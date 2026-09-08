@@ -134,6 +134,11 @@ mod tests {
             open_conflicts_count: 0,
             memory_count: 0,
             config_user_name: "Test".into(),
+            // Medium is what the configured model actually reports (Qwen3.5-9B, 4–14B), so a
+            // fixture built on it exercises the same branch the desktop takes. Every instinct in
+            // this crate switches on the tier to decide whether it may ask the model for anything,
+            // which makes the default here load-bearing rather than filler.
+            model_tier: yantrik_companion_core::types::ModelTier::Medium,
             bond_level: BondLevel::Acquaintance,
             bond_score: 0.0,
             formality: 0.5,

@@ -1064,9 +1064,17 @@ mod tests {
     #[test]
     fn test_humanize_interval() {
         assert_eq!(humanize_interval(30.0), "30 seconds");
-        assert_eq!(humanize_interval(90.0), "2 minutes");
         assert_eq!(humanize_interval(7200.0), "2 hours");
         assert_eq!(humanize_interval(172800.0), "2 days");
+
+        // Anything under two of a unit reads as one of it, singular. The guard exists so nothing
+        // ever says "1 minutes", and it applies to all three units the same way. This line used to
+        // expect "2 minutes" for ninety seconds, which is both ungrammatical to arrive at and
+        // thirty seconds of exaggeration; the test disagreed with the code and nobody noticed
+        // because the suite did not compile.
+        assert_eq!(humanize_interval(90.0), "1 minute");
+        assert_eq!(humanize_interval(5400.0), "1 hour");
+        assert_eq!(humanize_interval(129_600.0), "1 day");
     }
 
     #[test]

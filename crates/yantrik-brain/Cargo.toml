@@ -9,3 +9,9 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# The unit tests mint candidate ids and nothing else here needs one, so this is
+# test-only rather than a dependency of the crate proper. Without it the tests do
+# not compile at all, which is how they came to be unrun.
+uuid7 = { workspace = true }

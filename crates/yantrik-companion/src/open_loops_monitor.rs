@@ -297,7 +297,7 @@ mod tests {
 
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        WorldModel::init_tables(&conn);
+        WorldModel::ensure_tables(&conn);
         conn
     }
 
