@@ -59,6 +59,32 @@ echo "socket        : $SOCK"
 echo nested > "$LAB/watched/nested/deep.txt"
 echo secret > "$LAB/watched/secret/private.txt"
 echo elsewhere > "$LAB/unwatched/ignored.txt"
+
+# And an atomic save, which is what every serious editor actually does: write a scratch file,
+# close it, rename it over the document. This is the case the first version of this service got
+# wrong. `echo > note.txt` above writes in place, which is the one shape of save that is not
+# representative of anything — it passed, and `report.odt` was invisible.
+LAB="$LAB" python3 - <<'ATOMIC'
+import os, time
+watched = os.environ["LAB"] + "/watched"
+scratch = os.path.join(watched, ".report.odt.swpx")
+with open(scratch, "w") as f:
+    f.write("the document a person would name")
+# The pause is the whole point of this probe. fanotify hands over a descriptor and the daemon
+# resolves it through /proc/self/fd afterwards, so without a pause the rename usually lands first
+# and the descriptor group reports the document by luck — which is how the original bug passed
+# this probe. Waiting here forces the other side of the race: the daemon sees the scratch name,
+# and only FAN_MOVED_TO can supply the document. Editors save fast; this is not a fair fight
+# either way, and a probe that only ever tests the lucky side is not testing anything.
+time.sleep(0.4)
+os.rename(scratch, os.path.join(watched, "report.odt"))
+ATOMIC
+
+# And a swap file an editor genuinely leaves behind: closed, never renamed. This is the case the
+# name-shape rule really exists for, and it is the one that stays true whichever way the rename
+# race goes.
+LAB="$LAB" python3 -c 'import os; open(os.environ["LAB"] + "/watched/.report.odt.swp", "w").write("swap")'
+
 /bin/sleep 1 &
 sleep 2
 
@@ -123,8 +149,8 @@ for o in page["observations"]:
 saved = by_kind.get("saved", [])
 launched = by_kind.get("launched", [])
 failures = by_kind.get("source_failed", [])
-for o in saved[:4]:
-    print(f"  saved       : {o['summary']}   (salience {o['salience']:.2f})")
+for o in saved[:6]:
+    print(f"  saved       : {o['summary']}   (how {o['kind'].get('how')}, salience {o['salience']:.2f})")
 for o in launched[:3]:
     print(f"  launched    : {o['summary']}")
 for o in failures:
@@ -135,6 +161,43 @@ if f"{lab}/watched/note.txt" not in paths:
     fails.append(f"a save in scope was not reported: {sorted(paths)}")
 if f"{lab}/watched/nested/deep.txt" not in paths:
     fails.append("a save in a nested watched directory was not reported")
+
+# ── The atomic save ──────────────────────────────────────────────────
+#
+# The one this probe exists to catch now. An editor writes `.report.odt.swpx` and renames it over
+# `report.odt`; the descriptor group sees only the scratch file, and the document — the thing a
+# person would name — never appears at all unless the rename group is up.
+wrote = by_kind.get("wrote", [])
+scratch_paths = {o["kind"]["path"] for o in wrote}
+for o in wrote[:3]:
+    print(f"  wrote       : {o['summary']}   (salience {o['salience']:.2f})")
+
+renames_down = [o for o in failures if o["kind"]["source"] == "file-renames"]
+if renames_down:
+    # A stated limitation rather than a silent one: on a kernel before 5.9, or a filesystem with
+    # no file handles, this cannot work and the service is required to say so.
+    print(f"limitation    : {renames_down[0]['kind']['reason'][:150]}")
+elif f"{lab}/watched/report.odt" not in paths:
+    fails.append(
+        "an atomic-rename save was not reported; the document itself is invisible, which is the "
+        "shape of save almost every editor uses"
+    )
+else:
+    # Exactly once, however the race went. Whether the descriptor group resolved the renamed inode
+    # to the document or to the scratch file, the person saved one thing one time.
+    doc = [o for o in saved if o["kind"]["path"] == f"{lab}/watched/report.odt"]
+    if len(doc) != 1:
+        fails.append(f"one save reached the ring {len(doc)} times: {[o['kind'] for o in doc]}")
+    else:
+        print(f"atomic save   : {doc[0]['summary']}   (how: {doc[0]['kind']['how']})")
+
+# The swap file: recorded, and never called a save. Both halves matter. Calling it a save is the
+# original bug wearing a different hat; discarding it would hide a crashed editor.
+swap = f"{lab}/watched/.report.odt.swp"
+if swap in paths:
+    fails.append("an editor's leftover swap file was announced as a save")
+if swap not in scratch_paths:
+    fails.append(f"the swap-file write was discarded rather than recorded: {sorted(scratch_paths)}")
 
 # The two that must be silent, for different reasons: one is outside the watch list entirely, the
 # other sits inside it and is excluded by name.
@@ -187,7 +250,7 @@ elif elapsed > 8:
     fails.append(f"the reader sat out most of its timeout ({elapsed:.1f}s) instead of being woken")
 
 c = call("perception.snapshot", {})["counts"]
-print(f"counts        : {c['launched']} launched, {c['saved']} saved, "
+print(f"counts        : {c['launched']} launched, {c['saved']} saved, {c['wrote']} written, {c['coalesced']} coalesced, "
       f"{c['dropped_out_of_scope']} refused by scope, {c['held']} held")
 
 print()

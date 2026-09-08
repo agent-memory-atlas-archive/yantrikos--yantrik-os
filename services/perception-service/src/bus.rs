@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::observation::{Kind, Observation};
+use crate::observation::{Actor, Kind, Observation};
 
 /// How many observations are kept for readers that have not caught up.
 ///
@@ -28,6 +28,14 @@ const CAPACITY: usize = 2048;
 
 /// The longest a reader may park. Bounded so a client that vanishes cannot pin a thread forever.
 pub const MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// How long two reports of the same save are treated as one save.
+///
+/// Generous on purpose. The two arrive milliseconds apart in practice — two threads draining two
+/// descriptors — and the cost of the window being too wide is that somebody who saved the same
+/// file twice inside two seconds is reported once, which is also a fair description of what they
+/// did.
+const COALESCE_WINDOW: f64 = 2.0;
 
 #[derive(Default)]
 struct Inner {
@@ -41,6 +49,12 @@ struct Inner {
     launched: u64,
     ended: u64,
     saved: u64,
+    /// Scratch writes: the machinery of a save, counted separately so the ratio is visible. A
+    /// desktop reporting thousands of these and no saves is one where the rename group is down.
+    wrote: u64,
+    /// Saves that turned out to be the same save described a second time. Counted rather than
+    /// silent, so the ring never looks quieter than the disk actually was.
+    coalesced: u64,
     executed: u64,
     dropped_out_of_scope: u64,
 }
@@ -71,12 +85,22 @@ impl Bus {
             return;
         };
 
+        // One save reaches this function twice: the descriptor group sees the close, the rename
+        // group sees the directory entry change, and both resolve to the same document a few
+        // milliseconds apart. Two true statements about one thing a person did — and announcing it
+        // twice would wake everything expensive twice.
+        if already_reported(&kind, actor.as_ref(), &inner.ring) {
+            inner.coalesced += 1;
+            return;
+        }
+
         let seq = inner.next_seq;
         inner.next_seq += 1;
         match &kind {
             Kind::Launched { .. } => inner.launched += 1,
             Kind::Ended { .. } => inner.ended += 1,
             Kind::Saved { .. } => inner.saved += 1,
+            Kind::Wrote { .. } => inner.wrote += 1,
             Kind::Executed { .. } => inner.executed += 1,
             _ => {}
         }
@@ -132,12 +156,38 @@ impl Bus {
             launched: inner.launched,
             ended: inner.ended,
             saved: inner.saved,
+            wrote: inner.wrote,
+            coalesced: inner.coalesced,
             executed: inner.executed,
             dropped_out_of_scope: inner.dropped_out_of_scope,
             held: inner.ring.len() as u64,
             next_seq: inner.next_seq,
         }
     }
+}
+
+/// Whether this save is already in the ring under another description.
+///
+/// Same document, same process, inside [`COALESCE_WINDOW`]. `how` is deliberately not compared:
+/// the whole point is that a closed descriptor and a rename are two accounts of one save, and
+/// requiring them to agree about the mechanism would make the rule never fire.
+///
+/// First report wins, and that is not arbitrary — it is the one a reader may already have been
+/// woken for, and preferring the later one would mean retracting something already delivered.
+fn already_reported(kind: &Kind, actor: Option<&Actor>, ring: &VecDeque<Observation>) -> bool {
+    let Kind::Saved { path, .. } = kind else { return false };
+    let pid = actor.map(|a| a.pid);
+    let now = crate::observation::now();
+
+    ring.iter()
+        .rev()
+        .take_while(|o| now - o.at <= COALESCE_WINDOW)
+        .any(|o| match &o.kind {
+            Kind::Saved { path: held, .. } => {
+                held == path && o.actor.as_ref().map(|a| a.pid) == pid
+            }
+            _ => false,
+        })
 }
 
 pub struct Page {
@@ -151,6 +201,8 @@ pub struct Counts {
     pub launched: u64,
     pub ended: u64,
     pub saved: u64,
+    pub wrote: u64,
+    pub coalesced: u64,
     pub executed: u64,
     pub dropped_out_of_scope: u64,
     pub held: u64,
@@ -161,8 +213,66 @@ pub struct Counts {
 mod tests {
     use super::*;
 
+    use crate::observation::SaveShape;
+
     fn launch(bus: &Bus, cmd: &str) {
         bus.push(Kind::Launched { command: cmd.into() }, None);
+    }
+
+    fn saver(pid: i32) -> Option<Actor> {
+        Some(Actor { pid, name: "soffice".into(), parent: None })
+    }
+
+    fn save(bus: &Bus, pid: i32, path: &str, how: SaveShape) {
+        bus.push(Kind::Saved { path: path.into(), how }, saver(pid));
+    }
+
+    #[test]
+    fn one_save_described_twice_is_one_save() {
+        // The atomic save as it actually arrives. The descriptor group resolves the renamed inode
+        // and reports a close on the document; the rename group reports the same document a few
+        // milliseconds later from its own thread. Two accounts of one thing a person did, and
+        // waking the expensive faculties twice for it would be a bug with a cost.
+        let bus = Bus::new();
+        save(&bus, 900, "/home/p/report.odt", SaveShape::ClosedWrite);
+        save(&bus, 900, "/home/p/report.odt", SaveShape::Replaced);
+
+        let page = bus.since(0, Duration::ZERO);
+        assert_eq!(page.observations.len(), 1, "one save should reach a reader once");
+        assert_eq!(bus.counts().saved, 1);
+        // Never silently: a ring that quietly drops things is the failure this service is against.
+        assert_eq!(bus.counts().coalesced, 1, "the second account must be counted, not vanish");
+    }
+
+    #[test]
+    fn two_documents_are_two_saves_however_close_together() {
+        let bus = Bus::new();
+        save(&bus, 900, "/home/p/one.odt", SaveShape::Replaced);
+        save(&bus, 900, "/home/p/two.odt", SaveShape::Replaced);
+        assert_eq!(bus.since(0, Duration::ZERO).observations.len(), 2);
+        assert_eq!(bus.counts().coalesced, 0);
+    }
+
+    #[test]
+    fn the_same_file_written_by_two_processes_is_two_saves() {
+        // Two people, or a build and an editor, touching one file. Collapsing these would hide
+        // exactly the collision somebody would want to know about.
+        let bus = Bus::new();
+        save(&bus, 900, "/home/p/shared.md", SaveShape::ClosedWrite);
+        save(&bus, 901, "/home/p/shared.md", SaveShape::ClosedWrite);
+        assert_eq!(bus.since(0, Duration::ZERO).observations.len(), 2);
+    }
+
+    #[test]
+    fn coalescing_only_ever_applies_to_saves() {
+        // A process launched twice, or the same binary run twice, is two events. The rule exists
+        // for one specific double-report and must not quietly deduplicate the rest of perception.
+        let bus = Bus::new();
+        launch(&bus, "cargo build");
+        launch(&bus, "cargo build");
+        bus.push(Kind::Wrote { path: "/home/p/.x.swp".into() }, saver(900));
+        bus.push(Kind::Wrote { path: "/home/p/.x.swp".into() }, saver(900));
+        assert_eq!(bus.since(0, Duration::ZERO).observations.len(), 4);
     }
 
     #[test]

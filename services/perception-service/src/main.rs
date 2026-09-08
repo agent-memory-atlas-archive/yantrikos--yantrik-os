@@ -109,9 +109,24 @@ fn main() {
         }
     };
     let fan = match sources::files::init_and_mark(&scope) {
-        Ok((fd, marks)) => {
-            tracing::info!(marks, "fanotify watching");
-            Some(fd)
+        Ok(watches) => {
+            tracing::info!(
+                marks = watches.marks,
+                renames = watches.renames.is_some(),
+                "fanotify watching"
+            );
+            // The rename group can be missing on its own — an older kernel, or directories whose
+            // handles could not be taken. Half-blind is a state a reader has to be able to see,
+            // because without it every atomic save arrives as a scratch write and the desktop
+            // looks like a place where nobody ever saves anything.
+            if let Some(reason) = watches.renames_unavailable.clone() {
+                bus.push(
+                    Kind::SourceFailed { source: "file-renames".into(), reason: reason.clone() },
+                    None,
+                );
+                tracing::warn!(reason = %reason, "Atomic-rename saves will not be seen");
+            }
+            Some(watches)
         }
         Err(e) => {
             bus.push(Kind::SourceFailed { source: "files".into(), reason: e.clone() }, None);
@@ -157,15 +172,30 @@ fn main() {
             .spawn(move || sources::pressure::run(bus))
             .ok();
     }
-    if let Some(fd) = fan {
-        let bus = bus.clone();
-        // Cloned rather than borrowed: the source needs the scope for the life of the thread, and
-        // the main thread is about to block in the RPC server.
-        let watch = scope.clone();
-        std::thread::Builder::new()
-            .name("perception-files".into())
-            .spawn(move || sources::files::run(bus, &watch, fd))
-            .ok();
+    if let Some(watches) = fan {
+        {
+            let bus = bus.clone();
+            // Cloned rather than borrowed: the source needs the scope for the life of the thread,
+            // and the main thread is about to block in the RPC server.
+            let watch = scope.clone();
+            let fd = watches.files;
+            std::thread::Builder::new()
+                .name("perception-files".into())
+                .spawn(move || sources::files::run(bus, &watch, fd))
+                .ok();
+        }
+        // A second thread rather than one loop over both descriptors: the two groups deliver
+        // different event layouts, and a `poll` that had to remember which fd it woke on would be
+        // the same code with a branch in the middle of it.
+        if let Some(fd) = watches.renames {
+            let bus = bus.clone();
+            let watch = scope.clone();
+            let dirs = watches.dirs;
+            std::thread::Builder::new()
+                .name("perception-renames".into())
+                .spawn(move || sources::files::run_renames(bus, &watch, fd, dirs))
+                .ok();
+        }
     }
 
     ServiceBuilder::new("perception")

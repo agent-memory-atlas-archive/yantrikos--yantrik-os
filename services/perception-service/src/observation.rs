@@ -50,9 +50,17 @@ pub enum Kind {
     Launched { command: String },
     /// A program ended, and how.
     Ended { exit_code: i32, signal: i32 },
-    /// Someone finished writing a file. `FAN_CLOSE_WRITE`, not "modified" — a save, not a
-    /// keystroke, which is the difference between a signal and a flood.
-    Saved { path: String },
+    /// A document now holds new content. The inferred fact, not the raw one: [`SaveShape`] says
+    /// which observation established it, because "a writable descriptor closed" and "a name was
+    /// renamed over the document" are different things that both mean a person saved.
+    Saved { path: String, how: SaveShape },
+    /// A writable descriptor was closed on a file that is not a document — an editor's swap file,
+    /// a lock, a partial download.
+    ///
+    /// Kept rather than dropped. This is the machinery of a save, and the rename that follows is
+    /// the event; but a scratch write with no rename after it is the shape of a crashed editor,
+    /// and a perception service that had silently discarded it could not say so.
+    Wrote { path: String },
     /// Something was executed from a path. `FAN_OPEN_EXEC` catches a script or binary being run
     /// from a place a program does not normally run from.
     Executed { path: String },
@@ -63,6 +71,28 @@ pub enum Kind {
     /// A source could not start, or stopped. Reported rather than logged: a perception system
     /// that has quietly gone blind must never look the same as one that sees nothing happening.
     SourceFailed { source: String, reason: String },
+}
+
+/// How we came to believe a document was saved.
+///
+/// Carried on the observation rather than resolved away, because the two have different
+/// confidence and a reader is entitled to know which one it got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SaveShape {
+    /// A writable descriptor was closed, and the inode behind it is now at this path.
+    ///
+    /// Deliberately *not* called `InPlace`, because it does not establish that. fanotify hands
+    /// over a descriptor and the path is read afterwards from `/proc/self/fd`, which resolves to
+    /// whatever that inode is called *at the moment we look* — so a scratch file already renamed
+    /// over the document resolves to the document, and one not yet renamed resolves to the
+    /// scratch file. Which happens is a race with the editor. The name is usually right; the
+    /// mechanism is unknown; and the variant claims exactly that much.
+    ClosedWrite,
+    /// `FAN_MOVED_TO`: a directory entry now points at something else — the rename that every
+    /// serious editor's save ends with. The only deterministic statement of the two, and the one
+    /// the first version of this service could not make at all.
+    Replaced,
 }
 
 impl Observation {
@@ -85,6 +115,10 @@ impl Kind {
             // Work reaching disk is the strongest ordinary signal that something happened that a
             // person would describe as an event.
             Kind::Saved { .. } => 0.6,
+            // The same syscall, and almost never worth waking anything for: a swap file being
+            // written is not news. Low rather than zero so it is still visible to anyone looking
+            // at the record on purpose — which is how you find out an editor died mid-save.
+            Kind::Wrote { .. } => 0.15,
             Kind::Executed { .. } => 0.5,
             Kind::Launched { .. } => 0.35,
             // Only pressure that is actually being felt. Below a fifth of wall time stalled,
@@ -122,9 +156,16 @@ impl Kind {
                 Some(name) => format!("{name} finished"),
                 None => "a process finished".to_string(),
             },
-            Kind::Saved { path } => match who {
+            Kind::Saved { path, .. } => match who {
                 Some(name) => format!("{name} saved {path}"),
                 None => format!("{path} was saved"),
+            },
+            // Deliberately not the word "saved". This line ends up in memory next to
+            // conversations, and the difference between "vim saved report.odt" and "vim wrote
+            // .report.odt.swp" is the difference between an event and a noise the machine makes.
+            Kind::Wrote { path } => match who {
+                Some(name) => format!("{name} wrote {path}"),
+                None => format!("{path} was written"),
             },
             Kind::Executed { path } => match who {
                 Some(name) => format!("{name} ran {path}"),
@@ -165,7 +206,7 @@ mod tests {
     #[test]
     fn a_source_going_blind_outranks_everything() {
         let blind = Kind::SourceFailed { source: "files".into(), reason: "EPERM".into() };
-        let saved = Kind::Saved { path: "/home/p/notes.md".into() };
+        let saved = Kind::Saved { path: "/home/p/notes.md".into(), how: SaveShape::ClosedWrite };
         assert!(
             blind.salience() > saved.salience(),
             "a perception system that has stopped seeing must never rank below what it can still see"
@@ -190,11 +231,65 @@ mod tests {
     #[test]
     fn the_summary_names_the_actor_when_there_is_one() {
         let actor = Actor { pid: 42, name: "cargo".into(), parent: None };
-        let o = Observation::new(1, Kind::Saved { path: "/tmp/x.rs".into() }, Some(actor));
+        let o = Observation::new(
+            1,
+            Kind::Saved { path: "/tmp/x.rs".into(), how: SaveShape::Replaced },
+            Some(actor),
+        );
         assert_eq!(o.summary, "cargo saved /tmp/x.rs");
 
         // And does not invent one when the process was already gone.
-        let o = Observation::new(2, Kind::Saved { path: "/tmp/x.rs".into() }, None);
+        let o = Observation::new(
+            2,
+            Kind::Saved { path: "/tmp/x.rs".into(), how: SaveShape::ClosedWrite },
+            None,
+        );
         assert_eq!(o.summary, "/tmp/x.rs was saved");
+    }
+
+    #[test]
+    fn a_scratch_write_does_not_claim_to_be_a_save() {
+        // The bug this pair of variants exists to prevent. `FAN_CLOSE_WRITE` on `.report.odt.swp`
+        // used to be reported as "vim saved .report.odt.swp" — a sentence that is wrong about the
+        // verb and about the file, and the only sentence the old code could produce for the way
+        // almost every editor actually saves.
+        let actor = Actor { pid: 7, name: "vim".into(), parent: None };
+        let scratch = Observation::new(
+            1,
+            Kind::Wrote { path: "/home/p/.report.odt.swp".into() },
+            Some(actor.clone()),
+        );
+        assert_eq!(scratch.summary, "vim wrote /home/p/.report.odt.swp");
+        assert!(!scratch.summary.contains("saved"));
+
+        let real = Observation::new(
+            2,
+            Kind::Saved { path: "/home/p/report.odt".into(), how: SaveShape::Replaced },
+            Some(actor),
+        );
+        assert_eq!(real.summary, "vim saved /home/p/report.odt");
+    }
+
+    #[test]
+    fn the_machinery_of_a_save_ranks_far_below_the_save() {
+        // Both come from the same syscall. If they scored alike, an editor with autosave would
+        // wake the expensive faculties every thirty seconds for a swap file.
+        let scratch = Kind::Wrote { path: "/home/p/.notes.md.swp".into() };
+        let saved = Kind::Saved { path: "/home/p/notes.md".into(), how: SaveShape::Replaced };
+        assert!(scratch.salience() < 0.2);
+        assert!(saved.salience() > scratch.salience() * 3.0);
+    }
+
+    #[test]
+    fn how_a_save_was_established_survives_the_wire() {
+        // A reader is entitled to know whether it got the near-certain fact or the judgement.
+        let o = Observation::new(
+            1,
+            Kind::Saved { path: "/home/p/report.odt".into(), how: SaveShape::Replaced },
+            None,
+        );
+        let json = serde_json::to_value(&o).unwrap();
+        assert_eq!(json["kind"]["type"], "saved");
+        assert_eq!(json["kind"]["how"], "replaced");
     }
 }
