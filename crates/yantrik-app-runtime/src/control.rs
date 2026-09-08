@@ -14,8 +14,9 @@
 //! speaks:
 //!
 //! ```text
-//! app.describe {}                  → { app, summary, state, actions: [...] }
-//! app.act      { action, args }    → { result }
+//! app.describe {}                                  → { app, summary, state, revision, actions }
+//! app.act      { action, args, expect_revision? }  → { accepted, action_id, settled, result,
+//!                                                      revision, summary, state }
 //! ```
 //!
 //! `describe` is a few hundred bytes of exact truth, always current. `act` is the same surface
@@ -23,6 +24,33 @@
 //! name — so driving our own software never needs a synthetic mouse click either.
 //!
 //! The rule this establishes: **semantic for ours, visual for theirs.**
+//!
+//! # Accepted is not done
+//!
+//! `act` never answers with a bare success, because there is no honest way to read one. Three
+//! different things could be meant by "it worked":
+//!
+//! 1. **accepted** — the guard passed and the handler ran;
+//! 2. **state changed** — the app now reports the intended result;
+//! 3. **presented** — that result reached a frame someone could see.
+//!
+//! An action that opens a note settles all three before the handler returns. An action that
+//! starts a build settles only the first: the compiler does not exist yet. A caller that cannot
+//! tell those apart will report a build as finished the instant it was started — so the response
+//! says `accepted`, carries `settled`, and an action that merely schedules work declares itself
+//! with [`Action::defers`] rather than leaving the caller to guess.
+//!
+//! # Compare and act, in one turn of the event loop
+//!
+//! `expect_revision` is the other half. A caller that reads state, decides, and then acts has a
+//! gap in between in which the person at the keyboard can type, close the document or switch
+//! windows — and the action lands on a world that no longer matches the reason for it. So the
+//! comparison happens *inside* the same closure as the dispatch, on the UI thread, which is the
+//! app's own serialization domain: between the check and the handler, nothing else can run.
+//!
+//! A revision from an earlier `describe` is a hint about whether to bother. `expect_revision` is
+//! the guard. Only the guard is atomic, and a caller that compares revisions itself and then
+//! calls `act` has rebuilt exactly the race this removes.
 //!
 //! # Threading
 //!
@@ -73,6 +101,17 @@ use yantrik_ipc_transport::server::{RpcServer, ServiceHandler};
 /// not have made — and the caller deserves a timeout it can report rather than a hang.
 const UI_ROUNDTRIP: Duration = Duration::from_secs(3);
 
+/// A name for one dispatch, so anything waiting on its effects can say which one it is waiting on.
+///
+/// Scoped to the app and monotonic within a run. Not a UUID: it is read by people in logs and
+/// compared by machines within a single session, and `app-notes#7` does both better than
+/// thirty-two hex digits would.
+fn next_action_id(service_id: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("{service_id}#{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
 /// Service ids are prefixed so an app cannot collide with the service of the same name.
 ///
 /// `notes` is already taken by notes-service, which stores notes; `app-notes` is the window a
@@ -111,6 +150,37 @@ impl View {
     pub fn state(mut self, state: serde_json::Value) -> Self {
         self.state = state;
         self
+    }
+
+    /// A short fingerprint of everything this view reports.
+    ///
+    /// Not a version counter: nothing increments it, and two states can only ever be compared for
+    /// difference, never ordered. That is all a caller needs — the question is only ever *has
+    /// what I looked at changed since I looked* — and a hash of the answer settles it without
+    /// asking every app to maintain a counter it would eventually forget to bump. Slint has no
+    /// general property-change hook, so a counter would have to be written into every setter by
+    /// hand, and the ones nobody remembered would be silently invisible forever.
+    ///
+    /// It deliberately excludes `actions`, which are fixed for the life of the app: including
+    /// them would drag a constant through every comparison and change nothing.
+    pub fn revision(&self) -> String {
+        // FNV-1a, written out rather than `DefaultHasher`, because this value crosses a socket and
+        // turns up in logs: it has to mean the same thing on both sides of the wire and in
+        // tomorrow's build, which `DefaultHasher` explicitly does not promise.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for b in bytes {
+                hash ^= *b as u64;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        eat(self.summary.as_bytes());
+        // A separator, so a summary ending mid-word cannot collide with a state beginning there.
+        eat(&[0]);
+        // `to_string` on a `serde_json::Value` renders object keys in sorted order, so the same
+        // state always produces the same bytes regardless of the order the app inserted them.
+        eat(self.state.to_string().as_bytes());
+        format!("{hash:016x}")
     }
 }
 
@@ -160,6 +230,12 @@ pub struct Action {
     /// reading which note is open and killing a process arrive through the same door. The
     /// caller compares this against its own ceiling; the app states the fact.
     pub permission: &'static str,
+    /// Whether the handler finishes the work or only starts it.
+    ///
+    /// Declared by the app because the app is the only thing that knows. A handler that hands off
+    /// to a worker returns long before the result exists, and a caller told only that the call
+    /// succeeded would report a build as finished the moment it began.
+    pub deferred: bool,
 }
 
 impl Action {
@@ -170,6 +246,9 @@ impl Action {
             params: Vec::new(),
             // Steering someone's window is not free, so the floor is `standard`, not `safe`.
             permission: "standard",
+            // Most actions are a property write and are finished when they return. The ones that
+            // are not have to say so.
+            deferred: false,
         }
     }
 
@@ -184,6 +263,16 @@ impl Action {
     /// killing a process, deleting a file, sending mail.
     pub fn risk(mut self, permission: &'static str) -> Self {
         self.permission = permission;
+        self
+    }
+
+    /// Declare that this action only *starts* the work.
+    ///
+    /// Anything handed to a worker thread, sent over a network, or waiting on another process.
+    /// The response then says `settled: false`, and the caller has to watch for the result rather
+    /// than mistake the call for the result.
+    pub fn defers(mut self) -> Self {
+        self.deferred = true;
         self
     }
 
@@ -204,6 +293,7 @@ impl Action {
             "name": self.name,
             "description": self.description,
             "permission": self.permission,
+            "settles": if self.deferred { "later" } else { "on return" },
             "parameters": {
                 "type": "object",
                 "properties": serde_json::Value::Object(properties),
@@ -224,21 +314,50 @@ struct Registry {
     actions: Vec<(Action, ActFn)>,
 }
 
+/// What an app reports about itself right now: the view, and its fingerprint.
+struct Snapshot {
+    summary: String,
+    state: serde_json::Value,
+    revision: String,
+}
+
 impl Registry {
-    fn describe(&self) -> serde_json::Value {
+    /// Read the live view once. Every caller below goes through this, so a revision is never
+    /// computed from a different read than the state it is reported beside.
+    fn snapshot(&self) -> Snapshot {
         let view = match &self.describe {
             Some(f) => f(),
             None => View::new(format!("{} (no description published)", self.app_id)),
         };
+        let revision = view.revision();
+        Snapshot { summary: view.summary, state: view.state, revision }
+    }
+
+    fn describe(&self) -> serde_json::Value {
+        let now = self.snapshot();
         serde_json::json!({
             "app": self.app_id,
-            "summary": view.summary,
-            "state": view.state,
+            "summary": now.summary,
+            "state": now.state,
+            "revision": now.revision,
             "actions": self.actions.iter().map(|(a, _)| a.schema()).collect::<Vec<_>>(),
         })
     }
 
-    fn act(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    /// Check the guard, dispatch, and read what came of it — without leaving the UI thread.
+    ///
+    /// The three steps are one function because they have to be one turn of the event loop. Split
+    /// across RPC calls, the gap between the check and the dispatch is a window in which the user
+    /// can type, and the gap between the dispatch and the read is a window in which they can undo
+    /// it. Here nothing runs in between, because there is no in between: this is the thread that
+    /// would have to run it.
+    fn act(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        expect_revision: Option<&str>,
+        action_id: &str,
+    ) -> Result<serde_json::Value, String> {
         let Some((spec, run)) = self.actions.iter().find(|(a, _)| a.name == name) else {
             let known: Vec<&str> = self.actions.iter().map(|(a, _)| a.name.as_str()).collect();
             return Err(format!("unknown action `{name}`; this app offers: {}", known.join(", ")));
@@ -250,7 +369,37 @@ impl Registry {
                 return Err(format!("`{name}` needs argument `{}`", p.name));
             }
         }
-        run(args)
+
+        // The guard. A caller that read state, decided, and asked for this action gets to say what
+        // it was looking at; if the app has moved on, the action does not happen. Refusing is
+        // cheap and correctable — acting on a stale premise is neither.
+        if let Some(expected) = expect_revision {
+            let before = self.snapshot();
+            if before.revision != expected {
+                return Err(format!(
+                    "STALE: this app is at revision {} and you acted on {expected}. \
+                     It now reports: {}. Read it again before deciding.",
+                    before.revision, before.summary
+                ));
+            }
+        }
+
+        let result = run(args)?;
+
+        // Read back through the same path a `describe` would take, so a caller never has to make
+        // a second round trip to find out what its own action did.
+        let after = self.snapshot();
+        Ok(serde_json::json!({
+            // Never `ok`, never `done`. The handler ran; whether the work finished is a separate
+            // question that `settled` answers and that only the app can answer.
+            "accepted": true,
+            "action_id": action_id,
+            "settled": !spec.deferred,
+            "result": result,
+            "revision": after.revision,
+            "summary": after.summary,
+            "state": after.state,
+        }))
     }
 }
 
@@ -317,13 +466,23 @@ impl ServiceHandler for ControlRpc {
                     });
                 }
                 let args = params.get("args").cloned().unwrap_or(serde_json::json!({}));
+                // Optional, and deliberately so: a caller acting on its own initiative has nothing
+                // to compare against, and demanding a revision it never read would only teach it
+                // to send back whatever it last saw.
+                let expect = params
+                    .get("expect_revision")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let action_id = next_action_id(&self.service_id);
 
-                tracing::info!(action = %action, "app.act");
-                let outcome = on_ui_thread(move |reg| reg.act(&action, &args))
-                    .map_err(|m| ServiceError { code: -32000, message: m })?;
+                tracing::info!(action = %action, id = %action_id, "app.act");
+                let id = action_id.clone();
+                let outcome =
+                    on_ui_thread(move |reg| reg.act(&action, &args, expect.as_deref(), &id))
+                        .map_err(|m| ServiceError { code: -32000, message: m })?;
 
                 match outcome {
-                    Ok(result) => Ok(serde_json::json!({ "result": result })),
+                    Ok(answer) => Ok(answer),
                     // An action that legitimately refuses is an application error, not a
                     // transport failure: -32602 keeps it out of the client's circuit breaker.
                     Err(message) => Err(ServiceError { code: -32602, message }),
@@ -458,6 +617,20 @@ mod tests {
         assert_eq!(v.state["unsaved"], true);
     }
 
+    /// A registry with one action over a state the test can move underneath it.
+    fn notes_at(title: &'static str) -> Registry {
+        Registry {
+            app_id: "notes".into(),
+            describe: Some(Box::new(move || {
+                View::new(format!("Notes \u{2014} {title}")).with("open_note", title)
+            })),
+            actions: vec![(
+                Action::new("rename", "Rename the open note").arg(Param::text("to")),
+                Box::new(|args| Ok(serde_json::json!({ "renamed_to": args["to"].clone() }))),
+            )],
+        }
+    }
+
     #[test]
     fn an_action_becomes_json_schema() {
         let schema = Action::new("open_note", "Open a note by title")
@@ -491,7 +664,7 @@ mod tests {
             )],
         };
 
-        let err = reg.act("open_note", &serde_json::json!({})).unwrap_err();
+        let err = reg.act("open_note", &serde_json::json!({}), None, "t#1").unwrap_err();
         assert!(err.contains("title"), "the error must name the missing argument: {err}");
     }
 
@@ -506,7 +679,7 @@ mod tests {
             )],
         };
 
-        let err = reg.act("nope", &serde_json::json!({})).unwrap_err();
+        let err = reg.act("nope", &serde_json::json!({}), None, "t#1").unwrap_err();
         assert!(err.contains("open_note"), "a wrong guess should be correctable: {err}");
     }
 
@@ -516,5 +689,147 @@ mod tests {
         let out = reg.describe();
         assert_eq!(out["app"], "notes");
         assert_eq!(out["actions"], serde_json::json!([]));
+    }
+
+    // ── The fingerprint ──
+
+    #[test]
+    fn the_same_view_fingerprints_the_same_and_a_changed_one_does_not() {
+        let a = View::new("Notes \u{2014} Kernel asks").with("words", 412).with("unsaved", true);
+        let same = View::new("Notes \u{2014} Kernel asks").with("words", 412).with("unsaved", true);
+        assert_eq!(a.revision(), same.revision());
+
+        // One word typed is a different state, and has to be a different revision — otherwise a
+        // guard built on it would wave through an action decided before the typing.
+        let typed = View::new("Notes \u{2014} Kernel asks").with("words", 413).with("unsaved", true);
+        assert_ne!(a.revision(), typed.revision());
+
+        // And so is a different summary over identical state.
+        let renamed = View::new("Notes \u{2014} Kernel answers").with("words", 412).with("unsaved", true);
+        assert_ne!(a.revision(), renamed.revision());
+    }
+
+    #[test]
+    fn the_order_fields_were_added_in_does_not_change_the_revision() {
+        // Two `describe` implementations of the same state must agree, or a guard would fire on a
+        // refactor that changed nothing a person could see.
+        let one = View::new("Notes").with("words", 412).with("unsaved", true);
+        let other = View::new("Notes").with("unsaved", true).with("words", 412);
+        assert_eq!(one.revision(), other.revision());
+    }
+
+    // ── Accepted is not done ──
+
+    #[test]
+    fn acting_never_answers_with_a_bare_success() {
+        let answer = notes_at("Kernel asks")
+            .act("rename", &serde_json::json!({ "to": "Kernel answers" }), None, "notes#1")
+            .unwrap();
+
+        // The three things a caller has to be able to tell apart.
+        assert_eq!(answer["accepted"], true);
+        assert_eq!(answer["action_id"], "notes#1");
+        assert_eq!(answer["settled"], true);
+        assert_eq!(answer["result"]["renamed_to"], "Kernel answers");
+        // And the state afterwards, so nobody has to make a second call to find out what they did.
+        assert!(answer["summary"].as_str().unwrap().contains("Kernel asks"));
+        assert!(answer["revision"].as_str().is_some_and(|r| r.len() == 16));
+    }
+
+    #[test]
+    fn an_action_that_only_starts_the_work_says_so() {
+        // The build case. Returning `accepted: true` with nothing else would let a caller report a
+        // compile as finished the instant it was started.
+        let reg = Registry {
+            app_id: "builder".into(),
+            describe: None,
+            actions: vec![(
+                Action::new("build", "Start a build").defers(),
+                Box::new(|_| Ok(serde_json::json!({ "job": 83 }))),
+            )],
+        };
+
+        let answer = reg.act("build", &serde_json::json!({}), None, "builder#1").unwrap();
+        assert_eq!(answer["accepted"], true);
+        assert_eq!(answer["settled"], false, "a dispatched build has not built anything yet");
+
+        // And the schema says it in advance, so a caller can plan to watch rather than discover
+        // afterwards that it has to.
+        let schema = Action::new("build", "Start a build").defers().schema();
+        assert_eq!(schema["settles"], "later");
+        assert_eq!(Action::new("open_note", "Open").schema()["settles"], "on return");
+    }
+
+    // ── The guard ──
+
+    #[test]
+    fn an_action_decided_on_a_state_the_app_has_left_is_refused() {
+        // The race this exists for. A caller reads "Kernel asks", decides to rename it, and by the
+        // time the call lands the user has opened something else. Renaming now renames the wrong
+        // note, and the caller would report success.
+        let stale = View::new("Notes \u{2014} Kernel asks").with("open_note", "Kernel asks").revision();
+
+        let err = notes_at("Shopping list")
+            .act("rename", &serde_json::json!({ "to": "x" }), Some(&stale), "notes#1")
+            .unwrap_err();
+
+        assert!(err.starts_with("STALE:"), "a caller has to be able to branch on this: {err}");
+        assert!(err.contains(&stale), "the refusal names what was expected: {err}");
+        assert!(
+            err.contains("Shopping list"),
+            "and what is actually there, so the next read is not blind: {err}"
+        );
+    }
+
+    #[test]
+    fn a_guard_that_matches_lets_the_action_through() {
+        let current = View::new("Notes \u{2014} Kernel asks").with("open_note", "Kernel asks").revision();
+
+        let answer = notes_at("Kernel asks")
+            .act("rename", &serde_json::json!({ "to": "ok" }), Some(&current), "notes#1")
+            .unwrap();
+        assert_eq!(answer["accepted"], true);
+        assert_eq!(answer["result"]["renamed_to"], "ok");
+    }
+
+    #[test]
+    fn an_action_with_no_guard_still_runs() {
+        // Most calls are the caller's own initiative and have nothing to compare against.
+        // Requiring a revision would only teach callers to echo back whatever they last saw,
+        // which is a guard that always passes.
+        let answer = notes_at("Kernel asks")
+            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1")
+            .unwrap();
+        assert_eq!(answer["accepted"], true);
+    }
+
+    #[test]
+    fn the_guard_is_checked_before_the_arguments_are_used() {
+        // Ordering that matters: a stale guard must refuse without the handler having run. If the
+        // rename happened and *then* we noticed the state had moved, the refusal would be a lie.
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let reg = Registry {
+            app_id: "notes".into(),
+            describe: Some(Box::new(|| View::new("Notes \u{2014} now"))),
+            actions: vec![(Action::new("go", "Go"), {
+                let ran = ran.clone();
+                Box::new(move |_| {
+                    ran.set(true);
+                    Ok(serde_json::Value::Null)
+                })
+            })],
+        };
+
+        let err = reg.act("go", &serde_json::json!({}), Some("0000000000000000"), "n#1");
+        assert!(err.is_err());
+        assert!(!ran.get(), "the handler must not have run");
+    }
+
+    #[test]
+    fn every_dispatch_gets_its_own_name() {
+        let first = next_action_id("app-notes");
+        let second = next_action_id("app-notes");
+        assert_ne!(first, second, "two waits must not key on the same id");
+        assert!(first.starts_with("app-notes#"), "{first}");
     }
 }

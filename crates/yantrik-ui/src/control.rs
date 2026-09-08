@@ -183,8 +183,18 @@ pub fn publish(ui: &App) {
     ControlSurface::new("shell")
         .describe(describe)
         .action(
+            // Deferred, and the handshake with yantrik-mind is what proved it. This returned
+            // `settled: true` while the shell still reported "0 windows open" and no app socket
+            // had appeared — a driver reading that would report a launch it had only requested.
+            //
+            // `invoke_launch_app` reaches the dock's callback, and most of its branches
+            // `spawn()` a process: the window arrives seconds later, if it arrives at all (a
+            // failed spawn is logged, not returned). A couple of branches only switch screens and
+            // do settle on return, but the caller cannot tell which branch it took, so the
+            // conservative claim is the only honest one.
             Action::new("open_app", "Launch an app, or focus it if it is already running")
-                .arg(Param::text("name").describe("App id, e.g. notes, email, terminal, files")),
+                .arg(Param::text("name").describe("App id, e.g. notes, email, terminal, files"))
+                .defers(),
             move |args| {
                 let ui = open_ui()?;
                 let name = args["name"].as_str().unwrap_or_default().trim().to_string();
@@ -222,7 +232,12 @@ pub fn publish(ui: &App) {
             },
         )
         .action(
+            // Deferred for the same reason as `open_app`, and slightly worse: this spawns
+            // `wlrctl toplevel focus` and the wiring discards the result with `let _ =`, so on a
+            // machine without wlrctl it succeeds loudly and does nothing at all. Focus is also
+            // the compositor's to grant, not ours to assert — we do not own labwc.
             Action::new("focus_window", "Bring an open window to the front")
+                .defers()
                 .arg(Param::text("title").describe("Window title, or part of one")),
             move |args| {
                 let ui = focus_ui()?;
