@@ -223,6 +223,6 @@ echo
 
 echo -e "${DIM}Next steps:${NC}"
 echo -e "  ${BOLD}Deploy to VM:${NC}     ./deploy.sh --skip-build"
-echo -e "  ${BOLD}Publish release:${NC}  ./deploy-release.sh nightly --skip-build"
+echo -e "  ${BOLD}Publish release:${NC}  ./deploy/yantrik-os/build-release.sh --publish nightly --no-build"
 echo -e "  ${BOLD}Bump & rebuild:${NC}   ./build.sh --bump patch"
 echo

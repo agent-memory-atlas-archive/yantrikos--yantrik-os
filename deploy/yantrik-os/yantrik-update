@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# yantrik-update — check for, apply, and roll back OS updates on an installed Yantrik system.
+# ═══════════════════════════════════════════════════════════════════════════════════════
+#
+# The release server already publishes everything an update needs: one `.tar.zst` bundle per
+# channel, its sha256, and a manifest saying which build each channel points at
+# (build-release.sh --publish). Until now nothing on the installed side could *read* that and
+# act — `version.rs` checks the manifest and lights a button, and the button did nothing. So
+# updating a machine meant what it meant all through this project's bring-up: hand-copying
+# binaries over ssh and restarting the shell by hand. This is that, done properly and safely.
+#
+# The safety it adds over a hand-copy is the part that matters:
+#   * the bundle is verified against the manifest's sha256 before a single file is touched,
+#   * the current binaries are backed up before they are replaced, and
+#   * if the new shell does not answer its control socket after the restart, the update is
+#     rolled back to the backup automatically — a bad build cannot leave the machine dark.
+#
+# Usage:
+#   yantrik-update check      [--channel C]           what is installed vs what the channel has
+#   yantrik-update apply      [--channel C] [--force] [--reboot] [--no-restart]
+#   yantrik-update rollback                            restore the most recent backup
+#   yantrik-update status                              current build + available backups
+#
+# It reads its defaults from /opt/yantrik/update.conf (CHANNEL=, HOST=) when present.
+
+set -uo pipefail
+
+# ── Where things live ───────────────────────────────────────────────────────────────────
+PREFIX="${YANTRIK_PREFIX:-/opt/yantrik}"
+BIN_DIR="$PREFIX/bin"
+BUILD_FILE="$PREFIX/BUILD"
+UPDATES_DIR="$PREFIX/updates"
+BACKUP_DIR="$PREFIX/backups"
+CONF="$PREFIX/update.conf"
+
+# Config file may set CHANNEL and HOST. It is plain KEY=value, sourced only for those two.
+CHANNEL_DEFAULT="stable"
+HOST_DEFAULT="releases.yantrikos.com"
+if [ -f "$CONF" ]; then
+  # shellcheck disable=SC1090
+  . "$CONF"
+fi
+CHANNEL="${CHANNEL:-$CHANNEL_DEFAULT}"
+HOST="${HOST:-$HOST_DEFAULT}"
+
+# ── Small helpers ───────────────────────────────────────────────────────────────────────
+c_bold=$'\033[1m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
+say()  { printf '%s%s%s\n' "$c_bold" "$*" "$c_off"; }
+info() { printf '  %s\n' "$*"; }
+warn() { printf '%s  %s%s\n' "$c_red" "$*" "$c_off" >&2; }
+fail() { printf '%sFAIL: %s%s\n' "$c_red" "$*" "$c_off" >&2; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || fail "need '$1' but it is not installed"; }
+
+# Pull a `--channel X` out of the argument list and let it override the configured channel. Both
+# `check` and `apply` take it, so it is parsed in one place rather than two that could disagree.
+parse_channel() {
+  local prev=""
+  for a in "$@"; do
+    if [ "$prev" = "--channel" ]; then CHANNEL="$a"; fi
+    prev="$a"
+  done
+}
+
+# The one field from the manifest we cannot do without, pulled with python for correctness
+# (the manifest is JSON and grepping JSON is how you ship the wrong build).
+manifest_field() {
+  # $1 = channel, $2 = field. HOST comes through the environment so the quoted heredoc below
+  # stays literal (expanding a shell var inside it is how you ship a malformed request).
+  YANTRIK_UPDATE_HOST="$HOST" python3 - "$1" "$2" <<'PY' 2>/dev/null
+import sys, os, json, urllib.request
+channel, field = sys.argv[1], sys.argv[2]
+host = os.environ.get("YANTRIK_UPDATE_HOST", "releases.yantrikos.com")
+for url in (f"http://{host}/manifest.json", "http://192.168.4.28/manifest.json"):
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            m = json.load(r)
+        ch = m.get("channels", {}).get(channel, {})
+        v = ch.get(field, "")
+        if v != "":
+            print(v)
+        sys.exit(0)
+    except Exception:
+        continue
+sys.exit(1)
+PY
+}
+
+# Read a KEY from the installed BUILD marker, or empty if absent.
+build_field() {
+  [ -f "$BUILD_FILE" ] || return 0
+  sed -n "s/^$1=//p" "$BUILD_FILE" | head -1
+}
+
+installed_git()     { build_field git; }
+installed_version() { build_field version; }
+
+# ── check ───────────────────────────────────────────────────────────────────────────────
+cmd_check() {
+  need python3
+  parse_channel "$@"
+  say "Checking channel '$CHANNEL' on $HOST"
+  local remote_ver remote_git local_ver local_git
+  remote_ver="$(manifest_field "$CHANNEL" version)" || fail "cannot reach the release server or channel '$CHANNEL' is not published"
+  remote_git="$(manifest_field "$CHANNEL" git)"
+  local_ver="$(installed_version)"; local_git="$(installed_git)"
+
+  info "installed: ${local_ver:-unknown}${local_git:+ ($local_git)}"
+  info "channel:   ${remote_ver:-unknown}${remote_git:+ ($remote_git)}"
+
+  if [ -z "$local_git" ]; then
+    printf '%supdate available%s — this machine has no build marker, so it cannot prove it is current\n' "$c_bold" "$c_off"
+    return 10
+  fi
+  if [ "$local_git" = "$remote_git" ]; then
+    printf '%sup to date%s\n' "$c_grn" "$c_off"
+    return 0
+  fi
+  printf '%supdate available%s: %s → %s\n' "$c_bold" "$c_off" "${local_git:-unknown}" "${remote_git:-unknown}"
+  return 10
+}
+
+# ── apply ───────────────────────────────────────────────────────────────────────────────
+cmd_apply() {
+  need python3; need curl; need sha256sum; need tar
+  parse_channel "$@"
+  local force=0 reboot=0 restart=1
+  for a in "$@"; do
+    case "$a" in
+      --force) force=1 ;;
+      --reboot) reboot=1 ;;
+      --no-restart) restart=0 ;;
+    esac
+  done
+
+  say "Preparing update from channel '$CHANNEL'"
+  local remote_git remote_ver artifact remote_sha
+  remote_ver="$(manifest_field "$CHANNEL" version)" || fail "cannot reach the release server"
+  remote_git="$(manifest_field "$CHANNEL" git)"
+  artifact="$(manifest_field "$CHANNEL" artifact)"
+  remote_sha="$(manifest_field "$CHANNEL" sha256)"
+  [ -n "$artifact" ] || fail "channel '$CHANNEL' publishes no artifact — nothing to download"
+  [ -n "$remote_sha" ] || fail "channel '$CHANNEL' publishes no sha256 — refusing to install an unverifiable build"
+
+  local local_git; local_git="$(installed_git)"
+  if [ "$force" = 0 ] && [ -n "$local_git" ] && [ "$local_git" = "$remote_git" ]; then
+    say "Already on $remote_git — nothing to do (use --force to reinstall)"
+    return 0
+  fi
+
+  mkdir -p "$UPDATES_DIR"
+  local dl="$UPDATES_DIR/$artifact"
+
+  say "Downloading $artifact"
+  local url="http://$HOST/$CHANNEL/$artifact"
+  if ! curl -fL --retry 3 --connect-timeout 15 -o "$dl" "$url"; then
+    # Fall back to the release server's IP, the same way the manifest read does.
+    warn "download from $HOST failed; trying 192.168.4.28"
+    curl -fL --retry 3 --connect-timeout 15 -o "$dl" "http://192.168.4.28/$CHANNEL/$artifact" \
+      || fail "could not download the update bundle"
+  fi
+
+  say "Verifying"
+  local got; got="$(sha256sum "$dl" | awk '{print $1}')"
+  if [ "$got" != "$remote_sha" ]; then
+    rm -f "$dl"
+    fail "sha256 mismatch — expected $remote_sha, got $got. The download is corrupt or tampered; nothing was changed."
+  fi
+  info "sha256 ok ($got)"
+
+  say "Unpacking"
+  local stage="$UPDATES_DIR/staging"
+  rm -rf "$stage"; mkdir -p "$stage"
+  tar --use-compress-program='zstd -d' -xf "$dl" -C "$stage" 2>/dev/null \
+    || tar -xf "$dl" -C "$stage" \
+    || fail "could not unpack the bundle (need zstd for .tar.zst)"
+  # The bundle holds one top directory <NAME>/ with bin/ under it.
+  local root; root="$(find "$stage" -maxdepth 1 -mindepth 1 -type d | head -1)"
+  [ -n "$root" ] && [ -d "$root/bin" ] || fail "the bundle has no bin/ directory — it is not a Yantrik release"
+
+  # A release that does not contain the shell is not a release; refuse before touching anything.
+  [ -f "$root/bin/yantrik-ui" ] || fail "the bundle has no yantrik-ui — refusing to install it"
+  local n; n="$(find "$root/bin" -maxdepth 1 -type f | wc -l)"
+  [ "$n" -ge 10 ] || fail "the bundle has only $n binaries — that is not a whole OS, refusing"
+  info "$n binaries staged"
+
+  # ── Back up what is there now, so a bad build is recoverable ──
+  local ts; ts="$(date -u +%Y%m%d-%H%M%S)"
+  local backup="$BACKUP_DIR/$ts"
+  say "Backing up current build to $backup"
+  mkdir -p "$backup"
+  cp -a "$BIN_DIR" "$backup/bin"
+  [ -f "$BUILD_FILE" ] && cp -a "$BUILD_FILE" "$backup/BUILD"
+  echo "$backup" > "$UPDATES_DIR/last-backup"
+
+  # ── Swap: install each new binary over the old, atomically per file ──
+  say "Installing"
+  local installed=0
+  while IFS= read -r f; do
+    local base; base="$(basename "$f")"
+    local tmp="$BIN_DIR/.$base.new"
+    if cp "$f" "$tmp" 2>/dev/null && chmod 755 "$tmp" && mv -f "$tmp" "$BIN_DIR/$base"; then
+      installed=$((installed + 1))
+    else
+      # A single file failing to install is a failed update; put everything back.
+      rm -f "$tmp"
+      warn "could not install $base — rolling back"
+      restore_backup "$backup"
+      fail "install failed at $base; rolled back to the previous build"
+    fi
+  done < <(find "$root/bin" -maxdepth 1 -type f)
+  info "installed $installed binaries"
+
+  # Record the new build so `check` can prove currency next time.
+  cat > "$BUILD_FILE" <<EOF
+name=${artifact%.tar.zst}
+version=$remote_ver
+git=$remote_git
+channel=$CHANNEL
+installed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+binaries=$installed
+EOF
+
+  rm -rf "$stage"; rm -f "$dl"
+  say "Installed $remote_ver ($remote_git)"
+
+  if [ "$reboot" = 1 ]; then
+    say "Rebooting"
+    exec sudo reboot
+  fi
+  if [ "$restart" = 1 ]; then
+    restart_and_verify "$backup"
+  else
+    info "not restarting (--no-restart); the new build takes effect on next session start"
+  fi
+}
+
+# Restart the shell in the current session, then confirm it answers its control socket. If it
+# does not come up, roll back and restart the old one — the machine must never be left dark.
+restart_and_verify() {
+  local backup="$1"
+  say "Restarting the shell"
+  local runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [ ! -S "$runtime/yantrik/app-shell.sock" ] && [ ! -d "$runtime/yantrik" ]; then
+    warn "no Yantrik session on this runtime dir ($runtime) — cannot restart from here."
+    info "the new build will take effect the next time the desktop session starts."
+    return 0
+  fi
+
+  pkill -x yantrik-ui 2>/dev/null
+  sleep 3
+  pkill -9 -x yantrik-ui 2>/dev/null
+  sleep 1
+  # Detached, with the session's wayland env, so it outlives this script.
+  setsid env \
+    XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+    SLINT_BACKEND="${SLINT_BACKEND:-winit}" \
+    "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$PREFIX/logs/yantrik-os.log" 2>&1 &
+
+  say "Waiting for the shell to answer"
+  local sock="$runtime/yantrik/app-shell.sock"
+  for _ in $(seq 1 20); do
+    if [ -S "$sock" ] && "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
+      printf '%shealthy — update complete%s\n' "$c_grn" "$c_off"
+      return 0
+    fi
+    sleep 1
+  done
+
+  warn "the new shell did not answer within 20s — rolling back"
+  restore_backup "$backup"
+  pkill -9 -x yantrik-ui 2>/dev/null
+  sleep 1
+  setsid env \
+    XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+    SLINT_BACKEND="${SLINT_BACKEND:-winit}" \
+    "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$PREFIX/logs/yantrik-os.log" 2>&1 &
+  fail "update rolled back — the previous build is running again"
+}
+
+# Copy a backup's binaries back over the live ones, and restore its build marker.
+restore_backup() {
+  local backup="$1"
+  [ -d "$backup/bin" ] || { warn "backup $backup has no bin/ — cannot restore"; return 1; }
+  while IFS= read -r f; do
+    local base; base="$(basename "$f")"
+    cp "$f" "$BIN_DIR/.$base.rb" 2>/dev/null && chmod 755 "$BIN_DIR/.$base.rb" && mv -f "$BIN_DIR/.$base.rb" "$BIN_DIR/$base"
+  done < <(find "$backup/bin" -maxdepth 1 -type f)
+  [ -f "$backup/BUILD" ] && cp -a "$backup/BUILD" "$BUILD_FILE"
+  info "restored from $backup"
+}
+
+# ── rollback ────────────────────────────────────────────────────────────────────────────
+cmd_rollback() {
+  local backup
+  backup="$(cat "$UPDATES_DIR/last-backup" 2>/dev/null)"
+  [ -n "$backup" ] && [ -d "$backup" ] || {
+    backup="$(find "$BACKUP_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort | tail -1)"
+  }
+  [ -n "$backup" ] && [ -d "$backup" ] || fail "no backup to roll back to"
+  say "Rolling back to $backup"
+  restore_backup "$backup"
+  restart_and_verify "$backup"
+}
+
+# ── status ──────────────────────────────────────────────────────────────────────────────
+cmd_status() {
+  say "Yantrik build"
+  if [ -f "$BUILD_FILE" ]; then
+    sed 's/^/  /' "$BUILD_FILE"
+  else
+    info "no build marker at $BUILD_FILE"
+  fi
+  info "channel: $CHANNEL   host: $HOST"
+  say "Backups"
+  if [ -d "$BACKUP_DIR" ] && [ -n "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
+    for b in "$BACKUP_DIR"/*/; do
+      printf '  %s  (%s binaries)\n' "$(basename "$b")" "$(find "$b/bin" -maxdepth 1 -type f 2>/dev/null | wc -l)"
+    done
+  else
+    info "none"
+  fi
+}
+
+# ── dispatch ────────────────────────────────────────────────────────────────────────────
+CMD="${1:-check}"; shift || true
+case "$CMD" in
+  check)    cmd_check "$@" ;;
+  apply)    cmd_apply "$@" ;;
+  rollback) cmd_rollback "$@" ;;
+  status)   cmd_status "$@" ;;
+  -h|--help|help)
+    sed -n '20,30p' "$0" ;;
+  *) fail "unknown command '$CMD' (check | apply | rollback | status)" ;;
+esac

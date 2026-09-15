@@ -1,0 +1,24 @@
+# Line endings.
+#
+# The repo is developed partly on Windows with core.autocrlf=true, which quietly gave the
+# working copy CRLF endings. That is harmless for Rust — rustc reads either — but fatal for a
+# shell script: a `#!/usr/bin/env bash` line ending in CR names the interpreter `bash\r`, which
+# does not exist, and `build-release.sh` copies these files verbatim into the release bundle. A
+# CRLF `yos` shipped in the image and every call to it failed with a traceback until it was
+# hand-fixed. So the tools that get shipped and executed are pinned to LF here, at the source.
+
+# Executable shell tools — must be LF, they run on Linux.
+*.sh              text eol=lf
+deploy/yantrik-os/yos          text eol=lf
+deploy/yantrik-os/yos-mcp      text eol=lf
+deploy/yantrik-os/yantrik-update text eol=lf
+
+# Source and config: normalise to LF in the repo, so a checkout on any platform matches what
+# CI and the release build see.
+*.rs              text eol=lf
+*.slint           text eol=lf
+*.toml            text eol=lf
+*.yaml            text eol=lf
+*.yml             text eol=lf
+*.json            text eol=lf
+*.md              text eol=lf
