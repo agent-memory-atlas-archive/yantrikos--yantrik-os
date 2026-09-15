@@ -153,7 +153,10 @@ echo "   $(du -h "$TARBALL" | cut -f1)  ·  $(cut -d= -f2 <<<"$(grep binaries "$
 if [ -n "${PUBLISH_CHANNEL:-}" ]; then
   RELEASES_IP="${RELEASES_IP:-192.168.4.28}"
   SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_deploy}"
-  SSH_OPTS="-o StrictHostKeyChecking=no -i $SSH_KEY"
+  # IdentitiesOnly=yes so ssh offers this key and only this key. Without it, ssh tries every
+  # key the agent holds first and the server can refuse the connection before the right one is
+  # reached — the exact failure that made a homelab host look unreachable earlier in this work.
+  SSH_OPTS="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o BatchMode=yes -i $SSH_KEY"
   REMOTE="/var/www/releases/$PUBLISH_CHANNEL"
 
   say "Publishing to $PUBLISH_CHANNEL"
