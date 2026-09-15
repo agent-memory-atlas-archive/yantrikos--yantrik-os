@@ -28,6 +28,22 @@ export struct AIProviderData {
     error-message: string,
 }
 
+// ── One mind that could answer ──
+//
+// Everything here is either what the harness said about itself when it attached, or the OS's own
+// answer to "is this the one talking". There is deliberately no endpoint, model or credential: a
+// harness manages its own, and this screen is for choosing between them, not configuring them.
+export struct HarnessData {
+    id: string,
+    name: string,
+    detail: string,           // whatever the harness chose to say: "qwen2.5 on node1"
+    status: string,           // "answering" | "attached" | "built in"
+    builtin: bool,
+    active: bool,
+    tools: bool,
+    memory: bool,
+}
+
 // ── AI Model data (for model list) ──
 export struct AIModelData {
     id: string,
@@ -182,8 +198,17 @@ export component SettingsScreen inherits Rectangle {
     in-out property <string> budget-input: "";
     callback save-budget(string);
 
-    // Active settings category (sidebar)
-    property <int> active-category: 0;
+    // ── Harnesses (category 8) ──
+    in property <[HarnessData]> harnesses: [];
+    in property <string> harness-error: "";
+    callback use-harness(string);
+
+    // Active settings category (sidebar).
+    //
+    // in-out rather than private so something else can open Settings ON a section — the status
+    // bar's mind badge goes straight to Harnesses, and the shell's control surface can too. A
+    // person sent to "Settings, now find it yourself" has been given a chore, not a link.
+    in-out property <int> active-category: 0;
 
     // Sidebar categories — data-driven
     property <[SettingsCategoryItem]> all-categories: [
@@ -195,6 +220,7 @@ export component SettingsScreen inherits Rectangle {
         { icon: Icons.shield, label: "Privacy & Security", id: 5 },
         { icon: Icons.settings, label: "System",             id: 6 },
         { icon: Icons.bolt, label: "Skills",             id: 7 },
+        { icon: Icons.companion, label: "Harnesses",        id: 8 },
     ];
 
     // Search-filtered categories (set from Rust callback or defaults to all)
@@ -202,8 +228,14 @@ export component SettingsScreen inherits Rectangle {
     // Category glyphs live here, keyed by id, so the Rust side never has to know icon paths.
     pure function category-icon(id: int) -> string {
         id == 0 ? Icons.sun : id == 1 ? Icons.spark : id == 2 ? Icons.apps : id == 3 ? Icons.wifi
-        : id == 4 ? Icons.link : id == 5 ? Icons.shield : id == 6 ? Icons.settings : Icons.bolt
+        : id == 4 ? Icons.link : id == 5 ? Icons.shield : id == 6 ? Icons.settings
+        : id == 7 ? Icons.bolt : Icons.companion
     }
+
+    // NOTE: the list of categories that actually reaches this screen is built in Rust, in
+    // crates/yantrik-ui/src/wire/settings.rs — `all-categories` below is only what shows before
+    // that arrives. Adding a category in one place and not the other is how Harnesses came to
+    // exist with no way to open it.
     in-out property <string> search-query: "";
     callback settings-search(string);
 
@@ -4090,6 +4122,174 @@ export component SettingsScreen inherits Rectangle {
                 }
 
                 // ===== CATEGORY 7: SKILLS =====
+                // ── Harnesses (category 8) ──
+                if root.active-category == 8 : Flickable {
+                    width: 100%;
+                    height: 100%;
+
+                    VerticalLayout {
+                        padding: Theme.sp-6;
+                        spacing: Theme.sp-4;
+                        alignment: start;
+
+                        HorizontalLayout {
+                            spacing: Theme.sp-2;
+                            Rectangle {
+                                width: 3px;
+                                height: 14px;
+                                y: 0;
+                                border-radius: 1.5px;
+                                background: Theme.accent;
+                                drop-shadow-blur: 4px;
+                                drop-shadow-color: Theme.accent-glow;
+                            }
+                            Text {
+                                text: "HARNESSES";
+                                color: Theme.accent;
+                                font-size: Theme.fs-caption;
+                                font-weight: 600;
+                                letter-spacing: 3px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Says the model out loud, because the thing people get wrong about this
+                        // screen is expecting to configure a harness here.
+                        Text {
+                            text: "Which mind answers when you ask. A harness brings its own models, keys and setup — this screen only decides which one you are talking to.";
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-body;
+                            wrap: word-wrap;
+                        }
+
+                        if root.harness-error != "" : Rectangle {
+                            background: Theme.color-danger-dim;
+                            border-radius: Theme.r-md;
+                            height: 38px;
+                            HorizontalLayout {
+                                padding-left: Theme.sp-3;
+                                padding-right: Theme.sp-3;
+                                Text {
+                                    text: root.harness-error;
+                                    color: Theme.color-danger;
+                                    font-size: Theme.fs-body;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        for h in root.harnesses : Rectangle {
+                            background: Theme.bg-card;
+                            border-radius: Theme.r-lg;
+                            border-width: 1px;
+                            // The one answering is outlined in the accent: at a glance, before
+                            // reading a word, you can see which mind you are talking to.
+                            border-color: h.active ? Theme.accent : Theme.border-subtle;
+                            // Tall enough that the action does not crowd the border it sits on:
+                            // three rows plus padding, measured on the deployed screen rather
+                            // than guessed.
+                            height: 104px;
+
+                            VerticalLayout {
+                                padding: Theme.sp-4;
+                                spacing: Theme.sp-2;
+
+                                HorizontalLayout {
+                                    spacing: Theme.sp-2;
+                                    Text {
+                                        text: h.name;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-body;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Rectangle {
+                                        width: pill-text.preferred-width + 20px;
+                                        height: 22px;
+                                        border-radius: 11px;
+                                        background: h.active ? Theme.accent : Theme.bg-elevated;
+                                        pill-text := Text {
+                                            text: h.status;
+                                            color: h.active ? Theme.bg-deep : Theme.text-dim;
+                                            font-size: Theme.fs-caption;
+                                            font-weight: 500;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                // The id in mono, because it is the thing you type — into
+                                // `yos act shell use_harness`, or into your own harness's attach.
+                                Text {
+                                    text: h.detail != "" ? h.id + "  ·  " + h.detail : h.id;
+                                    color: Theme.text-dim;
+                                    font-size: Theme.fs-caption;
+                                    font-family: Theme.font-mono;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: Theme.sp-2;
+                                    // Only what the harness actually claimed. An empty row here
+                                    // is honest about a mind that only talks.
+                                    if h.tools : Text {
+                                        text: "tools";
+                                        color: Theme.text-dim;
+                                        font-size: Theme.fs-caption;
+                                        vertical-alignment: center;
+                                    }
+                                    if h.memory : Text {
+                                        text: "memory";
+                                        color: Theme.text-dim;
+                                        font-size: Theme.fs-caption;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    if !h.active : YButton {
+                                        label: "Use this";
+                                        size: 0;
+                                        clicked => { root.use-harness(h.id); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Nothing attached is the normal state on a fresh machine, so it explains
+                        // itself rather than looking like a list that failed to load.
+                        if root.harnesses.length <= 1 : Rectangle {
+                            background: Theme.bg-card;
+                            border-radius: Theme.r-lg;
+                            border-width: 1px;
+                            border-color: Theme.border-subtle;
+                            height: 116px;
+
+                            VerticalLayout {
+                                padding: Theme.sp-4;
+                                spacing: Theme.sp-2;
+                                Text {
+                                    text: "Nothing else is attached";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-body;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: "There is nothing to install here. A harness — yantrik-mind, hermes, OpenClaw, your own — attaches itself to this machine and appears in this list while it is running.";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-caption;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "docs/harness.md";
+                                    color: Theme.text-dim;
+                                    font-size: Theme.fs-caption;
+                                    font-family: Theme.font-mono;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if root.active-category == 7 : SkillStore {
                     width: 100%;
                     height: 100%;

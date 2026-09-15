@@ -22,6 +22,21 @@ use crate::App;
 /// Not every screen the shell can render. Boot, onboarding and login are states the shell enters
 /// on its own and jumping into one would leave the session somewhere it cannot get back from;
 /// locking has its own action, because locking a machine is an act rather than a view change.
+/// Settings sections, by the name a caller would say.
+///
+/// Mirrors the list built in `wire::settings` — the ids are the same ints the sidebar uses.
+const SETTINGS_SECTIONS: &[(&str, i32)] = &[
+    ("appearance", 0),
+    ("ai", 1),
+    ("desktop", 2),
+    ("network", 3),
+    ("accounts", 4),
+    ("privacy", 5),
+    ("system", 6),
+    ("skills", 7),
+    ("harnesses", 8),
+];
+
 const SCREENS: &[(&str, i32)] = &[
     ("desktop", 1),
     ("bond", 4),
@@ -215,6 +230,29 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 .with("screen", screen_name(screen))
                 .with("screen_id", screen)
                 .with("windows", serde_json::Value::Array(open))
+                // Which mind is answering, and what else could. An agent that can switch this
+                // has to be able to see it first, and without the list it would be guessing at
+                // ids for `use_harness`.
+                .with(
+                    "minds",
+                    crate::wire::harness::host()
+                        .map(|host| {
+                            serde_json::Value::Array(
+                                host.list()
+                                    .iter()
+                                    .map(|e| {
+                                        serde_json::json!({
+                                            "id": e.id,
+                                            "name": e.name,
+                                            "answering": e.active,
+                                            "builtin": e.builtin,
+                                        })
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .unwrap_or(serde_json::Value::Array(Vec::new())),
+                )
                 .with("files", files)
                 .with("installer", installer)
                 .with("editor", editor)
@@ -296,13 +334,59 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
             },
         )
         .action(
-            Action::new("show_screen", "Switch the shell to one of its screens").arg(
-                Param::text("screen")
-                    .describe("desktop, files, settings, notifications, memory, system, terminal, permissions, bond, personality"),
-            ),
+            // Parity, deliberately: anything a person can do on the Harnesses screen, an agent
+            // can do here. A control surface that could not change which mind is answering would
+            // be the one decision on this desktop reserved for the mouse.
+            Action::new("use_harness", "Choose which mind answers when the shell is asked something")
+                .arg(Param::text("id").describe("Harness id, as `describe shell` lists under `minds`")),
+            move |args| {
+                let id = args["id"].as_str().unwrap_or_default().trim().to_string();
+                if id.is_empty() {
+                    return Err("`id` is empty".into());
+                }
+                let host = crate::wire::harness::host()
+                    .ok_or_else(|| "the harness host is not running".to_string())?;
+                host.set_active(&id)?;
+                Ok(serde_json::json!({
+                    "answering": id,
+                    "tools": host.list().iter().find(|e| e.id == id).map(|e| e.capabilities.tools),
+                }))
+            },
+        )
+        .action(
+            Action::new("show_screen", "Switch the shell to one of its screens")
+                .arg(
+                    Param::text("screen")
+                        .describe("desktop, files, settings, notifications, memory, system, terminal, permissions, bond, personality"),
+                )
+                .arg(
+                    Param::text("section")
+                        .optional()
+                        .describe("For `settings`: appearance, ai, desktop, network, accounts, privacy, system, skills, harnesses"),
+                ),
             move |args| {
                 let ui = screen_ui()?;
                 let want = args["screen"].as_str().unwrap_or_default().trim().to_lowercase();
+
+                // Sending someone to Settings and leaving them to find the section is a chore,
+                // not a link — for a person following an instruction and for an agent alike.
+                let section = args["section"].as_str().unwrap_or_default().trim().to_lowercase();
+                if !section.is_empty() {
+                    let id = SETTINGS_SECTIONS
+                        .iter()
+                        .find(|(name, _)| *name == section)
+                        .map(|(_, id)| *id)
+                        .ok_or_else(|| {
+                            let names: Vec<&str> =
+                                SETTINGS_SECTIONS.iter().map(|(n, _)| *n).collect();
+                            format!(
+                                "no settings section called `{section}`; there is: {}",
+                                names.join(", ")
+                            )
+                        })?;
+                    ui.set_settings_category(id);
+                }
+
                 let id = SCREENS
                     .iter()
                     .find(|(name, _)| *name == want)
@@ -316,7 +400,11 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 // empty one.
                 ui.set_current_screen(id);
                 ui.invoke_navigate(id);
-                Ok(serde_json::json!({ "showing": want }))
+                let mut showing = serde_json::json!({ "showing": want });
+                if !section.is_empty() {
+                    showing["section"] = section.into();
+                }
+                Ok(showing)
             },
         )
         .action(

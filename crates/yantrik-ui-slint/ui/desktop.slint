@@ -183,6 +183,10 @@ export component DesktopScreen inherits Rectangle {
     in property <string> ai-fallback-banner: "";
     callback ai-privacy-clicked();
 
+    in property <string> active-harness-id: "";
+    in property <string> active-harness-name: "";
+    callback active-mind-clicked();
+
     // Callbacks
     callback send-message(string);
     callback mic-pressed();
@@ -236,6 +240,9 @@ export component DesktopScreen inherits Rectangle {
         settings-tapped => { root.quick-settings-open = !root.quick-settings-open; }
         power-pressed => { root.power-menu-open = !root.power-menu-open; }
         ai-privacy-clicked => { root.ai-privacy-clicked(); }
+        active-harness-id: root.active-harness-id;
+        active-harness-name: root.active-harness-name;
+        active-mind-clicked => { root.active-mind-clicked(); }
     }
 
     // ── Layer 2: Desktop content area ──

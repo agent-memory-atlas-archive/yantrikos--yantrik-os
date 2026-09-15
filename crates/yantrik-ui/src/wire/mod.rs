@@ -13,6 +13,7 @@ mod callbacks;
 mod chat;
 mod clipboard;
 pub mod dock;
+pub mod harness;
 pub mod i18n;
 pub mod image_viewer;
 mod lens;
@@ -54,6 +55,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     i18n::wire(ui, ctx);
     timers::wire(ui, ctx);
     chat::wire(ui, ctx);
+    harness::wire(ui, ctx);
     clipboard::wire(ui, ctx);
     lens::wire(ui, ctx);
     navigate::wire(ui, ctx);

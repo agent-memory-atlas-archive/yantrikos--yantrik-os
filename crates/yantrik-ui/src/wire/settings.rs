@@ -440,6 +440,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         SettingsCategoryItem { icon: "".into(), label: "Privacy & Security".into(), id: 5 },
         SettingsCategoryItem { icon: "".into(), label: "System".into(), id: 6 },
         SettingsCategoryItem { icon: "".into(), label: "Skills".into(), id: 7 },
+        SettingsCategoryItem { icon: "".into(), label: "Harnesses".into(), id: 8 },
     ];
     // Push initial categories
     ui.set_settings_categories(ModelRc::new(VecModel::from(all_cats.clone())));

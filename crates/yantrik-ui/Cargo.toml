@@ -13,6 +13,7 @@ name = "test-brain"
 path = "src/bin/test_brain.rs"
 
 [dependencies]
+yantrik-harness = { workspace = true }
 yantrik-companion = { workspace = true }
 yantrik-chat = { workspace = true }
 yantrik-ml = { workspace = true, features = ["api-llm", "claude-cli"] }

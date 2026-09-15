@@ -15,7 +15,7 @@ import { BondScreen, BondData } from "bond.slint";
 import { PersonalityScreen, OpinionData, SharedRefData } from "personality.slint";
 import { LockScreen } from "lock.slint";
 import { LoginScreen } from "login.slint";
-import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData } from "settings.slint";
+import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData } from "settings.slint";
 import { SkillData } from "skill_store.slint";
 import { MemoryBrowser, MemoryItem } from "memory_browser.slint";
 import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem } from "file_browser.slint";
@@ -56,7 +56,7 @@ import { AppShell } from "components/app_shell.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { Tr } from "translations.slint";
 
-export { Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction }
+export { HarnessData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction }
 
 export component App inherits Window {
     default-font-family: Theme.font-ui;
@@ -293,6 +293,19 @@ export component App inherits Window {
     in property <[AIModelData]> settings-available-models: [];
     in property <string> settings-provider-test-result: "";
     in property <[SettingsCategoryItem]> settings-categories;
+    // Which Settings section is open, so anything can deep-link to one.
+    in-out property <int> settings-category: 0;
+
+    // ── Which mind is answering ──
+    //
+    // Read by two places that must not disagree: the Harnesses screen, and the status bar badge
+    // a person glances at without opening anything.
+    in property <[HarnessData]> harnesses: [];
+    in property <int> harness-count: 0;
+    in property <string> active-harness-name: "";
+    in property <string> active-harness-id: "";
+    in-out property <string> harness-error: "";
+    callback use-harness(string);
     callback settings-search(string);
     callback add-provider();
     callback save-provider(string, string, string, string, string);
@@ -1142,6 +1155,14 @@ export component App inherits Window {
             ai-provider-label: root.ai-active-provider-label;
             ai-fallback-banner: root.ai-fallback-banner;
             ai-privacy-clicked => { root.ai-quick-switcher-open = !root.ai-quick-switcher-open; }
+            active-harness-id: root.active-harness-id;
+            active-harness-name: root.active-harness-name;
+            // Straight to the section, not to the front door of Settings.
+            active-mind-clicked => {
+                root.settings-category = 8;
+                root.current-screen = 7;
+                root.navigate(7);
+            }
             // Companion
             is-thinking: root.is-thinking;
             has-urges: root.has-urges;
@@ -1391,6 +1412,10 @@ export component App inherits Window {
                 available-models: root.settings-available-models;
                 provider-test-result: root.settings-provider-test-result;
                 categories: root.settings-categories;
+                active-category <=> root.settings-category;
+                harnesses: root.harnesses;
+                harness-error: root.harness-error;
+                use-harness(id) => { root.use-harness(id); }
                 settings-search(query) => { root.settings-search(query); }
                 add-provider => { root.add-provider(); }
                 save-provider(name, ptype, url, key, auth) => { root.save-provider(name, ptype, url, key, auth); }
