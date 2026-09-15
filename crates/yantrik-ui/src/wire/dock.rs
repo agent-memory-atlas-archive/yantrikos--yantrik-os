@@ -314,8 +314,21 @@ pub fn spawn_app(app_id: &str, bin: &str) {
 
 /// The one place the shell starts an app process, whatever path asked for it.
 pub fn spawn_app_with_args(app_id: &str, bin: &str, args: &[&str]) {
+    spawn_app_in(app_id, bin, args, None)
+}
+
+/// The same launcher, started in a particular directory.
+///
+/// For "open a terminal here", where the directory IS the request. Goes through one body with
+/// `spawn_app_with_args` so the registry, the environment scrubbing and the reaper cannot end up
+/// applying to one launch path and not the other — which is how the dock grew two of them before.
+pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::path::Path>) {
     let path = resolve_app_binary(bin);
-    match std::process::Command::new(&path)
+    let mut command = std::process::Command::new(&path);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    match command
         .args(args)
         // The shell is often started with SLINT_FULLSCREEN=1 (dev runs, kiosk sessions). A child
         // inherits the environment, and an app that inherits that variable opens fullscreen too.

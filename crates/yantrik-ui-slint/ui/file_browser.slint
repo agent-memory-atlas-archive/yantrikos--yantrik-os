@@ -87,8 +87,10 @@ export component FileBrowser inherits Rectangle {
 
     // Context menu
     property <bool> show-context-menu: false;
-    property <int> context-menu-x: 0;
-    property <int> context-menu-y: 0;
+    // Where the menu opens. Lengths, not ints: these are a position on screen, and the menu was
+    // ignoring them entirely and opening in the middle of the window instead.
+    property <length> context-menu-x: 0;
+    property <length> context-menu-y: 0;
     property <int> context-menu-index: -1;
     callback context-copy-path(string);
     callback context-open-terminal();
@@ -1361,6 +1363,20 @@ export component FileBrowser inherits Rectangle {
                         }
 
                         file-touch := TouchArea {
+                            // The menu existed and had no way to be summoned the way anyone
+                            // would try. Right-click is the gesture; the "⋯" button stays for
+                            // touch and for anyone who prefers it.
+                            pointer-event(e) => {
+                                if (e.button == PointerEventButton.right
+                                    && e.kind == PointerEventKind.down) {
+                                    root.context-menu-index = idx;
+                                    root.context-menu-x = self.absolute-position.x
+                                        - root.absolute-position.x + self.mouse-x;
+                                    root.context-menu-y = self.absolute-position.y
+                                        - root.absolute-position.y + self.mouse-y;
+                                    root.show-context-menu = true;
+                                }
+                            }
                             clicked => {
                                 if entry.is-dir {
                                     root.selected-index = -1;
@@ -1445,10 +1461,13 @@ export component FileBrowser inherits Rectangle {
                                 width: 24px; height: 28px;
                                 clicked => {
                                     root.context-menu-index = idx;
+                                    // Under the button that opened it. This used to set 0,0 —
+                                    // which the menu then ignored anyway.
+                                    root.context-menu-x = self.absolute-position.x
+                                        - root.absolute-position.x;
+                                    root.context-menu-y = self.absolute-position.y
+                                        - root.absolute-position.y + self.height;
                                     root.show-context-menu = true;
-                                    // Position near bottom-right of row
-                                    root.context-menu-x = 0;
-                                    root.context-menu-y = 0;
                                 }
                                 Rectangle {
                                     border-radius: 4px;
@@ -1996,18 +2015,24 @@ export component FileBrowser inherits Rectangle {
 
     // ═══ Context menu overlay ═══
     if root.show-context-menu && root.context-menu-index >= 0 && root.context-menu-index < root.entries.length : Rectangle {
-        width: 100%; height: 100%; background: Theme.overlay-backdrop;
-        // Click outside to dismiss
+        // No backdrop fill. This dimmed the whole file list behind a centred card, which makes a
+        // right-click on one row read as a modal dialog about the whole window — and hides the
+        // very thing you just clicked on. The catcher stays, invisible, so clicking away still
+        // dismisses.
+        width: 100%; height: 100%;
         TouchArea {
             clicked => { root.show-context-menu = false; }
         }
 
-        // Menu card — centered for simplicity
+        // At the pointer, kept on screen. Clamped rather than centred: a context menu that opens
+        // somewhere else is a menu you have to go and find.
         Rectangle {
-            x: (parent.width - 200px) / 2;
-            y: (parent.height - 380px) / 2;
+            x: min(root.context-menu-x, parent.width - 208px);
+            y: min(root.context-menu-y, max(0px, parent.height - self.height - 8px));
             width: 200px;
-            height: 380px;
+            // Its contents, not a guess. 380px was ~95px taller than the items, so the menu
+            // trailed a slab of empty panel under the last entry.
+            height: menu-body.preferred-height;
             border-radius: Theme.r-lg;
             background: Theme.bg-elevated;
             border-width: 1px; border-color: Theme.border-subtle;
@@ -2017,7 +2042,7 @@ export component FileBrowser inherits Rectangle {
             // Block clicks from passing through
             TouchArea {}
 
-            VerticalLayout {
+            menu-body := VerticalLayout {
                 padding: 6px; spacing: 0px;
 
                 // Header

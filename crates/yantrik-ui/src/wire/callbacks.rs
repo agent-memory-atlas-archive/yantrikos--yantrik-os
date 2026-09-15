@@ -817,13 +817,23 @@ fn wire_file_browser(ui: &App, ctx: &AppContext) {
         let dir = bp.borrow().clone();
         let expanded = filebrowser::expand_home(&dir);
         let dir_str = expanded.to_string_lossy().to_string();
-        // Try common terminal emulators
-        let _ = std::process::Command::new("sh")
-            .args(["-c", &format!(
-                "cd '{}' && (xterm -e sh 2>/dev/null || alacritty 2>/dev/null || foot 2>/dev/null || sh) &",
-                dir_str
-            )])
-            .spawn();
+        // Our own terminal, first. This is Yantrik OS: "Open Terminal Here" reaching for xterm
+        // before the terminal the OS ships — and reaching for it FIRST, the least likely of the
+        // four to be installed or to look like anything — is a strange thing for a file manager
+        // to do in its own desktop. It also went through `sh -c ... &`, so nothing was registered
+        // and the window never appeared in the taskbar.
+        let own = crate::wire::dock::resolve_app_binary("yantrik-terminal");
+        if own.is_file() {
+            crate::wire::dock::spawn_app_in("terminal", "yantrik-terminal", &[], Some(&expanded));
+        } else {
+            // A machine without our terminal still gets one.
+            let _ = std::process::Command::new("sh")
+                .args(["-c", &format!(
+                    "cd '{}' && (foot 2>/dev/null || alacritty 2>/dev/null || xterm -e sh 2>/dev/null || sh) &",
+                    dir_str
+                )])
+                .spawn();
+        }
         tracing::info!(dir = %dir_str, "Opening terminal in directory");
     });
 
