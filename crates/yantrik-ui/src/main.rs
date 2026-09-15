@@ -43,6 +43,7 @@ mod control;
 mod control_installer;
 mod control_update;
 mod control_files;
+mod control_editor;
 mod jobs;
 mod cards;
 mod clipboard;

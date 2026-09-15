@@ -171,11 +171,21 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 serde_json::Value::Null
             };
 
+            // The open document, when the editor is up — so an agent reads what it is editing
+            // the same way it reads a directory or the weather.
+            let editor = if screen == 12 {
+                crate::control_editor::state(&ui)
+            } else {
+                serde_json::Value::Null
+            };
+
             // The one line worth reading first: where the user is, what is open, and whether
             // anything is wrong. Trouble comes before window count, because trouble is the
             // reason to look.
             let summary = if screen == 2 {
                 crate::control_installer::summary(&ui)
+            } else if screen == 12 {
+                crate::control_editor::summary(&ui)
             } else if !down.is_empty() {
                 format!(
                     "Yantrik — {} screen, {} windows open, {} not running",
@@ -207,6 +217,7 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 .with("windows", serde_json::Value::Array(open))
                 .with("files", files)
                 .with("installer", installer)
+                .with("editor", editor)
                 .with("services", serde_json::Value::Array(services))
                 .with("companion_online", ui.get_companion_online())
                 .with("companion_status", ui.get_companion_status().to_string())
@@ -369,5 +380,6 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
     // about status bars.
     let surface = crate::control_installer::actions(surface, ui);
     let surface = crate::control_update::actions(surface, ui);
-    crate::control_files::actions(surface, ui).serve();
+    let surface = crate::control_files::actions(surface, ui);
+    crate::control_editor::actions(surface, ui).serve();
 }
