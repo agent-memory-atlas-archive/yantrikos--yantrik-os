@@ -48,17 +48,97 @@ struct LastCommand {
 // directory they are in, what they last ran, and whether it failed. That is the whole point of
 // the ErrorCompanion feature, and until now it had no way to find out.
 
+/// Run one command line in the terminal and show the result, exactly as if it had been typed.
+///
+/// `cd` moves the working directory (a shelled-out `cd` would not persist); everything else runs
+/// through the shell. The output is appended to the visible buffer and recorded as the last
+/// command, and also returned, so the key handler and the `run` control action share one code
+/// path and cannot disagree about what "running a command" means.
+///
+/// It runs the process to completion on the calling thread — the same blocking `output()` the
+/// interactive path has always used, so it is no worse than a person typing the command. A caller
+/// handing it something that never returns will hang the window; an agent should reach for the
+/// companion's `run_command` for anything long-running and use this for the things a person types.
+fn exec_command(
+    cmd: &str,
+    ui: &TerminalApp,
+    cwd: &Rc<RefCell<String>>,
+    buf: &Rc<RefCell<String>>,
+    last: &Rc<RefCell<Option<LastCommand>>>,
+) -> (String, i32) {
+    let trimmed = cmd.trim();
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+
+    // `cd` is the one builtin the terminal has to implement itself.
+    if parts.first() == Some(&"cd") {
+        let target_arg = parts.get(1).copied().unwrap_or("~");
+        let target = if target_arg == "~" {
+            std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| "/".to_string())
+        } else {
+            let current = cwd.borrow().clone();
+            std::path::Path::new(&current).join(target_arg).to_string_lossy().to_string()
+        };
+        if std::path::Path::new(&target).is_dir() {
+            *cwd.borrow_mut() = target.clone();
+            ui.set_current_directory(target.into());
+            let mut b = buf.borrow_mut();
+            b.push_str("\n$ ");
+            ui.set_terminal_output(b.clone().into());
+            (String::new(), 0)
+        } else {
+            let msg = format!("cd: no such directory: {target}");
+            let mut b = buf.borrow_mut();
+            b.push_str(&format!("\n{msg}\n$ "));
+            ui.set_terminal_output(b.clone().into());
+            (msg, 1)
+        }
+    } else {
+        let current_dir = cwd.borrow().clone();
+        let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
+        let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
+        let result = std::process::Command::new(shell)
+            .arg(flag)
+            .arg(trimmed)
+            .current_dir(&current_dir)
+            .output();
+        let (output_text, exit) = match result {
+            Ok(ref o) => {
+                let mut combined = String::new();
+                combined.push_str(&String::from_utf8_lossy(&o.stdout));
+                combined.push_str(&String::from_utf8_lossy(&o.stderr));
+                // 127 is the shell's own "could not run it": the closest honest exit when the
+                // process never started.
+                (combined, o.status.code().unwrap_or(-1))
+            }
+            Err(ref e) => (format!("Error: {e}\n"), 127),
+        };
+        *last.borrow_mut() = Some(LastCommand { command: trimmed.to_string(), exit_code: exit });
+        let mut b = buf.borrow_mut();
+        b.push('\n');
+        b.push_str(&output_text);
+        if !output_text.ends_with('\n') && !output_text.is_empty() {
+            b.push('\n');
+        }
+        b.push_str("$ ");
+        ui.set_terminal_output(b.clone().into());
+        (output_text, exit)
+    }
+}
+
 fn publish_control(
     app: &TerminalApp,
     output: Rc<RefCell<String>>,
     last_command: Rc<RefCell<Option<LastCommand>>>,
+    cwd: Rc<RefCell<String>>,
 ) {
-    use yantrik_app_runtime::control::{Action, App, View};
+    use yantrik_app_runtime::control::{Action, App, Param, View};
 
     let describe = {
         let weak = app.as_weak();
         let out = output.clone();
-        let last = last_command;
+        let last = last_command.clone();
         move || {
             let Some(ui) = weak.upgrade() else {
                 return View::new("Terminal — closing");
@@ -106,6 +186,10 @@ fn publish_control(
     };
 
     let weak = app.as_weak();
+    let run_weak = app.as_weak();
+    let run_out = output.clone();
+    let run_last = last_command;
+    let run_cwd = cwd;
     let cleared = output;
 
     App::new("terminal")
@@ -116,6 +200,36 @@ fn publish_control(
             ui.set_terminal_output("$ ".into());
             Ok(serde_json::json!({ "cleared": true }))
         })
+        .action(
+            // What the terminal could not do before: an agent can run a command IN the visible
+            // window and read the result, so the person sees what the agent ran — the thing the
+            // companion's headless run_command cannot give them. `sensitive`, because it is the
+            // user's own shell and a command can do real work; the caller's ceiling decides.
+            Action::new("run", "Run a command in the terminal and return its output")
+                .risk("sensitive")
+                .arg(Param::text("command").describe("The command line to run, e.g. `ls -la` or `cd /tmp`")),
+            move |args| {
+                let ui = run_weak.upgrade().ok_or_else(|| "Terminal window is gone".to_string())?;
+                let command = args["command"].as_str().unwrap_or_default().trim().to_string();
+                if command.is_empty() {
+                    return Err("`command` is empty".into());
+                }
+                // Echo the command into the buffer first, so the visible terminal shows it on the
+                // prompt exactly as if it had been typed, then run it through the shared path.
+                {
+                    let mut b = run_out.borrow_mut();
+                    b.push_str(&command);
+                    ui.set_terminal_output(b.clone().into());
+                }
+                let (output, exit) = exec_command(&command, &ui, &run_cwd, &run_out, &run_last);
+                Ok(serde_json::json!({
+                    "command": command,
+                    "exit_code": exit,
+                    "directory": run_cwd.borrow().clone(),
+                    "output": output,
+                }))
+            },
+        )
         .serve();
 }
 
@@ -174,93 +288,18 @@ fn wire(app: &TerminalApp) {
                     return slint::private_unstable_api::re_exports::EventResult::Accept;
                 }
 
-                // Handle 'cd' specially
-                let parts: Vec<&str> = cmd_str.trim().split_whitespace().collect();
-                if parts.first() == Some(&"cd") {
-                    let target = parts.get(1).unwrap_or(&"~");
-                    let target = if *target == "~" {
-                        std::env::var("HOME")
-                            .or_else(|_| std::env::var("USERPROFILE"))
-                            .unwrap_or_else(|_| "/".to_string())
-                    } else {
-                        let current = cwd_ref.borrow().clone();
-                        let p = std::path::Path::new(&current).join(target);
-                        p.to_string_lossy().to_string()
-                    };
-                    if std::path::Path::new(&target).is_dir() {
-                        *cwd_ref.borrow_mut() = target.clone();
-                        ui.set_current_directory(target.into());
-                        let mut b = buf.borrow_mut();
-                        b.push_str("\n$ ");
-                        ui.set_terminal_output(b.clone().into());
-                    } else {
-                        let mut b = buf.borrow_mut();
-                        b.push_str(&format!("\ncd: no such directory: {}\n$ ", target));
-                        ui.set_terminal_output(b.clone().into());
-                    }
-                    return slint::private_unstable_api::re_exports::EventResult::Accept;
-                }
-
-                // Handle 'clear'
+                // `clear` and `exit` are terminal-local; everything else, including `cd`,
+                // goes through the one shared executor the `run` action also uses.
                 if cmd_str.trim() == "clear" {
                     *buf.borrow_mut() = "$ ".to_string();
                     ui.set_terminal_output("$ ".into());
                     return slint::private_unstable_api::re_exports::EventResult::Accept;
                 }
-
-                // Handle 'exit'
                 if cmd_str.trim() == "exit" {
                     ui.set_is_alive(false);
                     return slint::private_unstable_api::re_exports::EventResult::Accept;
                 }
-
-                // Run command via std::process::Command
-                let current_dir = cwd_ref.borrow().clone();
-                let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
-                let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
-
-                let result = std::process::Command::new(shell)
-                    .arg(flag)
-                    .arg(&cmd_str)
-                    .current_dir(&current_dir)
-                    .output();
-
-                let output_text = match result {
-                    Ok(ref output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        let mut combined = String::new();
-                        if !stdout.is_empty() {
-                            combined.push_str(&stdout);
-                        }
-                        if !stderr.is_empty() {
-                            combined.push_str(&stderr);
-                        }
-                        if combined.is_empty() {
-                            String::new()
-                        } else {
-                            combined
-                        }
-                    }
-                    Err(ref e) => format!("Error: {}\n", e),
-                };
-
-                *last_run.borrow_mut() = Some(LastCommand {
-                    command: cmd_str.clone(),
-                    // 127 is the shell's own "could not run it", which is the closest honest
-                    // answer when the process never started.
-                    exit_code: result.as_ref().map(|o| o.status.code().unwrap_or(-1)).unwrap_or(127),
-                });
-
-                let mut b = buf.borrow_mut();
-                b.push('\n');
-                b.push_str(&output_text);
-                if !output_text.ends_with('\n') && !output_text.is_empty() {
-                    b.push('\n');
-                }
-                b.push_str("$ ");
-                ui.set_terminal_output(b.clone().into());
-
+                exec_command(&cmd_str, &ui, &cwd_ref, &buf, &last_run);
                 return slint::private_unstable_api::re_exports::EventResult::Accept;
             }
 
@@ -289,7 +328,7 @@ fn wire(app: &TerminalApp) {
         });
     }
 
-    publish_control(app, output_buffer.clone(), last_command.clone());
+    publish_control(app, output_buffer.clone(), last_command.clone(), cwd.clone());
 
     // Tab management stubs
     app.on_new_tab(|| { tracing::info!("New tab requested (standalone mode — single tab only)"); });
