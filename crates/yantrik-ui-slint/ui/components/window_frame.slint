@@ -99,7 +99,19 @@ export component WindowFrame inherits Rectangle {
         spacing: 0px;
 
         // ── Title bar — glass gradient ──
-        Rectangle {
+        //
+        // Not drawn when the window is maximized, and that is the whole fix for something every
+        // shell screen had: a WindowFrame title bar saying "Memory", directly above the screen's
+        // own header saying "Memories". Two title bars, on every screen, one of them redundant.
+        //
+        // Maximized here means a shell screen filling the display, and a screen filling the
+        // display is not a window — it is what the OS is showing you. Its own header, with its
+        // own back arrow, is the header. Every screen has one; that was checked against
+        // photographs of all ten before this line was written, not assumed.
+        //
+        // A floating window still gets the bar, because that is where its drag handle and its
+        // controls live and there is nothing else to move it by.
+        if !root.is-maximized : Rectangle {
             height: 36px;
             background: @linear-gradient(180deg,
                 Theme.bg-surface.transparentize(44%) 0%,
