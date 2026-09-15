@@ -36,6 +36,11 @@ export component YContextMenu inherits Rectangle {
         x: root.menu-x;
         y: root.menu-y;
         width: 220px;
+        // Sized to its rows, not to the screen. A Rectangle does not size itself to its children,
+        // and with no height this filled the whole parent — so the first time this component was
+        // ever instantiated, the menu came up as a 220px column running to the bottom of the
+        // display with five items at the top of it.
+        height: items.preferred-height;
         border-radius: Theme.r-lg;
         background: Theme.bg-elevated;
         border-width: 1px;
@@ -44,7 +49,7 @@ export component YContextMenu inherits Rectangle {
         drop-shadow-color: Theme.overlay-backdrop;
         clip: true;
 
-        VerticalLayout {
+        items := VerticalLayout {
             padding: Theme.sp-1;
 
             for action[idx] in root.actions : VerticalLayout {

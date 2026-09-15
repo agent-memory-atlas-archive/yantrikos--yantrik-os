@@ -54,8 +54,14 @@ export component AppGrid inherits Rectangle {
     }
 
     if root.is-open : Rectangle {
-        property <int> rows: (root.apps.length + root.columns - 1) / root.columns;
-        property <length> panel-h: min(parent.height - 80px, max(360px, self.rows * (root.cell-h + root.cell-gap) + 150px));
+        // A fixed frame, deliberately.
+        //
+        // This used to be sized from the number of apps currently showing, so picking a category
+        // changed the row count, which changed the height, which re-centred the panel — the
+        // launcher jumped and resized under the pointer every time you filtered it, and the icon
+        // you were reaching for moved. The grid inside already scrolls; only its contents should
+        // change when you filter, never the frame around them.
+        property <length> panel-h: min(parent.height - 80px, 620px);
         x: (parent.width - root.panel-w) / 2;
         y: (parent.height - self.panel-h) / 2;
         width: root.panel-w;
