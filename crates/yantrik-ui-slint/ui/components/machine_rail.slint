@@ -106,6 +106,9 @@ export component MachineRail inherits Rectangle {
     in property <string> provider-label: "";
     in property <int> memory-count: 0;
     in property <int> whisper-count: 0;
+    // Which mind is answering, and what it is running on. "Model" alone could not say that a
+    // different harness had taken over the conversation.
+    in property <string> mind-name: "";
 
     width: 318px;
     background: Theme.bg-deep.transparentize(28%);
@@ -181,7 +184,14 @@ export component MachineRail inherits Rectangle {
                        value-color: !root.companion-online ? Theme.color-danger
                                   : root.companion-status == "thinking" ? Theme.accent
                                   : Theme.text-primary; }
-            KeyValue { key: "Model"; value: root.provider-label != "" ? root.provider-label : "—"; }
+            // An em-dash for "no model" reads as a fault rather than as a machine nobody has
+            // configured yet, and it said nothing about WHICH mind is answering — which, now
+            // that a harness can attach and take the conversation, is the more important half.
+            KeyValue { key: "Mind";
+                       value: root.mind-name != "" ? root.mind-name : "none attached"; }
+            KeyValue { key: "Model";
+                       value: root.provider-label != "" ? root.provider-label : "not configured";
+                       value-color: root.provider-label != "" ? Theme.text-primary : Theme.text-dim; }
             KeyValue { key: "Bond";  value: root.bond-level + " · " + Math.round(root.bond-score * 100) + "%"; }
             KeyValue { key: "Memories"; value: "" + root.memory-count; }
             KeyValue { key: "Suggestions"; value: "" + root.whisper-count;

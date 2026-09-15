@@ -7,6 +7,12 @@
 //! development session or an unusual setup — and it never runs when the shell has launched
 //! something itself.
 
+/// The title the shell's own window carries, from `title:` in yantrik-ui-slint/ui/app.slint.
+///
+/// Kept here so the one place that has to exclude it says why, rather than a bare string buried
+/// in a filter.
+const SHELL_WINDOW_TITLE: &str = "Yantrik OS";
+
 /// A running window on the desktop.
 pub struct WindowEntry {
     pub title: String,
@@ -104,6 +110,11 @@ fn wlrctl_windows() -> Vec<WindowEntry> {
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
         .filter(|line| !line.trim().is_empty())
+        // Not the shell itself. `wlrctl` lists every toplevel on the compositor, and one of them
+        // is always this process — so on a machine with nothing launched, the taskbar and the
+        // desktop's own "open windows" list both offered to switch you to the desktop you are
+        // already looking at.
+        .filter(|line| split_toplevel_line(line).0 != SHELL_WINDOW_TITLE)
         .map(|line| {
             // `wlrctl toplevel list` prints `app_id: title`. Reading the whole line as the title
             // put that separator into the name, and our own windows set no wayland app_id at all,
@@ -236,6 +247,13 @@ mod tests {
         assert_eq!(split_toplevel_line(": Terminal").0, "Terminal");
         assert_eq!(split_toplevel_line(": Yantrik OS").0, "Yantrik OS");
         assert_eq!(split_toplevel_line(": Snippet Manager").0, "Snippet Manager");
+    }
+
+    #[test]
+    fn the_shell_is_not_one_of_its_own_open_windows() {
+        // wlrctl reports this process too. Offering to switch to the desktop, from the desktop,
+        // is the kind of thing that makes a shell feel like it is not paying attention.
+        assert_eq!(split_toplevel_line(": Yantrik OS").0, SHELL_WINDOW_TITLE);
     }
 
     #[test]

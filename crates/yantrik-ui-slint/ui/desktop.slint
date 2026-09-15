@@ -29,7 +29,7 @@ import { Taskbar } from "components/taskbar.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { IntentLens, LensResult } from "components/intent_lens.slint";
 import { MessageData } from "components/message_bubble.slint";
-import { UrgeCardData } from "components/glance_card.slint";
+import { UrgeCardData, GlanceCard } from "components/glance_card.slint";
 import { WhisperCardStack, WhisperCardItem } from "components/whisper_card.slint";
 import { QuickSettings } from "components/quick_settings.slint";
 import { ClipboardPanel, ClipboardEntryData } from "components/clipboard_panel.slint";
@@ -729,6 +729,183 @@ export component DesktopScreen inherits Rectangle {
             }
         }
 
+        // ── The centre: what the mind has, what is open, what you can start ──
+        //
+        // This was empty. Three quarters of an "AI at the core" desktop was bare wallpaper
+        // between an ask bar and a taskbar, which is a strange thing for an OS whose entire
+        // claim is that something is thinking in it.
+        //
+        // Everything here is data the shell already holds, and every section disappears when it
+        // has nothing — a fresh machine genuinely has no suggestions, and inventing some would
+        // be the confident lie this codebase keeps having to remove. What a fresh machine gets
+        // instead is the one card at the bottom, which is true on day one and gone by day two.
+        if root.agent-mode && !root.focus-mode : Flickable {
+            x: 296px + Theme.sp-5;
+            y: Theme.sp-4 + 38px + Theme.sp-4;
+            width: parent.width - 296px - 318px - Theme.sp-5 * 2;
+            height: parent.height - 40px - (Theme.sp-4 + 38px + Theme.sp-4) - Theme.sp-4;
+            // Both, or the column lays itself out at its own preferred width and the cards sit
+            // in a narrow ribbon down the middle of the space they were supposed to fill.
+            viewport-width: self.width;
+            viewport-height: centre-column.preferred-height;
+
+            centre-column := VerticalLayout {
+                width: parent.width;
+                height: self.preferred-height;
+                spacing: Theme.sp-4;
+                alignment: start;
+
+                // What the mind is proposing. GlanceCard has existed in the kit since the
+                // instincts landed and had never once been placed on a screen.
+                if root.urges.length > 0 : VerticalLayout {
+                    spacing: Theme.sp-2;
+                    Text {
+                        text: "SUGGESTIONS";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        font-weight: Theme.fw-micro;
+                        letter-spacing: 1px;
+                    }
+                    // Tapping one sends it to the mind — the suggestion IS a message it
+                    // proposed saying to itself, so the honest action is to say it.
+                    for u in root.urges : GlanceCard {
+                        data: u;
+                        tapped(msg) => { root.send-message(msg); }
+                    }
+                }
+
+                // What is already open, so getting back to a window does not mean going to the
+                // taskbar and reading it.
+                if root.window-list.length > 0 : VerticalLayout {
+                    spacing: Theme.sp-2;
+                    Text {
+                        text: "OPEN";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        font-weight: Theme.fw-micro;
+                        letter-spacing: 1px;
+                    }
+                    for w in root.window-list : Rectangle {
+                        height: 40px;
+                        border-radius: Theme.r-md;
+                        background: win-ta.has-hover ? Theme.hover-fill : Theme.bg-card;
+                        border-width: 1px;
+                        border-color: Theme.border-subtle;
+                        win-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.switch-window(w.title); }
+                        }
+                        HorizontalLayout {
+                            padding-left: Theme.sp-3;
+                            padding-right: Theme.sp-3;
+                            spacing: Theme.sp-3;
+                            Text {
+                                text: w.title;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-body;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+
+                // Apps, because agent mode hides the desktop icons and the only way left to
+                // start anything was the Apps button in the corner. A desktop you cannot open
+                // anything from is not a more advanced desktop.
+                if root.dock-items.length > 0 : VerticalLayout {
+                    spacing: Theme.sp-2;
+                    Text {
+                        text: "START";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        font-weight: Theme.fw-micro;
+                        letter-spacing: 1px;
+                    }
+                    Rectangle {
+                        height: 84px;
+                        border-radius: Theme.r-lg;
+                        background: Theme.bg-card;
+                        border-width: 1px;
+                        border-color: Theme.border-subtle;
+                        clip: true;
+                        // Scrolls, because the number of pinned apps is not something this row
+                        // gets to decide. Clipping the last one in half — which it did — makes
+                        // the desktop look broken rather than full.
+                        Flickable {
+                            width: 100%;
+                            height: 100%;
+                            viewport-width: root.dock-items.length * 72px + Theme.sp-3 * 2;
+                            viewport-height: self.height;
+                        HorizontalLayout {
+                            padding: Theme.sp-3;
+                            spacing: Theme.sp-2;
+                            alignment: start;
+                            for item[i] in root.dock-items : Rectangle {
+                                width: 64px;
+                                border-radius: Theme.r-md;
+                                background: app-ta.has-hover ? Theme.hover-fill : transparent;
+                                app-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.launch-app(item.app-id); }
+                                }
+                                VerticalLayout {
+                                    padding-top: 8px;
+                                    spacing: 4px;
+                                    alignment: start;
+                                    Icon {
+                                        commands: Icons.app-or-window(item.app-id);
+                                        size: 24px;
+                                        // The dimmest tint in the palette is for metadata, not
+                                        // for the only way to start a program.
+                                        tint: app-ta.has-hover ? Theme.accent : Theme.text-primary;
+                                        thickness: 1.6px;
+                                        x: (parent.width - self.width) / 2;
+                                    }
+                                    Text {
+                                        text: item.label;
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.fs-micro;
+                                        horizontal-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                        }
+                    }
+                }
+
+                // Day one. Gone the moment any of the above has content, which is the only
+                // honest way to fill a screen on a machine that has not been used yet.
+                if root.urges.length == 0 && root.window-list.length == 0 : Rectangle {
+                    height: day-one.preferred-height;
+                    border-radius: Theme.r-lg;
+                    background: Theme.bg-card;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    day-one := VerticalLayout {
+                        padding: Theme.sp-4;
+                        spacing: Theme.sp-2;
+                        alignment: start;
+                        Text {
+                            text: "Nothing is happening yet";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-headline;
+                            font-weight: Theme.fw-headline;
+                        }
+                        Text {
+                            text: "This desktop fills itself in as it learns what you are doing. Ask it something with Ctrl K, open an app below, and it will start keeping track of the work rather than the icons.";
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-body;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Focus Overlay (Workspace Morph) ──
         if root.focus-mode : VerticalLayout {
             alignment: center;
@@ -786,6 +963,7 @@ export component DesktopScreen inherits Rectangle {
 
         // ── Machine rail (right, hidden in focus mode) ──
         if root.agent-mode && !root.focus-mode : MachineRail {
+            mind-name: root.active-harness-name;
             x: parent.width - self.width;
             y: 0;
             height: parent.height - 40px;
