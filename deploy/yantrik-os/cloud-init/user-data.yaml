@@ -170,7 +170,23 @@ write_files:
         rm -rf "$tmp"
         chown -R yantrik:yantrik /opt/yantrik
         ln -sf /opt/yantrik/bin/yos /usr/local/bin/yos
+        ln -sf /opt/yantrik/bin/yantrik-update /usr/local/bin/yantrik-update 2>/dev/null || true
         log "installed $(ls /opt/yantrik/bin | wc -l) binaries"
+
+        # Tell the updater which channel this machine came from.
+        #
+        # Without this it falls back to its own default of `stable`, so a machine installed
+        # from nightly checks a channel it has never seen — and a fresh install could not
+        # update itself at all, which was true of the first one built from this file.
+        # Derived from the URL that was actually installed rather than written down twice
+        # and kept in sync by hand.
+        CHANNEL_NAME="$(printf '%s' "$YANTRIK_RELEASE_URL" | sed -n 's#.*/\([^/]*\)/yantrik-os-latest.*#\1#p')"
+        CHANNEL_HOST="$(printf '%s' "$YANTRIK_RELEASE_URL" | sed -n 's#^[a-z]*://\([^/]*\)/.*#\1#p')"
+        if [ -n "$CHANNEL_NAME" ] && [ -n "$CHANNEL_HOST" ]; then
+          printf 'CHANNEL=%s\nHOST=%s\n' "$CHANNEL_NAME" "$CHANNEL_HOST" > /opt/yantrik/update.conf
+          chown yantrik:yantrik /opt/yantrik/update.conf
+          log "updates will come from $CHANNEL_NAME on $CHANNEL_HOST"
+        fi
 
         # ── Onboarding ────────────────────────────────────────────────────────────────
         # Without this the desktop opens on "Hey, I'm Yantrik. What should I call you?"
