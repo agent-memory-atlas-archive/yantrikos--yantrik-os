@@ -7,6 +7,11 @@
 # CRLF `yos` shipped in the image and every call to it failed with a traceback until it was
 # hand-fixed. So the tools that get shipped and executed are pinned to LF here, at the source.
 
+# This is a Linux OS repo: everything text is LF, everywhere, on every platform.
+# `eol=lf` overrides core.autocrlf, so a Windows checkout stops drifting to CRLF and the
+# two gits (Windows and WSL) stop disagreeing about whether the tree is dirty.
+* text=auto eol=lf
+
 # Executable shell tools — must be LF, they run on Linux.
 *.sh              text eol=lf
 deploy/yantrik-os/yos          text eol=lf
