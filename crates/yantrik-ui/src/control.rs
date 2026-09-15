@@ -35,7 +35,7 @@ const SCREENS: &[(&str, i32)] = &[
     ("permissions", 28),
 ];
 
-fn screen_name(id: i32) -> &'static str {
+pub(crate) fn screen_name(id: i32) -> &'static str {
     match id {
         0 => "boot",
         2 => "onboarding",
@@ -368,5 +368,6 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
     // binary and restarts) and they deserve to be read together, not buried at the end of a file
     // about status bars.
     let surface = crate::control_installer::actions(surface, ui);
-    crate::control_update::actions(surface, ui).serve();
+    let surface = crate::control_update::actions(surface, ui);
+    crate::control_files::actions(surface, ui).serve();
 }

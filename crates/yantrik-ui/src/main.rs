@@ -42,6 +42,7 @@ mod companion_rpc;
 mod control;
 mod control_installer;
 mod control_update;
+mod control_files;
 mod jobs;
 mod cards;
 mod clipboard;
