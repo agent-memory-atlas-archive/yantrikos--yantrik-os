@@ -128,10 +128,21 @@ Grade within an app rather than across it. Starting a container is recoverable a
 writable layer with it and is `dangerous`.
 
 **Some things do not belong on the surface at all.** Email publishes `compose` and not `send`: a
-draft can be read before it leaves, and mail that has gone cannot be taken back. The terminal
-publishes no way to run commands, because `run_command` already does that on a worker thread while
-this terminal would block the UI thread for the length of the command. A second, worse path to
-something we already do properly is not a feature.
+draft can be read before it leaves, and mail that has gone cannot be taken back. A second, worse
+path to something we already do properly is not a feature either — which is why nothing here
+duplicates the companion's own tools without earning its place.
+
+The terminal is the worked example of that judgement being revisited. It published no way to run
+commands for exactly the reason above: the companion's `run_command` already does that on a worker
+thread, and this terminal runs its commands on the UI thread. What changed the answer was noticing
+what `run_command` cannot do — run something in the window the person is *looking at*, so they see
+what the agent ran. That is a different capability, not a second path to the same one, so `run`
+exists, is declared `sensitive`, and shares one `exec_command` with the key handler.
+
+**And some things should not have a surface yet.** An app whose behaviour is a stub does not get
+one — see the rule above about saying what is true. The download manager is the worked example in
+the other direction: it had no surface because every button only logged a line, and it got one only
+once there was a real transfer engine behind them for the surface to describe.
 
 ## Threading
 
@@ -178,14 +189,15 @@ list on screen when notes-service was down.
 
 | App | Publishes | Notably |
 | --- | --- | --- |
-| `shell` | screen, windows, services, status bar, bond | a failed service leads the summary |
+| `shell` | screen, windows, services, status bar, bond; the Files screen's directory and listing; the text editor's open document | a failed service leads the summary; `files_delete` is `dangerous` |
 | `notes` | open note, word count, unsaved, vault list | `append` saves; AI suggestions do not |
 | `email` | folder, unread, selected message with body | composes, never sends |
 | `calendar` | month, selected day's events, busy days | |
 | `system-monitor` | health, CPU, memory, disks, top processes | `kill_process` is `dangerous` |
 | `weather` | conditions, alerts, forecast, units | reports what the user sees, not a fresh query |
 | `containers` | containers, images, volumes, open log tail | `stop` sensitive, `remove` dangerous |
-| `terminal` | directory, last command and its exit code | read-only by design |
+| `terminal` | directory, last command and its exit code | `run` executes in the visible window, `sensitive` |
+| `download-manager` | each transfer, its progress, where the file landed and its SHA-256 | `cancel` is `sensitive`; `add` settles later |
 
 Windows from other applications are not in this table and never will be: they publish through
 AT-SPI instead, and `a11y-service` reads whatever the toolkit chose to expose. What Yantrik

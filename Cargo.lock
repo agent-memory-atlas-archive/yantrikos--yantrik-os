@@ -10440,11 +10440,14 @@ dependencies = [
 name = "yantrik-download-manager"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "slint",
  "slint-build",
  "tracing",
+ "ureq 2.12.1",
  "yantrik-app-runtime",
  "yantrik-design-tokens",
  "yantrik-ipc-contracts",

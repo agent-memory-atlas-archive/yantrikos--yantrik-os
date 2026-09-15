@@ -71,6 +71,9 @@ ureq = { version = "2", features = ["json"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Hashing
+sha2 = "0.10"
+
 # Time / IDs
 chrono = { version = "0.4", features = ["serde"] }
 uuid7 = "1"

@@ -18,6 +18,11 @@ slint = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The transfer itself: ureq blocks, which is what a worker thread wants, and its rustls build
+# needs no system OpenSSL on the image.
+ureq = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
 
 [build-dependencies]
 slint-build = "1.17"
