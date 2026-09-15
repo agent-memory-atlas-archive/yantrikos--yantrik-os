@@ -6,21 +6,30 @@
 //! of them is the companion. This crate is the seam between the shell and whichever one is
 //! answering.
 //!
-//! # The thing this is designed for
+//! # What the OS owns, and what it does not
 //!
-//! Adding the *next* harness, not the three we know about. Two decisions follow from that.
+//! A harness already knows how to be itself. `yantrik-mind` has its own models, config and
+//! deployment; hermes-agent has its own; OpenClaw has its own. **None of that is the OS's
+//! business**, and an earlier draft of this crate got it exactly backwards — it held endpoints,
+//! model names and API keys in YAML files, which is the OS reimplementing, badly, the setup each
+//! harness already does properly.
 //!
-//! **Most harnesses need no Rust.** `yantrik-mind` serves `POST /v1/chat/completions`; so does
-//! hermes-agent, Ollama, vLLM, llama.cpp and almost everything else that will show up. One
-//! [`adapters::OpenAiHttp`] covers all of them, so adding one is a YAML file in
-//! `/etc/yantrik/harnesses/` or `~/.config/yantrik/harnesses/` — no build, no restart of anything
-//! but the shell. A CLI agent that speaks line-delimited JSON on stdio is the other common shape
-//! and gets [`adapters::Stdio`] for the same reason.
+//! So the OS owns one thing: **which mind the person is talking to**. Everything else belongs to
+//! the harness, and the interface between them is [`protocol`] — six methods, spoken by the
+//! harness, over the socket bus this OS already has.
 //!
-//! **A harness that needs Rust implements one trait.** [`Harness`] is deliberately small: say who
-//! you are, say what you can do, say whether you are reachable, and answer a turn as a stream of
-//! chunks. Everything else — retries, history, the panel, the picker — is the shell's business,
-//! not the adapter's.
+//! # Adding a harness
+//!
+//! Write the poll loop. In any language with a JSON-RPC client, it is about forty lines:
+//! announce yourself, ask for a turn, stream the answer back. There is nothing to register,
+//! nothing to install, no endpoint for the OS to store, and no restart — a harness appears in the
+//! picker when it attaches and is gone when it stops polling.
+//!
+//! `examples/echo-harness.rs` is a complete one, and it is short on purpose.
+//!
+//! Driving the desktop is separate and already exists: an attached harness reads and steers the
+//! OS through `app.describe` / `app.act` (or `yos`), which is permission-graded and works the same
+//! for a harness as for anything else.
 //!
 //! # Streaming is the contract
 //!
@@ -36,12 +45,10 @@
 //! you choose it. [`Harness::health`] exists so the UI can say *why* before a person commits a
 //! question to it — unreachable, or reachable but not configured, with the reason attached.
 
-pub mod adapters;
-pub mod registry;
-pub mod spec;
+pub mod host;
+pub mod protocol;
 
-pub use registry::Registry;
-pub use spec::{Kind, Spec};
+pub use host::{Entry, Host};
 
 use std::sync::mpsc::Receiver;
 
@@ -123,11 +130,11 @@ pub struct Capabilities {
     pub memory: bool,
 }
 
-/// A mind the shell can put a question to.
+/// A mind compiled into the shell.
 ///
-/// Implement this only for a harness that cannot be described by an existing adapter. Before
-/// writing one, check whether the thing speaks `/v1/chat/completions` or line-delimited JSON on
-/// stdio — those already have adapters and need a config file instead.
+/// This is for built-ins — today, the companion — and there is deliberately no reason for a new
+/// harness to implement it. An external harness attaches over [`protocol`] instead, which needs
+/// no Rust, no rebuild, and nothing from this OS but a socket.
 pub trait Harness: Send + Sync {
     /// Stable id, as used in config and in `set_active`.
     fn id(&self) -> &str;
