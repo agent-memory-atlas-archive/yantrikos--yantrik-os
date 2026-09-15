@@ -889,20 +889,8 @@ export component DesktopScreen inherits Rectangle {
         }
 
         // ── Taskbar (bottom edge) ──
-        Taskbar {
-            y: parent.height - self.height;
-            width: 100%;
-            windows: root.window-list;
-            pins: root.dock-items;
-            launcher-label: Tr.dock-apps;
-            companion-count: root.whisper-hint-count;
-            companion-online: root.companion-online;
-            companion-status: root.companion-status;
-            open-launcher => { root.app-grid-open = !root.app-grid-open; }
-            activate-window(title) => { root.switch-window(title); }
-            launch-app(app-id) => { root.launch-app(app-id); }
-            open-companion => { root.lens-open = !root.lens-open; root.open-lens(); }
-        }
+        // The taskbar is the shell's now, not the desktop's — it is drawn once in app.slint so
+        // it is the same bar above every screen instead of vanishing when you leave this one.
     }
 
     // ── Layer 2.5: Quick Settings overlay (slide down from status bar) ──

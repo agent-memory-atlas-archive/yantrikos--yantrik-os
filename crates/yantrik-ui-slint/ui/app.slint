@@ -8,6 +8,7 @@
 // The AI IS the shell — Intent Lens is the primary interaction.
 
 import { Theme, ThemeMode, ThemeOverrides, AccentPreset } from "theme.slint";
+import { Taskbar } from "components/taskbar.slint";
 import { BootScreen } from "boot.slint";
 import { OnboardingScreen } from "onboarding.slint";
 import { DesktopScreen } from "desktop.slint";
@@ -39,7 +40,7 @@ import { BriefSection } from "components/morning_brief.slint";
 import { ClipboardEntryData } from "components/clipboard_panel.slint";
 import { AppGridItem } from "components/app_grid.slint";
 import { WindowItem } from "components/window_switcher.slint";
-import { DockItem, AppDock } from "components/app_dock.slint";
+import { DockItem } from "components/app_dock.slint";
 import { CategoryItem } from "components/app_grid.slint";
 import { ServiceItem } from "components/machine_rail.slint";
 import { WindowFrame } from "components/window_frame.slint";
@@ -1258,7 +1259,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1286,7 +1287,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1319,7 +1320,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1350,7 +1351,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1476,7 +1477,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1567,7 +1568,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1600,7 +1601,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1647,7 +1648,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1718,7 +1719,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1802,7 +1803,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1869,7 +1870,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1916,7 +1917,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1982,7 +1983,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -2036,7 +2037,7 @@ export component App inherits Window {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? 0px : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 60px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -2092,73 +2093,55 @@ export component App inherits Window {
         // Spreadsheet
         // ── Document Editor (screen 30) ──
         // Presentation (screen 31)
-        // ── Persistent dock for windowed app screens (auto-hide) ──
-        if current-screen >= 4 && current-screen <= 31 : Rectangle {
+        // ── The taskbar, on every screen that should have one ──
+        //
+        // This was `>= 4 && <= 31`: app screens only, never the desktop, because the desktop
+        // carried a taskbar of its own. Two bars, two conditions, and the seam between them was
+        // exactly where the old Mac dock appeared.
+        //
+        // One bar now, drawn here for the desktop AND the app screens. Boot (0), onboarding (2),
+        // lock (3) and login (32) are deliberately excluded: they are states where there is
+        // nothing to switch to and nothing should invite you to try.
+        if current-screen == 1 || (current-screen >= 4 && current-screen <= 31) : Rectangle {
             width: 100%;
             height: parent.height;
             y: 0;
             background: transparent;
 
-            // Invisible hover-trigger zone at bottom edge
-            dock-trigger := TouchArea {
-                y: parent.height - 6px;
+            // ── The one bar at the bottom of this OS ──
+            //
+            // What stood here was a Mac-style auto-hide dock: an invisible six-pixel strip at the
+            // bottom edge that slid up a row of square tiles bearing LETTERS — ">_", "W", "F",
+            // "@", "N" — from a hardcoded list that had drifted out of step with the real pinned
+            // apps. It was the old design, and it was at the APP level, so it appeared on every
+            // screen. The real Taskbar lived inside DesktopScreen, so it appeared on exactly one.
+            //
+            // The result is what you saw: on the desktop, the designed taskbar; the moment you
+            // opened anything, that taskbar went away with the desktop and brushing the bottom of
+            // the screen produced a different dock, in a different visual language, listing
+            // different apps.
+            //
+            // One Taskbar, here, above every screen. Same component, same icons, same window
+            // entries, always in the same place — which is the whole of what "consistent" means
+            // for the one strip a person's eye returns to all day.
+            Taskbar {
+                y: parent.height - self.height;
                 width: 100%;
-                height: 6px;
+                windows: root.window-list;
+                pins: root.dock-items;
+                launcher-label: Tr.dock-apps;
+                companion-count: root.whisper-hint-count;
+                companion-online: root.companion-online;
+                companion-status: root.companion-status;
+                open-launcher => { root.app-grid-open = !root.app-grid-open; }
+                activate-window(title) => { root.switch-window(title); }
+                launch-app(app-id) => { root.launch-app(app-id); }
+                open-companion => { root.lens-open = !root.lens-open; root.open-lens(); }
             }
 
-            property <bool> dock-revealed: dock-trigger.has-hover || dock-area.has-hover;
-
-            // The actual dock, slides up when revealed
-            dock-area := TouchArea {
-                y: parent.height - (dock-revealed ? 60px : 4px);
-                width: 100%;
-                height: 60px;
-
-                animate y { duration: 200ms; easing: ease-out; }
-
-                AppDock {
-                    width: 100%;
-                    opacity: dock-revealed ? 1.0 : 0.0;
-                    animate opacity { duration: 150ms; }
-                    items: root.dock-items.length > 0 ? root.dock-items : [
-                        { app-id: "terminal",      label: "Terminal", icon-char: ">_", is-running: false },
-                        { app-id: "browser",       label: "Browser",  icon-char: "W",  is-running: false },
-                        { app-id: "files",         label: "Files",    icon-char: "F",  is-running: false },
-                        { app-id: "notes",         label: "Notes",    icon-char: "✎",  is-running: false },
-                        { app-id: "editor",        label: "Editor",   icon-char: "≡",  is-running: false },
-                        { app-id: "bond",          label: "Bond",     icon-char: "♥",  is-running: false },
-                        { app-id: "memory",        label: "Memory",   icon-char: "◈",  is-running: false },
-                        { app-id: "notifications", label: "Alerts",   icon-char: "N",  is-running: false },
-                        { app-id: "system",        label: "System",   icon-char: "◉",  is-running: false },
-                        { app-id: "media",         label: "Media",    icon-char: "♪",  is-running: false },
-                        { app-id: "email",         label: "Email",    icon-char: "@",  is-running: false },
-                        { app-id: "calendar",      label: "Calendar", icon-char: "▦",  is-running: false },
-                        { app-id: "network",       label: "Network",  icon-char: "\u{25CE}",  is-running: false },
-                        { app-id: "launchpad",     label: "Apps",     icon-char: "\u{229E}",  is-running: false },
-                        { app-id: "spreadsheet",   label: "ySheets",  icon-char: "YS", is-running: false },
-                        { app-id: "documents",     label: "yDoc",     icon-char: "YD", is-running: false },
-                        { app-id: "presentation",  label: "yPresent", icon-char: "YP", is-running: false },
-                        { app-id: "settings",      label: "Settings", icon-char: "\u{2699}",  is-running: false },
-                    ];
-                    launch-app(app-id) => { root.launch-app(app-id); }
-                    anchor-pressed => {
-                        root.current-screen = 1;
-                        root.navigate(1);
-                    }
-                }
-            }
-
-            // Thin glow hint line when dock is hidden
-            Rectangle {
-                y: parent.height - 2px;
-                width: parent.width * 0.3;
-                x: (parent.width - self.width) / 2;
-                height: 2px;
-                border-radius: 1px;
-                background: @linear-gradient(90deg, transparent 0%, Theme.cyan-glow 50%, transparent 100%);
-                opacity: dock-revealed ? 0.0 : 0.3;
-                animate opacity { duration: 200ms; }
-            }
+            // The glow hint that used to sit here belonged to the auto-hide dock: a thin line
+            // teasing that something was down there. Nothing is hidden any more, so there is
+            // nothing to hint at.
         }
 
         // Voice overlay
