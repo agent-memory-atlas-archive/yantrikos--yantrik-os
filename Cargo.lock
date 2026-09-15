@@ -10478,6 +10478,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-harness"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
+]
+
+[[package]]
 name = "yantrik-image-viewer"
 version = "0.1.0"
 dependencies = [
@@ -10766,6 +10778,7 @@ dependencies = [
  "yantrik-app-runtime",
  "yantrik-chat",
  "yantrik-companion",
+ "yantrik-harness",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ml",
