@@ -5,26 +5,49 @@ use slint::ComponentHandle;
 use crate::app_context::AppContext;
 use crate::App;
 
-/// The app ids this shell can actually launch.
+/// The app ids this shell can actually launch, in the spelling the dispatch matches on.
 ///
 /// These mirror the match arms in `wire()` below and must be kept with them. The list exists
 /// because the control surface used to answer `{"launching": "<anything>"}` for any string at
 /// all: the dispatch quietly reached its `_` arm, logged "Unknown app" and returned, long after
 /// the caller had been told the launch was under way.
+///
+/// "Must be kept with them" was doing no work on its own — ten arms were missing from this list,
+/// so `open_app name=containers` was refused as unknown while the arm that launches it sat right
+/// there. There is now a test that walks this list against what the dispatch accepts, because a
+/// comment asking two lists to agree is not a mechanism that makes them agree.
 pub const BUILTIN_APP_IDS: &[&str] = &[
     "terminal", "browser", "files", "settings", "notes", "editor", "bond", "personality",
     "memory", "notifications", "system", "media", "email", "calendar", "packages", "network",
     "weather", "spreadsheet", "launchpad",
+    // Every arm below also answers to the name its app publishes on its control surface, which
+    // `canonical_id` folds onto these.
+    "sysmonitor", "system_monitor", "music", "music_player", "downloads", "download_manager",
+    "snippets", "snippet_manager", "containers", "container_manager", "devices",
+    "device_dashboard", "permissions", "permission_dashboard", "documents", "document_editor",
+    "presentation", "slides",
 ];
+
+/// One spelling of an app id, from whatever a caller had to hand.
+///
+/// Callers read app ids from places that punctuate them differently. An app's own control surface
+/// says `download-manager` (and `yos ls` shows `app-download-manager`); the arms below were
+/// written `download_manager`; a person types `Download Manager`. They are the same app, and
+/// which separator arrived should not decide whether the window opens — but it did: a hyphenated
+/// id fell through every arm to `_`, so `open_app name=download-manager` logged "Unknown app"
+/// after the caller had already been told the launch was under way.
+pub fn canonical_id(app: &str) -> String {
+    app.trim().to_lowercase().replace([' ', '-'], "_")
+}
 
 /// Whether `launch_app` will do anything with this id.
 ///
 /// Checks the same two sources the dispatch does, in the same order: installed .desktop entries
 /// first, then the shell's own built-ins.
 pub fn is_known_app(app: &str, installed: &[crate::apps::DesktopEntry]) -> bool {
-    let lower = app.to_lowercase();
+    let lower = app.trim().to_lowercase();
     installed.iter().any(|e| e.app_id == app || e.name.to_lowercase() == lower)
-        || BUILTIN_APP_IDS.contains(&app)
+        || BUILTIN_APP_IDS.contains(&canonical_id(app).as_str())
 }
 
 /// Wire on_launch_app callback.
@@ -53,8 +76,13 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             }
         }
 
-        // Fallback: hardcoded commands
-        let cmd = match app.as_str() {
+        // Fallback: hardcoded commands.
+        //
+        // Matched on the canonical spelling, so an id taken from an app's control surface reaches
+        // the same arm as the dock's own. The .desktop scan above deliberately still uses the raw
+        // string: those entries carry real ids and names, and folding their punctuation would be
+        // guessing at somebody else's vocabulary rather than settling our own.
+        let cmd = match canonical_id(&app).as_str() {
             "terminal" => {
                 spawn_app("terminal", "yantrik-terminal");
                 return;
@@ -319,5 +347,64 @@ pub fn spawn_app_with_args(app_id: &str, bin: &str, args: &[&str]) {
             });
         }
         Err(e) => tracing::error!(app = app_id, bin, path = %path.display(), error = %e, "Failed to launch app"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ids apps publish on their own control surfaces, from `App::new(...)`.
+    ///
+    /// This is the vocabulary an agent actually has: it reads an id from `yos ls` or from an
+    /// app's own describe, and hands that back to `open_app`. Anything it can describe, it must
+    /// be able to open.
+    const SURFACE_IDS: &[&str] = &[
+        "calendar", "containers", "download-manager", "email", "notes", "system-monitor",
+        "terminal", "weather",
+    ];
+
+    #[test]
+    fn every_app_with_a_control_surface_opens_by_the_id_it_publishes() {
+        for id in SURFACE_IDS {
+            assert!(
+                is_known_app(id, &[]),
+                "`{id}` publishes a control surface, so an agent will ask for it by that name"
+            );
+            assert!(
+                BUILTIN_APP_IDS.contains(&canonical_id(id).as_str()),
+                "`{id}` normalises to `{}`, which no arm answers to",
+                canonical_id(id)
+            );
+        }
+    }
+
+    #[test]
+    fn punctuation_does_not_decide_whether_an_app_opens() {
+        assert_eq!(canonical_id("download-manager"), "download_manager");
+        assert_eq!(canonical_id("System-Monitor"), "system_monitor");
+        assert_eq!(canonical_id("Download Manager"), "download_manager");
+        assert_eq!(canonical_id("  notes  "), "notes");
+        // Already canonical, and unchanged.
+        assert_eq!(canonical_id("terminal"), "terminal");
+    }
+
+    #[test]
+    fn the_guard_accepts_everything_the_dispatch_handles() {
+        // These all have arms in `wire()` and were all refused by `is_known_app` as unknown,
+        // which is the failure mode this list's own comment claimed to prevent.
+        for id in [
+            "containers", "downloads", "music", "snippets", "documents", "presentation",
+            "sysmonitor", "devices", "permissions", "slides",
+        ] {
+            assert!(is_known_app(id, &[]), "the dispatch launches `{id}` but the guard refuses it");
+        }
+    }
+
+    #[test]
+    fn an_app_that_does_not_exist_is_still_refused() {
+        // The guard must not have become a rubber stamp on the way to being more generous.
+        assert!(!is_known_app("nonexistent-app", &[]));
+        assert!(!is_known_app("", &[]));
     }
 }
