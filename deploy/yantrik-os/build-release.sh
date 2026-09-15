@@ -233,4 +233,27 @@ PYEOF" || fail "manifest update failed"
   else
     fail "served bytes do not match what was built (got $GOT, want $WANT)"
   fi
+
+  # ── Retention ──
+  #
+  # A nightly channel with no retention is a disk filling at ~240 MB a build; five had
+  # accumulated to 1.4 GB before anyone looked. Keep the newest RETAIN bundles and delete the
+  # rest, AFTER the verification above — so a publish that turned out to serve the wrong bytes
+  # has not already deleted the build that was working.
+  #
+  # Deliberately by modification time and never by name: the version string contains a date
+  # that is the BUILD date, and a rebuild of an old commit would sort itself into the wrong
+  # place. Whatever `-latest` points at is protected regardless of age.
+  RETAIN="${RELEASE_RETAIN:-3}"
+  say "Pruning $PUBLISH_CHANNEL to the newest $RETAIN"
+  ssh $SSH_OPTS "root@$RELEASES_IP" "
+    cd $REMOTE || exit 0
+    KEEP=\$(readlink yantrik-os-latest-linux-amd64.$EXT 2>/dev/null)
+    ls -1t *.tar.zst *.tar.gz 2>/dev/null | grep -v '^yantrik-os-latest' | tail -n +\$(($RETAIN + 1)) | while read -r old; do
+      [ \"\$old\" = \"\$KEEP\" ] && continue
+      rm -f -- \"\$old\" \"\$old.sha256\"
+      echo \"   removed \$old\"
+    done
+    echo \"   \$(ls -1 *.tar.zst *.tar.gz 2>/dev/null | grep -v '^yantrik-os-latest' | wc -l) kept, \$(df -h . | awk 'NR==2{print \$4}') free\"
+  " || echo "   (prune skipped)"
 fi
