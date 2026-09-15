@@ -110,6 +110,13 @@ else
   echo "   skipped — /opt/yantrik/models/embedder not present here"
 fi
 
+say "Desktop chrome"
+"${SSH[@]}" "mkdir -p $REMOTE/share/labwc $REMOTE/share/fonts"
+rsync -a -e "$RSYNC_RSH" "$PROJECT_ROOT/config/labwc/" "$TARGET_HOST:$REMOTE/share/labwc/"
+rsync -a -e "$RSYNC_RSH" "$PROJECT_ROOT/crates/yantrik-design-tokens/slint/fonts/" \
+  "$TARGET_HOST:$REMOTE/share/fonts/"
+echo "   labwc theme + Barlow/JetBrains Mono"
+
 say "Config (backend: $BACKEND)"
 CONFIG_SRC="$PROJECT_ROOT/config/yantrik-ollama.yaml"
 [ "$BACKEND" = "candle" ] && CONFIG_SRC="$PROJECT_ROOT/config/yantrik-os.yaml"
@@ -133,6 +140,24 @@ export WLR_BACKENDS=headless
 export WLR_LIBINPUT_NO_DEVICES=1
 export LIBGL_ALWAYS_SOFTWARE=1
 export PATH="/opt/yantrik/bin:$PATH"
+
+
+# The window decorations and the typeface they are drawn in.
+#
+# labwc reads its config from the user's home, so this needs no root and re-applies on every
+# start — a machine that was deployed before the theme existed picks it up by rebooting. Both
+# sources live in the release payload; see deploy/yantrik-os/build-release.sh.
+CHROME=/opt/yantrik/share
+if [ -d "$CHROME/labwc" ]; then
+  mkdir -p "$HOME/.config/labwc" "$HOME/.local/share/themes/Yantrik/labwc"
+  cp -f "$CHROME/labwc/rc.xml" "$HOME/.config/labwc/rc.xml"
+  cp -f "$CHROME/labwc/themerc" "$HOME/.local/share/themes/Yantrik/labwc/themerc"
+fi
+if [ -d "$CHROME/fonts" ]; then
+  mkdir -p "$HOME/.local/share/fonts"
+  cp -f "$CHROME/fonts/"*.ttf "$HOME/.local/share/fonts/" 2>/dev/null
+  fc-cache -f "$HOME/.local/share/fonts" >/dev/null 2>&1
+fi
 
 mkdir -p /opt/yantrik/logs
 exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml' \

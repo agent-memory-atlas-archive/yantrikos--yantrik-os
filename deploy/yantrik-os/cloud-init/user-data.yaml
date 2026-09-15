@@ -65,6 +65,11 @@ packages:
   - python3-websocket
   - curl
   - ca-certificates
+  # fc-cache, so the compositor can find the house typeface the session installs.
+  - fontconfig
+  # The OS photographs foreign windows with grim (crates/yantrik-companion-tools/src/vision.rs).
+  # It was never in this list, so that path was dead on every install.
+  - grim
   # Without this the hypervisor cannot report the machine's address, so an instance created
   # unprompted is one you then have to go looking for. It is two megabytes and it is the
   # difference between `qm guest cmd <id> network-get-interfaces` answering and not.
@@ -187,7 +192,11 @@ write_files:
               echo "agent_mode: false"
             } > /home/yantrik/.config/yantrik/settings.yaml
           fi
-          chown -R yantrik:yantrik /home/yantrik/.yantrik /home/yantrik/.config/yantrik
+          # .config itself, not only what is under it: `install -d` created the parent as root
+          # and this chown named only the leaf, so the user was left unable to write their own
+          # ~/.config — which is where the session puts the compositor theme and where anything
+          # saving a setting would try to write.
+          chown -R yantrik:yantrik /home/yantrik/.yantrik /home/yantrik/.config
           log "onboarding seeded — the desktop opens ready"
         else
           log "onboarding left interactive"
@@ -256,6 +265,21 @@ write_files:
       # Without this the shell opens as an ordinary labwc window, title bar and all,
       # sitting in the middle of the screen. An OS is not a window on something else.
       export SLINT_FULLSCREEN=1
+      # The same is true of every app, and for them the answer is a themed frame rather than
+      # no frame. labwc reads its config from the user's home, so this needs no root and
+      # re-applies on every start; a machine deployed before the theme existed picks it up by
+      # rebooting. Both sources ride in the release payload.
+      CHROME=/opt/yantrik/share
+      if [ -d "$CHROME/labwc" ]; then
+        mkdir -p "$HOME/.config/labwc" "$HOME/.local/share/themes/Yantrik/labwc"
+        cp -f "$CHROME/labwc/rc.xml" "$HOME/.config/labwc/rc.xml"
+        cp -f "$CHROME/labwc/themerc" "$HOME/.local/share/themes/Yantrik/labwc/themerc"
+      fi
+      if [ -d "$CHROME/fonts" ]; then
+        mkdir -p "$HOME/.local/share/fonts"
+        cp -f "$CHROME/fonts/"*.ttf "$HOME/.local/share/fonts/" 2>/dev/null
+        fc-cache -f "$HOME/.local/share/fonts" >/dev/null 2>&1
+      fi
       exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml'
 
 runcmd:

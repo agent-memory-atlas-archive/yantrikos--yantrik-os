@@ -1,0 +1,52 @@
+# Yantrik — window decorations.
+#
+# Every app in this OS is drawn from crates/yantrik-design-tokens: #0c0c14 ground, #161622
+# surfaces, #e8eaef text, a teal accent. The compositor was never told any of that, so labwc drew
+# its stock light-grey title bar on top of all of it — a pale 1990s frame around a dark, carefully
+# typed window, in the one piece of chrome that borders every single app.
+#
+# yantrik-session already knew this was wrong and fixed it for exactly one window, with a comment
+# saying so: it exports SLINT_FULLSCREEN=1 because "an OS is not a window on something else". That
+# hid the frame on the shell and left it on all sixteen apps.
+#
+# Colours below are the tokens, not approximations of them. When theme.slint changes, change these.
+
+# ── Frame ───────────────────────────────────────────────────────────
+border.width: 1
+padding.height: 7
+padding.width: 9
+
+# ── Active window ───────────────────────────────────────────────────
+# The title bar is bg-surface, so it reads as the top edge of the app rather than a separate
+# object sitting on it; the border is one step lighter so a focused window still has an outline
+# against the desktop.
+window.active.title.bg.color: #161622
+window.active.label.text.color: #e8eaef
+window.active.border.color: #2a2a3c
+window.active.button.unpressed.image.color: #e8eaef
+window.active.button.hover.bg.color: #232336
+window.active.button.close.hover.bg.color: #e05263
+
+# ── Inactive window ─────────────────────────────────────────────────
+# Recedes to the ground colour with dimmed text: an unfocused window should be quiet, and the
+# difference between focused and not should be legible without reading the title.
+window.inactive.title.bg.color: #0c0c14
+window.inactive.label.text.color: #4a5060
+window.inactive.border.color: #1a1a28
+window.inactive.button.unpressed.image.color: #4a5060
+window.inactive.button.hover.bg.color: #1f1f2e
+
+# ── Menus ───────────────────────────────────────────────────────────
+menu.items.bg.color: #161622
+menu.items.text.color: #e8eaef
+menu.items.active.bg.color: #4ecdc4
+menu.items.active.text.color: #0c0c14
+menu.border.color: #2a2a3c
+menu.border.width: 1
+
+# ── On-screen display (window switcher) ─────────────────────────────
+osd.bg.color: #161622
+osd.border.color: #2a2a3c
+osd.border.width: 1
+osd.label.text.color: #e8eaef
+osd.window-switcher.item.active.border.color: #4ecdc4

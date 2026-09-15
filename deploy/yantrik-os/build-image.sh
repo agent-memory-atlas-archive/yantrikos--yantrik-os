@@ -123,7 +123,7 @@ echo "   verified: no cloud kernel left in /boot"
 say "Packages"
 # One layer, one apt run: the desktop, the eyes, the ears, and what yos needs to talk CDP.
 virt-customize -a "$IMAGE" \
-  --install labwc,seatd,mesa-utils,foot,chromium,pipewire-pulse,wireplumber,pulseaudio-utils,python3-websocket,qemu-guest-agent,curl,ca-certificates \
+  --install labwc,seatd,mesa-utils,foot,chromium,pipewire-pulse,wireplumber,pulseaudio-utils,python3-websocket,qemu-guest-agent,curl,ca-certificates,fontconfig,grim,wlrctl,wlr-randr \
 
 echo "   desktop, browser, audio, agent surface deps"
 
@@ -168,6 +168,22 @@ WantedBy=graphical.target' \
   --write '/opt/yantrik/bin/yantrik-session:#!/bin/sh
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR"
+# The window decorations and the typeface they are drawn in.
+#
+# labwc reads its config from the user'\''s home, so this needs no root and re-applies on every
+# start — a machine that was deployed before the theme existed picks it up by rebooting. Both
+# sources live in the release payload; see deploy/yantrik-os/build-release.sh.
+CHROME=/opt/yantrik/share
+if [ -d "$CHROME/labwc" ]; then
+  mkdir -p "$HOME/.config/labwc" "$HOME/.local/share/themes/Yantrik/labwc"
+  cp -f "$CHROME/labwc/rc.xml" "$HOME/.config/labwc/rc.xml"
+  cp -f "$CHROME/labwc/themerc" "$HOME/.local/share/themes/Yantrik/labwc/themerc"
+fi
+if [ -d "$CHROME/fonts" ]; then
+  mkdir -p "$HOME/.local/share/fonts"
+  cp -f "$CHROME/fonts/"*.ttf "$HOME/.local/share/fonts/" 2>/dev/null
+  fc-cache -f "$HOME/.local/share/fonts" >/dev/null 2>&1
+fi
 exec labwc -s "/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml"' \
   --chmod '0755:/opt/yantrik/bin/yantrik-session' \
   --run-command 'useradd -m -s /bin/bash -G sudo,video,render,input,audio yantrik 2>/dev/null || true' \

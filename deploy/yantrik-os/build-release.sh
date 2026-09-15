@@ -98,6 +98,19 @@ fi
 cp "$PROJECT_ROOT/config/yantrik-ollama.yaml" "$ROOT/config.yaml" 2>/dev/null \
   || echo "   (no config shipped — the machine will need one)"
 
+# The desktop's own chrome. Without these the compositor runs on stock defaults and draws a
+# light-grey title bar, in a font this OS does not use, around every one of its dark apps — the
+# most-seen pixels on the machine, and the last ones anybody thought to own. The session script
+# installs them on start; they ship here because a release that cannot dress its own windows is
+# not a release of this OS.
+mkdir -p "$ROOT/share/labwc" "$ROOT/share/fonts"
+cp "$PROJECT_ROOT/config/labwc/rc.xml" "$ROOT/share/labwc/rc.xml"
+cp "$PROJECT_ROOT/config/labwc/themerc" "$ROOT/share/labwc/themerc"
+# Barlow is embedded in each app binary, which the compositor cannot read a font out of, so the
+# same files also ship loose for fontconfig.
+cp "$PROJECT_ROOT/crates/yantrik-design-tokens/slint/fonts/"*.ttf "$ROOT/share/fonts/"
+echo "   + labwc theme and $(ls "$ROOT/share/fonts" | wc -l) fonts"
+
 if [ "$WITH_MODELS" = 1 ]; then
   say "Including models"
   for m in embedder whisper; do

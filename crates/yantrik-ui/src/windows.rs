@@ -52,7 +52,15 @@ pub fn shell_windows() -> Vec<WindowEntry> {
         .collect()
 }
 
-/// A human name for one of our app ids: `notes` → `Notes`, `system-monitor` → `System monitor`.
+/// The name one of our app ids goes by on screen.
+///
+/// These are not free-form labels: they are the exact `title:` each app's window declares in
+/// `apps/<app>/ui/app.slint`, because this same string is what the taskbar hands to
+/// `wlrctl toplevel focus title:…` when the entry is clicked. Five of them used to be the app's
+/// short name instead — `Downloads` for a window called "Download Manager", `Music` for "Music
+/// Player" — so clicking those entries matched no window and did nothing at all, silently.
+///
+/// If you rename a window, rename it here. There is a test below that lists both.
 fn display_name(app_id: &str) -> String {
     match app_id {
         "terminal" => "Terminal".to_string(),
@@ -60,15 +68,15 @@ fn display_name(app_id: &str) -> String {
         "notes" => "Notes".to_string(),
         "email" => "Email".to_string(),
         "calendar" => "Calendar".to_string(),
-        "network" => "Network".to_string(),
+        "network" => "Network Manager".to_string(),
         "sysmonitor" => "System Monitor".to_string(),
         "weather" => "Weather".to_string(),
-        "music" => "Music".to_string(),
-        "downloads" => "Downloads".to_string(),
-        "snippets" => "Snippets".to_string(),
-        "containers" => "Containers".to_string(),
+        "music" => "Music Player".to_string(),
+        "downloads" => "Download Manager".to_string(),
+        "snippets" => "Snippet Manager".to_string(),
+        "containers" => "Container Manager".to_string(),
         "spreadsheet" => "Spreadsheet".to_string(),
-        "documents" => "Documents".to_string(),
+        "documents" => "Document Editor".to_string(),
         "presentation" => "Presentation".to_string(),
         // Unknown id (a .desktop app the shell launched): title-case its first segment.
         other => {
@@ -97,8 +105,11 @@ fn wlrctl_windows() -> Vec<WindowEntry> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let title = line.trim().to_string();
-            let app_id = derive_app_id(&title);
+            // `wlrctl toplevel list` prints `app_id: title`. Reading the whole line as the title
+            // put that separator into the name, and our own windows set no wayland app_id at all,
+            // so the taskbar showed every one of them as ": Terminal", ": Weather" — a stray colon
+            // in front of the name, on the desktop's most-looked-at strip.
+            let (title, app_id) = split_toplevel_line(line);
             let icon_char = icon_for_app(&app_id).to_string();
             let subtitle = derive_context(&title, &app_id);
             WindowEntry {
@@ -109,6 +120,29 @@ fn wlrctl_windows() -> Vec<WindowEntry> {
             }
         })
         .collect()
+}
+
+/// One `wlrctl toplevel list` line, as `(title, app_id)`.
+///
+/// The format is `app_id: title`. Reading the whole line as the title put that separator into the
+/// name, and our own windows set no wayland app_id at all, so the taskbar showed every one of them
+/// as ": Terminal", ": Weather" — a stray colon in front of the name, on the strip of the desktop
+/// people look at most.
+fn split_toplevel_line(line: &str) -> (String, String) {
+    let (declared_id, title) = match line.split_once(':') {
+        Some((id, rest)) if !rest.trim().is_empty() => (id.trim(), rest.trim()),
+        // A foreign toplevel with no separator at all is all title.
+        _ => ("", line.trim()),
+    };
+    let title = title.to_string();
+    // Prefer what the window calls itself; fall back to guessing from the title, which is all
+    // there is for our own windows until Slint gives them an app_id.
+    let app_id = if declared_id.is_empty() {
+        derive_app_id(&title)
+    } else {
+        declared_id.to_lowercase()
+    };
+    (title, app_id)
 }
 
 /// Derive a normalized app_id from a window title (fallback path only).
@@ -189,5 +223,66 @@ fn derive_context(title: &str, app_id: &str) -> String {
             }
         }
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_with_no_app_id_is_named_without_the_separator() {
+        // What labwc actually reports for our Slint windows, which set a title and no app_id.
+        assert_eq!(split_toplevel_line(": Terminal").0, "Terminal");
+        assert_eq!(split_toplevel_line(": Yantrik OS").0, "Yantrik OS");
+        assert_eq!(split_toplevel_line(": Snippet Manager").0, "Snippet Manager");
+    }
+
+    #[test]
+    fn a_foreign_window_keeps_the_id_it_declares() {
+        let (title, app_id) = split_toplevel_line("firefox: Mozilla Firefox");
+        assert_eq!(title, "Mozilla Firefox");
+        assert_eq!(app_id, "firefox");
+    }
+
+    #[test]
+    fn a_colon_in_the_title_itself_survives() {
+        // Only the first separator divides the two fields; the rest belongs to the name.
+        assert_eq!(split_toplevel_line(": Notes: Handover").0, "Notes: Handover");
+        assert_eq!(split_toplevel_line("notes: Notes: Handover").0, "Notes: Handover");
+    }
+
+    #[test]
+    fn a_line_with_no_separator_is_all_title() {
+        assert_eq!(split_toplevel_line("Some Foreign Window").0, "Some Foreign Window");
+    }
+
+    #[test]
+    fn a_taskbar_entry_is_named_exactly_what_its_window_is_called() {
+        // Right-hand side copied from `title:` in apps/<app>/ui/app.slint. The taskbar sends this
+        // string to `wlrctl toplevel focus title:…`, so a label that is merely *close* to the
+        // window title is a click that does nothing — which is what five of these were.
+        for (app_id, window_title) in [
+            ("terminal", "Terminal"),
+            ("notes", "Notes"),
+            ("email", "Email"),
+            ("calendar", "Calendar"),
+            ("weather", "Weather"),
+            ("spreadsheet", "Spreadsheet"),
+            ("presentation", "Presentation"),
+            ("sysmonitor", "System Monitor"),
+            ("downloads", "Download Manager"),
+            ("music", "Music Player"),
+            ("snippets", "Snippet Manager"),
+            ("containers", "Container Manager"),
+            ("documents", "Document Editor"),
+            ("network", "Network Manager"),
+        ] {
+            assert_eq!(
+                display_name(app_id),
+                window_title,
+                "the taskbar would ask the compositor to focus a window by the wrong name"
+            );
+        }
     }
 }

@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<!--
+  Yantrik — compositor configuration.
+
+  This file did not exist. labwc ran on its stock defaults under an OS that ships its own
+  typeface, its own palette and sixteen apps built against both, which is why every window wore a
+  light title bar in a font the rest of the system never uses.
+
+  Installed to /etc/xdg/labwc/rc.xml so it applies to the session whoever is logged in, and the
+  theme it names lives at /usr/share/themes/Yantrik/labwc/themerc.
+-->
+<labwc_config>
+  <theme>
+    <name>Yantrik</name>
+    <!-- Matches the corner radius the app windows and cards already use. -->
+    <cornerRadius>10</cornerRadius>
+    <dropShadows>yes</dropShadows>
+
+    <!--
+      Barlow is the house UI typeface, embedded in every app binary. The compositor cannot read a
+      font out of a binary, so the deploy also installs the same TTFs into
+      /usr/share/fonts/truetype/yantrik — otherwise this silently falls back to DejaVu and the
+      title bar goes on looking like someone else's software.
+    -->
+    <font place="ActiveWindow">
+      <name>Barlow</name>
+      <size>10</size>
+      <weight>medium</weight>
+    </font>
+    <font place="InactiveWindow">
+      <name>Barlow</name>
+      <size>10</size>
+    </font>
+    <font place="MenuItem">
+      <name>Barlow</name>
+      <size>10</size>
+    </font>
+    <font place="OnScreenDisplay">
+      <name>Barlow</name>
+      <size>10</size>
+    </font>
+  </theme>
+
+  <!--
+    Keep the shell's own furniture visible.
+
+    The status bar and the dock are drawn by yantrik-ui, which is one ordinary fullscreen window
+    rather than a wlr-layer-shell panel. So the compositor had no idea they were there: any app
+    opening at a decent size was placed straight over them, and the dock simply vanished the
+    moment you opened anything — with no way back to it, because the way back was the dock.
+
+    labwc documents <margin> for exactly this case ("a workaround for clients such as panels that
+    do NOT support the wlr-layer-shell protocol"). New, maximized and tiled windows keep out of
+    these strips. The numbers are the real heights: Theme.status-bar-height is 32px
+    (crates/yantrik-design-tokens/slint/theme.slint) and the taskbar is 40px
+    (crates/yantrik-ui-slint/ui/components/taskbar.slint). If either changes, change these.
+
+    The proper fix is for the panel to speak layer-shell and declare its own exclusive zone; this
+    is the honest workaround until it does, and it is the one labwc recommends.
+  -->
+  <margin top="32" bottom="40" left="0" right="0" />
+
+  <!-- Focus follows the click, not the pointer: an agent moving the pointer must not change
+       which window receives what the person types next. -->
+  <focus>
+    <followMouse>no</followMouse>
+  </focus>
+</labwc_config>
