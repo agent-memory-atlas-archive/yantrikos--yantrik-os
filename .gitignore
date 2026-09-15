@@ -1,5 +1,6 @@
 # Rust
 target/
+dist/
 
 .brainstorm/
 
@@ -21,10 +22,11 @@ memory.db.bak
 .vscode/
 .idea/
 
-# Claude Code (local settings with permissions, API keys in MCP config)
+# Claude Code — local dev tooling, not the OS: session settings/permissions,
+# handoff notes, and the MCP config (+ its placeholder template).
+.claude/
 .mcp.json
-.claude/settings.local.json
-".claude/settings copy.json"
+.mcp.json.template
 
 # Scripts (local-only)
 scripts/
