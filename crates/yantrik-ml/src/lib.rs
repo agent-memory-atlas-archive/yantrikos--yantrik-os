@@ -104,3 +104,6 @@ pub use hardware::{
 #[cfg(feature = "candle-stt")]
 pub use stt::{CandleWhisper, WhisperEngine};
 pub use tts::TTSEngine;
+pub use tts::PiperTTS;
+#[cfg(feature = "kokoro-neural-tts")]
+pub use tts::KokoroTTS;

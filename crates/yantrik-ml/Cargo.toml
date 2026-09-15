@@ -35,8 +35,9 @@ sysinfo = { version = "0.33", optional = true }
 # llama.cpp backend (optional)
 llama-cpp-2 = { version = "0.1", optional = true }
 
+
 # Cognitive Kernel backend (optional)
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["ndarray"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false }
 ndarray = { version = "0.16", optional = true }
 regex-lite = { version = "0.1", optional = true }
 chrono = { version = "0.4", optional = true }
@@ -62,6 +63,10 @@ claude-cli = []
 # llama.cpp backend (CPU-only base)
 llamacpp = ["dep:llama-cpp-2"]
 
+# Kokoro neural TTS (88MB ONNX model, natural voice)
+# Kokoro neural TTS (direct ONNX inference, no third-party TTS crate)
+kokoro-neural-tts = ["dep:ort"]
+
 # Cognitive Kernel (ONNX-based cortical columns)
 cognitive-kernel = ["dep:ort", "dep:ndarray", "dep:tokenizers", "dep:regex-lite", "dep:chrono"]
 
@@ -73,3 +78,8 @@ llamacpp-metal = ["llamacpp", "llama-cpp-2/metal"]         # Apple Silicon (M1/M
 
 [dev-dependencies]
 tempfile = "3"
+
+[[bin]]
+name = "transcribe"
+path = "src/bin/transcribe.rs"
+required-features = ["candle-stt"]

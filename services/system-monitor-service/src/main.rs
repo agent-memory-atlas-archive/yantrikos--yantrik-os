@@ -8,6 +8,7 @@
 //!   sysmon.processes   { sort_by?, limit? }      → Vec<ProcessInfo>
 //!   sysmon.kill_process { pid }                  → ()
 
+use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
 use yantrik_ipc_contracts::system_monitor::*;
 use yantrik_service_sdk::prelude::*;
 
@@ -48,11 +49,162 @@ impl ServiceHandler for SysMonHandler {
                 kill_process(pid)?;
                 Ok(serde_json::json!(null))
             }
+            // The agent-facing surface: one call gives live eyesight of the machine — the same
+            // numbers the System app draws — without opening a window or reading a screenshot.
+            "app.describe" => Ok(describe_json(
+                "system-monitor",
+                &describe_view()?,
+                &sysmon_actions(),
+            )),
+            "app.act" => act(&params),
             _ => Err(ServiceError {
                 code: -1,
                 message: format!("Unknown method: {method}"),
             }),
         }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Control surface (app.describe / app.act)
+// ══════════════════════════════════════════════════════════════════════
+
+/// A byte count a person can read at a glance: "12.4 GB", "512 MB".
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// The machine as data: the snapshot the System app draws, plus the busiest processes, in the
+/// one shape every Yantrik surface reports. Reading it costs a caller one call and one line
+/// before it decides whether to look closer.
+fn describe_view() -> Result<View, ServiceError> {
+    let snap = build_snapshot()?;
+    // Top few by CPU: the question "what is this machine doing" is almost always "what is using
+    // it", and a full process table is the transcript an agent was told to avoid.
+    let top = read_processes("cpu", 5).unwrap_or_default();
+
+    let mem_used = human_bytes(snap.memory.used_bytes);
+    let mem_total = human_bytes(snap.memory.total_bytes);
+    let busiest = top
+        .first()
+        .map(|p| format!(", busiest {} ({:.0}%)", p.name, p.cpu_percent))
+        .unwrap_or_default();
+    let summary = format!(
+        "System — CPU {:.0}%, memory {} / {} ({:.0}%), load {:.2}, up {}{}",
+        snap.cpu.overall_percent,
+        mem_used,
+        mem_total,
+        snap.memory.usage_percent,
+        snap.cpu.load_avg_1,
+        human_uptime(snap.uptime_secs),
+        busiest,
+    );
+
+    let disks: Vec<serde_json::Value> = snap
+        .disks
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "mount": d.mount_point,
+                "used": human_bytes(d.used_bytes),
+                "total": human_bytes(d.total_bytes),
+                "percent": (d.usage_percent).round() as i64,
+            })
+        })
+        .collect();
+    let processes: Vec<serde_json::Value> = top
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "pid": p.pid,
+                "name": p.name,
+                "cpu_percent": (p.cpu_percent * 10.0).round() / 10.0,
+                "mem_percent": (p.mem_percent * 10.0).round() / 10.0,
+                "user": p.user,
+            })
+        })
+        .collect();
+
+    Ok(View::new(summary)
+        .with("cpu_percent", (snap.cpu.overall_percent).round() as i64)
+        .with("cores", snap.cpu.cores.len() as i64)
+        .with("load", serde_json::json!([snap.cpu.load_avg_1, snap.cpu.load_avg_5, snap.cpu.load_avg_15]))
+        .with("memory_used", mem_used)
+        .with("memory_total", mem_total)
+        .with("memory_percent", (snap.memory.usage_percent).round() as i64)
+        .with("swap_used", human_bytes(snap.memory.swap_used_bytes))
+        .with("swap_total", human_bytes(snap.memory.swap_total_bytes))
+        .with("uptime_secs", snap.uptime_secs as i64)
+        .with("disks", serde_json::Value::Array(disks))
+        .with("top_processes", serde_json::Value::Array(processes)))
+}
+
+/// An uptime a person reads: "3d 4h", "12m".
+fn human_uptime(secs: u64) -> String {
+    let d = secs / 86_400;
+    let h = (secs % 86_400) / 3_600;
+    let m = (secs % 3_600) / 60;
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m")
+    }
+}
+
+/// What this service can be asked to do. Ending a process is the one mutating thing it offers,
+/// and it destroys work a person cannot get back, so it is graded `dangerous` — the caller's
+/// ceiling decides whether it is allowed, the service only states the risk.
+fn sysmon_actions() -> Vec<Action> {
+    vec![Action::new("kill_process", "End a running process by PID")
+        .risk("dangerous")
+        .arg(Param::number("pid").describe("The process id to end, as shown in top_processes"))]
+}
+
+/// Dispatch `app.act`. The argument checks mirror the Slint path: an unknown action or a missing
+/// argument is named, not swallowed, because a model reads the error and corrects from it.
+fn act(params: &serde_json::Value) -> Result<serde_json::Value, ServiceError> {
+    let action = params["action"].as_str().unwrap_or("").trim();
+    let args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let action_id = "system-monitor#act";
+    match action {
+        "kill_process" => {
+            let pid = args["pid"].as_u64().ok_or_else(|| ServiceError {
+                code: -32602,
+                message: "`kill_process` needs argument `pid` (a number)".to_string(),
+            })? as u32;
+            kill_process(pid)?;
+            // Read back through describe, so the caller sees the machine after the kill without a
+            // second round trip and can confirm the process is gone.
+            let view = describe_view()?;
+            Ok(act_json(
+                "system-monitor",
+                action_id,
+                true,
+                serde_json::json!({ "killed": pid }),
+                &view,
+            ))
+        }
+        "" => Err(ServiceError {
+            code: -32602,
+            message: "act needs a non-empty `action`".to_string(),
+        }),
+        other => Err(ServiceError {
+            code: -32601,
+            message: format!("unknown action `{other}`; this service offers: kill_process"),
+        }),
     }
 }
 
@@ -102,6 +254,9 @@ mod platform {
             },
             swap_total_bytes: swap_total,
             swap_used_bytes: swap_used,
+            available_bytes: available,
+            cached_bytes: meminfo.get("Cached").copied().unwrap_or(0),
+            buffers_bytes: meminfo.get("Buffers").copied().unwrap_or(0),
         };
 
         let disks = read_mounts()
@@ -489,6 +644,9 @@ mod platform {
                 usage_percent: 0.0,
                 swap_total_bytes: 0,
                 swap_used_bytes: 0,
+                available_bytes: 0,
+                cached_bytes: 0,
+                buffers_bytes: 0,
             },
             disks: Vec::new(),
             networks: Vec::new(),

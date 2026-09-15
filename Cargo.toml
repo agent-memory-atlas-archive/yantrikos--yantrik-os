@@ -29,6 +29,7 @@ members = [
     "services/network-service",
     "services/email-service",
     "services/perception-service",
+    "services/perception-journal",
     "services/a11y-service",
     "crates/yantrik-app-runtime",
     "apps/notes",

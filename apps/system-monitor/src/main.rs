@@ -82,13 +82,18 @@ fn snapshot_local() -> SystemSnapshot {
         cores.iter().map(|c| c.usage_percent).sum::<f64>() / cores.len() as f64
     };
 
+    // Was hardcoded to zero, so the card always read "Load: 0.00 0.00 0.00".
+    let load = sysinfo::System::load_average();
+
     let cpu = CpuInfo {
         overall_percent: overall,
         cores,
-        load_avg_1: 0.0,
-        load_avg_5: 0.0,
-        load_avg_15: 0.0,
+        load_avg_1: load.one,
+        load_avg_5: load.five,
+        load_avg_15: load.fifteen,
     };
+
+    let (cached, buffers) = cached_and_buffers();
 
     let memory = MemoryInfo {
         total_bytes: sys.total_memory(),
@@ -100,6 +105,9 @@ fn snapshot_local() -> SystemSnapshot {
         },
         swap_total_bytes: sys.total_swap(),
         swap_used_bytes: sys.used_swap(),
+        available_bytes: sys.available_memory(),
+        cached_bytes: cached,
+        buffers_bytes: buffers,
     };
 
     let disks: Vec<DiskInfo> = sysinfo::Disks::new_with_refreshed_list()
@@ -173,6 +181,31 @@ fn processes_local(sort_by: &str, limit: u32) -> Vec<ProcessInfo> {
 
 // ── Formatting helpers ───────────────────────────────────────────────
 
+/// Page cache and buffer sizes are not exposed by `sysinfo`; on Linux they come
+/// straight out of /proc/meminfo, whose values are in kB.
+#[cfg(target_os = "linux")]
+fn cached_and_buffers() -> (u64, u64) {
+    let (mut cached, mut buffers) = (0u64, 0u64);
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        for line in text.lines() {
+            let mut parts = line.split_whitespace();
+            let key = parts.next().unwrap_or("");
+            let kb: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            match key {
+                "Cached:" => cached = kb * 1024,
+                "Buffers:" => buffers = kb * 1024,
+                _ => {}
+            }
+        }
+    }
+    (cached, buffers)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cached_and_buffers() -> (u64, u64) {
+    (0, 0)
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -235,6 +268,9 @@ fn apply_snapshot(ui: &SystemMonitorApp, snap: &SystemSnapshot) {
     ui.set_memory_usage(snap.memory.usage_percent as f32);
     ui.set_memory_used_text(format_bytes(snap.memory.used_bytes).into());
     ui.set_memory_total_text(format_bytes(snap.memory.total_bytes).into());
+    ui.set_memory_available_text(format_bytes(snap.memory.available_bytes).into());
+    ui.set_memory_cached_text(format_bytes(snap.memory.cached_bytes).into());
+    ui.set_memory_buffers_text(format_bytes(snap.memory.buffers_bytes).into());
     let swap_pct = if snap.memory.swap_total_bytes > 0 {
         (snap.memory.swap_used_bytes as f64 / snap.memory.swap_total_bytes as f64) * 100.0
     } else {

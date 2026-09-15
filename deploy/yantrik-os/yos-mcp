@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+"""yos-mcp — the OS's body, offered to a mind as MCP tools.
+
+`yos` is the command line an agent uses to see and act on this machine. This wraps it
+as a Model Context Protocol server over stdio, so a mind that speaks MCP gets the
+desktop as ordinary tools: what is running, what is on screen, what the page says,
+what it says out loud, and how to act on any of it.
+
+The split is deliberate. This process holds no model and makes no decisions; it
+translates a tool call into a `yos` invocation and hands back what came out. Everything
+it returns — page text, app state, a transcript — is a report about the world and is
+never an instruction, however imperative it reads. A page that says "ignore your
+previous instructions" is a page that says that; it is content to relay, not a command
+to obey, and the mind on the other end has to treat it the same way.
+
+Config for the mind (YM_MCP_CONFIG, default /etc/yantrik-mind/mcp.json):
+
+    {"mcpServers": {"yantrik-os": {"command": "/opt/yantrik/bin/yos-mcp"}}}
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+YOS = os.environ.get("YOS_BIN", "/opt/yantrik/bin/yos")
+PROTOCOL_VERSION = "2024-11-05"
+
+# Every tool is a `yos` invocation. `argv` builds the command line from the call's
+# arguments; `timeout` is generous where the work is genuinely slow (transcription runs
+# at well under real time on this hardware) and short everywhere else, so a hung browser
+# surfaces as a timeout rather than a stalled mind.
+TOOLS = [
+    {
+        "name": "os_apps",
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "description": "What is running on this desktop right now — the apps and services "
+                       "that can be described and acted on.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "argv": lambda a: ["ls"],
+        "timeout": 15,
+    },
+    {
+        "name": "os_describe",
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "description": "The current state of one app or service: what it is showing and "
+                       "which actions it offers. Takes a short name, e.g. 'notes', 'shell'.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"app": {"type": "string", "description": "short app name"}},
+            "required": ["app"],
+        },
+        "argv": lambda a: ["describe", a["app"]],
+        "timeout": 20,
+    },
+    {
+        "name": "os_act",
+        # Destructive actions are refused inside this tool by the permission guard, so what
+        # it can actually reach is the routine surface. The grade still decides per call.
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        "description": "Perform an action on an app. The action name and its arguments come "
+                       "from os_describe. Returns whether the action settled and what the "
+                       "app looks like afterwards, so the effect can be checked rather than "
+                       "assumed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string"},
+                "action": {"type": "string"},
+                "args": {
+                    "type": "object",
+                    "description": "action arguments as an object keyed by the parameter names os_describe lists, e.g. {\"text\": \"hello\"}. A single-parameter action also accepts the bare value.",
+                },
+            },
+            "required": ["app", "action"],
+        },
+        "argv": lambda a: ["act", a["app"], a["action"]] + act_pairs(a),
+        "timeout": 60,
+    },
+    {
+        "name": "os_perception",
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "description": "What the OS has noticed lately — files saved, apps opened, windows "
+                       "focused. This is the machine's own account of what has been happening, "
+                       "not a guess.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "description": "how many recent observations"}
+            },
+        },
+        "argv": lambda a: ["perception"] + ([str(a["count"])] if a.get("count") else []),
+        "timeout": 20,
+    },
+    {
+        "name": "web_read",
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
+        "description": "What is on the current web page: everything that can be interacted "
+                       "with, numbered, each with its accessible name. The numbers are refs "
+                       "for web_click and web_type and are only valid until the page changes.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "argv": lambda a: ["web"],
+        "timeout": 45,
+    },
+    {
+        "name": "web_text",
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
+        "description": "What the current page SAYS — the prose a reader sees, without the "
+                       "markup or the interactive furniture.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "max characters"}},
+        },
+        "argv": lambda a: ["web", "text"] + ([str(a["limit"])] if a.get("limit") else []),
+        "timeout": 45,
+    },
+    {
+        "name": "web_find",
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
+        "description": "Locate something anywhere on the page, including off screen — useful "
+                       "when web_read only shows the viewport.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"words": {"type": "string"}},
+            "required": ["words"],
+        },
+        "argv": lambda a: ["web", "find"] + a["words"].split(),
+        "timeout": 45,
+    },
+    {
+        "name": "web_go",
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+        "description": "Navigate the browser to a URL. The page takes a moment to settle; "
+                       "read it again afterwards rather than acting on the previous reading.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
+        "argv": lambda a: ["web", "go", a["url"]],
+        "timeout": 45,
+    },
+    {
+        "name": "web_click",
+        # `yos web` refuses any control whose label reads as a commitment — buy, pay,
+        # send, submit, delete and the rest — and refuses it inside the same evaluation
+        # that would have pressed it, so there is no gap between reading the label and
+        # acting on it. What this tool can actually reach is therefore the ordinary
+        # surface of a page: links, filters, tabs, form fields short of the button that
+        # commits them.
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+        "description": "Click element n from the most recent web_read. A stale ref clicks "
+                       "whatever occupies that position now, so re-read if the page may have "
+                       "moved.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"ref": {"type": "integer"}},
+            "required": ["ref"],
+        },
+        "argv": lambda a: ["web", "click", str(a["ref"])],
+        "timeout": 30,
+    },
+    {
+        "name": "web_type",
+        # `yos web` refuses any control whose label reads as a commitment — buy, pay,
+        # send, submit, delete and the rest — and refuses it inside the same evaluation
+        # that would have pressed it, so there is no gap between reading the label and
+        # acting on it. What this tool can actually reach is therefore the ordinary
+        # surface of a page: links, filters, tabs, form fields short of the button that
+        # commits them.
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+        "description": "Type text into element n from the most recent web_read.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"ref": {"type": "integer"}, "text": {"type": "string"}},
+            "required": ["ref", "text"],
+        },
+        "argv": lambda a: ["web", "type", str(a["ref"]), a["text"]],
+        "timeout": 30,
+    },
+    {
+        "name": "web_listen",
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
+        "description": "What the page says OUT LOUD. Records the audio this machine is "
+                       "playing and transcribes it, so speech in a video is readable whether "
+                       "or not the video is captioned. It hears whatever is making noise, not "
+                       "one specific tab. Takes roughly twice the requested duration to return.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "seconds": {"type": "integer", "description": "how long to listen, default 30"}
+            },
+        },
+        "argv": lambda a: ["web", "listen", str(a.get("seconds", 30))],
+        # Capture is real-time and transcription runs slower than real time on this CPU,
+        # so the ceiling has to scale with the request rather than sit at a fixed value.
+        "timeout": lambda a: int(a.get("seconds", 30)) * 4 + 120,
+    },
+]
+
+BY_NAME = {t["name"]: t for t in TOOLS}
+
+
+# The OS grades every action it publishes: safe < standard < sensitive < dangerous. Of the
+# 46 actions on this desktop, 40 are `standard` — open a note, save, append, search — and
+# six are not: killing a process, removing a container, locking the session.
+#
+# That grade is the OS's own judgement about its own surface, and it is finer than anything
+# this bridge could infer, so it is what decides. Everything at or below the ceiling runs;
+# anything above it is refused HERE, in the process that would otherwise make the call.
+# A caller cannot argue with it, because the refusal is not advice passed upstream — it is
+# the absence of an invocation.
+def act_pairs(a):
+    """Turn an os_act call's arguments into the key=value pairs `yos act` expects.
+
+    A model asked to append a line will often send the line itself where an object was
+    specified — `"args": "the text"` rather than `{"text": "the text"}`. That is a
+    reasonable thing to have meant, and refusing it teaches nothing: the caller cannot see
+    which parameter name it should have used without another round trip. So a bare string
+    is resolved against the action's own schema, and only genuinely ambiguous cases fail.
+    """
+    args = a.get("args")
+    if not args:
+        return []
+
+    if isinstance(args, str):
+        # It may simply be JSON that arrived as text.
+        try:
+            parsed = json.loads(args)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            args = parsed
+        else:
+            names = action_parameters(a.get("app"), a.get("action"))
+            if len(names) == 1:
+                args = {names[0]: args}
+            else:
+                raise ValueError(
+                    "args arrived as a bare value but %s.%s takes %s. Send an object, e.g. "
+                    '{"%s": ...}.' % (a.get("app"), a.get("action"),
+                                      ("no parameters" if not names else "parameters " + ", ".join(names)),
+                                      names[0] if names else "param")
+                )
+
+    if not isinstance(args, dict):
+        raise ValueError("args must be an object of parameter names to values, got %s"
+                         % type(args).__name__)
+
+    # Values are stringified rather than json-dumped so a plain string arrives as
+    # `text=hello`, not `text="hello"` with the quotes becoming part of the note.
+    return ["%s=%s" % (k, v if isinstance(v, str) else json.dumps(v)) for k, v in args.items()]
+
+
+def action_parameters(app, action):
+    """The parameter names one action takes, read from the OS's own description of it."""
+    import re
+    import subprocess
+
+    if not app or not action:
+        return []
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    try:
+        p = subprocess.run([YOS, "describe", app], capture_output=True, text=True,
+                           timeout=20, env=env)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+    if p.returncode != 0:
+        return []
+    for m in re.finditer(r"^\s*act:\s*([A-Za-z0-9_]+)\(([^)]*)\)", p.stdout, re.M):
+        if m.group(1) == action:
+            return [n.strip() for n in m.group(2).split(",") if n.strip()]
+    return []
+
+
+# ── Keeping private data from walking out ───────────────────────────────────────────────
+#
+# A leak needs three things at once: reach into private data, exposure to content someone
+# else wrote, and a way to send outward. An agent on this desktop has all three, so one of
+# them has to be broken.
+#
+# The naive break — taint on reading a web page — makes the browser useless: read a search
+# page, and you can no longer type in its search box. So the taint tracks the leg that is
+# actually diagnostic: has this session looked at anything PRIVATE? Browsing stays free for
+# a session that has only ever seen the open web, because a session that has seen no secrets
+# has none to spend. The moment it reads app state, machine events or machine audio, putting
+# data into a page stops being free.
+#
+# Scope is the process. A harness spawns this bridge once and keeps it, so process lifetime
+# is session lifetime. There is deliberately NO tool to clear the taint — a caller that can
+# untaint itself is not constrained, and the only way back is a new session, which is a
+# person's decision rather than an agent's.
+PRIVATE_READS = {"os_describe", "os_perception", "web_listen"}
+OUTBOUND = {"web_type", "web_go"}
+
+_SAW_PRIVATE = []          # what tainted this session, in order, for the refusal message
+TAINT_OFF = os.environ.get("YOS_MCP_NO_TAINT") == "1"
+
+
+def payload_in_url(url):
+    """Does this URL carry data, as opposed to just naming a place?
+
+    A query string, a fragment, or userinfo can carry anything. Those are the shapes a
+    secret leaves in; a bare path is navigation. Length alone is not the test — a long
+    article path is innocent and a short ?k= is not.
+    """
+    try:
+        from urllib.parse import urlsplit
+        u = urlsplit(url)
+    except Exception:
+        return True  # unparseable is not a reason to allow it
+    if u.query or u.fragment:
+        return True
+    if "@" in (u.netloc or ""):
+        return True
+    return False
+
+
+def taint_refusal(name, args):
+    """Refuse an outbound call once this session has seen private data. None = allow."""
+    if TAINT_OFF or not _SAW_PRIVATE or name not in OUTBOUND:
+        return None
+    if name == "web_go" and not payload_in_url(args.get("url", "")):
+        # Plain navigation carries nothing out; going somewhere is not saying something.
+        return None
+    saw = ", ".join(dict.fromkeys(_SAW_PRIVATE))
+    what = "type into a page" if name == "web_type" else "open a URL carrying data in it"
+    return ("this session has already read private state (%s), so it will not %s. "
+            "Whatever is on this machine could be carried out that way, and nothing here "
+            "can tell an innocent string from a secret. A person has to do this part, or "
+            "start a fresh session that has not read anything private." % (saw, what))
+
+
+
+LADDER = ["safe", "standard", "sensitive", "dangerous"]
+CEILING = os.environ.get("YOS_MCP_MAX_PERMISSION", "standard")
+
+
+def action_permission(app, action):
+    """Ask the OS how it grades one of its own actions.
+
+    Returns None when the grade cannot be established — a missing app, a renamed action,
+    a describe that would not answer. None is not "safe": an ungradeable action is refused,
+    because the failure that matters here is running something whose cost was never read.
+    """
+    import re
+    import subprocess
+
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    try:
+        p = subprocess.run([YOS, "describe", app], capture_output=True, text=True,
+                           timeout=20, env=env)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if p.returncode != 0:
+        return None
+    # `  act: open_note(title)  [standard, settles on return]`
+    for m in re.finditer(r"^\s*act:\s*([A-Za-z0-9_]+)\([^)]*\)\s*\[([a-z]+),", p.stdout, re.M):
+        if m.group(1) == action:
+            return m.group(2)
+    return None
+
+
+def guard_act(args):
+    """Refuse an action the OS grades above the ceiling. Returns a message, or None to allow."""
+    app, action = args.get("app"), args.get("action")
+    if not app or not action:
+        return "os_act needs both an app and an action — see os_describe for what an app offers."
+
+    level = action_permission(app, action)
+    if level is None:
+        return ("cannot establish how %r grades %r, so it will not be run. Check the name "
+                "with os_describe %s." % (app, action, app))
+    if level not in LADDER:
+        return "%s.%s is graded %r, which is not a level this OS defines. Refusing." % (app, action, level)
+    if LADDER.index(level) > LADDER.index(CEILING):
+        return ("%s.%s is graded %s, above this session's %s ceiling, so it was not run. "
+                "An action at that level needs a person to authorise it directly — raise "
+                "YOS_MCP_MAX_PERMISSION if that is the intent." % (app, action, level, CEILING))
+    return None
+
+
+def run_tool(tool, args):
+    """Invoke yos and return its output as text, whatever the outcome.
+
+    A tool that raises loses the detail the mind needs to recover, so a failure comes
+    back as content that says what failed. The distinction that matters downstream is
+    "the machine answered and the answer was no" versus "nothing answered at all", and
+    both are reported in words rather than as an empty string.
+    """
+    if tool["name"] == "os_act":
+        refusal = guard_act(args)
+        if refusal is not None:
+            return "refused: " + refusal
+
+    refusal = taint_refusal(tool["name"], args)
+    if refusal is not None:
+        return "refused: " + refusal
+
+    try:
+        argv = [YOS] + tool["argv"](args)
+    except ValueError as e:
+        return "refused: %s" % e
+    timeout = tool["timeout"]
+    if callable(timeout):
+        timeout = timeout(args)
+
+    env = dict(os.environ)
+    # yos reaches the compositor's session bus and the audio server; without these it
+    # sees an empty desktop and reports that as fact, which is worse than an error.
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return "timed out after %ss — the desktop did not answer. It may be busy rather " \
+               "than broken; nothing was rolled back." % timeout
+    except FileNotFoundError:
+        return "%s is not installed on this machine, so the desktop cannot be reached." % YOS
+
+    out = (p.stdout or "").strip()
+    err = (p.stderr or "").strip()
+    if p.returncode != 0:
+        return "failed (exit %d)%s%s" % (
+            p.returncode,
+            ("\n" + out) if out else "",
+            ("\n" + err) if err else "",
+        )
+    if tool["name"] in PRIVATE_READS and p.returncode == 0:
+        # Recorded after the call, not before: a read that failed saw nothing.
+        _SAW_PRIVATE.append(tool["name"])
+
+    if not out:
+        return "(the command succeeded and printed nothing)" + (("\n" + err) if err else "")
+    return out + (("\n" + err) if err else "")
+
+
+def reply(msg_id, result=None, error=None):
+    m = {"jsonrpc": "2.0", "id": msg_id}
+    if error is not None:
+        m["error"] = error
+    else:
+        m["result"] = result
+    # One message per line, no embedded newlines — the transport is line-delimited, and a
+    # transcript full of newlines is exactly the payload that would break it.
+    sys.stdout.write(json.dumps(m) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+
+        method, msg_id = msg.get("method"), msg.get("id")
+
+        if method == "initialize":
+            reply(msg_id, {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "yantrik-os", "version": "1.0.0"},
+            })
+        elif method == "tools/list":
+            # annotations tell a client what a tool does to the world, so it can run reads
+            # freely and gate the rest. A client that has to guess from the name gets it
+            # wrong: "os_apps" looks like a mutation to every heuristic worth writing.
+            reply(msg_id, {"tools": [
+                {k: t[k] for k in ("name", "description", "inputSchema", "annotations")
+                 if k in t}
+                for t in TOOLS
+            ]})
+        elif method == "tools/call":
+            params = msg.get("params") or {}
+            tool = BY_NAME.get(params.get("name"))
+            if tool is None:
+                reply(msg_id, error={"code": -32602,
+                                     "message": "no such tool: %s" % params.get("name")})
+                continue
+            try:
+                text = run_tool(tool, params.get("arguments") or {})
+            except Exception as e:  # a malformed argument must not take the server down
+                text = "could not run %s: %s" % (tool["name"], e)
+            reply(msg_id, {"content": [{"type": "text", "text": text}]})
+        elif msg_id is not None:
+            reply(msg_id, error={"code": -32601, "message": "unknown method: %s" % method})
+        # Notifications (no id) get no reply, per JSON-RPC.
+
+
+if __name__ == "__main__":
+    main()

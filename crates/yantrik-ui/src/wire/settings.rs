@@ -28,6 +28,11 @@ pub struct UserSettings {
     pub user_name: String,
     #[serde(default)]
     pub companion_name: String,
+    /// Show the operator console (working-set rail, machine rail, ask bar) instead
+    /// of a desktop. Off by default: the machine is for a person until told
+    /// otherwise, and a console is unusable to someone who did not build it.
+    #[serde(default)]
+    pub agent_mode: bool,
 }
 
 impl Default for UserSettings {
@@ -41,6 +46,7 @@ impl Default for UserSettings {
             wallpaper: String::new(),
             user_name: String::new(),
             companion_name: String::new(),
+            agent_mode: false,
         }
     }
 }
@@ -126,6 +132,15 @@ pub fn accent_name_to_index(name: &str) -> i32 {
 /// Wire settings callbacks with persistence.
 pub fn wire(ui: &App, ctx: &AppContext) {
     let settings = Arc::new(Mutex::new(load()));
+
+    // YANTRIK_AGENT_MODE wins over the file so an agent harness or a kiosk image can
+    // force either face without rewriting a user's settings.
+    let agent_mode = match std::env::var("YANTRIK_AGENT_MODE") {
+        Ok(v) => matches!(v.trim(), "1" | "true" | "yes" | "on"),
+        Err(_) => settings.lock().map(|s| s.agent_mode).unwrap_or(false),
+    };
+    ui.set_agent_mode(agent_mode);
+    tracing::info!(agent_mode, "Shell face selected");
 
     // Dark mode toggle
     let ui_weak = ui.as_weak();

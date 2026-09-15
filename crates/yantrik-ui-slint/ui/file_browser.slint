@@ -7,7 +7,8 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
-import { ListView, LineEdit } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
+import { YInput } from "components/y_input.slint";
 
 export struct FileEntry {
     name: string,
@@ -442,9 +443,9 @@ export component FileBrowser inherits Rectangle {
                     horizontal-stretch: 1;
                     spacing: 4px;
 
-                    addr-input := LineEdit {
+                    addr-input := YInput {
                         horizontal-stretch: 1;
-                        text: root.current-path;
+                        value: root.current-path;
                         accepted(t) => {
                             root.address-editing = false;
                             root.selected-index = -1;
@@ -500,12 +501,13 @@ export component FileBrowser inherits Rectangle {
                     if root.search-active : HorizontalLayout {
                         spacing: 2px;
 
-                        filter-input := LineEdit {
-                            width: 160px;
-                            placeholder-text: "Filter...";
-                            text: root.search-text;
+                        filter-input := YInput {
+                            width: 180px;
+                            mode: 1;
+                            placeholder: "Filter...";
+                            value: root.search-text;
                             edited(t) => { root.search-text = t; root.file-filter-changed(t); }
-                            accepted(t) => { /* keep filter active */ }
+                            cleared() => { root.search-text = ""; root.file-filter-changed(""); }
                         }
 
                         filter-close := TouchArea {
@@ -2173,7 +2175,7 @@ export component FileBrowser inherits Rectangle {
             VerticalLayout {
                 padding: 20px; spacing: 16px;
                 Text { text: "Rename"; color: Theme.text-primary; font-size: Theme.font-title; font-weight: 600; }
-                rename-input := LineEdit { text: root.rename-new-name; edited(t) => { root.rename-new-name = t; } accepted(t) => { root.file-rename(root.rename-old-name, t); root.show-rename-dialog = false; root.selected-index = -1; root.clear-selection(); } }
+                rename-input := YInput { value: root.rename-new-name; placeholder: "New name"; edited(t) => { root.rename-new-name = t; } accepted(t) => { root.file-rename(root.rename-old-name, t); root.show-rename-dialog = false; root.selected-index = -1; root.clear-selection(); } }
                 HorizontalLayout {
                     spacing: 12px; alignment: end;
                     TouchArea { width: 80px; height: 36px; clicked => { root.show-rename-dialog = false; root.selected-index = -1; root.clear-selection(); } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : transparent; animate background { duration: Theme.dur-fast; } Text { text: "Cancel"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
@@ -2230,7 +2232,7 @@ export component FileBrowser inherits Rectangle {
             VerticalLayout {
                 padding: 20px; spacing: 16px;
                 Text { text: "New Folder"; color: Theme.text-primary; font-size: Theme.font-title; font-weight: 600; }
-                folder-input := LineEdit { text: root.new-folder-name; placeholder-text: "Folder name"; edited(t) => { root.new-folder-name = t; } accepted(t) => { root.create-folder(t); root.show-new-folder-dialog = false; } }
+                folder-input := YInput { value: root.new-folder-name; placeholder: "Folder name"; edited(t) => { root.new-folder-name = t; } accepted(t) => { root.create-folder(t); root.show-new-folder-dialog = false; } }
                 HorizontalLayout {
                     spacing: 12px; alignment: end;
                     TouchArea { width: 80px; height: 36px; clicked => { root.show-new-folder-dialog = false; } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : transparent; animate background { duration: Theme.dur-fast; } Text { text: "Cancel"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
@@ -2255,7 +2257,7 @@ export component FileBrowser inherits Rectangle {
             VerticalLayout {
                 padding: 20px; spacing: 16px;
                 Text { text: "New File"; color: Theme.text-primary; font-size: Theme.font-title; font-weight: 600; }
-                file-input := LineEdit { text: root.new-file-name; placeholder-text: "File name"; edited(t) => { root.new-file-name = t; } accepted(t) => { root.create-file(t); root.show-new-file-dialog = false; } }
+                file-input := YInput { value: root.new-file-name; placeholder: "File name"; edited(t) => { root.new-file-name = t; } accepted(t) => { root.create-file(t); root.show-new-file-dialog = false; } }
                 HorizontalLayout {
                     spacing: 12px; alignment: end;
                     TouchArea { width: 80px; height: 36px; clicked => { root.show-new-file-dialog = false; } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : transparent; animate background { duration: Theme.dur-fast; } Text { text: "Cancel"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
@@ -2425,9 +2427,9 @@ export component FileBrowser inherits Rectangle {
                 VerticalLayout {
                     spacing: 4px;
                     Text { text: "Find pattern"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 600; letter-spacing: 1px; }
-                    batch-pattern-input := LineEdit {
-                        text: root.file-batch-rename-pattern;
-                        placeholder-text: "e.g. .txt";
+                    batch-pattern-input := YInput {
+                        value: root.file-batch-rename-pattern;
+                        placeholder: "e.g. .txt";
                         edited(t) => { root.file-batch-rename-pattern = t; }
                     }
                 }
@@ -2436,9 +2438,9 @@ export component FileBrowser inherits Rectangle {
                 VerticalLayout {
                     spacing: 4px;
                     Text { text: "Replace with"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 600; letter-spacing: 1px; }
-                    batch-replace-input := LineEdit {
-                        text: root.file-batch-rename-replace;
-                        placeholder-text: "e.g. .md";
+                    batch-replace-input := YInput {
+                        value: root.file-batch-rename-replace;
+                        placeholder: "e.g. .md";
                         edited(t) => { root.file-batch-rename-replace = t; }
                     }
                 }

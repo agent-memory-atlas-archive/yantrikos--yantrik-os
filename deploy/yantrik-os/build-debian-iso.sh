@@ -51,8 +51,11 @@ ROOTFS="$WORK_DIR/rootfs"
 ISO_DIR="$WORK_DIR/iso"
 OUTPUT="yantrik-os-${YANTRIK_VERSION}.iso"
 
-BINARY_UI="${YANTRIK_BINARY:-$TARGET_DIR/release/yantrik-ui}"
-BINARY_CLI="${YANTRIK_CLI_BINARY:-$TARGET_DIR/release/yantrik}"
+# What the OS is made of is DISCOVERED by build-release.sh, never listed here.
+# This script used to name two binaries and therefore shipped an ISO with no apps
+# and no services — a desktop that looked right and could not open anything.
+# Set RELEASE_TARBALL to reuse a prebuilt artifact instead of repackaging.
+RELEASE_TARBALL="${RELEASE_TARBALL:-}"
 
 INCLUDE_LLM=false
 INCLUDE_WHISPER=false
@@ -116,11 +119,11 @@ if [ -n "$MISSING" ]; then
     fail "Missing tools:$MISSING\n  Install: sudo apt install debootstrap xorriso squashfs-tools grub-pc-bin grub-efi-amd64-bin mtools"
 fi
 
-for bin in "$BINARY_UI" "$BINARY_CLI"; do
-    if [ ! -f "$bin" ]; then
-        fail "Binary not found: $bin\n  Build first: cargo build --release -p yantrik-ui -p yantrik"
-    fi
-done
+if [ -n "$RELEASE_TARBALL" ]; then
+    [ -f "$RELEASE_TARBALL" ] || fail "RELEASE_TARBALL not found: $RELEASE_TARBALL"
+elif [ ! -x "$TARGET_DIR/release/yantrik-ui" ]; then
+    fail "No built workspace at $TARGET_DIR/release\n  Build first: cargo build --release --workspace"
+fi
 
 # ── Cleanup function ──
 cleanup() {
@@ -181,6 +184,7 @@ apt-get install -y -qq \
 apt-get install -y -qq \
     labwc foot \
     wl-clipboard \
+    wlrctl wlr-randr \
     mesa-utils libgl1-mesa-dri libegl-mesa0 \
     libinput-tools \
     fonts-dejavu-core \
@@ -217,7 +221,6 @@ apt-get install -y -qq \
 
 # ── Calamares installer ──
 apt-get install -y -qq \
-    calamares calamares-settings-debian \
     2>/dev/null || {
         echo "Calamares not in repos — will use text installer"
     }
@@ -276,11 +279,53 @@ ok "User yantrik created"
 # ═══════════════════════════════════════════════════════════════
 # STEP 4: Install Yantrik binaries
 # ═══════════════════════════════════════════════════════════════
-step "[4/10] Installing Yantrik OS binaries..."
+step "[4/10] Installing Yantrik OS (every binary, discovered)..."
 
-sudo cp "$BINARY_UI" "$ROOTFS/opt/yantrik/bin/yantrik-ui"
-sudo cp "$BINARY_CLI" "$ROOTFS/opt/yantrik/bin/yantrik"
-sudo chmod +x "$ROOTFS/opt/yantrik/bin/yantrik-ui" "$ROOTFS/opt/yantrik/bin/yantrik"
+# Package the workspace unless a prebuilt artifact was handed to us. --no-build
+# because this script is not the thing that decides when to compile; it installs
+# what has already been built.
+if [ -z "$RELEASE_TARBALL" ]; then
+    "$SCRIPT_DIR/build-release.sh" --no-build --out "$WORK_DIR/dist" \
+        || fail "build-release.sh failed — cannot determine what the OS contains"
+    RELEASE_TARBALL="$(ls -t "$WORK_DIR/dist"/yantrik-os-*.tar.zst 2>/dev/null | head -1)"
+    [ -n "$RELEASE_TARBALL" ] || fail "build-release.sh produced no tarball"
+fi
+
+UNPACK="$WORK_DIR/release-unpack"
+rm -rf "$UNPACK"; mkdir -p "$UNPACK"
+tar --zstd -xf "$RELEASE_TARBALL" -C "$UNPACK" --strip-components=1 \
+    || fail "could not unpack $RELEASE_TARBALL"
+
+sudo mkdir -p "$ROOTFS/opt/yantrik/bin" "$ROOTFS/opt/yantrik/models"
+sudo cp -a "$UNPACK/bin/." "$ROOTFS/opt/yantrik/bin/"
+sudo chmod +x "$ROOTFS/opt/yantrik/bin/"*
+
+# The build manifest travels with the image so a running machine can answer
+# "which build is this?" — a question that was unanswerable on the VM all day.
+# Written as `if`, not `[ ... ] && cp`: under `set -e` a false test is the last
+# command in that compound and would abort the whole build silently.
+if [ -f "$UNPACK/BUILD" ]; then
+    sudo cp "$UNPACK/BUILD" "$ROOTFS/opt/yantrik/BUILD"
+else
+    warn "release tarball carries no BUILD manifest — the image will not be able to say which build it is"
+fi
+if [ -f "$UNPACK/config.yaml" ]; then
+    sudo cp "$UNPACK/config.yaml" "$ROOTFS/opt/yantrik/config.yaml"
+else
+    warn "release tarball carries no config.yaml — the machine will need one before it can talk to a model"
+fi
+if [ -d "$UNPACK/models" ] && [ -n "$(ls -A "$UNPACK/models" 2>/dev/null)" ]; then
+    sudo cp -a "$UNPACK/models/." "$ROOTFS/opt/yantrik/models/"
+fi
+
+# A desktop with no apps behind it is the failure this whole change exists to stop,
+# so assert the shape of what landed rather than trusting the copy.
+INSTALLED=$(ls "$ROOTFS/opt/yantrik/bin" | wc -l)
+[ "$INSTALLED" -ge 20 ] || fail "only $INSTALLED binaries landed in the image — expected the full set"
+for required in yantrik-ui yantrik yantrik-notes weather-service yos; do
+    [ -e "$ROOTFS/opt/yantrik/bin/$required" ] \
+        || fail "$required missing from the image — the ISO would boot without it"
+done
 
 # Copy i18n files if they exist
 if [ -d "$PROJECT_ROOT/crates/yantrik-ui/i18n" ]; then
@@ -292,7 +337,7 @@ if [ -d "$PROJECT_ROOT/skills" ]; then
     sudo cp -r "$PROJECT_ROOT/skills/"* "$ROOTFS/opt/yantrik/skills/" 2>/dev/null || true
 fi
 
-ok "Binaries installed ($(du -h "$BINARY_UI" | cut -f1) + $(du -h "$BINARY_CLI" | cut -f1))"
+ok "Installed $INSTALLED binaries ($(sudo du -sh "$ROOTFS/opt/yantrik/bin" | cut -f1))"
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 5: Download AI models (baked into ISO)
@@ -325,13 +370,20 @@ PIPER_URL="https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper
 PIPER_VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium"
 if [ ! -f "$TTS_DIR/piper" ]; then
     info "Piper TTS binary + voice model (~66MB)..."
-    sudo wget -q "$PIPER_URL" -O /tmp/piper.tar.gz
-    tar xzf /tmp/piper.tar.gz -C /tmp/
-    sudo cp /tmp/piper/piper "$TTS_DIR/"
-    sudo cp /tmp/piper/lib*.so* "$TTS_DIR/" 2>/dev/null || true
-    sudo cp -r /tmp/piper/espeak-ng-data "$TTS_DIR/"
+    # Staged inside the build dir, not /tmp. `sudo wget` left a root-owned file in
+    # a sticky /tmp and the unprivileged `rm` below could not remove it — under
+    # `set -e` that aborted the whole ISO build at step 5 of 10, after debootstrap
+    # and every apt install had already run.
+    PIPER_TMP="$WORK_DIR/piper-stage"
+    sudo rm -rf "$PIPER_TMP"
+    sudo mkdir -p "$PIPER_TMP"
+    sudo wget -q "$PIPER_URL" -O "$PIPER_TMP/piper.tar.gz"
+    sudo tar xzf "$PIPER_TMP/piper.tar.gz" -C "$PIPER_TMP"
+    sudo cp "$PIPER_TMP/piper/piper" "$TTS_DIR/"
+    sudo cp "$PIPER_TMP/piper/lib"*.so* "$TTS_DIR/" 2>/dev/null || true
+    sudo cp -r "$PIPER_TMP/piper/espeak-ng-data" "$TTS_DIR/"
     sudo chmod +x "$TTS_DIR/piper"
-    rm -rf /tmp/piper /tmp/piper.tar.gz
+    sudo rm -rf "$PIPER_TMP"
     ok "Piper binary installed"
 else
     ok "Piper binary (cached)"
@@ -808,304 +860,12 @@ fi
 step "[9/10] Configuring installer..."
 
 # Check if Calamares was installed
-if sudo chroot "$ROOTFS" dpkg -l calamares 2>/dev/null | grep -q '^ii'; then
-    info "Calamares found — configuring graphical installer"
-
-    CALA_DIR="$ROOTFS/etc/calamares"
-    sudo mkdir -p "$CALA_DIR/branding/yantrik" "$CALA_DIR/modules"
-
-    # Main settings
-    sudo tee "$CALA_DIR/settings.conf" > /dev/null <<'CALA_SETTINGS'
-modules-search: [ local, /usr/lib/calamares/modules ]
-
-sequence:
-  - show:
-    - welcome
-    - locale
-    - keyboard
-    - partition
-    - users
-    - summary
-  - exec:
-    - partition
-    - mount
-    - unpackfs
-    - machineid
-    - fstab
-    - locale
-    - keyboard
-    - localecfg
-    - users
-    - networkcfg
-    - hwclock
-    - services-systemd
-    - grubcfg
-    - bootloader
-    - shellprocess@yantrik-post-install
-    - umount
-  - show:
-    - finished
-
-branding: yantrik
-CALA_SETTINGS
-
-    # Branding
-    sudo tee "$CALA_DIR/branding/yantrik/branding.desc" > /dev/null <<'BRANDING'
-componentName: yantrik
-
-strings:
-    productName:         "Yantrik OS"
-    shortProductName:    "Yantrik"
-    version:             "0.3.0 Beta"
-    shortVersion:        "0.3"
-    versionedName:       "Yantrik OS 0.3"
-    shortVersionedName:  "Yantrik 0.3"
-    bootloaderEntryName: "yantrik"
-    productUrl:          "https://yantrikos.com"
-    supportUrl:          "https://github.com/yantrikos/yantrik-os/issues"
-    knownIssuesUrl:      "https://github.com/yantrikos/yantrik-os/issues"
-    releaseNotesUrl:     "https://yantrikos.com/releases"
-
-images:
-    productLogo:         "logo.png"
-    productIcon:         "logo.png"
-
-style:
-    sidebarBackground:   "#0c0b10"
-    sidebarText:         "#c8c8d0"
-    sidebarTextSelect:   "#5ac8d4"
-
-slideshow: "show.qml"
-BRANDING
-
-    # ── Module configs ──
-
-    # unpackfs — tells Calamares what to copy to the target disk
-    sudo tee "$CALA_DIR/modules/unpackfs.conf" > /dev/null <<'UNPACKFS'
----
-unpack:
-  - source: /run/live/medium/live/filesystem.squashfs
-    sourcefs: squashfs
-    destination: ""
-UNPACKFS
-
-    # partition — automatic or manual partitioning
-    sudo tee "$CALA_DIR/modules/partition.conf" > /dev/null <<'PARTITION'
----
-efiSystemPartition: /boot/efi
-efiSystemPartitionSize: 512M
-userSwapChoices:
-  - none
-  - small
-  - file
-drawNestedPartitions: false
-alwaysShowPartitionLabels: true
-defaultPartitionTableType: gpt
-defaultFileSystemType: ext4
-PARTITION
-
-    # users — user creation with password
-    sudo tee "$CALA_DIR/modules/users.conf" > /dev/null <<'USERS'
----
-defaultGroups:
-  - name: sudo
-    must_exist: true
-  - name: video
-    must_exist: false
-  - name: audio
-    must_exist: false
-  - name: input
-    must_exist: false
-  - name: netdev
-    must_exist: false
-autologinGroup: autologin
-doAutologin: false
-setRootPassword: true
-doReusePassword: true
-passwordRequirements:
-  minLength: 4
-  maxLength: -1
-allowWeakPasswords: true
-USERS
-
-    # bootloader — GRUB config
-    sudo tee "$CALA_DIR/modules/bootloader.conf" > /dev/null <<'BOOTLOADER'
----
-efiBootLoader: grub
-kernel: /vmlinuz
-img: /initrd.img
-timeout: 3
-grubInstall: "grub-install"
-grubMkconfig: "grub-mkconfig"
-grubCfg: "/boot/grub/grub.cfg"
-BOOTLOADER
-
-    # welcome — requirements check
-    sudo tee "$CALA_DIR/modules/welcome.conf" > /dev/null <<'WELCOME'
----
-showSupportUrl: true
-showKnownIssuesUrl: true
-showReleaseNotesUrl: false
-requirements:
-  requiredStorage: 8
-  requiredRam: 1.0
-  check:
-    - storage
-    - ram
-  required:
-    - storage
-WELCOME
-
-    # finished — what to do after install
-    sudo tee "$CALA_DIR/modules/finished.conf" > /dev/null <<'FINISHED'
----
-restartNowEnabled: true
-restartNowChecked: true
-restartNowCommand: "systemctl reboot"
-FINISHED
-
-    # ── Post-install hook: configure the installed system for the new user ──
-    sudo tee "$CALA_DIR/modules/shellprocess@yantrik-post-install.conf" > /dev/null <<'POSTINST'
----
-dontChroot: false
-script:
-  - command: "/opt/yantrik/bin/yantrik-post-install.sh"
-    timeout: 120
-POSTINST
-
-    # The actual post-install script (runs inside the installed system chroot)
-    sudo tee "$ROOTFS/opt/yantrik/bin/yantrik-post-install.sh" > /dev/null <<'POSTSCRIPT'
-#!/bin/bash
-# Yantrik OS — Post-install setup (runs inside chroot after Calamares)
-# Configures the new user's desktop, marks onboarding done, updates config.
-
-set -e
-
-LOG="/opt/yantrik/logs/post-install.log"
-exec >> "$LOG" 2>&1
-echo "=== Post-install $(date) ==="
-
-# Find the real user (not root, not yantrik live user)
-REAL_USER=""
-REAL_HOME=""
-for dir in /home/*; do
-    u=$(basename "$dir")
-    [ "$u" = "yantrik" ] && continue
-    [ "$u" = "lost+found" ] && continue
-    if id "$u" &>/dev/null; then
-        REAL_USER="$u"
-        REAL_HOME="$dir"
-        break
-    fi
-done
-
-# Fallback: if Calamares created the yantrik user on disk, use that
-if [ -z "$REAL_USER" ]; then
-    REAL_USER="yantrik"
-    REAL_HOME="/home/yantrik"
-fi
-
-echo "User: $REAL_USER ($REAL_HOME)"
-
-# 1. Copy labwc desktop config to the new user
-LABWC_SRC="/home/yantrik/.config/labwc"
-LABWC_DST="$REAL_HOME/.config/labwc"
-if [ -d "$LABWC_SRC" ] && [ "$REAL_USER" != "yantrik" ]; then
-    mkdir -p "$REAL_HOME/.config"
-    cp -r "$LABWC_SRC" "$LABWC_DST"
-    echo "Copied labwc config"
-fi
-
-# 2. Copy .bash_profile for auto-start desktop
-if [ -f "/home/yantrik/.bash_profile" ] && [ "$REAL_USER" != "yantrik" ]; then
-    cp /home/yantrik/.bash_profile "$REAL_HOME/.bash_profile"
-    echo "Copied .bash_profile"
-fi
-
-# 3. Fix ownership
-if [ "$REAL_USER" != "yantrik" ]; then
-    REAL_UID=$(id -u "$REAL_USER")
-    REAL_GID=$(id -g "$REAL_USER")
-    chown -R "$REAL_UID:$REAL_GID" "$REAL_HOME/.config" "$REAL_HOME/.bash_profile" 2>/dev/null || true
-fi
-
-# 4. Mark onboarding as complete (so desktop boots, not onboarding wizard)
-mkdir -p "$REAL_HOME/.yantrik"
-touch "$REAL_HOME/.yantrik/.onboarding_complete"
-chown -R "$(id -u "$REAL_USER"):$(id -g "$REAL_USER")" "$REAL_HOME/.yantrik" 2>/dev/null || true
-echo "Onboarding marked complete"
-
-# 5. Update Yantrik config with the new username
-CONFIG="/opt/yantrik/config.yaml"
-if [ -f "$CONFIG" ]; then
-    sed -i "s/^user_name:.*/user_name: \"$REAL_USER\"/" "$CONFIG"
-    echo "Config updated: user_name=$REAL_USER"
-fi
-
-# 6. Set auto-login for the new user (override getty)
-mkdir -p /etc/systemd/system/getty@tty1.service.d
-cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<AUTOLOGIN
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin $REAL_USER --noclear %I \$TERM
-AUTOLOGIN
-echo "Auto-login set for $REAL_USER"
-
-# 7. Remove installer-mode marker
-rm -f /opt/yantrik/.installer-mode
-echo "Installer mode marker removed"
-
-# 8. Ensure the new user is in required groups
-for grp in sudo video audio input; do
-    usermod -aG "$grp" "$REAL_USER" 2>/dev/null || true
-done
-
-# 9. Fix /opt/yantrik ownership for the new user
-chown -R "$(id -u "$REAL_USER"):$(id -g "$REAL_USER")" /opt/yantrik/data /opt/yantrik/logs 2>/dev/null || true
-
-echo "=== Post-install done ==="
-POSTSCRIPT
-    sudo chmod +x "$ROOTFS/opt/yantrik/bin/yantrik-post-install.sh"
-
-    ok "Post-install hook configured"
-
-    # Simple slideshow (placeholder)
-    sudo tee "$CALA_DIR/branding/yantrik/show.qml" > /dev/null <<'QML'
-import QtQuick 2.0
-
-Rectangle {
-    color: "#0c0b10"
-
-    Text {
-        anchors.centerIn: parent
-        text: "Installing Yantrik OS...\n\nYour AI-native desktop is being set up."
-        color: "#c8c8d0"
-        font.pixelSize: 20
-        horizontalAlignment: Text.AlignHCenter
-    }
-}
-QML
-
-    # Create a placeholder logo
-    # (In production, replace with actual PNG)
-    sudo touch "$CALA_DIR/branding/yantrik/logo.png"
-
-    # Desktop entry for installer
-    sudo tee "$ROOTFS/usr/share/applications/yantrik-installer.desktop" > /dev/null <<'DESKTOP'
-[Desktop Entry]
-Type=Application
-Name=Install Yantrik OS
-Comment=Install Yantrik OS to your hard drive
-Exec=sudo calamares
-Icon=calamares
-Terminal=false
-Categories=System;
-DESKTOP
-
-    ok "Calamares installer configured"
-else
-    info "Calamares not available — text installer will be primary"
-fi
+# Calamares is gone. It cost 169 MB across 113 KDE/Qt packages to deliver a 10.8 MB
+# installer that nothing on the boot path ever reached: both GRUB entries pass
+# yantrik.install=true, which puts the Slint onboarding into installer mode, and
+# yantrik-install.sh below is the text fallback. An OS should not carry a second
+# desktop framework so that a third installer can exist.
+info "Installer: Slint onboarding (GRUB default) with yantrik-install as the text fallback"
 
 # Always install the text-based installer (used by GRUB "Install" option)
 sudo cp "$SCRIPT_DIR/yantrik-install.sh" "$ROOTFS/opt/yantrik/bin/yantrik-install"

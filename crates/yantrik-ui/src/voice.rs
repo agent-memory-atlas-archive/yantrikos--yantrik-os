@@ -213,10 +213,32 @@ const BARGE_IN_ENERGY_THRESHOLD: f32 = 0.015;
 
 // ─── Lazy-loaded audio pipeline ─────────────────────────────────────────────
 
+/// TTS backend — tries Piper neural first, falls back to system TTS.
+enum SmartTTS {
+    Piper(yantrik_ml::PiperTTS),
+    System(TTSEngine),
+}
+
+impl SmartTTS {
+    fn speak(&self, text: &str, params: Option<&yantrik_ml::VoiceParams>) -> anyhow::Result<()> {
+        match self {
+            SmartTTS::Piper(p) => p.speak(text, params),
+            SmartTTS::System(s) => s.speak(text, params),
+        }
+    }
+
+    fn is_speaking(&self) -> bool {
+        match self {
+            SmartTTS::Piper(p) => p.is_speaking(),
+            SmartTTS::System(s) => s.is_speaking(),
+        }
+    }
+}
+
 /// All the heavy resources that are loaded lazily on first voice activation.
 struct AudioPipeline {
     stt: WhisperEngine,
-    tts: TTSEngine,
+    tts: SmartTTS,
     audio_buffer: Arc<Mutex<Vec<f32>>>,
     mic_energy: Arc<Mutex<f32>>,
     _input_stream: cpal::Stream, // kept alive via ownership
@@ -237,9 +259,21 @@ fn init_audio_pipeline(voice_config: &VoiceConfig) -> anyhow::Result<AudioPipeli
         WhisperEngine::from_hub(&voice_config.whisper_model)?
     };
 
-    // Load system TTS
+    // Load TTS — try Piper (neural) first, fall back to system TTS
     tracing::info!("Voice: loading TTS engine...");
-    let tts = TTSEngine::new()?;
+    let tts = {
+        let tts_dir = std::path::Path::new("/opt/yantrik/models/tts");
+        match yantrik_ml::PiperTTS::from_dir(tts_dir) {
+            Ok(piper) => {
+                tracing::info!("Voice: using Piper neural TTS");
+                SmartTTS::Piper(piper)
+            }
+            Err(e) => {
+                tracing::info!(err = %e, "Voice: Piper not available, using system TTS");
+                SmartTTS::System(TTSEngine::new()?)
+            }
+        }
+    };
 
     // Set up microphone
     let host = cpal::default_host();

@@ -251,7 +251,13 @@ export component MusicPlayerScreen inherits Rectangle {
 
                 Rectangle { width: Theme.sp-4; }
 
-                // Category tabs — the four ways to look at the same library
+                // Category tabs — the four ways to look at the same library.
+                // The centring column matters: `alignment: center` below is the
+                // horizontal axis, so without this the 28px chips top-aligned in a
+                // full-height strip and sat above the search field beside them.
+                VerticalLayout {
+                    alignment: center;
+
                 HorizontalLayout {
                     spacing: 2px;
                     alignment: center;
@@ -281,6 +287,8 @@ export component MusicPlayerScreen inherits Rectangle {
                             vertical-alignment: center;
                         }
                     }
+                }
+
                 }
 
                 Rectangle { horizontal-stretch: 1; }

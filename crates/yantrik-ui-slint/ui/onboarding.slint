@@ -266,18 +266,24 @@ export component OnboardingScreen inherits Rectangle {
     // 4=interests, 5=location+notif, 6=hw-scan, 7=ai-mode-select,
     // 8=ai-provider-setup, 9=ai-test, 10=instruction/install-summary,
     // 11=install-progress (installer only), 12=install-complete (installer only)
-    property <int> phase: 0;
+    //
+    // These are `in-out` rather than private because the shell publishes the installer on its
+    // control surface: an agent asked to install this machine should be able to read what the
+    // form holds and fill it, the same way a person reads the screen and types. Private
+    // properties are invisible to Rust, which is why driving the installer previously meant
+    // screenshotting it and aiming synthetic clicks at pixel coordinates.
+    in-out property <int> phase: 0;
     property <float> timer-elapsed: 0;
-    property <string> input-user-name: "";
-    property <string> input-companion-name: "";
-    property <string> input-home-location: "";
+    in-out property <string> input-user-name: "";
+    in-out property <string> input-companion-name: "";
+    in-out property <string> input-home-location: "";
     // Installer fields (only shown when installer-mode is true)
-    property <string> input-username: "";
-    property <string> input-password: "";
-    property <string> input-password-confirm: "";
-    property <string> input-hostname: "yantrik";
-    property <string> install-error: "";
-    property <bool> installing: false;
+    in-out property <string> input-username: "";
+    in-out property <string> input-password: "";
+    in-out property <string> input-password-confirm: "";
+    in-out property <string> input-hostname: "yantrik";
+    in-out property <string> install-error: "";
+    in-out property <bool> installing: false;
     in-out property <int> install-progress: 0;
     in-out property <string> install-status: "";
 

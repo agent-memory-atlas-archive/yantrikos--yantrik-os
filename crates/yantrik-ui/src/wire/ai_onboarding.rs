@@ -133,6 +133,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         // watches this screen, so the scan used to time out into "Unknown".
         let weak = ui.as_weak();
         let has_gpu = gpu.is_some();
+        let local_worth_it = matches!(
+            gpu.as_deref(),
+            Some("NVIDIA") | Some("AMD ROCm") | Some("AMD (amdgpu)")
+        );
         std::thread::spawn(move || {
             let hw = read_hardware();
             let runtime = probe_runtime(configured_url.as_deref());
@@ -158,9 +162,18 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 // runtime probe alone forced "cloud", so the scan could say
                 // "GPU available" and the very next screen badge Cloud as
                 // Recommended. Only "local"/"cloud" are rendered by the UI.
-                let recommend = if has_gpu { "local" } else { "cloud" };
+                // Integrated graphics is a GPU and still the wrong place to run a
+                // model, so "has an accelerator" and "should run locally" are not the
+                // same question. Only discrete NVIDIA/AMD earns the local recommendation.
+                let recommend = if local_worth_it { "local" } else { "cloud" };
                 ui.set_onboard_ai_hw_recommend(recommend.into());
-                tracing::info!(gpu = has_gpu, runtime, recommend, "Onboarding: scan complete");
+                tracing::info!(
+                    gpu = has_gpu,
+                    local_worth_it,
+                    runtime,
+                    recommend,
+                    "Onboarding: scan complete"
+                );
             });
         });
     });
@@ -217,6 +230,16 @@ fn gib(bytes: u64) -> u64 {
 }
 
 /// Detect a usable GPU. Returns a human-readable label when one is found.
+/// What accelerator this machine actually has, if any.
+///
+/// This used to return Some("Available") for the mere existence of a
+/// /dev/dri/renderD* node. That is not evidence of an accelerator: every VM with
+/// virtio-gpu publishes one and renders on the host CPU through llvmpipe, and so
+/// does a server whose only graphics is its BMC. On a Proxmox VM the screen
+/// consequently reported a GPU and recommended local inference, where a model
+/// would have run on software rasterisation.
+///
+/// So the render node is only a starting point — the driver behind it decides.
 fn detect_gpu() -> Option<String> {
     if std::path::Path::new("/proc/driver/nvidia/version").exists()
         || std::path::Path::new("/dev/nvidia0").exists()
@@ -226,12 +249,26 @@ fn detect_gpu() -> Option<String> {
     if std::path::Path::new("/sys/class/kfd").exists() {
         return Some("AMD ROCm".into());
     }
-    // Any DRM render node means some accelerator is present.
-    if let Ok(entries) = std::fs::read_dir("/dev/dri") {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with("renderD") {
-                return Some("Available".into());
-            }
+    for entry in std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("renderD") {
+            continue;
+        }
+        let Ok(uevent) = std::fs::read_to_string(entry.path().join("device/uevent")) else {
+            continue;
+        };
+        let driver = uevent
+            .lines()
+            .find_map(|l| l.strip_prefix("DRIVER="))
+            .unwrap_or("")
+            .trim();
+        // Named explicitly, because the interesting case is everything NOT here:
+        // virtio-pci, virtio_gpu, vmwgfx, qxl, bochs-drm, simpledrm, mgag200 and
+        // ast all expose a render node and none of them can run a model.
+        match driver {
+            "amdgpu" => return Some("AMD (amdgpu)".into()),
+            "nouveau" => return Some("NVIDIA (nouveau)".into()),
+            "i915" | "xe" => return Some("Intel integrated".into()),
+            _ => {}
         }
     }
     None

@@ -66,8 +66,18 @@ fn list_of(names: &[&str]) -> String {
     }
 }
 
+/// How many directory entries `describe` will list.
+///
+/// A glance, not a transcript: a model reading 4,000 filenames has spent its context on
+/// something it could have asked a narrower question about. The true count travels beside
+/// the list, so a caller always knows it is looking at a window onto something larger.
+const FILE_LISTING_CAP: usize = 40;
+
 /// Publish the desktop on the service bus. Call from the UI thread before `run()`.
-pub fn publish(ui: &App) {
+pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
+    // Cloned once, not scanned per call: the shell itself snapshots the installed apps at
+    // startup, and the control surface should answer from the same picture the launcher uses.
+    let installed = ctx.installed_apps.clone();
     let describe = {
         let weak = ui.as_weak();
         move || {
@@ -77,19 +87,19 @@ pub fn publish(ui: &App) {
             let screen = ui.get_current_screen();
             let bond = ui.get_bond_data();
 
-            let windows = ui.get_window_list();
-            let open: Vec<serde_json::Value> = {
-                use slint::Model;
-                (0..windows.row_count())
-                    .filter_map(|i| windows.row_data(i))
-                    .map(|w| {
-                        serde_json::json!({
-                            "title": w.title.to_string(),
-                            "app": w.app_id.to_string(),
-                        })
+            // From the launch registry, not the Slint window-list model. The model is only
+            // refreshed while the desktop screen is showing, so a describe from any other screen
+            // reported "0 windows open" even with apps running — the registry is refreshed by
+            // launches and exits, not by which screen is up, so it is right everywhere.
+            let open: Vec<serde_json::Value> = crate::windows::shell_windows()
+                .into_iter()
+                .map(|w| {
+                    serde_json::json!({
+                        "title": w.title,
+                        "app": w.app_id,
                     })
-                    .collect()
-            };
+                })
+                .collect();
 
             let service_model = ui.get_services();
             let services: Vec<serde_json::Value> = {
@@ -114,15 +124,72 @@ pub fn publish(ui: &App) {
                 .filter_map(|s| s["id"].as_str())
                 .collect();
 
+            // What the Files screen is showing. A directory listing is the thing an agent
+            // most often needed and could not get without photographing the window.
+            let files = if screen == 8 {
+                use slint::Model;
+                let entries = ui.get_file_browser_entries();
+                let total = entries.row_count();
+                let listing: Vec<serde_json::Value> = (0..total.min(FILE_LISTING_CAP))
+                    .filter_map(|i| entries.row_data(i))
+                    .map(|e| {
+                        serde_json::json!({
+                            "name": e.name.to_string(),
+                            "dir": e.is_dir,
+                            "size": e.size_text.to_string(),
+                            "modified": e.modified_text.to_string(),
+                        })
+                    })
+                    .collect();
+                let sel = ui.get_file_selected_index();
+                let selected = if sel >= 0 {
+                    entries
+                        .row_data(sel as usize)
+                        .map(|e| serde_json::Value::String(e.name.to_string()))
+                        .unwrap_or(serde_json::Value::Null)
+                } else {
+                    serde_json::Value::Null
+                };
+                serde_json::json!({
+                    "path": ui.get_file_browser_path().to_string(),
+                    "entries": listing,
+                    "shown": total.min(FILE_LISTING_CAP),
+                    "total": total,
+                    "selected": selected,
+                    "selection_count": ui.get_file_selection_count(),
+                    "free_space": ui.get_file_free_space_text().to_string(),
+                })
+            } else {
+                serde_json::Value::Null
+            };
+
+            // The wizard, when the wizard is up. This is the screen an agent is most likely to
+            // meet first and, until it published anything, the only one it could not read.
+            let installer = if screen == 2 {
+                crate::control_installer::state(&ui)
+            } else {
+                serde_json::Value::Null
+            };
+
             // The one line worth reading first: where the user is, what is open, and whether
             // anything is wrong. Trouble comes before window count, because trouble is the
             // reason to look.
-            let summary = if !down.is_empty() {
+            let summary = if screen == 2 {
+                crate::control_installer::summary(&ui)
+            } else if !down.is_empty() {
                 format!(
                     "Yantrik — {} screen, {} windows open, {} not running",
                     screen_name(screen),
                     open.len(),
                     list_of(&down)
+                )
+            } else if screen == 8 {
+                // On the file screen the directory IS the answer to "where am I".
+                format!(
+                    "Yantrik — files at {}, {} items, {} windows open",
+                    ui.get_file_browser_path(),
+                    files["total"].as_u64().unwrap_or(0),
+                    open.len()
                 )
             } else {
                 format!(
@@ -138,6 +205,8 @@ pub fn publish(ui: &App) {
                 .with("screen", screen_name(screen))
                 .with("screen_id", screen)
                 .with("windows", serde_json::Value::Array(open))
+                .with("files", files)
+                .with("installer", installer)
                 .with("services", serde_json::Value::Array(services))
                 .with("companion_online", ui.get_companion_online())
                 .with("companion_status", ui.get_companion_status().to_string())
@@ -180,7 +249,7 @@ pub fn publish(ui: &App) {
     let dnd_ui = ui_for.clone();
     let lock_ui = ui_for;
 
-    ControlSurface::new("shell")
+    let surface = ControlSurface::new("shell")
         .describe(describe)
         .action(
             // Deferred, and the handshake with yantrik-mind is what proved it. This returned
@@ -200,6 +269,14 @@ pub fn publish(ui: &App) {
                 let name = args["name"].as_str().unwrap_or_default().trim().to_string();
                 if name.is_empty() {
                     return Err("`name` is empty".into());
+                }
+                // Checked before answering. The dispatch discovers an unknown id too, but only
+                // after this function has already reported the launch as under way.
+                if !crate::wire::dock::is_known_app(&name, &installed) {
+                    return Err(format!(
+                        "no app `{name}` on this machine; it can launch: {}",
+                        crate::wire::dock::BUILTIN_APP_IDS.join(", ")
+                    ));
                 }
                 // The launcher's own path: it resolves the binary, enforces one window per app,
                 // and focuses the running one instead of starting a second.
@@ -284,6 +361,12 @@ pub fn publish(ui: &App) {
                 ui.invoke_lock_screen();
                 Ok(serde_json::json!({ "locked": true }))
             },
-        )
-        .serve();
+        );
+
+    // The installer and the updater keep their actions in their own modules: they are the
+    // riskiest things the shell can be asked to do (one erases a disk, the other replaces every
+    // binary and restarts) and they deserve to be read together, not buried at the end of a file
+    // about status bars.
+    let surface = crate::control_installer::actions(surface, ui);
+    crate::control_update::actions(surface, ui).serve();
 }

@@ -34,11 +34,40 @@ pub fn socket_dir() -> std::path::PathBuf {
     let last_resort = PathBuf::from(format!("/tmp/yantrik-{uid}"));
     candidates.push(last_resort.clone());
 
+    // Why each rejection is logged: this function silently falls through to the last candidate,
+    // so a failure on the *first* one surfaces later as a bind error naming the *last* one.
+    // perception-service died with "cannot create socket directory /tmp/yantrik-0" while holding
+    // a perfectly good /run/user/1000/yantrik, and the message sent the diagnosis to the wrong
+    // directory entirely. A fallback chain that does not say why it fell back is a chain that
+    // lies about where the problem is.
     for dir in &candidates {
-        if std::fs::create_dir_all(dir).is_ok() && harden(dir).is_ok() {
-            return dir.clone();
+        // Only create it if it is not already there.
+        //
+        // `create_dir_all` looks idempotent and is not, under Landlock. On an existing directory
+        // it still issues `mkdir`, and a ruleset without MAKE_DIR denies that with EACCES —
+        // before the kernel ever reaches the EEXIST that `std` would have translated into "fine,
+        // it exists". So a service that resolves this directory once, applies a ruleset over it,
+        // and resolves it again gets a permission error on the directory it just made itself, and
+        // falls through to candidates it can create even less. That is exactly how
+        // perception-service died pointing at /tmp/yantrik-0.
+        if !dir.is_dir() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                tracing::debug!(dir = %dir.display(), error = %e, "socket dir candidate: cannot create");
+                continue;
+            }
         }
+        if let Err(e) = harden(dir) {
+            tracing::debug!(dir = %dir.display(), error = %e, "socket dir candidate: cannot harden");
+            continue;
+        }
+        tracing::debug!(dir = %dir.display(), "socket dir chosen");
+        return dir.clone();
     }
+    tracing::warn!(
+        candidates = ?candidates,
+        "no socket directory could be prepared; falling back to the last candidate, which will \
+         almost certainly fail to bind"
+    );
     last_resort
 }
 
@@ -50,7 +79,22 @@ pub fn socket_dir() -> std::path::PathBuf {
 #[cfg(unix)]
 fn harden(dir: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(dir)?.permissions();
+    let perms = std::fs::metadata(dir)?.permissions();
+    // Already private: say so and touch nothing.
+    //
+    // This early return is what makes `socket_dir` idempotent, and that matters more than it
+    // looks. perception-service calls it once to learn where its socket goes, applies a Landlock
+    // ruleset over that directory, and then the service SDK calls it again to bind. The second
+    // call used to re-issue this chmod — which Landlock denies, because the ruleset grants writes
+    // *inside* the directory and not the right to change the directory itself. So the second call
+    // failed on a directory the first call had just successfully created, fell through to
+    // candidates it could not create either, and reported the last one's error. The service died
+    // with "cannot create socket directory /tmp/yantrik-0" while holding a perfectly good
+    // /run/user/1000/yantrik it had made moments earlier.
+    if perms.mode() & 0o777 == 0o700 {
+        return Ok(());
+    }
+    let mut perms = perms;
     perms.set_mode(0o700);
     std::fs::set_permissions(dir, perms)
 }
@@ -251,5 +295,57 @@ fn dispatch(handler: &Arc<dyn ServiceHandler>, req: RpcRequest) -> RpcResponse {
 impl Drop for RpcServer {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.address);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod socket_dir_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn hardening_an_already_private_directory_changes_nothing() {
+        // The property perception-service depends on: asking twice must be safe. The second ask
+        // happens after a Landlock ruleset is in force, and a chmod at that point is denied — so
+        // if this is not a no-op the service cannot bind the socket it already made room for.
+        let dir = std::env::temp_dir().join(format!("yantrik-harden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        harden(&dir).expect("first harden");
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+
+        // Make it read-only so any *attempted* chmod would be visible as a change, then prove the
+        // second call does not attempt one.
+        harden(&dir).expect("second harden must be a no-op, not a second chmod");
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_world_readable_directory_is_still_tightened() {
+        // The other half: the early return must not make `harden` stop hardening. /tmp is
+        // world-writable and these sockets drive system-monitor, network and notifications.
+        let dir = std::env::temp_dir().join(format!("yantrik-loose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o777);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        harden(&dir).expect("harden");
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "a world-writable socket directory must be tightened, not waved through"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn asking_twice_returns_the_same_directory() {
+        assert_eq!(socket_dir(), socket_dir());
     }
 }

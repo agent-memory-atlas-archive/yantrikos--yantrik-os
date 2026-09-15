@@ -1,23 +1,34 @@
-//! System TTS engine — text-to-speech via OS native APIs.
+//! TTS engines — text-to-speech synthesis.
 //!
-//! Uses the `tts` crate which wraps:
-//! - macOS: AVSpeechSynthesizer
-//! - Linux: speech-dispatcher
-//! - Windows: SAPI
-//!
-//! This is a synchronous, blocking TTS that speaks through the system speakers.
-//! For neural TTS (Piper), see the `piper` feature (requires cmake + espeak-ng).
+//! Two backends:
+//! - `TTSEngine` — OS native (speech-dispatcher on Linux, SAPI on Windows)
+//! - `KokoroTTS` — Neural TTS via Kokoro 82M ONNX (88MB, natural voice)
 //!
 //! ```rust,ignore
+//! // System TTS (robotic but always available)
 //! let engine = TTSEngine::new()?;
 //! engine.speak("Hello world!", None)?;
+//!
+//! // Neural TTS (natural, requires model download)
+//! let kokoro = KokoroTTS::from_dir("/opt/yantrik/models/tts")?;
+//! kokoro.speak("Hello world!", None)?;
 //! ```
+
+#[cfg(feature = "kokoro-neural-tts")]
+pub mod kokoro;
+
+pub mod piper;
 
 use std::sync::Mutex;
 
 use anyhow::Result;
 
 pub use crate::types::VoiceParams;
+
+#[cfg(feature = "kokoro-neural-tts")]
+pub use kokoro::KokoroTTS;
+
+pub use piper::PiperTTS;
 
 /// System TTS engine.
 ///

@@ -5,6 +5,28 @@ use slint::ComponentHandle;
 use crate::app_context::AppContext;
 use crate::App;
 
+/// The app ids this shell can actually launch.
+///
+/// These mirror the match arms in `wire()` below and must be kept with them. The list exists
+/// because the control surface used to answer `{"launching": "<anything>"}` for any string at
+/// all: the dispatch quietly reached its `_` arm, logged "Unknown app" and returned, long after
+/// the caller had been told the launch was under way.
+pub const BUILTIN_APP_IDS: &[&str] = &[
+    "terminal", "browser", "files", "settings", "notes", "editor", "bond", "personality",
+    "memory", "notifications", "system", "media", "email", "calendar", "packages", "network",
+    "weather", "spreadsheet", "launchpad",
+];
+
+/// Whether `launch_app` will do anything with this id.
+///
+/// Checks the same two sources the dispatch does, in the same order: installed .desktop entries
+/// first, then the shell's own built-ins.
+pub fn is_known_app(app: &str, installed: &[crate::apps::DesktopEntry]) -> bool {
+    let lower = app.to_lowercase();
+    installed.iter().any(|e| e.app_id == app || e.name.to_lowercase() == lower)
+        || BUILTIN_APP_IDS.contains(&app)
+}
+
 /// Wire on_launch_app callback.
 pub fn wire(ui: &App, ctx: &AppContext) {
     let apps = ctx.installed_apps.clone();
@@ -25,7 +47,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 // arms below do — same resolution, same environment scrubbing.
                 let parts: Vec<&str> = entry.exec.split_whitespace().collect();
                 if let Some((bin, args)) = parts.split_first() {
-                    spawn_app_with_args(bin, args);
+                    spawn_app_with_args(&app, bin, args);
                 }
                 return;
             }
@@ -34,7 +56,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         // Fallback: hardcoded commands
         let cmd = match app.as_str() {
             "terminal" => {
-                spawn_app("yantrik-terminal");
+                spawn_app("terminal", "yantrik-terminal");
                 return;
             }
             "browser" => {
@@ -55,7 +77,17 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                     .stderr(std::process::Stdio::null())
                     .spawn()
                 {
-                    Ok(_) => tracing::info!("Browser launched (visible mode)"),
+                    Ok(mut child) => {
+                        let pid = child.id();
+                        tracing::info!(pid, "Browser launched (visible mode)");
+                        // Chromium is a window like any other, so the shell tracks it the same
+                        // way — otherwise "what is open" would silently omit the browser.
+                        crate::running::mark_launched("browser", pid, "chromium");
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                            crate::running::mark_exited("browser", pid);
+                        });
+                    }
                     Err(e) => tracing::error!(error = %e, "Failed to launch browser"),
                 }
                 return;
@@ -75,7 +107,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 return;
             }
             "notes" => {
-                spawn_app("yantrik-notes");
+                spawn_app("notes", "yantrik-notes");
                 return;
             }
             "editor" => {
@@ -132,11 +164,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 return;
             }
             "email" => {
-                spawn_app("yantrik-email");
+                spawn_app("email", "yantrik-email");
                 return;
             }
             "calendar" => {
-                spawn_app("yantrik-calendar");
+                spawn_app("calendar", "yantrik-calendar");
                 return;
             }
             "packages" => {
@@ -147,31 +179,31 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 return;
             }
             "network" => {
-                spawn_app("yantrik-network-manager");
+                spawn_app("network", "yantrik-network-manager");
                 return;
             }
             "sysmonitor" | "system_monitor" => {
-                spawn_app("yantrik-system-monitor");
+                spawn_app("sysmonitor", "yantrik-system-monitor");
                 return;
             }
             "weather" => {
-                spawn_app("yantrik-weather");
+                spawn_app("weather", "yantrik-weather");
                 return;
             }
             "music" | "music_player" => {
-                spawn_app("yantrik-music-player");
+                spawn_app("music", "yantrik-music-player");
                 return;
             }
             "downloads" | "download_manager" => {
-                spawn_app("yantrik-download-manager");
+                spawn_app("downloads", "yantrik-download-manager");
                 return;
             }
             "snippets" | "snippet_manager" => {
-                spawn_app("yantrik-snippet-manager");
+                spawn_app("snippets", "yantrik-snippet-manager");
                 return;
             }
             "containers" | "container_manager" => {
-                spawn_app("yantrik-container-manager");
+                spawn_app("containers", "yantrik-container-manager");
                 return;
             }
             "devices" | "device_dashboard" => {
@@ -189,15 +221,15 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 return;
             }
             "spreadsheet" => {
-                spawn_app("yantrik-spreadsheet");
+                spawn_app("spreadsheet", "yantrik-spreadsheet");
                 return;
             }
             "documents" | "document_editor" => {
-                spawn_app("yantrik-document-editor");
+                spawn_app("documents", "yantrik-document-editor");
                 return;
             }
             "presentation" | "slides" => {
-                spawn_app("yantrik-presentation");
+                spawn_app("presentation", "yantrik-presentation");
                 return;
             }
             "launchpad" => {
@@ -242,12 +274,18 @@ pub fn resolve_app_binary(bin: &str) -> std::path::PathBuf {
 }
 
 /// Launch a standalone app binary. The app's own single-instance guard handles repeats.
-pub fn spawn_app(bin: &str) {
-    spawn_app_with_args(bin, &[]);
+/// Launch a windowed app under a logical id.
+///
+/// `app_id` is the id the app is known by everywhere a caller reads it — the dock, `open_app`,
+/// `describe shell` — and `bin` is the binary to run. They differ (`notes` vs `yantrik-notes`),
+/// and the id is what the running-apps registry is keyed on, so "what is open" answers in the
+/// same vocabulary a caller uses to open things.
+pub fn spawn_app(app_id: &str, bin: &str) {
+    spawn_app_with_args(app_id, bin, &[]);
 }
 
 /// The one place the shell starts an app process, whatever path asked for it.
-pub fn spawn_app_with_args(bin: &str, args: &[&str]) {
+pub fn spawn_app_with_args(app_id: &str, bin: &str, args: &[&str]) {
     let path = resolve_app_binary(bin);
     match std::process::Command::new(&path)
         .args(args)
@@ -260,16 +298,26 @@ pub fn spawn_app_with_args(bin: &str, args: &[&str]) {
         .spawn()
     {
         Ok(mut child) => {
-            tracing::info!(app = bin, path = %path.display(), "App launched");
+            let pid = child.id();
+            tracing::info!(app = app_id, bin, pid, path = %path.display(), "App launched");
+            // The shell now knows this window is open without asking the compositor. Recorded
+            // before the reaper thread starts, so a describe that lands in the same instant sees
+            // it.
+            crate::running::mark_launched(app_id, pid, bin);
             // Reap it when it exits. Without a wait, every app the shell ever launched lingers
             // as a zombie until the shell itself quits — and a zombie still has a /proc entry,
-            // which is enough to confuse anything that checks "is that pid alive".
+            // which is enough to confuse anything that checks "is that pid alive". The same wait
+            // is where the registry learns the window has closed.
+            let id = app_id.to_string();
             let name = bin.to_string();
-            std::thread::spawn(move || match child.wait() {
-                Ok(status) => tracing::info!(app = %name, %status, "App exited"),
-                Err(e) => tracing::warn!(app = %name, error = %e, "Could not wait for app"),
+            std::thread::spawn(move || {
+                match child.wait() {
+                    Ok(status) => tracing::info!(app = %name, %status, "App exited"),
+                    Err(e) => tracing::warn!(app = %name, error = %e, "Could not wait for app"),
+                }
+                crate::running::mark_exited(&id, pid);
             });
         }
-        Err(e) => tracing::error!(app = bin, path = %path.display(), error = %e, "Failed to launch app"),
+        Err(e) => tracing::error!(app = app_id, bin, path = %path.display(), error = %e, "Failed to launch app"),
     }
 }

@@ -365,6 +365,11 @@ export component CalendarScreen inherits Rectangle {
                 if root.view-mode == 0 : VerticalLayout {
                     spacing: 2px;
 
+                    // A month needs 6 rows only when it spills past cell 35; drawing
+                    // 6 regardless left an empty band under every shorter month.
+                    property <int> month-rows: root.days.length > 35
+                        && root.days[35].day-number > 0 ? 6 : 5;
+
                     // Day-of-week headers
                     HorizontalLayout {
                         spacing: 2px;
@@ -372,7 +377,13 @@ export component CalendarScreen inherits Rectangle {
                         for header in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] : Rectangle {
                             height: 32px;
 
+                            // Same box the date numeral gets below (x:6, width:22),
+                            // so the header sits on the column's own axis instead of
+                            // the column's centre ~38px to its right.
                             Text {
+                                x: 6px;
+                                width: 22px;
+                                height: 100%;
                                 text: header;
                                 color: Theme.text-dim;
                                 font-size: 11px;
@@ -389,7 +400,7 @@ export component CalendarScreen inherits Rectangle {
                         spacing: 2px;
                         vertical-stretch: 1;
 
-                        for row in 6 : HorizontalLayout {
+                        for row in parent.month-rows : HorizontalLayout {
                             spacing: 2px;
 
                             for col in 7 : Rectangle {

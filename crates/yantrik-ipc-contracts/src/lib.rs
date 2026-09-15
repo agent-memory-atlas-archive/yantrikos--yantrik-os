@@ -14,3 +14,4 @@ pub mod music;
 pub mod system_monitor;
 pub mod network;
 pub mod notifications;
+pub mod control_surface;

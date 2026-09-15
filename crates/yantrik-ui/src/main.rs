@@ -40,6 +40,8 @@ mod apps;
 mod bridge;
 mod companion_rpc;
 mod control;
+mod control_installer;
+mod control_update;
 mod jobs;
 mod cards;
 mod clipboard;
@@ -60,6 +62,7 @@ mod notifications;
 mod onboarding;
 mod icons;
 mod render_backend;
+mod running;
 mod streaming;
 mod system_context;
 mod telegram;
@@ -135,7 +138,7 @@ fn main() {
 
     // And publish the desktop itself, the same way every app does. Without it, "what is on my
     // desktop right now" was answerable only by photographing a status bar we wrote ourselves.
-    control::publish(&ui);
+    control::publish(&ui, &ctx);
 
     // Debug: navigate to specific screen on startup via env var
     if let Ok(screen_str) = std::env::var("YANTRIK_START_SCREEN") {

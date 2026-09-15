@@ -418,29 +418,45 @@ export component SystemMonitor inherits Rectangle {
                                         font-size: 10px;
                                     }
 
-                                    // Load averages
+                                    // Load averages. `alignment: start` because a Text in a
+                                    // HorizontalLayout stretches by default, which scattered the
+                                    // three numbers across the whole card with nothing to say
+                                    // which window each belonged to.
                                     HorizontalLayout {
-                                        spacing: 8px;
+                                        spacing: 6px;
+                                        alignment: start;
+
                                         Text {
-                                            text: "Load:";
+                                            text: "LOAD";
                                             color: Theme.text-dim;
                                             font-size: 10px;
+                                            letter-spacing: 0.6px;
+                                            vertical-alignment: center;
                                         }
                                         Text {
                                             text: root.load-avg-1;
-                                            color: Theme.text-secondary;
+                                            color: Theme.text-primary;
                                             font-size: 10px;
                                             font-weight: 600;
+                                            vertical-alignment: center;
                                         }
                                         Text {
                                             text: root.load-avg-5;
-                                            color: Theme.text-dim;
+                                            color: Theme.text-secondary;
                                             font-size: 10px;
+                                            vertical-alignment: center;
                                         }
                                         Text {
                                             text: root.load-avg-15;
                                             color: Theme.text-dim;
                                             font-size: 10px;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: "1 / 5 / 15 min";
+                                            color: Theme.text-dim.transparentize(35%);
+                                            font-size: 9px;
+                                            vertical-alignment: center;
                                         }
                                     }
                                 }

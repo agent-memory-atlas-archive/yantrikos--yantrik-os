@@ -121,187 +121,14 @@ pub fn service_id_for(app_id: &str) -> String {
 }
 
 // ── What an app reports ─────────────────────────────────────────────
-
-/// One app's account of itself.
-pub struct View {
-    /// One line a person could read: `Notes — editing "Kernel asks", 412 words, unsaved`.
-    ///
-    /// Present so a caller surveying every open window pays one line per app instead of parsing
-    /// sixteen state objects.
-    pub summary: String,
-    /// The structured view-model. An object; keys are the app's own vocabulary.
-    pub state: serde_json::Value,
-}
-
-impl View {
-    pub fn new(summary: impl Into<String>) -> Self {
-        Self { summary: summary.into(), state: serde_json::json!({}) }
-    }
-
-    /// Add one field to the state object.
-    pub fn with(mut self, key: &str, value: impl Into<serde_json::Value>) -> Self {
-        if let Some(map) = self.state.as_object_mut() {
-            map.insert(key.to_string(), value.into());
-        }
-        self
-    }
-
-    /// Replace the whole state object at once, for an app that builds it elsewhere.
-    pub fn state(mut self, state: serde_json::Value) -> Self {
-        self.state = state;
-        self
-    }
-
-    /// A short fingerprint of everything this view reports.
-    ///
-    /// Not a version counter: nothing increments it, and two states can only ever be compared for
-    /// difference, never ordered. That is all a caller needs — the question is only ever *has
-    /// what I looked at changed since I looked* — and a hash of the answer settles it without
-    /// asking every app to maintain a counter it would eventually forget to bump. Slint has no
-    /// general property-change hook, so a counter would have to be written into every setter by
-    /// hand, and the ones nobody remembered would be silently invisible forever.
-    ///
-    /// It deliberately excludes `actions`, which are fixed for the life of the app: including
-    /// them would drag a constant through every comparison and change nothing.
-    pub fn revision(&self) -> String {
-        // FNV-1a, written out rather than `DefaultHasher`, because this value crosses a socket and
-        // turns up in logs: it has to mean the same thing on both sides of the wire and in
-        // tomorrow's build, which `DefaultHasher` explicitly does not promise.
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut eat = |bytes: &[u8]| {
-            for b in bytes {
-                hash ^= *b as u64;
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        };
-        eat(self.summary.as_bytes());
-        // A separator, so a summary ending mid-word cannot collide with a state beginning there.
-        eat(&[0]);
-        // `to_string` on a `serde_json::Value` renders object keys in sorted order, so the same
-        // state always produces the same bytes regardless of the order the app inserted them.
-        eat(self.state.to_string().as_bytes());
-        format!("{hash:016x}")
-    }
-}
-
-// ── What an app accepts ─────────────────────────────────────────────
-
-/// One argument of an action.
-#[derive(Clone)]
-pub struct Param {
-    pub name: String,
-    /// JSON Schema primitive: `string`, `number`, `integer`, `boolean`.
-    pub kind: &'static str,
-    pub required: bool,
-    pub description: String,
-}
-
-impl Param {
-    pub fn text(name: &str) -> Self {
-        Self { name: name.into(), kind: "string", required: true, description: String::new() }
-    }
-    pub fn number(name: &str) -> Self {
-        Self { name: name.into(), kind: "number", required: true, description: String::new() }
-    }
-    pub fn flag(name: &str) -> Self {
-        Self { name: name.into(), kind: "boolean", required: true, description: String::new() }
-    }
-    /// Mark this argument optional. The handler must cope with it being absent.
-    pub fn optional(mut self) -> Self {
-        self.required = false;
-        self
-    }
-    pub fn describe(mut self, description: &str) -> Self {
-        self.description = description.into();
-        self
-    }
-}
-
-/// One thing an app can be asked to do.
-#[derive(Clone)]
-pub struct Action {
-    pub name: String,
-    pub description: String,
-    pub params: Vec<Param>,
-    /// How much damage this can do, in the companion's vocabulary:
-    /// `safe`, `standard`, `sensitive`, `dangerous`.
-    ///
-    /// Declared per action rather than per surface because apps do not have one risk level:
-    /// reading which note is open and killing a process arrive through the same door. The
-    /// caller compares this against its own ceiling; the app states the fact.
-    pub permission: &'static str,
-    /// Whether the handler finishes the work or only starts it.
-    ///
-    /// Declared by the app because the app is the only thing that knows. A handler that hands off
-    /// to a worker returns long before the result exists, and a caller told only that the call
-    /// succeeded would report a build as finished the moment it began.
-    pub deferred: bool,
-}
-
-impl Action {
-    pub fn new(name: &str, description: &str) -> Self {
-        Self {
-            name: name.into(),
-            description: description.into(),
-            params: Vec::new(),
-            // Steering someone's window is not free, so the floor is `standard`, not `safe`.
-            permission: "standard",
-            // Most actions are a property write and are finished when they return. The ones that
-            // are not have to say so.
-            deferred: false,
-        }
-    }
-
-    pub fn arg(mut self, param: Param) -> Self {
-        self.params.push(param);
-        self
-    }
-
-    /// Declare this action riskier (or safer) than the default `standard`.
-    ///
-    /// Use `dangerous` for anything that destroys work or state a person cannot get back:
-    /// killing a process, deleting a file, sending mail.
-    pub fn risk(mut self, permission: &'static str) -> Self {
-        self.permission = permission;
-        self
-    }
-
-    /// Declare that this action only *starts* the work.
-    ///
-    /// Anything handed to a worker thread, sent over a network, or waiting on another process.
-    /// The response then says `settled: false`, and the caller has to watch for the result rather
-    /// than mistake the call for the result.
-    pub fn defers(mut self) -> Self {
-        self.deferred = true;
-        self
-    }
-
-    /// The action as JSON Schema, so a caller can hand it to a model unmodified.
-    fn schema(&self) -> serde_json::Value {
-        let mut properties = serde_json::Map::new();
-        let mut required = Vec::new();
-        for p in &self.params {
-            properties.insert(
-                p.name.clone(),
-                serde_json::json!({ "type": p.kind, "description": p.description }),
-            );
-            if p.required {
-                required.push(serde_json::Value::String(p.name.clone()));
-            }
-        }
-        serde_json::json!({
-            "name": self.name,
-            "description": self.description,
-            "permission": self.permission,
-            "settles": if self.deferred { "later" } else { "on return" },
-            "parameters": {
-                "type": "object",
-                "properties": serde_json::Value::Object(properties),
-                "required": required,
-            }
-        })
-    }
-}
+//
+// The vocabulary itself — `View`, `Param`, `Action`, the action JSON schema and the
+// revision hash — is pure data with no tie to Slint, and a standalone service must be able
+// to build the identical envelope without pulling this runtime in. So it lives in
+// `yantrik-ipc-contracts::control_surface`, and this module re-exports it: every existing
+// `control::View` / `control::Action` / `control::Param` caller is unchanged, and the shell
+// window and a headless service now share one definition of what an app is.
+pub use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
 
 // ── The registry, which lives on the UI thread ──────────────────────
 
@@ -335,13 +162,9 @@ impl Registry {
 
     fn describe(&self) -> serde_json::Value {
         let now = self.snapshot();
-        serde_json::json!({
-            "app": self.app_id,
-            "summary": now.summary,
-            "state": now.state,
-            "revision": now.revision,
-            "actions": self.actions.iter().map(|(a, _)| a.schema()).collect::<Vec<_>>(),
-        })
+        let specs: Vec<Action> = self.actions.iter().map(|(a, _)| a.clone()).collect();
+        let view = View { summary: now.summary, state: now.state };
+        describe_json(&self.app_id, &view, &specs)
     }
 
     /// Check the guard, dispatch, and read what came of it — without leaving the UI thread.
@@ -370,6 +193,25 @@ impl Registry {
             }
         }
 
+        // The mirror of the check above, and the omission that actually bit: an argument the
+        // action does not declare used to be dropped in silence. `new_note title='Handover'`
+        // answered accepted:true and wrote a note called "Untitled" — the caller was told its
+        // instruction had landed when nothing had read it. Refusing names the mistake and costs
+        // one retry; accepting it hides the mistake and costs the whole task.
+        if let Some(given) = args.as_object() {
+            for key in given.keys() {
+                if spec.params.iter().any(|p| &p.name == key) {
+                    continue;
+                }
+                let known: Vec<&str> = spec.params.iter().map(|p| p.name.as_str()).collect();
+                return Err(if known.is_empty() {
+                    format!("`{name}` takes no arguments, but `{key}` was given")
+                } else {
+                    format!("`{name}` has no argument `{key}`; it takes: {}", known.join(", "))
+                });
+            }
+        }
+
         // The guard. A caller that read state, decided, and asked for this action gets to say what
         // it was looking at; if the app has moved on, the action does not happen. Refusing is
         // cheap and correctable — acting on a stale premise is neither.
@@ -389,17 +231,11 @@ impl Registry {
         // Read back through the same path a `describe` would take, so a caller never has to make
         // a second round trip to find out what its own action did.
         let after = self.snapshot();
-        Ok(serde_json::json!({
-            // Never `ok`, never `done`. The handler ran; whether the work finished is a separate
-            // question that `settled` answers and that only the app can answer.
-            "accepted": true,
-            "action_id": action_id,
-            "settled": !spec.deferred,
-            "result": result,
-            "revision": after.revision,
-            "summary": after.summary,
-            "state": after.state,
-        }))
+        // Through the same helper a service uses, so a window action and a service action are
+        // indistinguishable by shape. `accepted` says the handler ran; `settled` (from the
+        // action's own `deferred`) says whether the work finished — never `ok`, never `done`.
+        let view = View { summary: after.summary, state: after.state };
+        Ok(act_json(&self.app_id, action_id, !spec.deferred, result, &view))
     }
 }
 
@@ -666,6 +502,49 @@ mod tests {
 
         let err = reg.act("open_note", &serde_json::json!({}), None, "t#1").unwrap_err();
         assert!(err.contains("title"), "the error must name the missing argument: {err}");
+    }
+
+    #[test]
+    fn an_argument_the_action_never_declared_is_refused_not_dropped() {
+        let reg = Registry {
+            app_id: "notes".into(),
+            describe: None,
+            actions: vec![(
+                Action::new("open_note", "Open a note").arg(Param::text("title")),
+                Box::new(|_| Ok(serde_json::json!("ran"))),
+            )],
+        };
+
+        // The real call that exposed this: a title was passed to an action that does not take
+        // one, the argument was dropped, and the caller was told the action succeeded.
+        let err = reg
+            .act("open_note", &serde_json::json!({"title": "a", "colour": "red"}), None, "t#1")
+            .unwrap_err();
+        assert!(err.contains("colour"), "the error must name the argument it did not know: {err}");
+        assert!(err.contains("title"), "and list what it does take: {err}");
+    }
+
+    #[test]
+    fn an_action_that_takes_nothing_says_so_rather_than_ignoring_you() {
+        let reg = Registry {
+            app_id: "notes".into(),
+            describe: None,
+            actions: vec![(
+                Action::new("new_note", "Start a new note"),
+                Box::new(|_| Ok(serde_json::json!({"title": "Untitled"}))),
+            )],
+        };
+
+        // This is verbatim the call made on the deployed VM. It used to answer accepted:true
+        // and write a note called "Untitled".
+        let err = reg
+            .act("new_note", &serde_json::json!({"title": "Handover"}), None, "t#1")
+            .unwrap_err();
+        assert!(err.contains("takes no arguments"), "{err}");
+        assert!(err.contains("title"), "{err}");
+
+        // And the no-argument call it was always meant to accept still works.
+        assert!(reg.act("new_note", &serde_json::json!({}), None, "t#2").is_ok());
     }
 
     #[test]

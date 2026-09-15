@@ -27,11 +27,45 @@ pub struct ApiLLM {
     family: ModelFamily,
 }
 
+/// A guess at whether a URL is an Ollama, for callers that were not told.
+///
+/// It matters because the two paths are not equivalent: Ollama's native `/api/chat` carries the
+/// `think` control, and the OpenAI-compatible `/v1` path silently discards it. Getting this wrong
+/// is not an error, it is a slower answer — measured on the sibling project at 188s against 86s
+/// for the same prompt, a 2.2x penalty with no log line to explain it.
+///
+/// The old rule was `base_url.contains(":11434")`, which is wrong for the deployment we actually
+/// recommend. A TLS gateway in front of Ollama — `https://aig.mycluster.cyou` — is better
+/// transport than a plaintext LAN port, and it has no `:11434` in it, so following the advice
+/// turned off the fast path. The documented best practice defeated the detection.
+///
+/// So: still a heuristic, now a wider one, and no longer the only way to answer the question.
+/// [`ApiLLM::with_flavor`] exists because a guess should never be the only option when the
+/// operator knows.
+fn looks_like_ollama(base_url: &str) -> bool {
+    let url = base_url.to_ascii_lowercase();
+    url.contains(":11434") || url.contains("ollama")
+}
+
 impl ApiLLM {
     pub fn new(base_url: impl Into<String>, api_key: Option<String>, model: impl Into<String>) -> Self {
         let base_url: String = base_url.into();
+        let is_ollama = looks_like_ollama(&base_url);
+        Self::with_flavor(base_url, api_key, model, is_ollama)
+    }
+
+    /// Build one that is *told* what it is talking to, rather than guessing.
+    ///
+    /// Use this whenever the answer is known. The guess below is only a default for callers that
+    /// have nothing better, and it is wrong for exactly the deployment we recommend.
+    pub fn with_flavor(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        model: impl Into<String>,
+        is_ollama: bool,
+    ) -> Self {
+        let base_url: String = base_url.into();
         let model: String = model.into();
-        let is_ollama = base_url.contains(":11434");
         let family = ModelFamily::from_model_name(&model);
         Self {
             base_url,
@@ -789,5 +823,44 @@ impl LLMBackend for ApiLLM {
 
     fn model_id(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod flavor_tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_lan_ollama_is_recognised() {
+        assert!(looks_like_ollama("http://192.168.4.35:11434/v1"));
+        assert!(looks_like_ollama("http://localhost:11434"));
+    }
+
+    #[test]
+    fn a_tls_gateway_in_front_of_ollama_is_not_recognised_by_url_alone() {
+        // The case that motivated `with_flavor`. This gateway *is* an Ollama, and no amount of
+        // looking at the URL can establish that — the name says nothing about the backend.
+        // Documented as a limitation rather than papered over with a longer pattern list, because
+        // the next gateway will have a different name again.
+        assert!(!looks_like_ollama("https://aig.mycluster.cyou"));
+
+        // Told, rather than guessed:
+        let told = ApiLLM::with_flavor("https://aig.mycluster.cyou", None, "qwen3.8:27b", true);
+        assert!(told.is_ollama, "an operator who knows must be able to say so");
+    }
+
+    #[test]
+    fn the_widened_guess_still_catches_the_obvious_names() {
+        assert!(looks_like_ollama("https://ollama.com/v1"));
+        assert!(looks_like_ollama("http://my-ollama.internal/v1"));
+    }
+
+    #[test]
+    fn an_openai_compatible_endpoint_is_not_mistaken_for_one() {
+        // The other direction matters just as much: claiming Ollama at an endpoint that is not one
+        // sends `think` to a server that will reject or ignore it.
+        for url in ["https://api.openai.com/v1", "https://api.deepseek.com", "http://localhost:8083/v1"] {
+            assert!(!looks_like_ollama(url), "{url} is not an Ollama");
+        }
     }
 }

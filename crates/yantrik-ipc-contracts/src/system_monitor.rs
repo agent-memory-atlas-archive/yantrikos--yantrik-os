@@ -25,6 +25,14 @@ pub struct MemoryInfo {
     pub usage_percent: f64,
     pub swap_total_bytes: u64,
     pub swap_used_bytes: u64,
+    /// MemAvailable — what a new allocation could actually get.
+    #[serde(default)]
+    pub available_bytes: u64,
+    /// Page cache. Counted as "used" by most tools but reclaimable.
+    #[serde(default)]
+    pub cached_bytes: u64,
+    #[serde(default)]
+    pub buffers_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

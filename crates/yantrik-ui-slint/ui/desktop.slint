@@ -168,6 +168,10 @@ export component DesktopScreen inherits Rectangle {
     callback end-focus-mode();
 
     // Wallpaper
+    // Agent mode shows the machine: both rails and the ask bar. A human gets a
+    // desktop instead. Off by default — the person is the default user.
+    in property <bool> agent-mode: false;
+
     in property <string> wallpaper-path: "";
     in property <image> wallpaper-image;
 
@@ -482,11 +486,74 @@ export component DesktopScreen inherits Rectangle {
             animate time-of-day { duration: 5000ms; }
         }
 
+        // ── Desktop icons (human mode) ──
+        // A desktop a person can use: the pinned apps sit on the wallpaper and
+        // open on a click. Positioned rather than laid out, because a plain
+        // Rectangle does not size to its children and the grid must not be able
+        // to push the wallpaper around.
+        if !root.agent-mode && !root.focus-mode : Rectangle {
+            x: 0; y: 0;
+            width: parent.width;
+            height: parent.height - 40px;
+
+            for item[i] in root.dock-items : Rectangle {
+                // `row`/`col` are reserved (GridLayout attaches them to every element).
+                property <int> icon-row: Math.floor(i / 6);
+                property <int> icon-col: i - self.icon-row * 6;
+
+                x: 28px + self.icon-col * 108px;
+                y: 24px + self.icon-row * 104px;
+                width: 96px;
+                height: 92px;
+                border-radius: Theme.r-md;
+                background: icon-ta.has-hover ? Theme.hover-fill : transparent;
+                animate background { duration: Theme.dur-fast; }
+
+                icon-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.launch-app(item.app-id); }
+                }
+
+                VerticalLayout {
+                    padding-top: 12px;
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            commands: Icons.app-or-window(item.app-id);
+                            size: 34px;
+                            thickness: 1.5px;
+                            tint: Theme.text-primary;
+                        }
+                    }
+
+                    Text {
+                        text: item.label;
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // A running app should say so without opening the switcher.
+                if item.is-running : Rectangle {
+                    x: (parent.width - 5px) / 2;
+                    y: parent.height - 7px;
+                    width: 5px;
+                    height: 5px;
+                    border-radius: 2.5px;
+                    background: Theme.accent;
+                }
+            }
+        }
+
         // ── Working set (left rail, hidden in focus mode) ──
         // What replaced the centred greeting. A desktop that shows the project, the recent
         // files and the memory count is a desktop that shows work; one that says "Good
         // evening" shows nothing. Every line here is data the shell already had.
-        if !root.focus-mode : Rectangle {
+        if root.agent-mode && !root.focus-mode : Rectangle {
             x: 0; y: 0;
             width: 296px;
             height: parent.height - 40px;
@@ -579,7 +646,7 @@ export component DesktopScreen inherits Rectangle {
         // ── Ask bar (top of the content area, hidden in focus mode) ──
         // The Lens is the primary interaction; it should look like one, not like an orb
         // to be discovered. Clicking opens the same overlay the orb used to.
-        if !root.focus-mode : TouchArea {
+        if root.agent-mode && !root.focus-mode : TouchArea {
             x: 296px + Theme.sp-5;
             y: Theme.sp-4;
             width: parent.width - 296px - 318px - Theme.sp-5 * 2;
@@ -679,7 +746,7 @@ export component DesktopScreen inherits Rectangle {
         }
 
         // ── Machine rail (right, hidden in focus mode) ──
-        if !root.focus-mode : MachineRail {
+        if root.agent-mode && !root.focus-mode : MachineRail {
             x: parent.width - self.width;
             y: 0;
             height: parent.height - 40px;
@@ -802,8 +869,13 @@ export component DesktopScreen inherits Rectangle {
 
     // ── Layer 2.7: Morning Brief Card (floating, upper-left) ──
     MorningBriefCard {
-        x: 24px;
+        // Top-left is where the desktop icons live now, and the brief was landing
+        // on top of them. In agent mode there are no icons, so it keeps its corner.
+        x: root.agent-mode ? 24px : parent.width - self.width - 24px;
         y: Theme.status-bar-height + 16px;
+        // A child of a plain Rectangle fills its parent by default, so the card
+        // ignored its own preferred-height and ran the whole height of the screen.
+        height: self.preferred-height;
         show-card: root.morning-brief-visible;
         greeting: root.morning-brief-greeting;
         sections: root.morning-brief-sections;

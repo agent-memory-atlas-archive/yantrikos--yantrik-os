@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use yantrik_app_runtime::prelude::*;
 use yantrik_ipc_transport::SyncRpcClient;
 
@@ -43,7 +43,7 @@ struct WeatherData {
     error: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct SavedLocation {
     name: String,
     lat: f64,
@@ -58,19 +58,67 @@ struct WeatherState {
     last_fetch_time: Arc<Mutex<Option<Instant>>>,
 }
 
+/// Prefs live next to the shell's settings (`~/.config/yantrik/weather.json`) — the
+/// user's locations and unit choice should survive a restart, not a process.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Prefs {
+    #[serde(default)]
+    fahrenheit: bool,
+    #[serde(default)]
+    active: usize,
+    #[serde(default)]
+    locations: Vec<SavedLocation>,
+}
+
+fn prefs_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    home.into()
+}
+
 impl WeatherState {
+    /// Build from persisted prefs when present; otherwise the default single location.
     fn new() -> Self {
-        let locations = vec![SavedLocation {
-            name: DEFAULT_LOCATION_NAME.to_string(),
-            lat: DEFAULT_LAT,
-            lon: DEFAULT_LON,
-        }];
+        let prefs: Option<Prefs> = std::fs::read_to_string(prefs_path().join(".config/yantrik/weather.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok());
+        let (locations, active, fahrenheit) = match prefs {
+            Some(p) if !p.locations.is_empty() => {
+                let active = (p.active).min(p.locations.len() - 1);
+                (p.locations, active, p.fahrenheit)
+            }
+            _ => (
+                vec![SavedLocation {
+                    name: DEFAULT_LOCATION_NAME.to_string(),
+                    lat: DEFAULT_LAT,
+                    lon: DEFAULT_LON,
+                }],
+                0,
+                false,
+            ),
+        };
         Self {
             locations: Arc::new(Mutex::new(locations)),
-            active_index: Arc::new(Mutex::new(0)),
-            use_fahrenheit: Arc::new(Mutex::new(false)),
+            active_index: Arc::new(Mutex::new(active)),
+            use_fahrenheit: Arc::new(Mutex::new(fahrenheit)),
             last_fetch_time: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn save(&self) {
+        let locs = self.locations.lock().unwrap();
+        let active = *self.active_index.lock().unwrap();
+        let prefs = Prefs {
+            fahrenheit: *self.use_fahrenheit.lock().unwrap(),
+            active,
+            locations: locs.clone(),
+        };
+        let path = prefs_path().join(".config/yantrik/weather.json");
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, serde_json::to_string_pretty(&prefs).unwrap());
     }
 
     fn active_location(&self) -> SavedLocation {
@@ -134,7 +182,7 @@ const DEFAULT_LOCATION_NAME: &str = "London";
 fn fetch_via_service(lat: f64, lon: f64, location_name: &str, use_fahrenheit: bool) -> Result<WeatherData, String> {
     let client = SyncRpcClient::for_service("weather");
     let params = serde_json::json!({
-        "lat": lat, "lon": lon, "name": location_name, "fahrenheit": use_fahrenheit,
+        "lat": lat, "lon": lon, "name": location_name, "fahrenheit": use_fahrenheit, "days": 7,
     });
 
     let current_json = client.call("weather.current", params.clone()).map_err(|e| e.message)?;
@@ -160,6 +208,7 @@ fn fetch_via_service(lat: f64, lon: f64, location_name: &str, use_fahrenheit: bo
     let deg_symbol = if use_fahrenheit { "\u{00B0}F" } else { "\u{00B0}C" };
     let wind_label = if use_fahrenheit { "mph" } else { "km/h" };
 
+    let today = svc_daily.first();
     let current = WeatherCurrent {
         temperature: format!("{:.0}{}", svc_current.temperature, deg_symbol).into(),
         feels_like: format!("{:.0}{}", svc_current.feels_like, deg_symbol).into(),
@@ -170,21 +219,32 @@ fn fetch_via_service(lat: f64, lon: f64, location_name: &str, use_fahrenheit: bo
         wind_speed: format!("{:.0} {}", svc_current.wind_speed, wind_label).into(),
         wind_direction: svc_current.wind_direction.into(),
         uv_index: format!("{:.0}", svc_current.uv_index).into(),
-        visibility: "Good".into(),
+        visibility: if svc_current.visibility_km >= 10.0 { "Excellent" }
+                    else if svc_current.visibility_km >= 4.0 { "Good" }
+                    else { "Reduced" }.into(),
         pressure: format!("{:.0} hPa", svc_current.pressure_hpa).into(),
-        cloud_cover: "".into(),
-        dew_point: "".into(),
-        sunrise: "".into(),
-        sunset: "".into(),
+        cloud_cover: format!("{}%", svc_current.cloud_cover).into(),
+        dew_point: format!("{:.0}{}", svc_current.dew_point, deg_symbol).into(),
+        sunrise: today.map(|d| d.sunrise.clone()).unwrap_or_default().into(),
+        sunset: today.map(|d| d.sunset.clone()).unwrap_or_default().into(),
+        is_day: svc_current.is_day,
         is_loading: false,
         error_text: "".into(),
     };
 
+    let h_min = svc_hourly.iter().map(|h| h.temperature).fold(f64::MAX, f64::min);
+    let h_max = svc_hourly.iter().map(|h| h.temperature).fold(f64::MIN, f64::max);
     let hourly: Vec<WeatherHourly> = svc_hourly.iter().map(|h| WeatherHourly {
         time: h.time.clone().into(),
         icon: h.icon.clone().into(),
         temp: format!("{:.0}\u{00B0}", h.temperature).into(),
+        precip: if h.precipitation_chance > 0 {
+            format!("{}%", h.precipitation_chance).into()
+        } else { "".into() },
         is_current: h.time == "Now",
+        temp_value: h.temperature as f32,
+        t_min: h_min as f32,
+        t_max: h_max as f32,
     }).collect();
 
     let mut global_min = f64::MAX;
@@ -246,7 +306,7 @@ fn fetch_weather_direct(lat: f64, lon: f64, location_name: &str, use_fahrenheit:
          &current=temperature_2m,relative_humidity_2m,apparent_temperature,\
          weather_code,wind_speed_10m,wind_direction_10m,surface_pressure,\
          is_day,cloud_cover\
-         &hourly=temperature_2m,weather_code\
+         &hourly=temperature_2m,weather_code,precipitation_probability\
          &daily=weather_code,temperature_2m_max,temperature_2m_min,\
          precipitation_sum,sunrise,sunset,uv_index_max\
          &timezone=auto&forecast_days=5{temp_unit}{wind_unit}"
@@ -322,6 +382,7 @@ fn fetch_weather_direct(lat: f64, lon: f64, location_name: &str, use_fahrenheit:
         dew_point: "".into(),
         sunrise: sunrise.into(),
         sunset: sunset.into(),
+        is_day,
         is_loading: false,
         error_text: "".into(),
     };
@@ -329,6 +390,7 @@ fn fetch_weather_direct(lat: f64, lon: f64, location_name: &str, use_fahrenheit:
     // Parse hourly
     let hourly_obj = &json["hourly"];
     let mut hourly = Vec::new();
+    let precip_probs = hourly_obj["precipitation_probability"].as_array();
     if let (Some(times), Some(temps), Some(codes)) = (
         hourly_obj["time"].as_array(),
         hourly_obj["temperature_2m"].as_array(),
@@ -343,15 +405,34 @@ fn fetch_weather_direct(lat: f64, lon: f64, location_name: &str, use_fahrenheit:
             let is_day_hour = (6..20).contains(&hour);
             let is_current = i == current_hour;
             if i >= current_hour && hourly.len() < 24 {
+                let chance = precip_probs
+                    .and_then(|a| a.get(i))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
                 hourly.push(WeatherHourly {
                     time: if is_current { "Now".into() }
                           else { format!("{}:00", hour).into() },
                     icon: wmo_icon(code, is_day_hour).into(),
                     temp: format!("{:.0}\u{00B0}", t).into(),
+                    precip: if chance > 0 { format!("{}%", chance).into() }
+                            else { "".into() },
                     is_current,
+                    temp_value: t as f32,
+                    // Filled once the whole strip is known, just below.
+                    t_min: 0.0,
+                    t_max: 0.0,
                 });
             }
         }
+    }
+
+    // Each column draws where its hour sits between the strip's coldest and
+    // warmest, so the range can only be stamped once every hour is collected.
+    let h_min = hourly.iter().map(|h| h.temp_value).fold(f32::MAX, f32::min);
+    let h_max = hourly.iter().map(|h| h.temp_value).fold(f32::MIN, f32::max);
+    for h in hourly.iter_mut() {
+        h.t_min = h_min;
+        h.t_max = h_max;
     }
 
     // Parse daily

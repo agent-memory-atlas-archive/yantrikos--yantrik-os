@@ -9,6 +9,7 @@
 //!   network.dns         {}  -> DnsConfig
 
 use serde::{Deserialize, Serialize};
+use yantrik_ipc_contracts::control_surface::{describe_json, Action, View};
 use yantrik_ipc_contracts::network::*;
 use yantrik_service_sdk::prelude::*;
 
@@ -74,11 +75,82 @@ impl ServiceHandler for NetworkHandler {
                 let dns = read_dns()?;
                 Ok(serde_json::to_value(dns).unwrap())
             }
+            // The agent-facing surface: connectivity, interfaces and resolvers in one read, so
+            // "am I online, and how" is answerable without a screenshot of the network applet.
+            "app.describe" => Ok(describe_json("network", &describe_view()?, &network_actions())),
             _ => Err(ServiceError {
                 code: -1,
                 message: format!("Unknown method: {method}"),
             }),
         }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Control surface (app.describe)
+// ══════════════════════════════════════════════════════════════════════
+
+/// Connectivity as data: the one-line "am I online, and how", plus interfaces and resolvers.
+///
+/// Reading is the whole job here. Changing the connection — joining a wifi network, bringing a
+/// link up or down — is not implemented in this service yet, so no actions are advertised: an
+/// empty action list is the honest statement that this surface is read-only, and it is better
+/// than offering a verb that would fail.
+fn describe_view() -> Result<View, ServiceError> {
+    let status = read_status()?;
+    let ifaces = read_interfaces().unwrap_or_default();
+    let dns = read_dns().ok();
+
+    let summary = if status.connected {
+        let where_ = status.ssid.clone().unwrap_or_else(|| status.conn_type.clone());
+        let ip = status.ip_address.clone().unwrap_or_else(|| "no address".to_string());
+        format!("Network — online via {where_}, {ip}")
+    } else {
+        "Network — offline".to_string()
+    };
+
+    let interfaces: Vec<serde_json::Value> = ifaces
+        .iter()
+        // Loopback is never the answer to "how am I connected"; drop it from the glance.
+        .filter(|i| i.name != "lo")
+        .map(|i| {
+            serde_json::json!({
+                "name": i.name,
+                "type": conn_type_str(&i.conn_type),
+                "state": i.state,
+                "ip": i.ip_address,
+                "mac": i.mac_address,
+            })
+        })
+        .collect();
+
+    let mut view = View::new(summary)
+        .with("connected", status.connected)
+        .with("type", status.conn_type)
+        .with("ssid", status.ssid.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
+        .with("ip_address", status.ip_address.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
+        .with("interfaces", serde_json::Value::Array(interfaces));
+    if let Some(dns) = dns {
+        view = view
+            .with("nameservers", serde_json::json!(dns.nameservers))
+            .with("search_domains", serde_json::json!(dns.search_domains));
+    }
+    Ok(view)
+}
+
+/// This surface is read-only for now; see the note on `describe_view`.
+fn network_actions() -> Vec<Action> {
+    Vec::new()
+}
+
+/// The connection type as the short word the rest of the UI uses.
+fn conn_type_str(t: &ConnectionType) -> &'static str {
+    match t {
+        ConnectionType::Wifi => "wifi",
+        ConnectionType::Ethernet => "ethernet",
+        ConnectionType::Vpn => "vpn",
+        ConnectionType::Bridge => "bridge",
+        ConnectionType::Other(_) => "other",
     }
 }
 

@@ -1,0 +1,276 @@
+#cloud-config
+#
+# Turn a stock Debian 13 cloud image into a Yantrik OS desktop on first boot.
+#
+# This targets the genericcloud images Proxmox and most VPS providers already carry, so a
+# machine can be created without building or uploading an image first. It fetches a built
+# release rather than compiling: one rustc in this workspace peaks near 14 GB of RSS, which
+# is more than most VMs have and far more than they should spend on a first boot.
+#
+# THE KERNEL TRAP, which cost an afternoon to find: Debian's genericcloud kernel ships no
+# virtio-gpu module, so the compositor comes up with no /dev/dri and the screen stays black
+# while every log says the session started fine. Installing linux-image-amd64 alongside it
+# is NOT enough — GRUB_DEFAULT=0 keeps booting the cloud kernel. The cloud kernel has to be
+# removed, which is why that step is a removal and not just an install.
+#
+# Usage (Proxmox):
+#   qm set <vmid> --cicustom "user=local:snippets/yantrik-user-data.yaml"
+# Override the build it installs with YANTRIK_RELEASE_URL in the write_files block below.
+
+hostname: yantrik
+manage_etc_hosts: true
+
+users:
+  - name: yantrik
+    gecos: Yantrik OS
+    groups: [sudo, video, render, input, audio, seat]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    # Key auth only. A password hash invented for an example is worse than none: the
+    # machine boots, looks correct, and nobody can log in to find out why.
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL86m/XfAfYIrggZFJH0MENK9dqYx69alB+s6S+kNpAt k3s-deployment
+
+package_update: true
+package_upgrade: false
+
+packages:
+  # A real kernel. See the note above: this one carries virtio-gpu, the cloud one does not.
+  - linux-image-amd64
+  # The session: a stacking Wayland compositor, seat management, and something to prove
+  # rendering works when it does not.
+  - labwc
+  - seatd
+  # How the shell enumerates windows and outputs. It shells out to `wlrctl toplevel list`
+  # for the taskbar and the window list, and to wlr-randr for displays. Without these the
+  # desktop reports "0 windows open" with apps running, and an agent asking what is open is
+  # told nothing is.
+  - wlrctl
+  - wlr-randr
+  - mesa-utils
+  - foot
+  # The eyes. Chromium is driven over CDP rather than by screenshotting.
+  - chromium
+  # The ears. There is no sound card on a VM, so audio is captured from a virtual sink's
+  # monitor — the same thing a screen recorder does.
+  - pipewire-pulse
+  - wireplumber
+  - pulseaudio-utils
+  # yantrik-ui and yantrik link against libspeechd.so.2. Without it the shell dies at
+  # exec with a loader error, labwc restarts it forever, and the machine shows a text
+  # login — which reads as "the desktop was never built" rather than "one .so is absent".
+  - libspeechd2
+  # `yos` talks CDP over a websocket.
+  - python3-websocket
+  - curl
+  - ca-certificates
+  # Without this the hypervisor cannot report the machine's address, so an instance created
+  # unprompted is one you then have to go looking for. It is two megabytes and it is the
+  # difference between `qm guest cmd <id> network-get-interfaces` answering and not.
+  - qemu-guest-agent
+
+write_files:
+  - path: /etc/yantrik/install.env
+    permissions: "0644"
+    content: |
+      # Where the built OS comes from. A nightly job publishes this tarball; point it
+      # anywhere reachable (a release URL, an internal HTTP server, a file:// path).
+      # The internal release host first: the pipeline gets proven where a bad build
+      # costs nothing, and moves to the public host once it has run clean for a while.
+      # Pin a dated build for a machine that must not move under you; -latest is right
+      # for a box you rebuild often.
+      YANTRIK_RELEASE_URL="http://releases.yantrikos.com/nightly/yantrik-os-latest-linux-amd64.tar.zst"
+      # A machine built by a script has nobody sitting at it to answer questions.
+      # Set to "interactive" to present onboarding on first boot instead.
+      YANTRIK_ONBOARDING="seeded"
+      YANTRIK_USER_NAME="Pranab"
+      YANTRIK_COMPANION_NAME="Yantrik"
+
+  - path: /usr/local/sbin/yantrik-firstboot
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # First-boot installer. Idempotent: re-running it re-installs the payload and leaves
+      # everything else alone, so a failed boot can simply be retried.
+      set -euo pipefail
+      . /etc/yantrik/install.env
+
+      log() { echo "[yantrik-firstboot] $*"; }
+
+      # State directories first. The kernel block below writes its reboot marker into
+      # /var/lib/yantrik, and that directory used to be created further down by the
+      # payload step — so under `set -e` the touch failed, the script exited before
+      # installing anything, and the machine never rebooted onto the new kernel.
+      install -d -o yantrik -g yantrik /opt/yantrik /var/lib/yantrik /var/log/yantrik
+
+      # ── The kernel ────────────────────────────────────────────────────────────────────
+      # Remove the cloud kernel rather than merely installing a real one beside it. With
+      # both present GRUB keeps the cloud kernel as entry 0 and the machine boots back into
+      # a session with no GPU node, which presents as a black screen and healthy logs.
+      #
+      # This used to be one apt-get with `|| true` on the end, and it silently did nothing:
+      # runcmd fires while the tail of cloud-init's own package phase still holds the dpkg
+      # lock, so the removal failed on the lock, the failure was swallowed, the reboot
+      # marker was written anyway, and the machine came back on the same cloud kernel.
+      wait_for_apt() {
+        i=0
+        while [ $i -lt 60 ]; do
+          if ! fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; then
+            return 0
+          fi
+          i=$((i + 1))
+          sleep 5
+        done
+        return 1
+      }
+
+      RUNNING="$(uname -r)"
+      case "$RUNNING" in
+        *cloud*)
+          log "running the cloud kernel ($RUNNING); it ships no virtio-gpu, so a compositor would find no output"
+          wait_for_apt || log "apt still locked after five minutes — attempting the removal anyway"
+
+          # Removing the kernel you are booted on makes the prerm ask, through debconf,
+          # whether to abort. Noninteractive answers the default, which is yes. Say no.
+          echo "linux-image-$RUNNING linux-image-$RUNNING/prerm/removing-running-kernel-$RUNNING boolean false" \
+            | debconf-set-selections 2>/dev/null || true
+
+          DEBIAN_FRONTEND=noninteractive apt-get purge -y \
+            linux-image-cloud-amd64 "linux-image-$RUNNING" \
+            || log "WARNING: apt could not purge the cloud kernel"
+          update-grub || true
+
+          # Check, do not hope. A silent failure here is the black screen.
+          if dpkg -l 2>/dev/null | awk '/^ii/ && /linux-image.*cloud/ { found = 1 } END { exit !found }'; then
+            log "ERROR: the cloud kernel is still installed — this machine will boot without /dev/dri"
+          else
+            log "cloud kernel removed; next boot uses $(ls /boot/vmlinuz-* 2>/dev/null | grep -v cloud | head -1)"
+          fi
+          touch /var/lib/yantrik/.reboot-needed
+          ;;
+        *)
+          log "kernel $RUNNING is not the cloud flavour; nothing to remove"
+          ;;
+      esac
+
+      # ── The payload ───────────────────────────────────────────────────────────────────
+      if [ -n "${YANTRIK_RELEASE_URL:-}" ]; then
+        log "fetching $YANTRIK_RELEASE_URL"
+        tmp=$(mktemp -d)
+        # Fail loudly on a 404: a silently empty install boots to a desktop with no OS on it,
+        # which looks like a broken build rather than a missing download.
+        curl -fL --retry 3 --retry-delay 5 -o "$tmp/payload" "$YANTRIK_RELEASE_URL"
+        tar --zstd -xf "$tmp/payload" -C /opt/yantrik --strip-components=1
+        rm -rf "$tmp"
+        chown -R yantrik:yantrik /opt/yantrik
+        ln -sf /opt/yantrik/bin/yos /usr/local/bin/yos
+        log "installed $(ls /opt/yantrik/bin | wc -l) binaries"
+
+        # ── Onboarding ────────────────────────────────────────────────────────────────
+        # Without this the desktop opens on "Hey, I'm Yantrik. What should I call you?"
+        # and waits — on a machine nobody is looking at. The marker path and the settings
+        # path are the ones the shell itself reads (onboarding.rs, wire/settings.rs).
+        if [ "${YANTRIK_ONBOARDING:-seeded}" = "seeded" ]; then
+          install -d -o yantrik -g yantrik /home/yantrik/.yantrik /home/yantrik/.config/yantrik
+          touch /home/yantrik/.yantrik/.onboarding_complete
+          if [ ! -f /home/yantrik/.config/yantrik/settings.yaml ]; then
+            {
+              echo "user_name: ${YANTRIK_USER_NAME:-Pranab}"
+              echo "companion_name: ${YANTRIK_COMPANION_NAME:-Yantrik}"
+              echo "dark_mode: true"
+              echo "accent_color: cyan"
+              echo "tool_permission: sensitive"
+              echo "auto_lock_secs: 300"
+              echo "dnd_mode: false"
+              echo "wallpaper: aurora"
+              echo "agent_mode: false"
+            } > /home/yantrik/.config/yantrik/settings.yaml
+          fi
+          chown -R yantrik:yantrik /home/yantrik/.yantrik /home/yantrik/.config/yantrik
+          log "onboarding seeded — the desktop opens ready"
+        else
+          log "onboarding left interactive"
+        fi
+      else
+        log "no YANTRIK_RELEASE_URL set — desktop will start with nothing to run"
+      fi
+
+      # ── Audio ─────────────────────────────────────────────────────────────────────────
+      # A VM has no sound card, so give it a virtual one. Chromium plays into this sink and
+      # `yos web listen` records the sink's monitor; without it the machine is simply deaf.
+      install -d -m 0755 /etc/pipewire/pipewire.conf.d
+      cat > /etc/pipewire/pipewire.conf.d/10-yantrik-capture.conf <<'CONF'
+      context.modules = [
+        { name = libpipewire-module-loopback
+          args = {
+            node.name = "yantrik_capture"
+            node.description = "yantrik_capture"
+            capture.props = { media.class = "Audio/Sink" }
+          }
+        }
+      ]
+      CONF
+
+      systemctl daemon-reload
+      systemctl enable --now seatd
+      systemctl enable yantrik-session
+      log "done"
+
+  - path: /etc/systemd/system/yantrik-session.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Yantrik OS desktop session
+      After=systemd-user-sessions.service seatd.service
+      Wants=seatd.service
+
+      [Service]
+      User=yantrik
+      PAMName=login
+      TTYPath=/dev/tty1
+      # The session owns the tty so the compositor can take the seat; without this labwc
+      # starts, finds no seat, and exits with a message that reads like success.
+      StandardInput=tty
+      TTYReset=yes
+      TTYVHangup=yes
+      Environment=XDG_RUNTIME_DIR=/run/user/1000
+      Environment=XDG_SESSION_TYPE=wayland
+      Environment=WLR_RENDERER_ALLOW_SOFTWARE=1
+      ExecStart=/opt/yantrik/bin/yantrik-session
+      Restart=always
+      RestartSec=3
+
+      [Install]
+      WantedBy=graphical.target
+
+  - path: /opt/yantrik/bin/yantrik-session
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # The desktop. labwc supervises the shell; the shell is the thing the user sees and
+      # the thing an agent acts on, and they are two views of one state rather than two
+      # programs that happen to agree.
+      export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+      mkdir -p "$XDG_RUNTIME_DIR"
+      # Without this the shell opens as an ordinary labwc window, title bar and all,
+      # sitting in the middle of the screen. An OS is not a window on something else.
+      export SLINT_FULLSCREEN=1
+      exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml'
+
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+  - [ systemctl, enable, seatd ]
+  - [ /usr/local/sbin/yantrik-firstboot ]
+  # Boot into the desktop rather than a text console. Setting the target is not enough:
+  # getty@tty1 keeps its own claim on /dev/tty1, and the session unit takes that tty
+  # (PAMName=login, TTYVHangup), so the two fight and the session is killed with SIGHUP
+  # a second after every start — 25 restarts before anyone looked.
+  - [ systemctl, set-default, graphical.target ]
+  - [ systemctl, disable, --now, getty@tty1.service ]
+  - [ systemctl, restart, yantrik-session.service ]
+  # The kernel swap only takes effect on the next boot, so take it now rather than leaving
+  # the machine in a state where the desktop cannot start and nothing says why.
+  - [ sh, -c, "test -f /var/lib/yantrik/.reboot-needed && rm -f /var/lib/yantrik/.reboot-needed && systemctl reboot || true" ]
+
+final_message: "Yantrik OS ready after $UPTIME seconds. yos ls to see what is running."

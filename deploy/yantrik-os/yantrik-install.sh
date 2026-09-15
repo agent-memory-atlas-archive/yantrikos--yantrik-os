@@ -17,17 +17,45 @@ echo
 
 # ── 1. User setup ──
 step "Create your account"
-echo -n "  Full name: "; read -r FULLNAME
+echo -n "  Full name (used for git commits): "; read -r FULLNAME
 echo -n "  Username: "; read -r USERNAME
 [ -z "$USERNAME" ] && USERNAME="yantrik"
-echo -n "  Password: "; read -rs PASSWORD; echo
-echo -n "  Confirm:  "; read -rs PASSWORD2; echo
-if [ "$PASSWORD" != "$PASSWORD2" ]; then
-    echo -e "${R}Passwords don't match. Aborting.${N}"; exit 1
-fi
+
+# Re-prompt rather than abort. Throwing away every answer over one mistyped password
+# is a punishment for a typo, and it is the last thing anyone wants from an installer.
+while :; do
+    echo -n "  Password (for login and sudo): "; read -rs PASSWORD; echo
+    echo -n "  Confirm:  "; read -rs PASSWORD2; echo
+    [ -n "$PASSWORD" ] || { echo -e "  ${A}Password cannot be empty.${N}"; continue; }
+    [ "$PASSWORD" = "$PASSWORD2" ] && break
+    echo -e "  ${A}Those did not match. Try again.${N}"
+done
+
 echo -n "  Hostname [yantrik]: "; read -r HOSTNAME
 [ -z "$HOSTNAME" ] && HOSTNAME="yantrik"
-ok "User: $USERNAME ($FULLNAME) @ $HOSTNAME"
+
+# ── 1b. Timezone, guessed from the network ──
+# Asking someone to scroll four hundred zones when the network already knows is work
+# we can do for them. If there is no network, or the answer looks wrong, this is still
+# one keystroke to accept and one line to override.
+TZ_GUESS=""
+if command -v curl >/dev/null 2>&1; then
+    TZ_GUESS=$(curl -fsS -m 5 http://ip-api.com/line/?fields=timezone 2>/dev/null | head -1)
+fi
+case "$TZ_GUESS" in
+    */*) : ;;
+    *) TZ_GUESS="" ;;
+esac
+[ -n "$TZ_GUESS" ] && [ ! -f "/usr/share/zoneinfo/$TZ_GUESS" ] && TZ_GUESS=""
+[ -z "$TZ_GUESS" ] && TZ_GUESS="UTC"
+echo -n "  Timezone [$TZ_GUESS]: "; read -r TIMEZONE
+[ -z "$TIMEZONE" ] && TIMEZONE="$TZ_GUESS"
+if [ ! -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
+    echo -e "  ${A}Unknown timezone '$TIMEZONE' — using $TZ_GUESS.${N}"
+    TIMEZONE="$TZ_GUESS"
+fi
+
+ok "User: $USERNAME ($FULLNAME) @ $HOSTNAME, $TIMEZONE"
 
 # ── 2. Disk selection ──
 step "Select installation disk"
@@ -38,10 +66,22 @@ echo -n "  Target disk (e.g., sda): "; read -r TARGET_DISK
 [ -z "$TARGET_DISK" ] && { echo -e "${R}No disk specified.${N}"; exit 1; }
 DISK="/dev/$TARGET_DISK"
 [ -b "$DISK" ] || { echo -e "${R}$DISK is not a block device.${N}"; exit 1; }
+
+# ── 2b. Everything, once, before anything is destroyed ──
+# The disk was the only thing confirmed before this, so a mistyped username was
+# discovered after the install rather than before it.
 echo
-echo -e "  ${A}WARNING: ALL DATA on $DISK will be ERASED${N}"
-echo -n "  Type 'yes' to continue: "; read -r CONFIRM
-[ "$CONFIRM" = "yes" ] || exit 1
+step "Does this look right?"
+printf "  %-12s %s\n" "Username"  "$USERNAME"
+printf "  %-12s %s\n" "Full name" "${FULLNAME:-[skipped]}"
+printf "  %-12s %s\n" "Hostname"  "$HOSTNAME"
+printf "  %-12s %s\n" "Timezone"  "$TIMEZONE"
+printf "  %-12s %s\n" "Password"  "$(printf '%*s' "${#PASSWORD}" '' | tr ' ' '*')"
+printf "  %-12s %s\n" "Disk"      "$DISK ($(lsblk -dno SIZE "$DISK" 2>/dev/null | tr -d ' '))"
+echo
+echo -e "  ${A}Everything on $DISK will be erased. There is no recovery.${N}"
+echo -n "  Type 'yes' to install: "; read -r CONFIRM
+[ "$CONFIRM" = "yes" ] || { echo "  Nothing was changed."; exit 1; }
 
 # ── 3. Partition ──
 step "Partitioning $DISK (GPT)..."
@@ -101,6 +141,15 @@ $IS_EFI && [ -n "$EFI_PART" ] && echo "$EFI_PART  /boot/efi  vfat  defaults  0  
 
 # ── 9. Hostname ──
 echo "$HOSTNAME" > "$M/etc/hostname"
+
+# Apply the timezone that was asked for. Collecting an answer and then ignoring it is
+# the same defect as an action reporting success it never performed.
+if [ -n "${TIMEZONE:-}" ] && [ -f "$M/usr/share/zoneinfo/$TIMEZONE" ]; then
+    ln -sf "/usr/share/zoneinfo/$TIMEZONE" "$M/etc/localtime"
+    echo "$TIMEZONE" > "$M/etc/timezone"
+    chroot "$M" dpkg-reconfigure -f noninteractive tzdata >/dev/null 2>&1 || true
+    ok "Timezone: $TIMEZONE"
+fi
 printf "127.0.0.1\tlocalhost\n127.0.1.1\t%s\n" "$HOSTNAME" > "$M/etc/hosts"
 
 # ── 10. Create user ──

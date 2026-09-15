@@ -8,6 +8,7 @@
 //! let text = stt.transcribe(&pcm_16khz_mono)?;
 //! ```
 
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -139,13 +140,32 @@ impl CandleWhisper {
 
         let config = &inner.model.config;
 
+        let owned;
+        let pcm = match pad_or_trim(pcm) {
+            Cow::Borrowed(p) => p,
+            Cow::Owned(v) => {
+                owned = v;
+                &owned
+            }
+        };
+
         // Convert PCM to mel spectrogram
         let mel = audio::pcm_to_mel(config, pcm, &inner.mel_filters);
         let mel_len = mel.len();
         let n_mels = config.num_mel_bins;
         let n_frames = mel_len / n_mels;
-        let mel =
-            Tensor::from_vec(mel, (1, n_mels, n_frames), &inner.device)?;
+        let mel = Tensor::from_vec(mel, (1, n_mels, n_frames), &inner.device)?;
+
+        // pcm_to_mel appends an extra half-chunk of padding beyond the audio, so it
+        // returns more frames than the encoder's fixed source positions accept — for a
+        // full 30s chunk, 4500 frames where the encoder takes 3000. The caller is
+        // expected to narrow it; not doing so is a shape error out of the encoder, not
+        // a degraded transcript, so this cannot be skipped for short input either.
+        let mel = if n_frames > m::N_FRAMES {
+            mel.narrow(2, 0, m::N_FRAMES)?
+        } else {
+            mel
+        };
 
         // Reset KV cache for fresh transcription
         inner.model.reset_kv_cache();
@@ -203,7 +223,12 @@ impl CandleWhisper {
             }
 
             result_tokens.push(next_token);
-            tokens = vec![next_token];
+            // The decoder keeps no self-attention cache — it recomputes K/V from whatever
+            // sequence it is handed, and numbers positions from zero each call. So the
+            // whole sequence goes back in every step. Passing only the newest token makes
+            // every token look like position 0 with no history, which decodes to a word or
+            // two of plausible-looking noise and then EOT.
+            tokens.push(next_token);
         }
 
         tracing::info!(
@@ -294,6 +319,25 @@ fn mel_to_hz(mel: f64) -> f64 {
 /// Compute mel filterbank matching librosa's Slaney normalization.
 ///
 /// Returns a flat array of shape [num_mel_bins, n_fft/2+1].
+/// Fit PCM to the exactly-30-seconds window Whisper's encoder accepts.
+///
+/// The encoder has a fixed number of source positions, so it takes one chunk length of
+/// audio and nothing else: shorter clips are zero-padded, longer ones truncated. This is
+/// the same pad_or_trim the reference implementation applies before computing the mel.
+fn pad_or_trim(pcm: &[f32]) -> Cow<'_, [f32]> {
+    let want = m::N_SAMPLES;
+    match pcm.len().cmp(&want) {
+        std::cmp::Ordering::Equal => Cow::Borrowed(pcm),
+        std::cmp::Ordering::Greater => Cow::Borrowed(&pcm[..want]),
+        std::cmp::Ordering::Less => {
+            let mut v = Vec::with_capacity(want);
+            v.extend_from_slice(pcm);
+            v.resize(want, 0.0);
+            Cow::Owned(v)
+        }
+    }
+}
+
 fn compute_mel_filters(num_mel_bins: usize, n_fft: usize, sample_rate: f64) -> Vec<f32> {
     let n_freqs = n_fft / 2 + 1;
 
@@ -338,4 +382,61 @@ fn compute_mel_filters(num_mel_bins: usize, n_fft: usize, sample_rate: f64) -> V
     }
 
     filters
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whisper's encoder accepts one chunk length and nothing else. Every clip that is
+    /// not exactly that long — which is nearly every real clip — has to be fitted to it.
+    #[test]
+    fn any_clip_length_becomes_one_chunk() {
+        for len in [1usize, 16_000, m::N_SAMPLES - 1, m::N_SAMPLES, m::N_SAMPLES + 1, 45 * 16_000] {
+            let raw = vec![0.5f32; len];
+            let fitted = pad_or_trim(&raw);
+            assert_eq!(
+                fitted.len(),
+                m::N_SAMPLES,
+                "a {len}-sample clip must be fitted to one chunk"
+            );
+        }
+    }
+
+    #[test]
+    fn padding_keeps_the_audio_and_zeroes_the_rest() {
+        let pcm = vec![0.5f32; 16_000];
+        let fitted = pad_or_trim(&pcm);
+        assert!(fitted[..16_000].iter().all(|&s| s == 0.5), "audio must survive intact");
+        assert!(fitted[16_000..].iter().all(|&s| s == 0.0), "the tail must be silence");
+    }
+
+    /// The mel the audio helper returns is deliberately longer than the encoder accepts —
+    /// it appends half a chunk of padding past the end of the audio. A caller that hands
+    /// that straight to the encoder gets a shape error, so the frame count must come out
+    /// at one chunk regardless of how long the input was.
+    #[test]
+    fn mel_frames_exceed_what_the_encoder_takes() {
+        let filters = compute_mel_filters(80, m::N_FFT, m::SAMPLE_RATE as f64);
+        assert_eq!(filters.len(), 80 * (m::N_FFT / 2 + 1));
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"num_mel_bins":80,"max_source_positions":1500,"d_model":384,
+                "encoder_layers":4,"encoder_attention_heads":6,"decoder_layers":4,
+                "decoder_attention_heads":6,"vocab_size":51865,"max_target_positions":448,
+                "suppress_tokens":[]}"#,
+        )
+        .expect("whisper config");
+
+        let raw = vec![0.0f32; 20 * 16_000];
+        let pcm = pad_or_trim(&raw);
+        let mel = audio::pcm_to_mel(&cfg, &pcm, &filters);
+        let n_frames = mel.len() / cfg.num_mel_bins;
+        assert!(
+            n_frames > m::N_FRAMES,
+            "expected pcm_to_mel to over-produce frames ({n_frames} vs {}); if this ever              stops being true the narrow in transcribe_inner is still correct, but the              reason for it has changed",
+            m::N_FRAMES
+        );
+    }
 }

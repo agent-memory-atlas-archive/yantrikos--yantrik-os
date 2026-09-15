@@ -260,17 +260,49 @@ fn read_cmdline(pid: i32) -> Option<String> {
 /// anyway. Anything this service records may end up in the companion's memory, which is durable
 /// and searchable, so a secret that passes through here does not pass through once.
 fn redact(command: &str) -> String {
-    const MARKERS: [&str; 8] =
-        ["--password", "--passwd", "--token", "--secret", "--api-key", "--apikey", "--auth", "-p"];
+    const MARKERS: [&str; 7] =
+        ["--password", "--passwd", "--token", "--secret", "--api-key", "--apikey", "--auth"];
+
+    // `-p` gets its own rule, and only for the programs where it means a password.
+    //
+    // It used to sit in the list above, matched with `starts_with`, which destroyed every long
+    // flag beginning with those two characters. Found in the journal after an agent audited the
+    // filesystem: `find / -maxdepth 4 -perm -o+w` was recorded as `find '/' -maxdepth 4
+    // -p<redacted> -o+w`, and the record of a security audit became unreadable. `-print`,
+    // `-path`, `-pipe` and `-pretty` all had the same fate.
+    //
+    // This is the same shape as an over-broad rule in the companion's audit log — `auth` matching
+    // `author` — and the same lesson: over-redaction has a cost too. A record nobody can read
+    // stops being consulted, and a record nobody consults is not an audit.
+    //
+    // So `-p` is a password only for the handful of tools that define it that way. Anywhere else
+    // it is an ordinary flag and stays legible.
+    const DASH_P_IS_A_PASSWORD: [&str; 4] = ["mysql", "mysqldump", "mysqladmin", "psql"];
+
+    let program = command
+        .split(' ')
+        .next()
+        .unwrap_or_default()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    let dash_p_hides_a_secret = DASH_P_IS_A_PASSWORD.contains(&program.as_str());
+
     command
         .split(' ')
         .map(|arg| {
             let lower = arg.to_lowercase();
             for marker in MARKERS {
-                // `--password=x` and `-pSECRET` both hide the value in the same argument.
+                // `--password=x` and `--token=abc` hide the value in the same argument.
                 if lower.starts_with(marker) && arg.len() > marker.len() {
                     return format!("{marker}<redacted>");
                 }
+            }
+            // `mysql -pHunter2`: the value is jammed against the flag with no separator, so the
+            // whole argument goes.
+            if dash_p_hides_a_secret && lower.starts_with("-p") && arg.len() > 2 {
+                return "-p<redacted>".to_string();
             }
             arg.to_string()
         })
@@ -354,6 +386,31 @@ mod tests {
         assert_eq!(redact("curl --token=abc123 host"), "curl --token<redacted> host");
         // A bare flag carries nothing and should survive intact.
         assert_eq!(redact("git commit -p"), "git commit -p");
+    }
+
+    #[test]
+    fn an_ordinary_flag_that_begins_with_dash_p_survives() {
+        // Found in the journal, in the record of an agent auditing this machine for
+        // world-writable files. The command it actually ran was legible; the record of it was
+        // not, because every long flag starting with `-p` was being blanked.
+        assert_eq!(
+            redact("find / -maxdepth 4 -perm -o+w -not -path /proc/*"),
+            "find / -maxdepth 4 -perm -o+w -not -path /proc/*",
+            "a security audit must stay readable in the record of it"
+        );
+        assert_eq!(redact("find . -name x -print"), "find . -name x -print");
+        assert_eq!(redact("git log --pretty=oneline"), "git log --pretty=oneline");
+        assert_eq!(redact("gcc -pipe -O2 main.c"), "gcc -pipe -O2 main.c");
+        assert_eq!(redact("ssh -p 2222 host"), "ssh -p 2222 host");
+    }
+
+    #[test]
+    fn dash_p_still_hides_a_password_where_it_is_one() {
+        // The case the rule exists for, unchanged. Narrowing it to the programs that define `-p`
+        // as a password must not stop it working for them.
+        assert_eq!(redact("mysql -pHunter2 db"), "mysql -p<redacted> db");
+        assert_eq!(redact("/usr/bin/mysqldump -pS3cret schema"), "/usr/bin/mysqldump -p<redacted> schema");
+        assert_eq!(redact("psql -pletmein"), "psql -p<redacted>");
         assert_eq!(redact("cargo build --release"), "cargo build --release");
     }
 

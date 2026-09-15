@@ -104,6 +104,11 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             let weak_final = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak_final.upgrade() {
+                    // Whatever happened, the work has stopped. `installing` is what the
+                    // Install button and the control surface both check before starting one,
+                    // and nothing used to clear it: a failed install left the flag set and
+                    // every retry was refused as "already running".
+                    ui.set_onboard_installing(false);
                     match result {
                         Ok(()) => {
                             ui.set_onboard_install_status("Installation complete!".into());
@@ -114,6 +119,11 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                         Err(e) => {
                             tracing::error!(error = %e, "Installation failed");
                             ui.set_onboard_install_status(format!("Installation failed: {e}").into());
+                            ui.set_onboard_install_error(format!("Installation failed: {e}").into());
+                            // Back to the summary, where the error is displayed and the Install
+                            // button lives. The progress screen has no way off it, so failing
+                            // there left the machine staring at a stalled bar.
+                            ui.set_onboard_phase(10);
                         }
                     }
                 }
@@ -241,9 +251,9 @@ pub fn run_install(state: &InstallerState, progress: ProgressFn) -> Result<(), S
     std::thread::sleep(std::time::Duration::from_secs(1));
 
     // Unmount in reverse order, lazy flag to avoid EBUSY
-    let _ = run_cmd("umount", &["-l", &format!("{mount_dir}/sys")]);
-    let _ = run_cmd("umount", &["-l", &format!("{mount_dir}/proc")]);
-    let _ = run_cmd("umount", &["-l", &format!("{mount_dir}/dev")]);
+    let _ = run_cmd("umount", &["-Rl", &format!("{mount_dir}/sys")]);
+    let _ = run_cmd("umount", &["-Rl", &format!("{mount_dir}/proc")]);
+    let _ = run_cmd("umount", &["-Rl", &format!("{mount_dir}/dev")]);
     let _ = run_cmd("umount", &["-l", &format!("{mount_dir}/boot/efi")]);
     let _ = run_cmd("umount", &["-l", mount_dir]);
 
@@ -263,23 +273,7 @@ fn install_to_target(
     progress: &ProgressFn,
 ) -> Result<(), String> {
     // ── Step 4: Copy live system via rsync ──────────────────────
-    progress(20, "Copying system files (this takes a few minutes)...");
-    run_cmd(
-        "rsync",
-        &[
-            "-aAXH",
-            "--exclude=/proc/*",
-            "--exclude=/sys/*",
-            "--exclude=/dev/*",
-            "--exclude=/run/*",
-            "--exclude=/tmp/*",
-            "--exclude=/mnt/*",
-            "--exclude=/live/*",
-            "--exclude=/cdrom/*",
-            "/",
-            &format!("{mount_dir}/"),
-        ],
-    )?;
+    copy_system(mount_dir, progress)?;
     progress(55, "System files copied");
 
     // ── Step 5: Generate fstab ──────────────────────────────────
@@ -305,9 +299,21 @@ fn install_to_target(
 
     // ── Step 7: Bind-mount for chroot (needed BEFORE any chroot commands) ──
     progress(62, "Preparing chroot environment...");
-    run_cmd("mount", &["--bind", "/dev", &format!("{mount_dir}/dev")])?;
-    run_cmd("mount", &["--bind", "/proc", &format!("{mount_dir}/proc")])?;
-    run_cmd("mount", &["--bind", "/sys", &format!("{mount_dir}/sys")])?;
+    // --rbind, not --bind. A plain bind mounts the one filesystem and leaves every submount
+    // behind, so the chroot got a /sys with no /sys/firmware/efi/efivars under it. grub-install
+    // then could not write a UEFI boot entry, which is how this installer ended up carrying a
+    // `--no-nvram` flag and producing disks no firmware would boot.
+    for dir in ["dev", "proc", "sys"] {
+        let target = format!("{mount_dir}/{dir}");
+        run_cmd("mount", &["--rbind", &format!("/{dir}"), &target])?;
+        // And then make it a slave. Mounts under /sys and /dev propagate by default, so the
+        // recursive unmount at the end of the install travelled back up the bind and tore
+        // efivarfs off the running system: the first install worked and a second one in the
+        // same session would find no EFI variables and quietly install an unbootable disk.
+        // A slave mount receives changes from the host and sends none back, which is exactly
+        // the relationship a chroot wants.
+        run_cmd("mount", &["--make-rslave", &target])?;
+    }
 
     // ── Step 8: Create user account ─────────────────────────────
     progress(65, "Creating user account...");
@@ -345,17 +351,61 @@ fn install_to_target(
     // ── Step 12: Install GRUB ───────────────────────────────────
     progress(75, "Installing bootloader...");
     if is_efi {
+        // Two installs, and both are needed.
+        //
+        // The first writes \EFI\yantrik and asks the firmware to remember it. The second writes
+        // \EFI\BOOT\BOOTX64.EFI, the removable-media path every UEFI implementation tries when
+        // it has no entry of its own.
+        //
+        // Only the first used to run, and with `--no-nvram` on it, so it left a disk with a
+        // bootloader in a directory nothing had been told to look in. The machine installed
+        // cleanly, reported 100%, rebooted, and came straight back up on the installation
+        // media — the firmware had no entry for the disk and no fallback file to find.
         tracing::info!("Installer: installing GRUB for EFI");
-        chroot_cmd(
+        let named = chroot_cmd(
             mount_dir,
             &[
                 "grub-install",
                 "--target=x86_64-efi",
                 "--efi-directory=/boot/efi",
                 "--bootloader-id=yantrik",
-                "--no-nvram",  // Don't try to update NVRAM (may fail in live env)
             ],
+        );
+        if let Err(e) = named {
+            // Firmware that will not take a new entry is normal enough — a locked-down board,
+            // or efivars mounted read-only. It costs us the named entry, not the install,
+            // because the removable path below does not need NVRAM at all.
+            tracing::warn!(error = %e, "could not register a UEFI boot entry; the removable path will carry the boot");
+            chroot_cmd(
+                mount_dir,
+                &[
+                    "grub-install",
+                    "--target=x86_64-efi",
+                    "--efi-directory=/boot/efi",
+                    "--bootloader-id=yantrik",
+                    "--no-nvram",
+                ],
+            )?;
+        }
+
+        // This one is not optional and its failure is the install's failure.
+        chroot_cmd(
+            mount_dir,
+            &["grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi", "--removable"],
         )?;
+
+        // Check the file, not the exit code. grub-install has been known to report success
+        // having written nothing useful, and "the installer said it worked" is exactly the
+        // claim that cost us a boot.
+        let fallback = format!("{mount_dir}/boot/efi/EFI/BOOT/BOOTX64.EFI");
+        if !std::path::Path::new(&fallback).exists() {
+            return Err(
+                "grub-install reported success but left no EFI/BOOT/BOOTX64.EFI on the \
+                 EFI partition; the disk would not boot"
+                    .to_string(),
+            );
+        }
+        tracing::info!("Installer: EFI fallback bootloader present");
     } else {
         tracing::info!("Installer: installing GRUB for BIOS on {disk}");
         chroot_cmd(
@@ -826,6 +876,117 @@ fn sudo_write(path: &str, content: &str) -> Result<(), String> {
 
 /// Run a command via sudo, returning Ok(stdout) or Err(stderr).
 /// All installer commands need root privileges for disk/mount/chroot operations.
+/// Copy the live filesystem onto the target, reporting how far along it is.
+///
+/// This used to be one `run_cmd` call, which waits for the process and hands back its output in
+/// a single piece. The consequence was that `progress` sat at 20 for the whole multi-minute
+/// copy — and a number that does not move is indistinguishable from a hang, whether you are a
+/// person watching a bar or an agent reading `installer.progress` off the control surface. It
+/// was the longest step in the install and the only one that said nothing while it ran.
+///
+/// `--info=progress2` reports one running percentage for the whole transfer rather than
+/// per-file, and `--no-inc-recursive` makes rsync build the file list up front so that
+/// percentage means something instead of drifting against an estimate that keeps growing. The
+/// scan costs maybe a quarter of a minute before the first number appears, which is why the
+/// step announces itself before it starts.
+fn copy_system(mount_dir: &str, progress: &ProgressFn) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    // The band this step owns. Partitioning and formatting finish at 20; fstab starts at 58.
+    const START: i32 = 20;
+    const END: i32 = 55;
+
+    progress(START, "Scanning the live system...");
+
+    let target = format!("{mount_dir}/");
+    let mut child = Command::new("sudo")
+        .args([
+            "rsync",
+            "-aAXH",
+            "--info=progress2",
+            "--no-inc-recursive",
+            "--exclude=/proc/*",
+            "--exclude=/sys/*",
+            "--exclude=/dev/*",
+            "--exclude=/run/*",
+            "--exclude=/tmp/*",
+            "--exclude=/mnt/*",
+            "--exclude=/live/*",
+            "--exclude=/cdrom/*",
+            "/",
+            &target,
+        ])
+        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run rsync: {e}"))?;
+
+    // Drained on its own thread. rsync can be noisy about unreadable files and a full stderr
+    // pipe would block it forever while we sit here reading stdout.
+    let errors = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            text
+        })
+    });
+
+    let mut out = child.stdout.take().ok_or("rsync gave us no output to read")?;
+    let mut buf = [0u8; 4096];
+    let mut field = String::new();
+    let mut last = START;
+    loop {
+        let read = match out.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return Err(format!("reading rsync progress: {e}")),
+        };
+        for &byte in &buf[..read] {
+            // rsync rewrites its progress line in place, so updates are separated by carriage
+            // returns; splitting on newlines alone would yield one enormous line at the end.
+            if byte == b'\r' || byte == b'\n' {
+                if let Some(percent) = rsync_percent(&field) {
+                    let mapped = START + (percent * (END - START)) / 100;
+                    // Only ever forwards: rsync's figure can twitch backwards near the end and
+                    // a bar that retreats reads as something going wrong.
+                    if mapped > last {
+                        last = mapped;
+                        progress(mapped, "Copying system files...");
+                    }
+                }
+                field.clear();
+            } else {
+                field.push(byte as char);
+            }
+        }
+    }
+
+    let status = child.wait().map_err(|e| format!("waiting for rsync: {e}"))?;
+    let stderr = errors.and_then(|h| h.join().ok()).unwrap_or_default();
+    if !status.success() {
+        let detail = stderr.trim();
+        return Err(if detail.is_empty() {
+            format!("rsync failed ({status})")
+        } else {
+            format!("rsync failed: {detail}")
+        });
+    }
+    Ok(())
+}
+
+/// The percentage out of an `--info=progress2` line, if the line has one.
+///
+/// The line looks like `  1,234,567,890  42%  245.67MB/s    0:01:12`, so the percentage is the
+/// one field ending in `%`. Anything else rsync prints is ignored rather than guessed at.
+fn rsync_percent(line: &str) -> Option<i32> {
+    line.split_whitespace()
+        .find_map(|word| word.strip_suffix('%'))
+        .and_then(|digits| digits.parse::<i32>().ok())
+        .filter(|p| (0..=100).contains(p))
+}
+
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     tracing::debug!(cmd = cmd, args = ?args, "installer: running command (via sudo)");
 

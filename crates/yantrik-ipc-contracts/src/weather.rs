@@ -10,11 +10,22 @@ pub struct CurrentWeather {
     pub humidity: i32,
     pub wind_speed: f64,
     pub wind_direction: String,
+    /// Wind direction in degrees (0 = N, 90 = E) — the compass needle angle.
+    #[serde(default)]
+    pub wind_degrees: f64,
     pub condition: String,
+    /// Icon kind for the vector icon set: sun, moon, partly, cloud, rain, snow, fog, storm.
+    /// (Was emoji; the UI now draws its own icon per kind.)
     pub icon: String,
     pub uv_index: f64,
     pub visibility_km: f64,
     pub pressure_hpa: f64,
+    #[serde(default)]
+    pub dew_point: f64,
+    #[serde(default)]
+    pub cloud_cover: i32,
+    #[serde(default)]
+    pub is_day: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +66,14 @@ pub struct AirQuality {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Location {
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// A city match from the geocoding search — one row of the location suggestions list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationSuggestion {
     pub name: String,
     pub lat: f64,
     pub lon: f64,

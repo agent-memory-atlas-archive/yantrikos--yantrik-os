@@ -141,14 +141,25 @@ fn decide() -> Verdict {
         };
     }
 
-    // Native Linux: a render node means a DRM driver that can actually accept command buffers.
-    // llvmpipe on its own does not create one, which is exactly the distinction that matters here.
-    if has_render_node() {
-        return Verdict {
-            backend: "winit-femtovg",
-            gallium: None,
-            reason: "DRM render node present",
-        };
+    // Native Linux: a render node is necessary but NOT sufficient. The original rule here was
+    // "a render node means a DRM driver that can accept command buffers, and llvmpipe does not
+    // create one" — both true, and the conclusion still wrong, because virtio-gpu creates a
+    // render node and then falls back to llvmpipe when the host has nothing to pass through.
+    // Measured on a Proxmox VM: driver virtio-pci, EGL "failed to create dri2 screen ... falling
+    // back to kms_swrast", and the shell sat at 272% CPU animating a gradient through software
+    // OpenGL — the configuration this file already calls the worst of the three.
+    if let Some(driver) = render_node_driver() {
+        if accelerates(&driver) {
+            return Verdict {
+                backend: "winit-femtovg",
+                gallium: None,
+                reason: "DRM render node with an accelerating driver",
+            };
+        }
+        tracing::info!(
+            driver = %driver,
+            "Render node present but its driver does not accelerate; using the software rasteriser"
+        );
     }
 
     Verdict {
@@ -172,7 +183,37 @@ fn has_gallium_driver(name: &str) -> bool {
     DRI_DIRS.iter().any(|d| Path::new(d).join(&file).exists())
 }
 
+/// Which kernel driver is behind the first DRM render node, if there is one.
+///
+/// This is the question that matters. The node's existence is not evidence of acceleration:
+/// virtio-pci, vmwgfx, qxl, bochs-drm, simpledrm and the mgag200/ast BMC chips all publish one.
+fn render_node_driver() -> Option<String> {
+    for entry in std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("renderD") {
+            continue;
+        }
+        let uevent = std::fs::read_to_string(entry.path().join("device/uevent")).ok()?;
+        if let Some(d) = uevent.lines().find_map(|l| l.strip_prefix("DRIVER=")) {
+            return Some(d.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Whether that driver actually draws on hardware.
+///
+/// Named as an allowlist rather than a blocklist: an unknown driver on a machine we have never
+/// seen should land on the software rasteriser, which is merely slow, instead of software OpenGL,
+/// which is slow AND makes the shell believe frames are free.
+fn accelerates(driver: &str) -> bool {
+    matches!(
+        driver,
+        "amdgpu" | "radeon" | "i915" | "xe" | "nouveau" | "nvidia" | "nvidia-drm" | "msm" | "panfrost" | "v3d"
+    )
+}
+
 /// True if any DRM render node exists (`/dev/dri/renderD*`).
+#[allow(dead_code)]
 fn has_render_node() -> bool {
     let Ok(entries) = std::fs::read_dir("/dev/dri") else {
         return false;

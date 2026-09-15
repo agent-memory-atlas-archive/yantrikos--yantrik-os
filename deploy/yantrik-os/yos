@@ -1,0 +1,597 @@
+#!/usr/bin/env python3
+"""yos — talk to Yantrik OS from a command line.
+
+The OS publishes a rich control surface over unix sockets and, until now, no way to
+reach it except by writing a JSON-RPC client. That is not a theoretical gap: an agent
+given the job of writing a handover note spent most of a 64k context window building
+`parse_perc.py` and `fetch_perc.py` — mktemp, chmod, atomic rename, over and over —
+before it could ask the OS a single question. It then died when the context it had
+spent on plumbing pushed the actual task out of the window.
+
+So this exists to make the common thing one line. It is deliberately small, has no
+dependencies beyond the standard library, and does no interpretation: it speaks the
+protocol and prints what came back.
+
+    yos ls                              which surfaces are up
+    yos describe shell                  what the desktop is showing
+    yos describe notes                  what an app is showing
+    yos act shell open_app name=notes   ask something to do something
+    yos act notes append text='...'     with arguments
+    yos act shell open_app name=notes --full     the reply with the app state
+    yos perception [N]                  the last N kernel observations
+    yos journal                         is the eye being drained, and how far behind
+
+    yos web                             what is on the page, as a list of things you can do
+    yos web text                        what the page SAYS — the prose a reader sees
+    yos web find <words>                where is the thing I want, anywhere on the page
+    yos web all                         every interactive element, not just the viewport
+    yos web go <url>                    navigate
+    yos web click <n>                   click element n from `yos web`
+    yos web type <n> <text>             type into element n
+    yos web tabs                        what is open
+    yos web listen [secs]               what the page SAYS OUT LOUD — records the audio
+                                        the machine is playing and transcribes it
+
+Two conventions worth knowing:
+
+  * `describe` and `act` take a short name. `shell` means `app-shell`, `notes` means
+    `app-notes`; anything else is used as given, so `yos describe weather` reaches the
+    weather service directly.
+
+  * `act` prints the whole reply rather than a success line, because the reply is not a
+    boolean. `settled: false` means the work was accepted and has not finished — a
+    launch dispatched, a build started. Reading that as done is the mistake this
+    surface is built to make impossible, and hiding it behind a tick would put it back.
+
+  * `web` is the one place the OS cannot read structure from raw data, so it reads the
+    page the way a person does: the accessible name of everything you could interact
+    with, in the viewport, numbered so you can act on it. Measured on Hacker News,
+    that is 6 KB against 692 KB for Chromium's own accessibility tree, and 59 ms
+    against 417 ms. The numbers are refs into the last `yos web` — take a fresh
+    reading before clicking if the page may have moved.
+"""
+
+import json
+import os
+import socket
+import sys
+
+# perception-service needs CAP_SYS_ADMIN at startup so it runs as root and its socket
+# lands in /run/yantrik; everything else lives in the user's runtime dir. A caller
+# should not have to know which uid started what.
+SOCKET_DIRS = [
+    os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "yantrik"),
+    "/run/yantrik",
+]
+
+ALIASES = {"shell": "app-shell"}
+
+
+def socket_candidates(name):
+    """Every socket a short name might mean, best guess first.
+
+    Matching ignores case. The app calls itself "Notes" everywhere a caller can see it —
+    in its own title, in `describe` output — while its socket is `app-notes`, so anyone
+    reading the name off the screen and typing it back gets told there is no such app.
+    That is a needless way to fail, and the caller has no way to learn better from it.
+
+    Returns a list, not one path, because "best guess" can be wrong: an app window
+    (`app-weather`) preferred over the service (`weather`) may have been closed, leaving a
+    stale socket file that refuses connections. The caller tries them in order and falls
+    through a dead one, so a killed window never hides a live service.
+    """
+    key = name.lower()
+    names = [ALIASES.get(key, key)]
+    if key not in ALIASES and not key.startswith("app-"):
+        # `notes` should try `app-notes` before the `notes` service, because a person
+        # asking about Notes usually means the window they can see — but only *before*, so
+        # a closed window falls through to the service rather than dead-ending on it.
+        names.insert(0, "app-" + key)
+
+    found = []
+    seen = set()
+    for candidate in names:
+        for directory in SOCKET_DIRS:
+            path = os.path.join(directory, candidate + ".sock")
+            if os.path.exists(path) and path not in seen:
+                found.append(path); seen.add(path)
+        # A socket whose name differs only in case is the same app, so find it anyway.
+        for directory in SOCKET_DIRS:
+            if not os.path.isdir(directory):
+                continue
+            for entry in os.listdir(directory):
+                if entry.lower() == candidate + ".sock":
+                    path = os.path.join(directory, entry)
+                    if path not in seen:
+                        found.append(path); seen.add(path)
+    return found
+
+
+def call(name, method, params=None, timeout=40):
+    """One JSON-RPC round trip. One line in, one line out.
+
+    Tries every socket the name could mean, in order, skipping any that no longer has a
+    process behind it. A socket file outlives the process that made it, so a connection
+    refused is "that window is gone", not an error worth stopping on — the next candidate,
+    usually the always-on service, answers.
+    """
+    candidates = socket_candidates(name)
+    if not candidates:
+        die("no socket for %r (try: yos ls)" % name)
+
+    last_error = None
+    for path in candidates:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(path)
+        except (ConnectionRefusedError, FileNotFoundError) as e:
+            # A stale socket: the file is there, the process is not. Try the next candidate.
+            s.close()
+            last_error = e
+            continue
+        except PermissionError:
+            # Connecting to a unix socket needs *write* permission, which is why a
+            # world-readable socket is still unreachable. Say that rather than "denied".
+            s.close()
+            die("%s is not readable by this user — perception runs as root; try sudo" % path)
+        s.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(1 << 20)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        if not buf:
+            die("%s closed the connection without answering" % name)
+        reply = json.loads(buf)
+        if "error" in reply:
+            die("%s.%s refused: %s" % (name, method, reply["error"].get("message", "unknown")))
+        return reply["result"]
+
+    die("%s is not answering — its socket is stale (the app or service is not running)" % name)
+
+
+def die(message):
+    print("yos: " + message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def parse_args(pairs):
+    """`name=notes count=3` into a dict, with numbers and booleans as themselves.
+
+    JSON values pass through untouched, so `args='{"a":1}'` and `text='hello world'`
+    both work — the first because it parses, the second because it does not.
+    """
+    out = {}
+    for pair in pairs:
+        if "=" not in pair:
+            die("arguments look like key=value, got %r" % pair)
+        key, value = pair.split("=", 1)
+        try:
+            out[key] = json.loads(value)
+        except ValueError:
+            out[key] = value
+    return out
+
+
+def cmd_ls(_):
+    for directory in SOCKET_DIRS:
+        if not os.path.isdir(directory):
+            continue
+        try:
+            names = sorted(f[:-5] for f in os.listdir(directory) if f.endswith(".sock"))
+        except PermissionError:
+            print("  %s (not readable by this user)" % directory)
+            continue
+        if names:
+            print("%s:" % directory)
+            for n in names:
+                print("   ", n)
+
+
+def cmd_describe(argv):
+    if not argv:
+        die("usage: yos describe <shell|notes|...>")
+    view = call(argv[0], "app.describe")
+    print(view.get("summary", "(no summary)"))
+    if "revision" in view:
+        print("revision: %s" % view["revision"])
+    if view.get("state"):
+        print(json.dumps(view["state"], indent=2))
+    for action in view.get("actions", []):
+        args = ", ".join(action["parameters"].get("properties", {}).keys())
+        print("  act: %s(%s)  [%s, settles %s]" % (
+            action["name"], args,
+            action.get("permission", "?"), action.get("settles", "?")))
+
+
+def cmd_act(argv):
+    if len(argv) < 2:
+        die("usage: yos act <target> <action> [key=value ...] [--full]")
+    # The reply carries a full `describe` of the app as it stands after the action. That is
+    # the right thing to send and the wrong thing to print: filling six fields of the
+    # installer printed the same 180-line shell state six times, and an agent pays for every
+    # line of it. So the default is the part that changed, and `--full` is there for when the
+    # whole picture is what you actually wanted.
+    full = "--full" in argv
+    argv = [a for a in argv if a != "--full"]
+    target, action = argv[0], argv[1]
+    params = {"action": action, "args": parse_args(argv[2:])}
+    # An `expect_revision` is lifted out of the args, because it guards the call rather
+    # than being an argument to the action.
+    if "expect_revision" in params["args"]:
+        params["expect_revision"] = params["args"].pop("expect_revision")
+    reply = call(target, "app.act", params)
+    if full:
+        print(json.dumps(reply, indent=2))
+        return
+    print(reply.get("summary", "(no summary)"))
+    # `settled` is the one field a caller must not miss: false means the work was accepted and
+    # has not finished, so it is printed even when everything went well.
+    print("accepted: %s, settled: %s" % (reply.get("accepted"), reply.get("settled")))
+    if "revision" in reply:
+        print("revision: %s" % reply["revision"])
+    if reply.get("result"):
+        print(json.dumps(reply["result"], indent=2))
+    if reply.get("state"):
+        print("(state omitted; `yos describe %s`, or re-run with --full)" % target)
+
+
+def cmd_perception(argv):
+    limit = int(argv[0]) if argv else 20
+    page = call("perception", "perception.since", {"seq": 0})
+    obs = page["observations"]
+    print("%d held, next_seq %d, missed %d" % (len(obs), page["next_seq"], page["missed"]))
+    if page["missed"]:
+        print("  (%d observations were overwritten before anything read them)" % page["missed"])
+    for o in obs[-limit:]:
+        print("  [%.2f] %s" % (o["salience"], o["summary"]))
+
+
+def cmd_journal(_):
+    status = call("perception-journal", "journal.status")
+    for key in ("connected", "source_next_seq", "consumed_next_seq", "lag",
+                "records", "gaps", "observations_lost", "bytes_on_disk",
+                "seconds_since_progress"):
+        print("  %-22s %s" % (key, status.get(key)))
+
+
+# ── The browser ──
+#
+# Everything else in this file talks to something we wrote, which can simply be asked.
+# A web page cannot: it is rendered, unstructured, and changes under you. So this reads
+# it semantically rather than visually — accessible names over pixels — which is the
+# same rule the rest of the OS follows for foreign windows.
+
+CDP = "http://127.0.0.1:9222"
+
+
+def _page():
+    """The active page's debugger socket, or a usable complaint."""
+    import urllib.error
+    import urllib.request
+    try:
+        tabs = json.load(urllib.request.urlopen(CDP + "/json/list", timeout=5))
+    except urllib.error.URLError:
+        die("no browser with a debug port on 9222 (launch chromium with "
+            "--remote-debugging-port=9222 --remote-allow-origins=*)")
+    pages = [t for t in tabs if t.get("type") == "page"]
+    if not pages:
+        die("the browser is running but has no page open")
+    return pages[0]
+
+
+def _eval(expression, await_promise=False):
+    try:
+        from websocket import create_connection
+    except ImportError:
+        die("needs python3-websocket (apt install python3-websocket)")
+    page = _page()
+    # Chromium 2024+ refuses websocket upgrades whose Origin it did not expect, which is
+    # why the browser must be started with --remote-allow-origins and this must send one.
+    ws = create_connection(page["webSocketDebuggerUrl"], origin=CDP, timeout=60)
+    ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {
+        "expression": expression, "returnByValue": True, "awaitPromise": await_promise}}))
+    while True:
+        msg = json.loads(ws.recv())
+        if msg.get("id") == 1:
+            break
+    ws.close()
+    if "error" in msg:
+        die("the page refused: %s" % msg["error"].get("message"))
+    result = msg["result"].get("result", {})
+    if msg["result"].get("exceptionDetails"):
+        die("the page threw: %s" % msg["result"]["exceptionDetails"].get("text"))
+    return result.get("value")
+
+
+SCAN = None  # loaded lazily from disk beside this script
+
+
+def _scan_js():
+    global SCAN
+    if SCAN is None:
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "scan.js")
+        if not os.path.exists(path):
+            die("scan.js is missing next to yos; the page reader needs it")
+        SCAN = open(path).read()
+    return SCAN
+
+
+def cmd_web(argv):
+    if not argv:
+        page = _page()
+        print("%s\n%s\n" % (page.get("title", "")[:90], page.get("url", "")[:90]))
+        print(_eval(_scan_js()) or "(nothing interactive in the viewport)")
+        return
+
+    sub = argv[0]
+    if sub == "find":
+        # The answer to "1509 more not currently on screen".
+        #
+        # A viewport reading of Wikipedia shows 100 elements out of 1609. Printing all of
+        # them costs 60 KB and throws away the compression that makes this readable at
+        # all. But the refs are global — the scan numbers every element and only *prints*
+        # the visible ones — so the rest are already addressable, they just cannot be
+        # found. This searches the whole set by accessible name and prints the matches
+        # with their real refs, which is what an agent actually wants: not "show me
+        # everything", but "where is the thing I came for".
+        if len(argv) < 2:
+            die("usage: yos web find <words>")
+        needle = " ".join(argv[1:])
+        _eval(_scan_js())  # refresh the registry before searching it
+        matches = _eval("""(() => {
+            const NL = String.fromCharCode(10);
+            const q = %s.toLowerCase();
+            const out = [];
+            (window.__yantrik_elements || []).forEach((el, i) => {
+                const name = (el.getAttribute('aria-label') || el.innerText ||
+                              el.value || el.getAttribute('name') || '').trim();
+                if (!name || !name.toLowerCase().includes(q)) return;
+                const r = el.getBoundingClientRect();
+                const onscreen = r.width > 0 && r.height > 0 &&
+                                 r.top < innerHeight && r.bottom > 0;
+                out.push('[' + (i+1) + '] ' + el.tagName.toLowerCase() + ' "' +
+                         name.slice(0, 70).split(NL).join(' ') + '"' +
+                         (el.href ? ' -> ' + el.href.slice(0, 60) : '') +
+                         (onscreen ? '' : '  (off screen)'));
+            });
+            return out.slice(0, 40).join(NL);
+        })()""" % json.dumps(needle))
+        if not matches:
+            # Said plainly, because "nothing printed" and "nothing there" look identical
+            # and an agent will conclude the page lacks it and give up.
+            print("nothing on this page matches %r. It may be behind a click, or the page "
+                  "may not have finished rendering." % needle)
+        else:
+            print(matches)
+    elif sub == "all":
+        print(_eval(_scan_js().replace("const showAll = false", "const showAll = true"))
+              or "(nothing interactive on this page)")
+    elif sub == "text":
+        # The other half of seeing a page, and the half that was missing.
+        #
+        # `yos web` lists what you can *do* — links, buttons, fields — which is what an
+        # agent needs to act. It is useless for research, because an article and a comment
+        # thread are prose, and prose is not interactive. Pointed at a Hacker News
+        # discussion, the element scan returned 1.5 KB of navigation chrome and not one
+        # word of any comment. An agent asked to summarise the argument could navigate
+        # perfectly and had nothing to read.
+        #
+        # `innerText` rather than `textContent` deliberately: innerText is what is
+        # *rendered* — it respects display:none, collapses whitespace the way the browser
+        # does, and inserts the line breaks a reader actually sees. textContent would hand
+        # back hidden markup and run paragraphs together.
+        limit = int(argv[1]) if len(argv) > 1 else 20000
+        text = _eval("document.body.innerText") or ""
+        if len(text) > limit:
+            # Truncation is announced, not silent. An agent that quietly received half a
+            # page would summarise half an argument and never know.
+            print(text[:limit])
+            print("\n[... %d more characters. `yos web text %d` for more.]"
+                  % (len(text) - limit, len(text)))
+        else:
+            print(text)
+    elif sub == "go":
+        if len(argv) < 2:
+            die("usage: yos web go <url>")
+        url = argv[1]
+        _eval("location.assign(%s)" % json.dumps(url))
+        print("navigating to %s — take a fresh `yos web` once it settles" % url)
+    elif sub == "tabs":
+        import urllib.request
+        for t in json.load(urllib.request.urlopen(CDP + "/json/list", timeout=5)):
+            if t.get("type") == "page":
+                print("  %-60s %s" % (t.get("title", "")[:60], t.get("url", "")[:60]))
+    elif sub in ("click", "type"):
+        _web_click_or_type(sub, argv)
+    elif sub == "listen":
+        cmd_listen(argv[1:])
+    else:
+        die("unknown: yos web [go|click|type|tabs|listen]")
+
+
+# Controls whose label reads as a commitment. Taken from yantrik-mind's browser driver so
+# the two paths draw the same line — an agent stopped at a button in one of them must not
+# be able to reach it through the other.
+#
+# Broad on purpose: a false positive costs one confirmation, a false negative costs money
+# or a sent message.
+COMMIT_WORDS = [
+    "buy", "purchase", "order", "checkout", "pay", "payment", "subscribe", "place order",
+    "send", "submit", "post", "publish", "confirm", "book now", "reserve", "delete",
+    "remove", "cancel subscription", "deactivate", "close account", "transfer",
+    "withdraw", "sign contract", "agree and", "accept and", "apply now",
+]
+
+
+def _web_click_or_type(sub, argv):
+    """Click or type, refusing controls that read as a commitment unless explicitly armed.
+
+    The label is read and the click is made in ONE evaluation. Reading the label in a first
+    call and clicking in a second leaves a gap in which the page can re-render, and the
+    thing checked stops being the thing pressed — the same reason the OS checks an action's
+    guard and dispatches it inside a single turn of the app's event loop.
+
+    Nothing here asks permission upstream and then proceeds: a refusal is the absence of a
+    click, decided in the process holding the mouse.
+    """
+    if len(argv) < 2:
+        die("usage: yos web %s <n> %s" % (sub, "<text>" if sub == "type" else ""))
+
+    armed = "--armed" in argv
+    argv = [a for a in argv if a != "--armed"]
+    ref = argv[1]
+
+    # The scan leaves its elements on the page as `window.__yantrik_elements`, so a click
+    # refers to the element that was actually read rather than to a selector guessed from
+    # its name. That list is 0-indexed and the printed refs are 1-based, so the ref is
+    # decremented here — getting this wrong clicks the neighbour, which is the kind of
+    # mistake that looks like the page changed under you.
+    guard = """
+      const label = ((e.getAttribute('aria-label') || e.innerText || e.value ||
+                      e.getAttribute('title') || '') + '').toLowerCase().trim();
+      const words = %s;
+      if (!%s && label && words.some(w => label.includes(w)))
+        return 'commit:' + label.slice(0, 80);
+    """ % (json.dumps(COMMIT_WORDS), "true" if armed else "false")
+
+    if sub == "click":
+        out = _eval("(() => { const e = (window.__yantrik_elements||[])[%s-1]; if(!e) return 'gone';"
+                    "%s e.scrollIntoView({block:'center'}); e.click(); return 'clicked'; })()"
+                    % (ref, guard))
+    else:
+        text = " ".join(argv[2:])
+        out = _eval("(() => { const e = (window.__yantrik_elements||[])[%s-1]; if(!e) return 'gone';"
+                    "%s e.focus(); e.value = %s;"
+                    "e.dispatchEvent(new Event('input',{bubbles:true}));"
+                    "e.dispatchEvent(new Event('change',{bubbles:true})); return 'typed'; })()"
+                    % (ref, guard, json.dumps(text)))
+
+    if out == "gone":
+        die("element %s is not on the page any more — take a fresh `yos web`" % ref)
+    if out and out.startswith("commit:"):
+        die("refused: element %s reads as a commitment (%r). Nothing was %s. This is the "
+            "point at which a person decides — re-run with --armed only if that person has."
+            % (ref, out[len("commit:"):], "clicked" if sub == "click" else "typed"))
+    print("%s %s. The page may not have finished reacting; read it again to see." % (out, ref))
+
+
+MODEL_DIR = "/opt/yantrik/models/whisper"
+SINK = "yantrik_capture.monitor"
+
+
+def cmd_listen(argv):
+    """Transcribe what the machine is currently playing.
+
+    A page's speech is only in the DOM when the video happens to be captioned. This
+    route does not care: it records the audio the machine is actually playing and
+    transcribes it, so an uncaptioned video reads the same as a captioned one. It hears
+    whatever is making noise, not just the browser — there is no per-tab isolation here.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    seconds = 30
+    if argv:
+        try:
+            seconds = max(1, int(argv[0]))
+        except ValueError:
+            die("usage: yos web listen [seconds]")
+
+    for binary in ("parec", "/opt/yantrik/bin/transcribe"):
+        if not (shutil.which(binary) or os.path.exists(binary)):
+            die("%s is not installed — audio capture is unavailable on this machine" % binary)
+    if not os.path.isdir(MODEL_DIR):
+        die("no speech model at %s — transcription is unavailable" % MODEL_DIR)
+
+    # A silent recording is the common failure and it looks identical to a video with no
+    # speech in it, so check the sink has a producer before spending the time.
+    sinks = subprocess.run(["pactl", "list", "short", "sink-inputs"],
+                           capture_output=True, text=True).stdout.strip()
+    if not sinks:
+        print("nothing is playing audio right now — this will record %ds of silence."
+              % seconds)
+
+    # A pre-roll advert transcribes exactly as cleanly as the video does, and the result
+    # reads like the page's own content. The player knows the difference, so ask it, and
+    # say so rather than handing back a confident transcript of an unrelated commercial.
+    # Audio capture does not need a browser, so a browser that cannot be reached must not
+    # take the transcription down with it — it only costs us the advert check.
+    try:
+        ad = _eval("""(() => {
+          const p = document.querySelector('.html5-video-player');
+          const v = document.querySelector('video');
+          if (!p || !v) return '';
+          const showing = p.classList.contains('ad-showing') ||
+                          p.classList.contains('ad-interrupting') ||
+                          !!document.querySelector('.ytp-ad-player-overlay, .ytp-ad-module .ytp-ad-text');
+          return showing ? String(Math.round(v.duration || 0)) : '';
+        })()""")
+    except SystemExit:
+        ad = ""
+
+    raw = tempfile.NamedTemporaryFile(suffix=".f32", delete=False)
+    raw.close()
+    print("listening for %ds..." % seconds)
+    # parec runs until killed, so it is timed rather than asked to stop.
+    proc = subprocess.Popen(
+        ["parec", "-d", SINK, "--format=float32le", "--rate=16000", "--channels=1",
+         "--file-format=raw", raw.name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        proc.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        proc.wait()
+
+    size = os.path.getsize(raw.name)
+    if size < 4:
+        os.unlink(raw.name)
+        die("captured no audio — is %s a real sink? (pactl list short sinks)" % SINK)
+
+    out = subprocess.run(["/opt/yantrik/bin/transcribe", "--timestamps",
+                          "--model", MODEL_DIR, raw.name],
+                         capture_output=True, text=True)
+    os.unlink(raw.name)
+
+    text = out.stdout.strip()
+    if text:
+        if ad:
+            print("WARNING: an advertisement was playing (%ss long), not the video. What "
+                  "follows is the advert's audio, not the page's content. Wait for it to "
+                  "finish and listen again." % ad)
+        print(text)
+    else:
+        # Distinguish "heard nothing" from "heard something and could not read it": the
+        # first is a capture problem, the second is a model limit, and they need
+        # different fixes.
+        print("no speech found in %ds of audio." % seconds)
+        print("(%s)" % (out.stderr.strip().splitlines() or ["no detail"])[-1])
+
+
+COMMANDS = {
+    "ls": cmd_ls,
+    "describe": cmd_describe,
+    "act": cmd_act,
+    "perception": cmd_perception,
+    "journal": cmd_journal,
+    "web": cmd_web,
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    command = COMMANDS.get(sys.argv[1])
+    if command is None:
+        die("unknown command %r; try one of: %s" % (sys.argv[1], ", ".join(COMMANDS)))
+    command(sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

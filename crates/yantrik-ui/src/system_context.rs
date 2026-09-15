@@ -252,7 +252,7 @@ pub fn load_system_config(path: Option<PathBuf>) -> yantrik_os::SystemObserverCo
         Ok(c) => c,
         Err(_) => {
             return yantrik_os::SystemObserverConfig {
-                mock: true,
+                mock: false,
                 ..Default::default()
             };
         }
@@ -262,7 +262,7 @@ pub fn load_system_config(path: Option<PathBuf>) -> yantrik_os::SystemObserverCo
         Ok(v) => v,
         Err(_) => {
             return yantrik_os::SystemObserverConfig {
-                mock: true,
+                mock: false,
                 ..Default::default()
             };
         }
@@ -273,15 +273,15 @@ pub fn load_system_config(path: Option<PathBuf>) -> yantrik_os::SystemObserverCo
             serde_yaml::from_value(sys_val.clone()).unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "Invalid system config, using defaults");
                 yantrik_os::SystemObserverConfig {
-                    mock: true,
+                    mock: false,
                     ..Default::default()
                 }
             })
         }
         None => {
-            tracing::info!("No 'system' section in config, using mock mode");
+            tracing::info!("No 'system' section in config, using real monitors");
             yantrik_os::SystemObserverConfig {
-                mock: true,
+                mock: false,
                 ..Default::default()
             }
         }

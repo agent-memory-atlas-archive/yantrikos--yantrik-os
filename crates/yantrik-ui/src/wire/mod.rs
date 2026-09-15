@@ -12,7 +12,7 @@ pub mod dep_check;
 mod callbacks;
 mod chat;
 mod clipboard;
-mod dock;
+pub mod dock;
 pub mod i18n;
 pub mod image_viewer;
 mod lens;

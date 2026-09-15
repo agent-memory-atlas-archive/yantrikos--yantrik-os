@@ -146,6 +146,10 @@ export global Icons {
     out property <string> sunrise:    "M3 15H17 M5.5 12A4.5 4.5 0 0 1 14.5 12 M10 3V7 M7.5 5.5L10 3L12.5 5.5 M4 8.5L5.2 9.7 M16 8.5L14.8 9.7";
     out property <string> sunset:     "M3 15H17 M5.5 12A4.5 4.5 0 0 1 14.5 12 M10 7V3 M7.5 4.5L10 7L12.5 4.5 M4 8.5L5.2 9.7 M16 8.5L14.8 9.7";
     out property <string> compass:    "M3 10A7 7 0 1 0 17 10A7 7 0 1 0 3 10Z M13 7L11.5 11.5L7 13L8.5 8.5Z";
+    out property <string> partly:     "M6.5 6.2A3 3 0 0 1 12.2 7.6 M6.5 1.5V3 M2.6 6.2H4.1 M3.3 2.9L4.4 4 M10.8 2.9L9.7 4 M6 16.5H14A3 3 0 0 0 14 10.5A4 4 0 0 0 6.2 9.9A3.3 3.3 0 0 0 6 16.5Z";
+    out property <string> snow:       "M6 12H14.5A3.5 3.5 0 0 0 15 5A5 5 0 0 0 5.5 6A3 3 0 0 0 6 12Z M5.5 15H7.5 M6.5 14V16 M12.5 15H14.5 M13.5 14V16 M9 17.5H11 M10 16.5V18.5";
+    out property <string> fog:        "M6 11H14.5A3.5 3.5 0 0 0 15 4A5 5 0 0 0 5.5 5A3 3 0 0 0 6 11Z M3.5 14H16.5 M5.5 17H14.5";
+    out property <string> storm:      "M6 12H14.5A3.5 3.5 0 0 0 15 5A5 5 0 0 0 5.5 6A3 3 0 0 0 6 12Z M11 13.5L8.5 16.5H10.8L9.3 18.8";
 
     // Shell / system
     out property <string> home:       "M3 9.5L10 3.5L17 9.5V17H12V12H8V17H3Z";
@@ -176,6 +180,21 @@ export global Icons {
         : c == "\u{25A7}" ? root.doc
         : c == "\u{2699}" ? root.settings
         : root.file
+    }
+
+    // The weather service sends a vector icon KIND (sun/moon/partly/cloud/rain/
+    // snow/fog/storm) rather than an emoji, so the dashboard draws the same
+    // stroke set as the rest of the OS. Unknown kinds fall back to cloud.
+    public pure function weather-kind(kind: string) -> string {
+        kind == "sun"      ? root.sun
+        : kind == "moon"   ? root.moon
+        : kind == "partly" ? root.partly
+        : kind == "cloud"  ? root.cloud
+        : kind == "rain"   ? root.rain
+        : kind == "snow"   ? root.snow
+        : kind == "fog"    ? root.fog
+        : kind == "storm"  ? root.storm
+        : root.cloud
     }
 
     public pure function app(id: string) -> string {
