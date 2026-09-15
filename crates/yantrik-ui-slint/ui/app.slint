@@ -2172,6 +2172,143 @@ export component App inherits Window {
             }
         }
 
+        // ── Which mind is answering, from the status bar ──
+        //
+        // `ai-quick-switcher-open` and `ai-quick-switch-provider` have existed here for a while
+        // with nothing drawing them and nothing handling them: clicking the AI badge toggled a
+        // boolean and the desktop did not move. This is the panel that toggle was always meant to
+        // open, and switching minds is the thing it should have been switching.
+        //
+        // The fast path, deliberately: Settings > Harnesses is where you read about a mind, and
+        // this is where you change to one without leaving what you were doing.
+        if root.ai-quick-switcher-open : Rectangle {
+            width: 100%;
+            height: 100%;
+
+            // Anywhere outside closes it. A popover you have to aim at to dismiss is a popover
+            // that gets in the way.
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => { root.ai-quick-switcher-open = false; }
+            }
+
+            Rectangle {
+                // Hangs under the status bar at the right, where the badge that opened it is.
+                x: parent.width - self.width - 12px;
+                y: Theme.status-bar-height + 6px;
+                width: 260px;
+                height: switcher-body.preferred-height;
+                background: Theme.bg-elevated;
+                border-radius: Theme.r-lg;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: Theme.overlay-backdrop;
+
+                // Clicks inside must not reach the backdrop above.
+                TouchArea { width: 100%; height: 100%; }
+
+                switcher-body := VerticalLayout {
+                    padding: Theme.sp-2;
+                    spacing: 2px;
+
+                    Text {
+                        text: "ANSWERING";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        font-weight: 600;
+                        letter-spacing: 2px;
+                        height: 22px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                    }
+
+                    for m in root.harnesses : Rectangle {
+                        height: 40px;
+                        border-radius: Theme.r-sm;
+                        background: row-ta.has-hover ? Theme.hover-fill
+                                  : m.active ? Theme.tint-accent : transparent;
+
+                        row-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.use-harness(m.id);
+                                root.ai-quick-switcher-open = false;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: Theme.sp-2;
+                            padding-right: Theme.sp-2;
+                            spacing: Theme.sp-2;
+
+                            // A filled dot for the one answering, an empty ring for the rest:
+                            // the state is a shape before it is a colour, so it survives a
+                            // greyscale screen and a person who cannot separate teal from grey.
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                y: (parent.height - 8px) / 2;
+                                border-radius: 4px;
+                                background: m.active ? Theme.accent : transparent;
+                                border-width: m.active ? 0px : 1px;
+                                border-color: Theme.text-dim;
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 0px;
+                                Text {
+                                    text: m.name;
+                                    color: m.active ? Theme.accent : Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                    font-weight: m.active ? 600 : 400;
+                                }
+                                if m.detail != "" : Text {
+                                    text: m.detail;
+                                    color: Theme.text-dim;
+                                    font-size: Theme.fs-micro;
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.separator;
+                    }
+
+                    // The way out to the full surface, so this panel never has to grow into it.
+                    Rectangle {
+                        height: 32px;
+                        border-radius: Theme.r-sm;
+                        background: manage-ta.has-hover ? Theme.hover-fill : transparent;
+                        manage-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.ai-quick-switcher-open = false;
+                                root.settings-category = 8;
+                                root.current-screen = 7;
+                                root.navigate(7);
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: Theme.sp-2;
+                            padding-right: Theme.sp-2;
+                            Text {
+                                text: "Manage harnesses…";
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-caption;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Toast notification banners (top-right, stacking)
         if toast-queue.length > 0 : ToastBanner {
             width: 100%; height: 100%;

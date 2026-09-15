@@ -30,7 +30,7 @@ fn main() {
             "detail": "repeats what you say",
         }),
     );
-    let session = match attached {
+    let mut session = match attached {
         Ok(reply) => reply["session"].as_str().unwrap_or_default().to_string(),
         Err(e) => {
             eprintln!("could not attach: {} — is the Yantrik shell running?", e.message);
@@ -46,15 +46,21 @@ fn main() {
             Err(e) => {
                 // The shell restarted, or this session aged out. Attaching again is the whole
                 // recovery, which is why the protocol has no reconnect dance.
+                //
+                // The new session id MUST replace the old one. An earlier version of this loop
+                // re-attached and then went on polling with the dead id, so it recovered forever
+                // and never once succeeded — caught by running it against a restarted shell, not
+                // by reading it.
                 eprintln!("poll failed ({}); re-attaching", e.message);
                 std::thread::sleep(Duration::from_secs(2));
-                match client.call(
+                if let Ok(reply) = client.call(
                     protocol::ATTACH,
                     serde_json::json!({ "id": "echo", "name": "Echo" }),
                 ) {
-                    Ok(_) => continue,
-                    Err(_) => continue,
+                    session = reply["session"].as_str().unwrap_or_default().to_string();
+                    eprintln!("re-attached (session {session})");
                 }
+                continue;
             }
         };
 
