@@ -1,0 +1,12 @@
+[package]
+name = "yantrik-harness"
+version = "0.1.0"
+edition = "2021"
+description = "Which mind is answering — the seam between the shell and a pluggable agent harness"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+ureq = { workspace = true }
+tracing = { workspace = true }
