@@ -3,8 +3,7 @@
 //! Downloads the all-MiniLM-L6-v2 model from HuggingFace Hub on first run
 //! (cached in ~/.cache/huggingface/hub/).
 
-use yantrikdb_core::Embedder;
-use yantrik_ml::CandleEmbedder;
+use yantrik_ml::{CandleEmbedder, Embedder};
 
 #[test]
 fn test_embedder_from_hub() {
@@ -81,44 +80,12 @@ fn test_embed_batch() {
     }
 }
 
-#[test]
-fn test_embedder_with_aidb() {
-    // Test the full integration: CandleEmbedder plugged into YantrikDB
-    let embedder = CandleEmbedder::from_hub(
-        "sentence-transformers/all-MiniLM-L6-v2",
-        None,
-    )
-    .expect("failed to load model");
-
-    let mut db = yantrikdb_core::YantrikDB::new(":memory:", 384).expect("failed to create YantrikDB");
-    db.set_embedder(Box::new(embedder));
-
-    // Record with auto-embedding
-    let rid = db
-        .record_text(
-            "I love playing chess on rainy days",
-            "episodic",
-            0.7,
-            0.5,
-            604800.0,
-            &serde_json::json!({}),
-            "default",
-            0.9,
-            "hobby",
-            "user",
-            Some("happy"),
-        )
-        .expect("record_text failed");
-
-    assert!(!rid.is_empty());
-
-    // Recall with auto-embedding
-    let results = db.recall_text("What are my hobbies?", 5).expect("recall_text failed");
-
-    assert!(!results.is_empty(), "should recall at least one memory");
-    assert_eq!(results[0].rid, rid);
-    assert!(
-        results[0].text.contains("chess"),
-        "recalled text should contain 'chess'"
-    );
-}
+// test_embedder_with_aidb lived here and imported `yantrikdb_core`, which is not a dependency
+// of this workspace — so this whole file had failed to compile for as long as that was true,
+// and `cargo test --workspace` stopped at it before reaching anything else. Testing the
+// YantrikDB integration belongs in the repository that owns YantrikDB, where the type is in
+// scope. The three tests above cover what yantrik-ml is actually responsible for: that the
+// embedder loads, produces 384 normalized dimensions, and puts similar sentences near
+// each other.
+//
+// Like its sibling test_llm.rs, these download from HuggingFace Hub on first run.

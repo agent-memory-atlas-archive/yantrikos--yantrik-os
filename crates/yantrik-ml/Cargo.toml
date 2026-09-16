@@ -42,6 +42,13 @@ ndarray = { version = "0.16", optional = true }
 regex-lite = { version = "0.1", optional = true }
 chrono = { version = "0.4", optional = true }
 
+# test_kernel uses CognitiveKernelLLM, which lib.rs exports only under this feature. Without
+# this declaration cargo builds the example on a default `cargo test --workspace` and the whole
+# workspace fails on an unresolved import — which it had been doing.
+[[example]]
+name = "test_kernel"
+required-features = ["cognitive-kernel"]
+
 [features]
 default = ["candle-llm", "candle-stt"]
 
