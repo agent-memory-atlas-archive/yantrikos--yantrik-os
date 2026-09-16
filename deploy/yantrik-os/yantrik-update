@@ -103,6 +103,23 @@ build_field() {
 installed_git()     { build_field git; }
 installed_version() { build_field version; }
 
+# Can two builds be proven to be the same build?
+#
+# The test was `local_git = remote_git` alone, and a build from a modified tree publishes the
+# hash of the commit it started from -- so `apply` answered "already on 648ac85, nothing to do"
+# about a bundle whose contents had never been installed anywhere. Every iteration then needed
+# --force, and --force is the flag that means "I know this is the same build, install it
+# anyway": using it to work around a wrong answer is how it stops being a safety net.
+#
+# Two dirty trees with the same parent commit are not comparable, so the honest answer for
+# anything carrying -dirty is "no".
+same_build() {
+  local a="$1" b="$2" av="$3" bv="$4"
+  [ -n "$a" ] && [ "$a" = "$b" ] || return 1
+  case "$av$bv" in *-dirty*) return 1 ;; esac
+  return 0
+}
+
 # ── check ───────────────────────────────────────────────────────────────────────────────
 cmd_check() {
   need python3
@@ -116,6 +133,11 @@ cmd_check() {
   info "installed: ${local_ver:-unknown}${local_git:+ ($local_git)}"
   info "channel:   ${remote_ver:-unknown}${remote_git:+ ($remote_git)}"
 
+  if [ -n "$local_git" ] && ! same_build "$local_git" "$remote_git" "$local_ver" "$remote_ver" \
+     && [ "$local_git" = "$remote_git" ]; then
+    printf '%supdate available%s — same commit, but one of the two was built from a modified tree\n' "$c_bold" "$c_off"
+    return 0
+  fi
   if [ -z "$local_git" ]; then
     printf '%supdate available%s — this machine has no build marker, so it cannot prove it is current\n' "$c_bold" "$c_off"
     return 10
@@ -150,8 +172,9 @@ cmd_apply() {
   [ -n "$artifact" ] || fail "channel '$CHANNEL' publishes no artifact — nothing to download"
   [ -n "$remote_sha" ] || fail "channel '$CHANNEL' publishes no sha256 — refusing to install an unverifiable build"
 
-  local local_git; local_git="$(installed_git)"
-  if [ "$force" = 0 ] && [ -n "$local_git" ] && [ "$local_git" = "$remote_git" ]; then
+  local local_git local_ver
+  local_git="$(installed_git)"; local_ver="$(installed_version)"
+  if [ "$force" = 0 ] && same_build "$local_git" "$remote_git" "$local_ver" "$remote_ver"; then
     say "Already on $remote_git — nothing to do (use --force to reinstall)"
     return 0
   fi
@@ -325,7 +348,8 @@ wait_for_shell() {
   local sock="$runtime/yantrik/app-shell.sock"
   say "Waiting for the shell to answer"
   for _ in $(seq 1 30); do
-    if [ -S "$sock" ] && "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
+    if [ -S "$sock" ] \
+       && XDG_RUNTIME_DIR="$runtime" "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
       printf '%shealthy — update complete%s\n' "$c_grn" "$c_off"
       return 0
     fi
@@ -334,15 +358,21 @@ wait_for_shell() {
   return 1
 }
 
+# Which runtime dir the SESSION lives in -- not the one this process happens to have inherited.
+#
+# The unit says who it runs as; that user's uid is the only thing that decides where the
+# Wayland socket and the shell's control socket are.
+session_runtime_dir() {
+  local u uid
+  u="$(systemctl show "$SESSION_UNIT" -p User --value 2>/dev/null)"
+  [ -n "$u" ] || u="$(id -un)"
+  uid="$(id -u "$u" 2>/dev/null)" || uid="$(id -u)"
+  printf '/run/user/%s' "$uid"
+}
+
 restart_and_verify() {
   local backup="$1"
   say "Restarting the shell"
-  local runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-  if [ ! -S "$runtime/yantrik/app-shell.sock" ] && [ ! -d "$runtime/yantrik" ]; then
-    warn "no Yantrik session on this runtime dir ($runtime) — cannot restart from here."
-    info "the new build will take effect the next time the desktop session starts."
-    return 0
-  fi
 
   # Ask the session manager to restart the session, rather than respawning the shell by hand.
   #
@@ -362,8 +392,19 @@ restart_and_verify() {
   # the seat, the tty and the renderer settings, and labwc re-exports DISPLAY,
   # XDG_CURRENT_DESKTOP and the rest to its children. Restarting it reproduces the boot path
   # exactly, which is the only restart worth trusting.
+  #
+  # Asked FIRST, and asked about the session rather than about this shell's environment.
+  #
+  # The old order checked $XDG_RUNTIME_DIR before anything else, so running the updater the way
+  # it is meant to be run -- over ssh, under sudo -- landed on /run/user/0, found no session
+  # there, and printed "cannot restart from here" about a session systemd was perfectly able to
+  # restart. Every upgrade then needed a manual `systemctl restart` afterwards, which is the
+  # exact step the session unit exists to remove, and an upgrade whose last line says the new
+  # build is not running yet is not an upgrade.
+  local runtime
   if command -v systemctl >/dev/null 2>&1 \
      && systemctl cat "$SESSION_UNIT" >/dev/null 2>&1; then
+    runtime="$(session_runtime_dir)"
     info "restarting $SESSION_UNIT"
     if sudo -n systemctl restart "$SESSION_UNIT" 2>/dev/null; then
       wait_for_shell "$runtime" && return 0
@@ -379,8 +420,15 @@ sudo systemctl restart $SESSION_UNIT"
   fi
 
   # No session unit, or no privilege to restart it: a development machine where somebody
-  # started the shell by hand. Do the same thing they did.
-  #
+  # started the shell by hand. NOW the caller's own runtime dir is the right question, because
+  # the shell they started is a child of their session.
+  runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [ ! -S "$runtime/yantrik/app-shell.sock" ] && [ ! -d "$runtime/yantrik" ]; then
+    warn "no session unit, and no Yantrik session on this runtime dir ($runtime)."
+    info "the new build will take effect the next time the desktop session starts."
+    return 0
+  fi
+
   # Before the kill, or there is nothing left to read the environment from.
   capture_shell_env || warn "no running shell to copy the session environment from"
 
