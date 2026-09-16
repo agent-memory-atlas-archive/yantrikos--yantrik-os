@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Text Editor
+Name=Editor
 Comment=Text and code editor with syntax highlighting
 Exec=/opt/yantrik/bin/yantrik-text-editor
 Icon=yantrik-text-editor

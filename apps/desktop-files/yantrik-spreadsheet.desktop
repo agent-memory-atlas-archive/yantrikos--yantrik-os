@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Spreadsheet
+Name=ySheets
 Comment=Spreadsheet editor with formulas and charts
 Exec=/opt/yantrik/bin/yantrik-spreadsheet
 Icon=yantrik-spreadsheet

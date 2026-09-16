@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Container Manager
+Name=Containers
 Comment=Docker/Podman container management
 Exec=/opt/yantrik/bin/yantrik-container-manager
 Icon=yantrik-container-manager

@@ -29,6 +29,9 @@ set -uo pipefail
 # ── Where things live ───────────────────────────────────────────────────────────────────
 PREFIX="${YANTRIK_PREFIX:-/opt/yantrik}"
 BIN_DIR="$PREFIX/bin"
+# Everything a release ships that is not a binary: the compositor config and window theme, the
+# house typeface, the session autostart, and the .desktop entry for every app.
+SHARE_DIR="$PREFIX/share"
 BUILD_FILE="$PREFIX/BUILD"
 UPDATES_DIR="$PREFIX/updates"
 BACKUP_DIR="$PREFIX/backups"
@@ -195,6 +198,7 @@ cmd_apply() {
   say "Backing up current build to $backup"
   mkdir -p "$backup"
   cp -a "$BIN_DIR" "$backup/bin"
+  [ -d "$SHARE_DIR" ] && cp -a "$SHARE_DIR" "$backup/share"
   [ -f "$BUILD_FILE" ] && cp -a "$BUILD_FILE" "$backup/BUILD"
   echo "$backup" > "$UPDATES_DIR/last-backup"
 
@@ -215,6 +219,30 @@ cmd_apply() {
     fi
   done < <(find "$root/bin" -maxdepth 1 -type f)
   info "installed $installed binaries"
+
+  # ── And everything that is not a binary ──
+  #
+  # The updater installed bin/ and nothing else, so half of every release since this script
+  # was written went in the bin and stayed there. share/ carries the compositor config, the
+  # window theme, the house typeface, the autostart file and the .desktop entries for all
+  # sixteen apps — none of which ever reached an installed machine.
+  #
+  # It was invisible because each piece had an innocent explanation. The keyboard shortcuts
+  # "had not been deployed yet". The launcher "did not know about our apps". The desktop
+  # "needed a reboot to pick up the theme". They were all the same missing copy.
+  #
+  # Mirrored rather than merged: a file dropped from a release should disappear from the
+  # machine too, and --delete is what makes the installed tree equal the shipped one.
+  if [ -d "$root/share" ]; then
+    mkdir -p "$SHARE_DIR"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --delete "$root/share/" "$SHARE_DIR/" || fail "could not install share/"
+    else
+      rm -rf "$SHARE_DIR" && mkdir -p "$SHARE_DIR"
+      cp -a "$root/share/." "$SHARE_DIR/" || fail "could not install share/"
+    fi
+    info "installed $(find "$SHARE_DIR" -type f | wc -l) shared files"
+  fi
 
   # Record the new build so `check` can prove currency next time.
   cat > "$BUILD_FILE" <<EOF
@@ -409,6 +437,10 @@ restore_backup() {
     local base; base="$(basename "$f")"
     cp "$f" "$BIN_DIR/.$base.rb" 2>/dev/null && chmod 755 "$BIN_DIR/.$base.rb" && mv -f "$BIN_DIR/.$base.rb" "$BIN_DIR/$base"
   done < <(find "$backup/bin" -maxdepth 1 -type f)
+  if [ -d "$backup/share" ]; then
+    rm -rf "$SHARE_DIR"
+    cp -a "$backup/share" "$SHARE_DIR"
+  fi
   [ -f "$backup/BUILD" ] && cp -a "$backup/BUILD" "$BUILD_FILE"
   info "restored from $backup"
 }

@@ -73,6 +73,30 @@ fn read_battery(connection: &zbus::blocking::Connection) -> Option<SystemEvent> 
     let props: std::collections::HashMap<String, zbus::zvariant::OwnedValue> =
         body.deserialize().ok()?;
 
+    // Is there a battery at all?
+    //
+    // UPower always answers for /DisplayDevice, whether or not the machine has one. On a
+    // desktop or a VM it comes back Type=0 (Unknown), IsPresent=false, Percentage=0,
+    // State=0 — and read without this check that is indistinguishable from a laptop about to
+    // die. The desktop duly announced "Battery critical — Battery at 0%. Plug in now." on a
+    // virtual machine with an empty /sys/class/power_supply, which is where it was
+    // photographed.
+    //
+    // Type 2 is Battery in the UPower enumeration. A machine without one reports no battery
+    // rather than an empty one, which is also why no desktop PC running Ubuntu shows a
+    // battery icon.
+    let device_type = props
+        .get("Type")
+        .and_then(|v| <u32>::try_from(v).ok())
+        .unwrap_or(0);
+    let present = props
+        .get("IsPresent")
+        .and_then(|v| <bool>::try_from(v).ok())
+        .unwrap_or(false);
+    if device_type != 2 || !present {
+        return None;
+    }
+
     let percentage = props
         .get("Percentage")
         .and_then(|v| <f64>::try_from(v).ok())

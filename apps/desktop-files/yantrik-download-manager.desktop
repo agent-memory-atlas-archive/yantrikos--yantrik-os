@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Download Manager
+Name=Downloads
 Comment=File download manager with queue
 Exec=/opt/yantrik/bin/yantrik-download-manager
 Icon=yantrik-download-manager

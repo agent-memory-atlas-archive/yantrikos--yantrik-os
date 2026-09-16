@@ -171,7 +171,7 @@ export component DocumentEditorScreen inherits Rectangle {
         // -- Header --
         AppHeader {
             icon: Icons.doc;
-            title: root.doc-title != "" ? root.doc-title : "Document";
+            title: root.doc-title != "" ? root.doc-title : "yDoc";
             modified: root.doc-is-modified;
             leading-actions: [
                 { id: "save", icon: Icons.save, label: "Save", emphasis: 2, active: root.doc-is-modified },

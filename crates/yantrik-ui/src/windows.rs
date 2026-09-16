@@ -109,32 +109,56 @@ pub fn shell_windows() -> Vec<WindowEntry> {
 /// Player" — so clicking those entries matched no window and did nothing at all, silently.
 ///
 /// If you rename a window, rename it here. There is a test below that lists both.
+/// What each app this OS ships is CALLED. One list, because there were four.
+///
+/// The same application answered to a different name depending on which surface you were
+/// looking at: the dock said "Editor", the launcher said "Text Editor", the window title said
+/// "Text Editor" and the header said whatever the screen author wrote. Downloads was
+/// "Download Manager" in three places and "Downloads" in a fourth. No single one of those was
+/// wrong, which is exactly why it survived — it only reads as sloppy when you see two at once,
+/// and you always do: the taskbar entry sits directly beneath the window it names.
+///
+/// Short names, because that is the family the dock already used and the dock is the surface a
+/// person reads most. The suffixes went rather than being invented away: Container Manager to
+/// Containers, Music Player to Music, Image Viewer to Images. The office three keep the brand
+/// the dock gave them.
+///
+/// Keys are the shell's own app ids on the left, matching `Icons.app`, and the .desktop file
+/// stems for the rest. `app_names_agree_everywhere` in the tests below reads the .desktop files
+/// and each app's Window title and fails if any of them drifts from this.
+pub const APP_NAMES: &[(&str, &str)] = &[
+    ("browser", "Browser"),
+    ("calendar", "Calendar"),
+    ("containers", "Containers"),
+    ("documents", "yDoc"),
+    ("downloads", "Downloads"),
+    ("editor", "Editor"),
+    ("email", "Email"),
+    ("image", "Images"),
+    ("music", "Music"),
+    ("network", "Network"),
+    ("notes", "Notes"),
+    ("presentation", "yPresent"),
+    ("snippets", "Snippets"),
+    ("spreadsheet", "ySheets"),
+    ("sysmonitor", "System Monitor"),
+    ("terminal", "Terminal"),
+    ("weather", "Weather"),
+];
+
 fn display_name(app_id: &str) -> String {
-    match app_id {
-        "terminal" => "Terminal".to_string(),
-        "browser" => "Browser".to_string(),
-        "notes" => "Notes".to_string(),
-        "email" => "Email".to_string(),
-        "calendar" => "Calendar".to_string(),
-        "network" => "Network Manager".to_string(),
-        "sysmonitor" => "System Monitor".to_string(),
-        "weather" => "Weather".to_string(),
-        "music" => "Music Player".to_string(),
-        "downloads" => "Download Manager".to_string(),
-        "snippets" => "Snippet Manager".to_string(),
-        "containers" => "Container Manager".to_string(),
-        "spreadsheet" => "Spreadsheet".to_string(),
-        "documents" => "Document Editor".to_string(),
-        "presentation" => "Presentation".to_string(),
-        // Unknown id (a .desktop app the shell launched): title-case its first segment.
-        other => {
-            let mut c = other.replace(['-', '_'], " ");
+    APP_NAMES
+        .iter()
+        .find(|(id, _)| *id == app_id)
+        .map(|(_, name)| (*name).to_string())
+        .unwrap_or_else(|| {
+            // Unknown id (a .desktop app the shell launched): title-case its first segment.
+            let mut c = app_id.replace(['-', '_'], " ");
             if let Some(first) = c.get_mut(0..1) {
                 first.make_ascii_uppercase();
             }
             c
-        }
-    }
+        })
 }
 
 /// Ask the compositor directly. The fallback path, used only when the shell has launched nothing
@@ -317,32 +341,124 @@ mod tests {
         assert_eq!(split_toplevel_line("Some Foreign Window").0, "Some Foreign Window");
     }
 
+    // What used to be here: a hand-written list of every app id and the window title it was
+    // expected to produce, asserting display_name() matched. It did the right job and carried
+    // the wrong kind of list — a second copy of the names, maintained by hand, which went stale
+    // the moment the names were settled in one place.
+    //
+    // `app_name_tests::app_names_agree_everywhere` is the replacement. It reads the .desktop
+    // entries and each app's Window title off disk and compares them to APP_NAMES, so it checks
+    // the same invariant — that the taskbar label is exactly the window title, because the
+    // taskbar sends that string to `wlrctl toplevel focus title:…` and a label merely CLOSE to
+    // the title is a click that does nothing — without anyone having to remember to update it.
+}
+
+#[cfg(test)]
+mod app_name_tests {
+    use super::{display_name, APP_NAMES};
+    use std::path::{Path, PathBuf};
+
+    /// desktop-file stem -> the shell's own app id for the same application.
+    ///
+    /// Two naming schemes, both correct. A freedesktop entry needs a name unique across the
+    /// whole machine, so ours are `yantrik-download-manager`; the shell calls the same thing
+    /// `downloads`, which is what the icon set and the dock are keyed by.
+    const STEM_TO_ID: &[(&str, &str)] = &[
+        ("calendar", "calendar"),
+        ("container-manager", "containers"),
+        ("document-editor", "documents"),
+        ("download-manager", "downloads"),
+        ("email", "email"),
+        ("image-viewer", "image"),
+        ("music-player", "music"),
+        ("network-manager", "network"),
+        ("notes", "notes"),
+        ("presentation", "presentation"),
+        ("snippet-manager", "snippets"),
+        ("spreadsheet", "spreadsheet"),
+        ("system-monitor", "sysmonitor"),
+        ("terminal", "terminal"),
+        ("text-editor", "editor"),
+        ("weather", "weather"),
+    ];
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("the crate sits two levels under the repository root")
+    }
+
+    fn field(text: &str, key: &str) -> Option<String> {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key))
+            .map(|v| v.trim().to_string())
+    }
+
+    /// An application answers to ONE name, on every surface that shows it.
+    ///
+    /// It answered to four. The dock said "Editor", the launcher said "Text Editor", the
+    /// window title said "Text Editor", and the taskbar entry beneath that window said
+    /// something else again. Downloads was "Download Manager" in three places and "Downloads"
+    /// in a fourth. Each was defensible alone, which is why it lasted — it only reads as
+    /// sloppy when two are on screen together, and the taskbar entry sits directly under the
+    /// window it names, so they always are.
     #[test]
-    fn a_taskbar_entry_is_named_exactly_what_its_window_is_called() {
-        // Right-hand side copied from `title:` in apps/<app>/ui/app.slint. The taskbar sends this
-        // string to `wlrctl toplevel focus title:…`, so a label that is merely *close* to the
-        // window title is a click that does nothing — which is what five of these were.
-        for (app_id, window_title) in [
-            ("terminal", "Terminal"),
-            ("notes", "Notes"),
-            ("email", "Email"),
-            ("calendar", "Calendar"),
-            ("weather", "Weather"),
-            ("spreadsheet", "Spreadsheet"),
-            ("presentation", "Presentation"),
-            ("sysmonitor", "System Monitor"),
-            ("downloads", "Download Manager"),
-            ("music", "Music Player"),
-            ("snippets", "Snippet Manager"),
-            ("containers", "Container Manager"),
-            ("documents", "Document Editor"),
-            ("network", "Network Manager"),
-        ] {
-            assert_eq!(
-                display_name(app_id),
-                window_title,
-                "the taskbar would ask the compositor to focus a window by the wrong name"
-            );
+    fn app_names_agree_everywhere() {
+        let root = repo_root();
+        let mut wrong = Vec::new();
+
+        for (stem, id) in STEM_TO_ID {
+            let want = APP_NAMES
+                .iter()
+                .find(|(k, _)| k == id)
+                .map(|(_, n)| *n)
+                .unwrap_or_else(|| panic!("{id} is not in APP_NAMES"));
+
+            let entry = root.join(format!("apps/desktop-files/yantrik-{stem}.desktop"));
+            let text = std::fs::read_to_string(&entry)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", entry.display()));
+            if let Some(name) = field(&text, "Name=") {
+                if name != want {
+                    wrong.push(format!("{stem}: .desktop says {name:?}, APP_NAMES says {want:?}"));
+                }
+            }
+
+            let win = root.join(format!("apps/{stem}/ui/app.slint"));
+            let text = std::fs::read_to_string(&win)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", win.display()));
+            let title = text
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("title: \""))
+                .and_then(|r| r.split('"').next())
+                .map(|s| s.to_string());
+            if let Some(title) = title {
+                if title != want {
+                    wrong.push(format!("{stem}: window title {title:?}, APP_NAMES says {want:?}"));
+                }
+            }
+
+            if display_name(id) != want {
+                wrong.push(format!(
+                    "{stem}: taskbar calls it {:?}, APP_NAMES says {want:?}",
+                    display_name(id)
+                ));
+            }
         }
+
+        assert!(
+            wrong.is_empty(),
+            "one application, more than one name:\n  {}\n\n\
+             APP_NAMES in this file is the list. Change it there and change the .desktop entry \
+             and the app's Window title to match.",
+            wrong.join("\n  ")
+        );
+    }
+
+    /// An app the shell did not launch still gets a readable name rather than an id.
+    #[test]
+    fn a_foreign_app_is_title_cased_not_left_raw() {
+        assert_eq!(display_name("libreoffice-writer"), "Libreoffice writer");
+        assert_eq!(display_name("chromium"), "Chromium");
     }
 }

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Network Manager
+Name=Network
 Comment=WiFi, Bluetooth, VPN network management
 Exec=/opt/yantrik/bin/yantrik-network-manager
 Icon=yantrik-network-manager

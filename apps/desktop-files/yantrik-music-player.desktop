@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Music Player
+Name=Music
 Comment=Music player with library management
 Exec=/opt/yantrik/bin/yantrik-music-player
 Icon=yantrik-music-player

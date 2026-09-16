@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Document Editor
+Name=yDoc
 Comment=Rich document editor with AI assist
 Exec=/opt/yantrik/bin/yantrik-document-editor
 Icon=yantrik-document-editor

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Image Viewer
+Name=Images
 Comment=Image viewer with zoom and rotate
 Exec=/opt/yantrik/bin/yantrik-image-viewer
 Icon=yantrik-image-viewer

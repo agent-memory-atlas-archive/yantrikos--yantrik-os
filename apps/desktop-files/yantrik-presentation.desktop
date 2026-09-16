@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Presentation
+Name=yPresent
 Comment=Slide presentation editor
 Exec=/opt/yantrik/bin/yantrik-presentation
 Icon=yantrik-presentation

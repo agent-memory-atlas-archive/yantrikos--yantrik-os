@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Snippet Manager
+Name=Snippets
 Comment=Code snippet manager with search
 Exec=/opt/yantrik/bin/yantrik-snippet-manager
 Icon=yantrik-snippet-manager
