@@ -3,6 +3,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 
 export struct ComponentVersionData {
     name: string,
@@ -44,47 +45,16 @@ export component AboutScreen inherits Rectangle {
         width: 100%;
         height: 100%;
 
-        // ── Header bar (56px) ──
-        Rectangle {
-            height: 56px;
-            background: Theme.bg-surface;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 16px;
-                spacing: 12px;
-
-                // Back button
-                Rectangle {
-                    width: 36px;
-                    height: 36px;
-                    y: (parent.height - 36px) / 2;
-                    border-radius: 18px;
-                    background: ta-back.has-hover ? Theme.hover-fill-strong : transparent;
-
-                    ta-back := TouchArea {
-                        clicked => { root.back-pressed(); }
-                    }
-
-                    Icon {
-                        commands: Icons.arrow-left;
-                        size: 20px;
-                        tint: Theme.text-primary;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                }
-
-                // Title
-                Text {
-                    text: "About";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-title;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-            }
+        // -- Header --
+        //
+        // A 56px bar with its own back button, its own title type and its own padding, three
+        // pixels taller than every app's and built from scratch to be almost the same.
+        AppHeader {
+            show-back: true;
+            icon: Icons.chip;
+            title: "About";
+            subtitle: root.version-text != "" ? "Yantrik OS " + root.version-text : "";
+            back => { root.back-pressed(); }
         }
 
         // ── Scrollable content ──

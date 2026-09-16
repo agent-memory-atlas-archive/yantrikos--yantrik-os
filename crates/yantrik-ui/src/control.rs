@@ -37,6 +37,16 @@ const SETTINGS_SECTIONS: &[(&str, i32)] = &[
     ("harnesses", 8),
 ];
 
+/// Name to `current-screen` id, and the ids are the ones `app.slint` actually renders.
+///
+/// They were not. `("terminal", 16)` sent a caller to the ABOUT screen: 16 is about, terminal
+/// is 14, and 14 has no branch in app.slint at all because the terminal became a separate app
+/// binary and the shell screen went away. Nobody noticed because nothing compares this list to
+/// the file that decides what a number means. A photograph of `show_screen screen=terminal`
+/// showing "About" is how it surfaced.
+///
+/// `screens_match_the_shell` in the tests below now reads app.slint and checks every id here
+/// against the `if current-screen == N` branches, so this cannot drift again in silence.
 const SCREENS: &[(&str, i32)] = &[
     ("desktop", 1),
     ("bond", 4),
@@ -46,20 +56,27 @@ const SCREENS: &[(&str, i32)] = &[
     ("files", 8),
     ("notifications", 9),
     ("system", 10),
-    ("terminal", 16),
+    ("images", 11),
+    ("editor", 12),
+    ("media", 13),
+    ("about", 16),
+    ("packages", 21),
+    ("devices", 27),
     ("permissions", 28),
 ];
 
+/// What `describe` calls the screen the shell is on.
+///
+/// Only the states a caller cannot ASK for belong in this match; everything else comes from
+/// SCREENS, so a name can only be defined once. Two entries here were simply wrong -- 21 was
+/// reported as "email" and 27 as "snippets", when 21 renders the package manager and 27 the
+/// device dashboard. `describe` would tell an agent it was looking at email while the package
+/// manager was on screen, which is worse than saying nothing.
 pub(crate) fn screen_name(id: i32) -> &'static str {
     match id {
         0 => "boot",
         2 => "onboarding",
         3 => "lock",
-        11 => "image-viewer",
-        12 => "text-editor",
-        13 => "media-player",
-        21 => "email",
-        27 => "snippets",
         32 => "login",
         other => SCREENS
             .iter()
@@ -357,7 +374,7 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
             Action::new("show_screen", "Switch the shell to one of its screens")
                 .arg(
                     Param::text("screen")
-                        .describe("desktop, files, settings, notifications, memory, system, terminal, permissions, bond, personality"),
+                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media"),
                 )
                 .arg(
                     Param::text("section")
@@ -470,4 +487,160 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
     let surface = crate::control_update::actions(surface, ui);
     let surface = crate::control_files::actions(surface, ui);
     crate::control_editor::actions(surface, ui).serve();
+}
+
+#[cfg(test)]
+mod screen_table_tests {
+    use super::{SCREENS, SETTINGS_SECTIONS, screen_name};
+    use std::path::Path;
+
+    /// Elements that wrap a screen rather than being one.
+    const CHROME: &[&str] = &[
+        "WindowFrame", "Rectangle", "Text", "HorizontalLayout", "VerticalLayout",
+        "Image", "TouchArea", "Flickable", "GridLayout", "Timer", "FocusScope",
+    ];
+
+    /// `app.slint` decides what a screen id means. This reads it: for each
+    /// `if current-screen == N`, the id and the component actually drawn there.
+    fn rendered() -> Vec<(i32, String)> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../yantrik-ui-slint/ui/app.slint");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let lines: Vec<&str> = src.lines().collect();
+
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim().strip_prefix("if current-screen == ") else {
+                continue;
+            };
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let Ok(id) = digits.parse::<i32>() else { continue };
+
+            // The first CamelCase element under the branch that is not chrome.
+            let mut component = String::new();
+            'scan: for l in lines.iter().skip(i).take(30) {
+                for token in l.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                    if token.len() < 4 || !token.starts_with(|c: char| c.is_ascii_uppercase()) {
+                        continue;
+                    }
+                    if CHROME.contains(&token) {
+                        continue;
+                    }
+                    if l.contains(&format!("{token} {{")) || l.contains(&format!("{token}{{")) {
+                        component = token.to_string();
+                        break 'scan;
+                    }
+                }
+            }
+            out.push((id, component));
+        }
+        out
+    }
+
+    fn rendered_ids() -> Vec<i32> {
+        rendered().into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Every screen a caller can ask for must be one the shell actually draws.
+    ///
+    /// `("terminal", 16)` sat in this table pointing at the ABOUT screen. Terminal is 14, and
+    /// 14 stopped being rendered when the terminal became its own app binary — so `yos act
+    /// shell show_screen screen=terminal` quietly showed you About, and had done for as long
+    /// as that was true. The list and the file that gives the numbers meaning were maintained
+    /// by different hands and never compared.
+    #[test]
+    fn every_screen_a_caller_can_ask_for_is_one_the_shell_draws() {
+        let rendered = rendered_ids();
+        let missing: Vec<String> = SCREENS
+            .iter()
+            .filter(|(_, id)| !rendered.contains(id))
+            .map(|(name, id)| format!("{name} -> {id}"))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "these screens are offered by the control surface but app.slint renders no \
+             `if current-screen == N` branch for them:\n  {}\n\n\
+             Either the screen was removed (drop it here) or the id is wrong. The ids are \
+             defined by app.slint, not by this table.",
+            missing.join("\n  ")
+        );
+    }
+
+    /// One id, one name — in both directions.
+    ///
+    /// `screen_name` used to carry its own entries alongside SCREENS, and two of them
+    /// disagreed with the shell: 21 was reported as "email" when it renders the package
+    /// manager, and 27 as "snippets" when it renders the device dashboard. `describe` told
+    /// callers which screen they were on, and for those two it was lying.
+    #[test]
+    fn a_screen_answers_to_exactly_one_name() {
+        for (name, id) in SCREENS {
+            assert_eq!(
+                screen_name(*id), *name,
+                "screen {id} is offered as `{name}` but describe() calls it `{}`",
+                screen_name(*id)
+            );
+        }
+
+        let mut ids: Vec<i32> = SCREENS.iter().map(|(_, id)| *id).collect();
+        ids.sort_unstable();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "two names in SCREENS map to the same screen id");
+
+        let mut names: Vec<&str> = SCREENS.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "the same name appears twice in SCREENS");
+    }
+
+    /// The name a caller says must describe the screen that id draws.
+    ///
+    /// This is the check that would have caught `("terminal", 16)`. The other two would not:
+    /// 16 IS rendered, and the name was self-consistent because both directions read the same
+    /// table. What was wrong is the only thing neither could see — that the screen drawn at 16
+    /// is AboutScreen, and nobody calls that a terminal.
+    ///
+    /// Matching a name against a component name is a heuristic, so it is deliberately loose:
+    /// singular/plural is ignored, and an id whose component could not be parsed is skipped
+    /// rather than failed. A loose check that runs beats a strict one that gets deleted.
+    #[test]
+    fn a_screens_name_matches_what_it_draws() {
+        let drawn = rendered();
+        let mut wrong = Vec::new();
+
+        for (name, id) in SCREENS {
+            let Some((_, component)) = drawn.iter().find(|(rid, c)| rid == id && !c.is_empty())
+            else {
+                continue; // not parseable from the markup; the other tests still cover the id
+            };
+            let stem = name.strip_suffix('s').unwrap_or(name).to_ascii_lowercase();
+            if !component.to_ascii_lowercase().contains(&stem) {
+                wrong.push(format!("`{name}` -> {id}, which draws {component}"));
+            }
+        }
+
+        assert!(
+            wrong.is_empty(),
+            "these names do not describe the screen they point at:\n  {}\n\n\
+             The ids come from app.slint. If the screen moved, take its id from the \
+             `if current-screen == N` branch that renders it.",
+            wrong.join("\n  ")
+        );
+    }
+
+    /// The settings sections a caller can name are the ones the sidebar has.
+    #[test]
+    fn settings_sections_are_contiguous_from_zero() {
+        let mut ids: Vec<i32> = SETTINGS_SECTIONS.iter().map(|(_, id)| *id).collect();
+        ids.sort_unstable();
+        let expected: Vec<i32> = (0..ids.len() as i32).collect();
+        assert_eq!(
+            ids, expected,
+            "settings section ids are the sidebar's indices, so they run 0..n with no gaps"
+        );
+    }
 }

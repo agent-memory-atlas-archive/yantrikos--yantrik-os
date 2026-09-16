@@ -3,7 +3,7 @@
 // V52 polish: premium cards, hover states, better empty state, theme tokens.
 
 import { Theme } from "theme.slint";
-import { Icons } from "components/icon.slint";
+import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
 
 export struct NotificationData {
@@ -73,7 +73,16 @@ export component NotificationCenter inherits Rectangle {
                     padding-top: 120px;
                     spacing: Theme.sp-2;
 
-                    Text { text: "🔔"; font-size: 48px; horizontal-alignment: center; }
+                    // Was a bell EMOJI at 48px. On a machine with no emoji font that is a
+                    // tofu box in the middle of an otherwise empty screen -- the survey
+                    // photograph showed a question mark in a rectangle where the illustration
+                    // was meant to be.
+                    Icon {
+                        commands: Icons.alerts;
+                        size: 44px;
+                        tint: Theme.text-dim;
+                        x: (parent.width - self.width) / 2;
+                    }
                     Text { text: "All caught up"; color: Theme.text-secondary; font-size: Theme.fs-title-2; font-weight: Theme.fw-title-2; horizontal-alignment: center; }
                     Text { text: "System notifications will appear here"; color: Theme.text-dim; font-size: Theme.fs-caption; horizontal-alignment: center; }
                 }
@@ -99,7 +108,13 @@ export component NotificationCenter inherits Rectangle {
                                     width: 28px; height: 28px;
                                     border-radius: Theme.r-md;
                                     background: Theme.tint-accent;
-                                    Text { width: parent.width; height: parent.height; text: notif.group-icon; color: Theme.accent; font-size: Theme.fs-body; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                                    Icon {
+                                        commands: Icons.glyph(notif.group-icon);
+                                        size: 15px;
+                                        tint: Theme.accent;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                    }
                                 }
 
                                 Text { text: notif.group-name; color: Theme.text-primary; font-size: Theme.fs-body; font-weight: Theme.fw-headline; vertical-alignment: center; horizontal-stretch: 1; }
@@ -118,7 +133,13 @@ export component NotificationCenter inherits Rectangle {
                                         border-radius: Theme.r-md;
                                         background: parent.has-hover ? Theme.hover-fill : transparent;
                                         animate background { duration: Theme.dur-fast; }
-                                        Text { text: "✕"; color: Theme.text-dim; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
+                                        Icon {
+                                            commands: Icons.close;
+                                            size: 12px;
+                                            tint: Theme.text-dim;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
                                     }
                                 }
                             }
