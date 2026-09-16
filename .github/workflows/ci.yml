@@ -32,6 +32,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # This workspace path-depends on a SIBLING checkout: Cargo.toml carries
+      # `yantrikdb-core = { path = "../yantrikdb/crates/yantrikdb-core" }`, so a clone of this
+      # repository alone cannot be built by anyone, including this workflow. Cloning it here is
+      # what lets CI run at all; whether the repository should depend on a sibling path rather
+      # than a pinned git revision is a separate question, and a real one.
+      - name: Checkout yantrikdb (sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: yantrikos/yantrikdb
+          path: yantrikdb-sibling
+
+      - name: Put it where Cargo.toml expects
+        run: mv yantrikdb-sibling ../yantrikdb
+
       # The native libraries the workspace links against, found by looking for the -sys crates
       # in Cargo.lock rather than by guessing: alsa-sys, libudev-sys, openssl-sys,
       # speech-dispatcher-sys, wayland-sys. Slint's winit backend adds xkbcommon and fontconfig.
@@ -82,12 +96,14 @@ jobs:
         run: |
           fail=0
           while IFS= read -r f; do
-            head -c2 "$f" | grep -q '#!' || continue
+            # Only actual shell. The first version of this ran `bash -n` over scripts/* and
+            # choked on a Python file, which is a failure of the check rather than of the code.
+            head -n1 "$f" | grep -qE '^#!.*(bash|/bin/sh|env sh)' || continue
             if ! bash -n "$f" 2>/tmp/err; then
               echo "::error file=$f::$(cat /tmp/err)"
               fail=1
             fi
-          done < <(git ls-files '*.sh' 'deploy/yantrik-os/yantrik-*' 'scripts/*')
+          done < <(git ls-files '*.sh' 'deploy/yantrik-os/yantrik-*' 'scripts/*' 'config/labwc/autostart')
           exit $fail
 
       # Every tracked script must be executable. A fresh clone could not run this repository's
@@ -96,7 +112,7 @@ jobs:
         run: |
           bad=$(git ls-files -s | awk '$1=="100644"{print $4}' | while read -r f; do
             [ -f "$f" ] && head -c2 "$f" | grep -q '#!' && echo "$f"
-          done)
+          done || true)
           if [ -n "$bad" ]; then
             echo "::error::these start with #! but are not executable in git:"
             echo "$bad"
