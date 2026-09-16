@@ -188,7 +188,23 @@ export component EmailClient inherits Rectangle {
     callback oauth-google();  // Sign in with Google (OAuth2)
 
     // ── Account Setup View (shown when no account) ──
-    if !root.has-account : Rectangle {
+    // ── Account setup (shown until there is an account) ──
+    //
+    // With the header. This was the one screen in the OS that had no app shell at all: no
+    // glyph, no name, no window chrome of its own -- a bare form on a dark field, and the FIRST
+    // thing anyone sees of Mail, because it is what shows until an account exists. The app
+    // introduced itself everywhere except at the door.
+    if !root.has-account : VerticalLayout {
+        spacing: 0px;
+
+        AppHeader {
+            app-id: "email";
+            icon: Icons.mail;
+            title: "Email";
+            subtitle: "No account yet";
+        }
+
+        Rectangle {
         background: Theme.bg-deep;
 
         VerticalLayout {
@@ -246,9 +262,16 @@ export component EmailClient inherits Rectangle {
                         Rectangle {
                             height: Theme.touch-target;
                             border-radius: Theme.r-lg;
-                            background: @linear-gradient(90deg, Theme.accent.transparentize(87%) 0%, Theme.color-success.transparentize(87%) 50%, #ea433520 100%);
+                            // One surface, not three.
+                            //
+                            // This was a 90-degree gradient from teal through green to
+                            // Google red -- an attempt at the brand's four colours that, at
+                            // 13% alpha across a 380px button, renders as a muddy band and
+                            // reads as a rendering fault rather than as a logo. The G below
+                            // carries the brand; the button is a button.
+                            background: Theme.bg-elevated;
                             border-width: 1px;
-                            border-color: Theme.accent.transparentize(75%);
+                            border-color: Theme.border-strong;
 
                             TouchArea {
                                 clicked => { root.oauth-google(); }
@@ -261,7 +284,9 @@ export component EmailClient inherits Rectangle {
 
                                 Text {
                                     text: "G";
-                                    color: Theme.accent;
+                                    // Google's blue. The one place in this OS where a colour
+                                    // is somebody else's and has to stay theirs.
+                                    color: #4285f4;
                                     font-size: Theme.fs-title-1;
                                     font-weight: 700;
                                     vertical-alignment: center;
@@ -513,6 +538,7 @@ export component EmailClient inherits Rectangle {
             }
         }
     }
+        }
 
     // ── Main Email View (shown when account is configured) ──
     if root.has-account : VerticalLayout {

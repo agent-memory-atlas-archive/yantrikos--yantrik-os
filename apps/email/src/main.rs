@@ -9,6 +9,105 @@ use yantrik_ipc_transport::SyncRpcClient;
 
 slint::include_modules!();
 
+/// Put "Re: " (or "Fwd: ") on a subject without stacking it up.
+///
+/// Replying to a reply to a reply should not produce "Re: Re: Re: lunch".
+fn prefixed(prefix: &str, subject: &str) -> SharedString {
+    let s = subject.trim();
+    if s.to_lowercase().starts_with(&prefix.trim().to_lowercase()) {
+        return s.into();
+    }
+    format!("{prefix}{s}").into()
+}
+
+/// Open the composer as a reply to whatever is on screen.
+///
+/// `all` decides whether the other recipients come along. The quote block is the convention
+/// every mail client shares, which is the point: a reply from this app has to look like a reply
+/// in the client the other person is using.
+fn start_reply(ui: &EmailApp, all: bool) {
+    let d = ui.get_email_detail();
+    if d.id <= 0 {
+        return;
+    }
+    ui.set_is_composing(true);
+    ui.set_compose_to(d.from_addr.clone());
+    ui.set_compose_cc(if all { d.cc_addr.clone() } else { SharedString::default() });
+    ui.set_compose_bcc(SharedString::default());
+    ui.set_compose_subject(prefixed("Re: ", &d.subject));
+    ui.set_compose_body(
+        format!(
+            "\n\nOn {}, {} wrote:\n{}",
+            d.date_text,
+            d.from_name,
+            d.body
+                .lines()
+                .map(|l| format!("> {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+        .into(),
+    );
+}
+
+/// The two companion actions that read the open message.
+#[derive(Clone, Copy)]
+enum MailAi {
+    Summarize,
+    SuggestReply,
+}
+
+fn wire_mail_ai(app: &EmailApp, which: MailAi) {
+    let weak = app.as_weak();
+    let handler = move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let d = ui.get_email_detail();
+        if d.id <= 0 || d.body.is_empty() {
+            return;
+        }
+        let prompt = match which {
+            MailAi::Summarize => format!(
+                "Summarise this email in at most three short lines. Say what is being asked of \
+                 me, if anything. Use only what it says.\n\nFrom: {}\nSubject: {}\n\n{}",
+                d.from_name, d.subject, d.body
+            ),
+            MailAi::SuggestReply => format!(
+                "Draft a short reply to this email. Match its register. Reply with the body \
+                 only.\n\nFrom: {}\nSubject: {}\n\n{}",
+                d.from_name, d.subject, d.body
+            ),
+        };
+        ui.set_ai_is_working(true);
+        let back = ui.as_weak();
+        std::thread::spawn(move || {
+            let outcome = companion::ask(&prompt);
+            let _ = back.upgrade_in_event_loop(move |ui| {
+                ui.set_ai_is_working(false);
+                match outcome {
+                    Ok(text) => match which {
+                        // The summary belongs on the message it is about.
+                        MailAi::Summarize => {
+                            let mut d = ui.get_email_detail();
+                            d.ai_summary = text.into();
+                            ui.set_email_detail(d);
+                        }
+                        // A suggested reply belongs in the composer, unsent.
+                        MailAi::SuggestReply => {
+                            start_reply(&ui, false);
+                            ui.set_compose_body(text.into());
+                        }
+                    },
+                    Err(e) => tracing::warn!(error = %e, "Companion call failed"),
+                }
+            });
+        });
+    };
+    match which {
+        MailAi::Summarize => app.on_summarize_email(handler),
+        MailAi::SuggestReply => app.on_ai_reply_suggest(handler),
+    }
+}
+
 fn main() {
     init_tracing("yantrik-email");
 
@@ -671,13 +770,106 @@ fn wire(app: &EmailApp) {
     }
 
     // ── Stubs for features requiring companion bridge or complex setup ──
-    app.on_reply_email(|| { tracing::info!("Reply (standalone mode)"); });
-    app.on_reply_all_email(|| { tracing::info!("Reply-all (standalone mode)"); });
-    app.on_forward_email(|| { tracing::info!("Forward (standalone mode)"); });
-    app.on_summarize_email(|| { tracing::info!("AI summarize (standalone mode)"); });
-    app.on_enhance_text(|_| { tracing::info!("AI enhance (standalone mode)"); });
-    app.on_ai_draft(|_| { tracing::info!("AI draft (standalone mode)"); });
-    app.on_ai_reply_suggest(|| { tracing::info!("AI reply suggest (standalone mode)"); });
+    // ── Reply, reply-all, forward ──
+    //
+    // These three logged a line and returned, which is a strange thing for a mail client not to
+    // do. None of them needs a model or a network call: the message is already on screen, and
+    // replying is opening the composer with the right fields filled in. The quoting convention
+    // is the one every client has used since mail was text.
+    {
+        let weak = app.as_weak();
+        app.on_reply_email(move || {
+            if let Some(ui) = weak.upgrade() {
+                start_reply(&ui, false);
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_reply_all_email(move || {
+            if let Some(ui) = weak.upgrade() {
+                start_reply(&ui, true);
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_forward_email(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let d = ui.get_email_detail();
+            ui.set_is_composing(true);
+            ui.set_compose_to(SharedString::default());
+            ui.set_compose_cc(SharedString::default());
+            ui.set_compose_bcc(SharedString::default());
+            ui.set_compose_subject(prefixed("Fwd: ", &d.subject));
+            ui.set_compose_body(
+                format!(
+                    "\n\n---------- Forwarded message ----------\nFrom: {} <{}>\nSubject: {}\nDate: {}\n\n{}",
+                    d.from_name, d.from_addr, d.subject, d.date_text, d.body
+                )
+                .into(),
+            );
+        });
+    }
+
+    // ── What the companion is for ──
+    //
+    // Summarising a thread, drafting from an instruction, suggesting a reply: three things a
+    // model is genuinely better at than a rule. Each one reads the message that is open and
+    // says so on the card.
+    wire_mail_ai(&app, MailAi::Summarize);
+    wire_mail_ai(&app, MailAi::SuggestReply);
+    {
+        let weak = app.as_weak();
+        app.on_ai_draft(move |instruction| {
+            let Some(ui) = weak.upgrade() else { return };
+            let instruction = instruction.to_string();
+            if instruction.trim().is_empty() {
+                return;
+            }
+            ui.set_ai_is_working(true);
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&format!(
+                    "Draft an email for this instruction. Reply with the body only, no subject \
+                     line and no commentary.\n\n{instruction}"
+                ));
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_ai_is_working(false);
+                    match outcome {
+                        Ok(text) => ui.set_compose_body(text.into()),
+                        Err(e) => tracing::warn!(error = %e, "AI draft failed"),
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_enhance_text(move |style| {
+            let Some(ui) = weak.upgrade() else { return };
+            let body = ui.get_compose_body().to_string();
+            if body.trim().is_empty() {
+                return;
+            }
+            let style = style.to_string();
+            ui.set_ai_is_working(true);
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&format!(
+                    "Rewrite this email to be {style}. Keep every fact and every commitment. \
+                     Reply with the body only.\n\n{body}"
+                ));
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_ai_is_working(false);
+                    match outcome {
+                        Ok(text) => ui.set_compose_body(text.into()),
+                        Err(e) => tracing::warn!(error = %e, "AI enhance failed"),
+                    }
+                });
+            });
+        });
+    }
     app.on_back_pressed(|| {});
     app.on_add_account(|| { tracing::info!("Add account (standalone mode)"); });
     app.on_download_attachment(|_| { tracing::info!("Download attachment (standalone mode)"); });
