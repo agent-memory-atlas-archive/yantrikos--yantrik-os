@@ -2,6 +2,8 @@
 // Shows bond ring, level name, and relationship stats.
 
 import { Theme } from "theme.slint";
+import { Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 import { BondRing } from "components/bond_ring.slint";
 
 export struct BondData {
@@ -24,45 +26,30 @@ export component BondScreen inherits Rectangle {
     VerticalLayout {
         spacing: 0px;
 
-        // Header
-        Rectangle {
-            height: 56px;
-            background: Theme.bg-surface;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                alignment: start;
-                spacing: 12px;
-
-                TouchArea {
-                    width: Theme.touch-target;
-                    height: Theme.touch-target;
-                    clicked => { root.back-pressed(); }
-                    Text {
-                        text: "←";
-                        color: Theme.text-secondary;
-                        font-size: 22px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Text {
-                    text: "Bond";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-title;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-            }
+        // -- Header --
+        //
+        // Was a hand-rolled bar whose back button was the CHARACTER "left arrow" in a TouchArea.
+        // A glyph is only an icon if the font has it; the same habit put an emoji in the Memory
+        // browser's search field, where it drew as nothing and made the whole field look blank.
+        // AppHeader's back button is a stroke path from the Icons set.
+        AppHeader {
+            show-back: true;
+            icon: Icons.bond;
+            title: "Bond";
+            back => { root.back-pressed(); }
         }
 
         // Scrollable content
         Flickable {
             vertical-stretch: 1;
+            // Without this the column lays itself out at its own preferred width and the stats
+            // card sits in a ribbon down the left, leaving the right half of the screen empty.
+            // A Flickable's viewport defaults to the size its CONTENT asks for, not the size of
+            // the view -- which is right for the scrolling axis and wrong for the other one.
+            viewport-width: self.width;
 
             VerticalLayout {
+                width: parent.width;
                 padding: 24px;
                 spacing: 24px;
                 alignment: start;

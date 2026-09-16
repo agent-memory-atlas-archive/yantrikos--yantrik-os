@@ -4,6 +4,7 @@
 // Each section is collapsible. Dismiss button clears the card.
 
 import { Theme } from "theme.slint";
+import { Icon, Icons } from "icon.slint";
 
 // ── Section data ──────────────────────────────────────────────────
 
@@ -159,12 +160,12 @@ export component MorningBriefCard inherits Rectangle {
                     border-radius: 14px;
                     background: Theme.separator;
 
-                    Text {
-                        text: "✕";
-                        color: Theme.text-dim;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    Icon {
+                        commands: Icons.close;
+                        tint: Theme.text-dim;
+                        size: 12px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                 }
             }

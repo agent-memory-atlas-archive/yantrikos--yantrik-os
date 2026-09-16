@@ -4,7 +4,7 @@
 // Row 2 (44px): Grouped command band that swaps based on active tab
 
 import { Theme } from "theme.slint";
-import { Icon } from "icon.slint";
+import { Icon, Icons } from "icon.slint";
 
 // ── Ribbon Tool Button — standard 32x32 icon button ──
 export component RibbonToolButton inherits Rectangle {
@@ -307,11 +307,11 @@ export component RibbonDropdown inherits Rectangle {
             vertical-alignment: center;
         }
 
-        Text {
-            text: "▾";
-            color: Theme.text-dim;
-            font-size: 9px;
-            vertical-alignment: center;
+        Icon {
+            commands: Icons.chevron-down;
+            tint: Theme.text-dim;
+            size: 10px;
+            y: (parent.height - self.height) / 2;
         }
     }
 }

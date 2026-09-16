@@ -359,7 +359,7 @@ export component PresentationScreen inherits Rectangle {
                                     background: timer-ta.has-hover ? Theme.hover-fill : transparent;
 
                                     timer-ta := TouchArea { clicked => { root.toggle-timer(); } }
-                                    Text { text: "▶"; color: Theme.text-secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                                    Icon { commands: Icons.play; tint: Theme.text-secondary; size: 12px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                                 }
 
                                 // Reset timer
@@ -370,7 +370,7 @@ export component PresentationScreen inherits Rectangle {
                                     background: reset-ta.has-hover ? Theme.hover-fill : transparent;
 
                                     reset-ta := TouchArea { clicked => { root.reset-timer(); } }
-                                    Text { text: "↺"; color: Theme.text-secondary; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                                    Icon { commands: Icons.rotate-ccw; tint: Theme.text-secondary; size: 14px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                                 }
                             }
                         }
@@ -984,11 +984,11 @@ export component PresentationScreen inherits Rectangle {
                                         alignment: center;
                                         spacing: 4px;
 
-                                        Text {
-                                            text: "🖼";
-                                            font-size: 28px;
-                                            horizontal-alignment: center;
-                                            opacity: 0.3;
+                                        Icon {
+                                            commands: Icons.image;
+                                            tint: Theme.text-dim;
+                                            size: 28px;
+                                            opacity: 0.5;
                                         }
                                         Text {
                                             text: "Image placeholder";

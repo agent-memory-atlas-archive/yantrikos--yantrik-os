@@ -3,6 +3,7 @@
 // Tiers: Whisper (0.50-0.85, auto-fade 10s), Interrupt (≥0.85, persistent).
 
 import { Theme } from "theme.slint";
+import { Icon, Icons } from "icon.slint";
 
 export struct WhisperCardItem {
     id: string,
@@ -147,12 +148,12 @@ component WhisperCard inherits Rectangle {
             border-radius: 10px;
             background: root.hovered ? Theme.hover-fill-strong : transparent;
 
-            Text {
-                text: "✕";
-                color: root.hovered ? Theme.text-secondary : Theme.text-dim;
-                font-size: 10px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Icon {
+                commands: Icons.close;
+                tint: root.hovered ? Theme.text-secondary : Theme.text-dim;
+                size: 12px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
             }
         }
     }

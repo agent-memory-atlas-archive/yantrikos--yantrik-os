@@ -3,6 +3,8 @@
 // Real-time CPU and memory charts with 60-second history.
 
 import { Theme } from "theme.slint";
+import { Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 import { LineChart } from "components/line_chart.slint";
 
 export struct ProcessData {
@@ -45,38 +47,17 @@ export component SystemDashboard inherits Rectangle {
     VerticalLayout {
         spacing: 0px;
 
-        // Header
-        Rectangle {
-            height: 56px;
-            background: Theme.bg-surface;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                alignment: start;
-                spacing: 12px;
-
-                TouchArea {
-                    width: Theme.touch-target;
-                    height: Theme.touch-target;
-                    clicked => { root.back-pressed(); }
-                    Text {
-                        text: "←";
-                        color: Theme.text-secondary;
-                        font-size: 22px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Text {
-                    text: "System";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-title;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-            }
+        // -- Header --
+        //
+        // Was a hand-rolled bar whose back button was the CHARACTER "left arrow" in a TouchArea.
+        // A glyph is only an icon if the font has it; the same habit put an emoji in the Memory
+        // browser's search field, where it drew as nothing and made the whole field look blank.
+        // AppHeader's back button is a stroke path from the Icons set.
+        AppHeader {
+            show-back: true;
+            icon: Icons.monitor;
+            title: "System";
+            back => { root.back-pressed(); }
         }
 
         // Content

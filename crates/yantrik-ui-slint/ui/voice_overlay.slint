@@ -14,6 +14,7 @@
 //   - Keyboard shortcut hint (Ctrl+Space)
 
 import { Theme } from "theme.slint";
+import { Icon, Icons } from "components/icon.slint";
 import { Orb } from "components/orb.slint";
 
 export component VoiceOverlay inherits Rectangle {
@@ -109,12 +110,12 @@ export component VoiceOverlay inherits Rectangle {
                                 border-radius: 14px;
                                 background: parent.has-hover ? Theme.bg-elevated : transparent;
 
-                                Text {
-                                    text: "✕";
-                                    color: Theme.text-dim;
-                                    font-size: 14px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                Icon {
+                                    commands: Icons.close;
+                                    tint: Theme.text-dim;
+                                    size: 14px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
                                 }
                             }
                         }

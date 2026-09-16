@@ -1,6 +1,8 @@
 // Memory browser — search and explore stored memories.
 
 import { Theme } from "theme.slint";
+import { Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 import { ListView } from "std-widgets.slint";
 
 export struct MemoryItem {
@@ -25,90 +27,29 @@ export component MemoryBrowser inherits Rectangle {
     VerticalLayout {
         spacing: 0px;
 
-        // Header
-        Rectangle {
-            height: 56px;
-            background: Theme.bg-surface;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                alignment: start;
-                spacing: 12px;
-
-                TouchArea {
-                    width: Theme.touch-target;
-                    height: Theme.touch-target;
-                    clicked => { root.back-pressed(); }
-                    Text {
-                        text: "←";
-                        color: Theme.text-secondary;
-                        font-size: 22px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Text {
-                    text: "Memories";
-                    color: Theme.text-primary;
-                    font-size: Theme.font-title;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-
-                // Memory count
-                Text {
-                    text: total-memories + " total";
-                    color: Theme.text-dim;
-                    font-size: Theme.font-small;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    horizontal-alignment: right;
-                }
-            }
-        }
-
-        // Search bar
-        Rectangle {
-            height: 52px;
-            background: Theme.bg-surface;
-
-            HorizontalLayout {
-                padding: 8px;
-                padding-left: 16px;
-                padding-right: 16px;
-
-                Rectangle {
-                    border-radius: Theme.radius-pill;
-                    background: Theme.bg-card;
-                    horizontal-stretch: 1;
-                    height: 36px;
-                    clip: true;
-
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 8px;
-
-                        Text {
-                            text: "🔍";
-                            font-size: 14px;
-                            vertical-alignment: center;
-                        }
-
-                        search-input := TextInput {
-                            horizontal-stretch: 1;
-                            color: Theme.text-primary;
-                            font-size: Theme.font-body;
-                            vertical-alignment: center;
-                            accepted => {
-                                root.search(self.text);
-                            }
-                        }
-                    }
-                }
-            }
+        // -- Header --
+        //
+        // A 56px bar and a 52px search bar beneath it, replaced by the one header every app
+        // wears.
+        //
+        // The search field here rendered as a blank strip, and it was not a layout bug: its
+        // icon was a magnifying-glass EMOJI, which draws as nothing on a machine with no emoji
+        // font, and the input had no placeholder. An empty box with an invisible icon and no
+        // prompt is indistinguishable from a decorative rectangle, which is exactly what it
+        // looked like. The back button was a left-arrow character for the same reason.
+        //
+        // AppHeader draws both as stroke paths from the Icons set, at the size everything else
+        // uses, and gives the field a placeholder.
+        AppHeader {
+            show-back: true;
+            icon: Icons.chip;
+            title: "Memories";
+            subtitle: "\{root.total-memories} stored";
+            show-search: true;
+            search-placeholder: "Search memories";
+            status: root.is-searching ? "searching" : "";
+            back => { root.back-pressed(); }
+            search-accepted(q) => { root.search(q); }
         }
 
         // Results

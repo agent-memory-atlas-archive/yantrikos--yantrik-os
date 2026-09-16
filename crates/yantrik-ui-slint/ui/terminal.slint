@@ -4,7 +4,7 @@
 // and dangerous command warnings.
 
 import { Theme } from "theme.slint";
-import { Icons } from "components/icon.slint";
+import { Icons, Icon } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
 
 export struct TerminalTabData {
@@ -271,11 +271,11 @@ export component TerminalScreen inherits Rectangle {
                 spacing: Theme.sp-2;
 
                 // AI icon
-                Text {
-                    text: "◉";
-                    color: Theme.amber;
-                    font-size: 14px;
-                    vertical-alignment: center;
+                Icon {
+                    commands: Icons.spark;
+                    tint: Theme.amber;
+                    size: 14px;
+                    y: (parent.height - self.height) / 2;
                     width: 18px;
                 }
 
@@ -435,7 +435,7 @@ export component TerminalScreen inherits Rectangle {
                     Rectangle {
                         width: 24px; height: 24px; border-radius: Theme.r-sm;
                         background: parent.has-hover ? Theme.hover-fill-strong : transparent;
-                        Text { text: "▲"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                        Icon { commands: Icons.chevron-up; tint: Theme.text-secondary; size: 12px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                     }
                 }
                 TouchArea {
@@ -445,7 +445,7 @@ export component TerminalScreen inherits Rectangle {
                     Rectangle {
                         width: 24px; height: 24px; border-radius: Theme.r-sm;
                         background: parent.has-hover ? Theme.hover-fill-strong : transparent;
-                        Text { text: "▼"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                        Icon { commands: Icons.chevron-down; tint: Theme.text-secondary; size: 12px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                     }
                 }
                 TouchArea {
@@ -689,11 +689,11 @@ export component TerminalScreen inherits Rectangle {
                     spacing: Theme.sp-2;
                     alignment: start;
 
-                    Text {
-                        text: "⚠";
-                        color: Theme.color-danger;
-                        font-size: 16px;
-                        vertical-alignment: center;
+                    Icon {
+                        commands: Icons.warning;
+                        tint: Theme.color-danger;
+                        size: 16px;
+                        y: (parent.height - self.height) / 2;
                     }
 
                     Text {
@@ -761,7 +761,7 @@ export component TerminalScreen inherits Rectangle {
                             spacing: Theme.sp-2;
                             alignment: start;
 
-                            Text { text: "◉"; color: Theme.amber; font-size: 14px; vertical-alignment: center; }
+                            Icon { commands: Icons.spark; tint: Theme.amber; size: 14px; y: (parent.height - self.height) / 2; }
                             Text { text: "AI Assistant"; color: Theme.amber; font-size: Theme.fs-caption; font-weight: 600; vertical-alignment: center; }
                         }
 
