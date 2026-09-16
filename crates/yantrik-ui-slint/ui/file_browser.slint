@@ -6,6 +6,7 @@
 // create file/folder, status bar with selection info.
 
 import { Theme } from "theme.slint";
+import { AppIdentity } from "components/app_color.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { ListView } from "std-widgets.slint";
@@ -51,6 +52,10 @@ export struct FileOpItem {
 }
 
 export component FileBrowser inherits Rectangle {
+    // This screen draws its own header rather than AppHeader, so it has to say what
+    // it is: AppIdentity is otherwise left holding whichever app was opened before it.
+    init => { AppIdentity.id = "files"; }
+
     background: transparent;
 
     in property <string> current-path: "~";
@@ -697,7 +702,7 @@ export component FileBrowser inherits Rectangle {
                                 Text {
                                     text: root.file-trash-count < 100 ? root.file-trash-count : "99+";
                                     color: Theme.text-on-accent;
-                                    font-size: 8px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 700;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;

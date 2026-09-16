@@ -6,7 +6,7 @@ import { ScrollView } from "std-widgets.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 // ── Data Structures ──
 
@@ -254,7 +254,7 @@ export component CalendarScreen inherits Rectangle {
                                 border-radius: 8px;
                                 background: tpl-touch.has-hover ? Theme.bg-card : Theme.border-subtle;
                                 border-width: 1px;
-                                border-color: tpl-touch.has-hover ? Theme.accent.transparentize(60%) : transparent;
+                                border-color: tpl-touch.has-hover ? AppIdentity.accent.transparentize(60%) : transparent;
 
                                 tpl-touch := TouchArea {
                                     clicked => { root.cal-use-template(idx); }
@@ -273,7 +273,7 @@ export component CalendarScreen inherits Rectangle {
                                         Text {
                                             text: tpl.name;
                                             color: Theme.text-primary;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             vertical-alignment: center;
                                         }
@@ -282,7 +282,7 @@ export component CalendarScreen inherits Rectangle {
                                     Text {
                                         text: tpl.duration-min + " min";
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         horizontal-alignment: center;
                                     }
                                 }
@@ -318,7 +318,7 @@ export component CalendarScreen inherits Rectangle {
                                 height: 100%;
                                 text: header;
                                 color: Theme.text-dim;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 font-weight: 600;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -345,7 +345,7 @@ export component CalendarScreen inherits Rectangle {
                                 border-radius: Theme.r-sm;
                                 // Days of this month sit on a faint surface so the month reads as
                                 // a grid; days spilling in from the neighbouring months do not.
-                                background: cell-day.is-selected ? Theme.tint-accent
+                                background: cell-day.is-selected ? AppIdentity.tint
                                     : cell-day.is-current-month ? Theme.bg-surface.transparentize(45%)
                                     : transparent;
                                 border-width: cell-day.is-selected ? 1px : 0;
@@ -370,12 +370,12 @@ export component CalendarScreen inherits Rectangle {
                                     width: 22px;
                                     height: 20px;
                                     border-radius: Theme.r-sm;
-                                    background: cell-day.is-today ? Theme.accent : transparent;
+                                    background: cell-day.is-today ? AppIdentity.accent : transparent;
 
                                     Text {
                                         text: cell-day.day-number;
                                         color: cell-day.is-today ? Theme.bg-deep
-                                            : cell-day.is-selected ? Theme.accent
+                                            : cell-day.is-selected ? AppIdentity.accent
                                             : cell-day.is-current-month ? Theme.text-secondary
                                             : Theme.text-dim.transparentize(30%);
                                         font-size: Theme.fs-caption;
@@ -440,7 +440,7 @@ export component CalendarScreen inherits Rectangle {
                             Text {
                                 text: root.week-day-labels.length > idx ? root.week-day-labels[idx] : "";
                                 color: Theme.text-secondary;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 font-weight: 600;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -472,7 +472,7 @@ export component CalendarScreen inherits Rectangle {
                                     Text {
                                         text: hour < 10 ? "0" + hour : hour;
                                         color: Theme.text-dim;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         horizontal-alignment: center;
                                         vertical-alignment: top;
                                     }
@@ -533,14 +533,14 @@ export component CalendarScreen inherits Rectangle {
                                     Text {
                                         text: ev.title;
                                         color: Theme.text-on-accent;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 600;
                                         overflow: elide;
                                     }
                                     Text {
                                         text: (ev.start-hour < 10 ? "0" : "") + ev.start-hour + ":" + (ev.start-min < 10 ? "0" : "") + ev.start-min;
                                         color: Theme.text-on-accent;
-                                        font-size: 9px;
+                                        font-size: Theme.fs-micro;
                                     }
                                 }
                             }
@@ -578,7 +578,7 @@ export component CalendarScreen inherits Rectangle {
                                     Text {
                                         text: hour < 10 ? "0" + hour : hour;
                                         color: Theme.text-dim;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         horizontal-alignment: center;
                                         vertical-alignment: top;
                                     }
@@ -651,14 +651,14 @@ export component CalendarScreen inherits Rectangle {
                                         Text {
                                             text: ev.title;
                                             color: Theme.text-on-accent;
-                                            font-size: 13px;
+                                            font-size: Theme.fs-body;
                                             font-weight: 600;
                                             overflow: elide;
                                         }
                                         Text {
                                             text: (ev.start-hour < 10 ? "0" : "") + ev.start-hour + ":" + (ev.start-min < 10 ? "0" : "") + ev.start-min;
                                             color: Theme.text-on-accent;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                         }
                                     }
                                 }
@@ -712,7 +712,7 @@ export component CalendarScreen inherits Rectangle {
                     Text {
                         text: "Title";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                     }
                     Rectangle {
                         height: 38px;
@@ -726,7 +726,7 @@ export component CalendarScreen inherits Rectangle {
                             TextInput {
                                 text <=> root.event-title;
                                 color: Theme.text-primary;
-                                font-size: 13px;
+                                font-size: Theme.fs-body;
                                 vertical-alignment: center;
                             }
                         }
@@ -740,7 +740,7 @@ export component CalendarScreen inherits Rectangle {
                     Text {
                         text: "Date";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                     }
                     Rectangle {
                         height: 38px;
@@ -754,7 +754,7 @@ export component CalendarScreen inherits Rectangle {
                             TextInput {
                                 text <=> root.event-date;
                                 color: Theme.text-primary;
-                                font-size: 13px;
+                                font-size: Theme.fs-body;
                                 vertical-alignment: center;
                             }
                         }
@@ -768,7 +768,7 @@ export component CalendarScreen inherits Rectangle {
                     Text {
                         text: "Time (e.g. 2:00 PM - 3:00 PM)";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                     }
                     Rectangle {
                         height: 38px;
@@ -782,7 +782,7 @@ export component CalendarScreen inherits Rectangle {
                             TextInput {
                                 text <=> root.event-time;
                                 color: Theme.text-primary;
-                                font-size: 13px;
+                                font-size: Theme.fs-body;
                                 vertical-alignment: center;
                             }
                         }
@@ -796,7 +796,7 @@ export component CalendarScreen inherits Rectangle {
                     Text {
                         text: "Notes";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                     }
                     Rectangle {
                         height: 80px;
@@ -811,7 +811,7 @@ export component CalendarScreen inherits Rectangle {
                                 TextInput {
                                     text <=> root.event-notes;
                                     color: Theme.text-primary;
-                                    font-size: 13px;
+                                    font-size: Theme.fs-body;
                                     wrap: word-wrap;
                                 }
                             }
@@ -823,7 +823,7 @@ export component CalendarScreen inherits Rectangle {
                 if root.cal-timezone-display != "" : Text {
                     text: root.cal-timezone-display;
                     color: Theme.text-dim;
-                    font-size: 10px;
+                    font-size: Theme.fs-micro;
                 }
 
                 // ── Reminder selector ──
@@ -833,7 +833,7 @@ export component CalendarScreen inherits Rectangle {
                     Text {
                         text: "Reminder";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                     }
 
                     HorizontalLayout {
@@ -849,7 +849,7 @@ export component CalendarScreen inherits Rectangle {
                             height: 28px;
                             min-width: 38px;
                             border-radius: 6px;
-                            background: root.cal-reminder-minutes == rm.mins ? Theme.accent : Theme.border-subtle;
+                            background: root.cal-reminder-minutes == rm.mins ? AppIdentity.accent : Theme.border-subtle;
 
                             TouchArea {
                                 clicked => { root.cal-set-reminder(rm.mins); }
@@ -859,7 +859,7 @@ export component CalendarScreen inherits Rectangle {
                             Text {
                                 text: rm.label;
                                 color: root.cal-reminder-minutes == rm.mins ? Theme.text-on-accent : Theme.text-secondary;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 font-weight: root.cal-reminder-minutes == rm.mins ? 600 : 400;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -878,7 +878,7 @@ export component CalendarScreen inherits Rectangle {
                         Text {
                             text: "Attendees";
                             color: Theme.text-dim;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
                         Rectangle { horizontal-stretch: 1; }
@@ -886,7 +886,7 @@ export component CalendarScreen inherits Rectangle {
                             width: 24px;
                             height: 24px;
                             border-radius: 6px;
-                            background: root.cal-attendee-input-visible ? Theme.accent : Theme.bg-card;
+                            background: root.cal-attendee-input-visible ? AppIdentity.accent : Theme.bg-card;
 
                             TouchArea {
                                 clicked => { root.cal-attendee-input-visible = !root.cal-attendee-input-visible; }
@@ -896,7 +896,7 @@ export component CalendarScreen inherits Rectangle {
                             Text {
                                 text: "+";
                                 color: root.cal-attendee-input-visible ? Theme.text-on-accent : Theme.text-secondary;
-                                font-size: 13px;
+                                font-size: Theme.fs-body;
                                 font-weight: 600;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -922,7 +922,7 @@ export component CalendarScreen inherits Rectangle {
                                 TextInput {
                                     text <=> root.cal-attendee-email-input;
                                     color: Theme.text-primary;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                     vertical-alignment: center;
                                 }
                             }
@@ -945,7 +945,7 @@ export component CalendarScreen inherits Rectangle {
                             Text {
                                 text: "Add";
                                 color: Theme.text-on-accent;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 font-weight: 600;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -991,7 +991,7 @@ export component CalendarScreen inherits Rectangle {
                                 Text {
                                     text: att.email;
                                     color: Theme.text-secondary;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     overflow: elide;
                                     vertical-alignment: center;
                                 }
@@ -1037,7 +1037,7 @@ export component CalendarScreen inherits Rectangle {
                     Text {
                         text: "Save Event";
                         color: Theme.bg-deep;
-                        font-size: 13px;
+                        font-size: Theme.fs-body;
                         font-weight: 600;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -1148,7 +1148,7 @@ export component CalendarScreen inherits Rectangle {
                                 Text {
                                     text: event.title;
                                     color: Theme.text-primary;
-                                    font-size: 13px;
+                                    font-size: Theme.fs-body;
                                     font-weight: 600;
                                     overflow: elide;
                                 }
@@ -1156,7 +1156,7 @@ export component CalendarScreen inherits Rectangle {
                                 Text {
                                     text: event.time-text;
                                     color: Theme.text-secondary;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                 }
                             }
 

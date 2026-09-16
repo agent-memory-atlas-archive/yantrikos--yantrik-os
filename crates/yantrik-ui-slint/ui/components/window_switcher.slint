@@ -95,7 +95,7 @@ export component WindowSwitcher inherits Rectangle {
                         Text {
                             text: win.icon-char;
                             color: is-hovered ? Theme.cyan : Theme.text-secondary;
-                            font-size: 22px;
+                            font-size: Theme.fs-display;
                             font-weight: 700;
                             horizontal-alignment: center;
 
@@ -106,7 +106,7 @@ export component WindowSwitcher inherits Rectangle {
                         Text {
                             text: win.title;
                             color: Theme.text-primary;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             horizontal-alignment: center;
                             overflow: elide;
                         }
@@ -115,7 +115,7 @@ export component WindowSwitcher inherits Rectangle {
                         if win.subtitle != "" : Text {
                             text: win.subtitle;
                             color: Theme.text-dim;
-                            font-size: 8px;
+                            font-size: Theme.fs-micro;
                             horizontal-alignment: center;
                             overflow: elide;
                         }

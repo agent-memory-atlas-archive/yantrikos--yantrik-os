@@ -91,7 +91,7 @@ export component SystemDashboard inherits Rectangle {
                 Text {
                     text: "RESOURCES";
                     color: Theme.text-dim;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     letter-spacing: 2px;
                 }
 
@@ -208,7 +208,7 @@ export component SystemDashboard inherits Rectangle {
                                     Text {
                                         text: "Used: " + root.memory-used-text;
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                     }
                                 }
 
@@ -226,7 +226,7 @@ export component SystemDashboard inherits Rectangle {
                                     Text {
                                         text: "Cached: " + root.memory-cached-text;
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                     }
                                 }
 
@@ -245,7 +245,7 @@ export component SystemDashboard inherits Rectangle {
                                     Text {
                                         text: "Free: " + root.memory-total-text;
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                     }
                                 }
                             }
@@ -295,7 +295,7 @@ export component SystemDashboard inherits Rectangle {
                 Text {
                     text: "HISTORY (60s)";
                     color: Theme.text-dim;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     letter-spacing: 2px;
                 }
 
@@ -327,7 +327,7 @@ export component SystemDashboard inherits Rectangle {
                 Text {
                     text: "STATUS";
                     color: Theme.text-dim;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     letter-spacing: 2px;
                 }
 
@@ -438,7 +438,7 @@ export component SystemDashboard inherits Rectangle {
                 Text {
                     text: "TOP PROCESSES";
                     color: Theme.text-dim;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     letter-spacing: 2px;
                 }
 
@@ -458,21 +458,21 @@ export component SystemDashboard inherits Rectangle {
                             Text {
                                 text: "Name";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                                 horizontal-stretch: 1;
                             }
                             Text {
                                 text: "PID";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                                 min-width: 50px;
                             }
                             Text {
                                 text: "CPU";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                                 min-width: 44px;
                                 horizontal-alignment: right;
@@ -503,7 +503,7 @@ export component SystemDashboard inherits Rectangle {
                             Text {
                                 text: proc.pid;
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 min-width: 50px;
                                 vertical-alignment: center;
                             }

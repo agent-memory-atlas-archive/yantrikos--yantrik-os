@@ -140,7 +140,7 @@ export component QuickSettings inherits Rectangle {
                             Text {
                                 text: "WiFi";
                                 color: root.wifi-connected ? Theme.text-primary : Theme.text-dim;
-                                font-size: 9px;
+                                font-size: Theme.fs-micro;
                                 font-weight: 600;
                                 horizontal-alignment: center;
                             }
@@ -162,7 +162,7 @@ export component QuickSettings inherits Rectangle {
                     Text {
                         text: root.wifi-connected ? "Tap to disconnect" : "Tap to connect";
                         color: Theme.text-dim;
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                     }
                 }
             }

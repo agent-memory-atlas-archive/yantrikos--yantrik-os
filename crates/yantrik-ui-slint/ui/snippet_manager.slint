@@ -5,7 +5,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { ListView, LineEdit, TextEdit } from "std-widgets.slint";
 
@@ -182,7 +182,7 @@ export component SnippetManagerScreen inherits Rectangle {
                             background: parent.has-hover ? Theme.hover-fill : transparent;
                             Text {
                                 text: "+";
-                                font-size: 16px;
+                                font-size: Theme.fs-title-2;
                                 color: Theme.text-secondary;
                                 font-weight: 700;
                                 horizontal-alignment: center;
@@ -211,7 +211,7 @@ export component SnippetManagerScreen inherits Rectangle {
                             Icon {
                                 commands: Icons.glyph(coll.icon);
                                 size: 14px;
-                                tint: coll.is-selected ? Theme.accent : Theme.text-secondary;
+                                tint: coll.is-selected ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
 
@@ -244,7 +244,7 @@ export component SnippetManagerScreen inherits Rectangle {
 
                                 coll-count-text := Text {
                                     text: coll.snippet-count;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     color: Theme.text-dim;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -382,7 +382,7 @@ export component SnippetManagerScreen inherits Rectangle {
                     background: Theme.bg-input;
                     border-radius: Theme.radius-pill;
                     border-width: 1px;
-                    border-color: search-field.has-focus ? Theme.accent : Theme.border-subtle;
+                    border-color: search-field.has-focus ? AppIdentity.accent : Theme.border-subtle;
 
                     if root.search-query == "" : Text {
                         x: 12px + 13px + 8px;
@@ -424,7 +424,7 @@ export component SnippetManagerScreen inherits Rectangle {
 
                             match-count-text := Text {
                                 text: root.match-count;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.accent;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -453,7 +453,7 @@ export component SnippetManagerScreen inherits Rectangle {
                             chip-label := Text {
                                 text: chip.name;
                                 font-size: Theme.font-small;
-                                color: chip.is-active ? Theme.accent : Theme.text-secondary;
+                                color: chip.is-active ? AppIdentity.accent : Theme.text-secondary;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -535,7 +535,7 @@ export component SnippetManagerScreen inherits Rectangle {
 
                                     lang-text := Text {
                                         text: snip.language;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         color: Theme.accent;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -565,7 +565,7 @@ export component SnippetManagerScreen inherits Rectangle {
                                     }
                                     Text {
                                         text: snip.tags;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         color: Theme.accent-dim;
                                         overflow: elide;
                                         vertical-alignment: center;
@@ -587,7 +587,7 @@ export component SnippetManagerScreen inherits Rectangle {
 
                                 Text {
                                     text: snip.date-text;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     color: Theme.text-dim;
                                     vertical-alignment: center;
                                 }
@@ -609,37 +609,10 @@ export component SnippetManagerScreen inherits Rectangle {
                     }
                 }
 
-                // "New Snippet" button
-                Rectangle {
-                    height: 40px;
-                    background: new-ta.has-hover ? Theme.accent : Theme.accent-dim;
-                    border-radius: Theme.radius-pill;
-
-                    HorizontalLayout {
-                        alignment: center;
-                        spacing: 6px;
-
-                        Text {
-                            text: "+";
-                            font-size: 18px;
-                            color: Theme.text-on-accent;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                        }
-
-                        Text {
-                            text: "New Snippet";
-                            font-size: Theme.font-body;
-                            color: Theme.text-on-accent;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    new-ta := TouchArea {
-                        clicked => { root.snip-new(); }
-                    }
-                }
+                // The pill that was here is gone. "+ New Snippet" is already in the header, six
+                // hundred pixels away and above it -- the same words, the same action, twice on
+                // screen at once, one of them a full-width accent bar that made the sidebar look
+                // like it ended in an advert.
             }
         }
 
@@ -695,7 +668,7 @@ export component SnippetManagerScreen inherits Rectangle {
                         background: Theme.bg-input;
                         border-radius: Theme.radius-card;
                         border-width: 1px;
-                        border-color: title-field.has-focus ? Theme.accent : Theme.border-subtle;
+                        border-color: title-field.has-focus ? AppIdentity.accent : Theme.border-subtle;
 
                         HorizontalLayout {
                             padding-left: 12px;
@@ -752,7 +725,7 @@ export component SnippetManagerScreen inherits Rectangle {
                             background: Theme.bg-input;
                             border-radius: Theme.radius-card;
                             border-width: 1px;
-                            border-color: lang-field.has-focus ? Theme.accent : Theme.border-subtle;
+                            border-color: lang-field.has-focus ? AppIdentity.accent : Theme.border-subtle;
 
                             HorizontalLayout {
                                 padding-left: 10px;
@@ -830,7 +803,7 @@ export component SnippetManagerScreen inherits Rectangle {
                                                     Text {
                                                         text: lang-opt.name;
                                                         font-size: Theme.font-small;
-                                                        color: lang-opt.name == root.detail-language ? Theme.accent : Theme.text-primary;
+                                                        color: lang-opt.name == root.detail-language ? AppIdentity.accent : Theme.text-primary;
                                                         font-weight: lang-opt.name == root.detail-language ? 600 : 400;
                                                         vertical-alignment: center;
                                                     }
@@ -850,7 +823,7 @@ export component SnippetManagerScreen inherits Rectangle {
                         background: Theme.bg-input;
                         border-radius: Theme.radius-card;
                         border-width: 1px;
-                        border-color: tags-field.has-focus ? Theme.accent : Theme.border-subtle;
+                        border-color: tags-field.has-focus ? AppIdentity.accent : Theme.border-subtle;
 
                         HorizontalLayout {
                             padding-left: 10px;
@@ -889,7 +862,7 @@ export component SnippetManagerScreen inherits Rectangle {
                         code-editor := TextEdit {
                             vertical-stretch: 1;
                             text <=> root.detail-code;
-                            font-size: 14px;
+                            font-size: Theme.fs-body;
                             font-family: Theme.font-mono;
                         }
                     }
@@ -904,7 +877,7 @@ export component SnippetManagerScreen inherits Rectangle {
                     Rectangle {
                         width: 100px;
                         height: 38px;
-                        background: save-ta.has-hover ? Theme.accent : Theme.accent-dim;
+                        background: save-ta.has-hover ? AppIdentity.accent : Theme.accent-dim;
                         border-radius: Theme.radius-pill;
 
                         Text {
@@ -972,7 +945,7 @@ export component SnippetManagerScreen inherits Rectangle {
                         Rectangle {
                             width: 90px; height: 38px;
                             border-radius: Theme.radius-pill;
-                            background: root.ai-is-working ? Theme.accent
+                            background: root.ai-is-working ? AppIdentity.accent
                                 : (parent.has-hover ? Theme.hover-fill-strong : Theme.hover-fill);
                             border-width: root.ai-is-working ? 0px : 1px;
                             border-color: Theme.border-subtle;
@@ -1021,7 +994,7 @@ export component SnippetManagerScreen inherits Rectangle {
                             }
                             Text {
                                 text: "Versions";
-                                color: root.snip-version-panel-open ? Theme.accent : Theme.text-secondary;
+                                color: root.snip-version-panel-open ? AppIdentity.accent : Theme.text-secondary;
                                 font-size: Theme.font-body;
                                 font-weight: 500;
                                 vertical-alignment: center;
@@ -1079,13 +1052,13 @@ export component SnippetManagerScreen inherits Rectangle {
                             spacing: 4px;
                             Text {
                                 text: "Created:";
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-dim;
                                 vertical-alignment: center;
                             }
                             Text {
                                 text: root.detail-created-date != "" ? root.detail-created-date : "—";
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-secondary;
                                 vertical-alignment: center;
                             }
@@ -1096,13 +1069,13 @@ export component SnippetManagerScreen inherits Rectangle {
                             spacing: 4px;
                             Text {
                                 text: "Last used:";
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-dim;
                                 vertical-alignment: center;
                             }
                             Text {
                                 text: root.detail-last-used-date != "" ? root.detail-last-used-date : "Never";
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-secondary;
                                 vertical-alignment: center;
                             }
@@ -1113,13 +1086,13 @@ export component SnippetManagerScreen inherits Rectangle {
                             spacing: 4px;
                             Text {
                                 text: "Uses:";
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-dim;
                                 vertical-alignment: center;
                             }
                             Text {
                                 text: root.detail-use-count;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-secondary;
                                 vertical-alignment: center;
                             }
@@ -1158,7 +1131,7 @@ export component SnippetManagerScreen inherits Rectangle {
                     Text {
                         text: "AI Explanation";
                         color: Theme.accent;
-                        font-size: 12px;
+                        font-size: Theme.fs-caption;
                         font-weight: 600;
                         vertical-alignment: center;
                     }
@@ -1190,7 +1163,7 @@ export component SnippetManagerScreen inherits Rectangle {
                 Text {
                     text: root.ai-response;
                     color: Theme.text-primary;
-                    font-size: 12px;
+                    font-size: Theme.fs-caption;
                     wrap: word-wrap;
                 }
             }
@@ -1289,7 +1262,7 @@ export component SnippetManagerScreen inherits Rectangle {
 
                                 Text {
                                     text: ver;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     color: Theme.text-dim;
                                 }
                             }
@@ -1309,7 +1282,7 @@ export component SnippetManagerScreen inherits Rectangle {
 
                                     Text {
                                         text: "Restore";
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         color: Theme.text-secondary;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -1334,7 +1307,7 @@ export component SnippetManagerScreen inherits Rectangle {
                         x: 8px;
                         width: parent.width - 16px;
                         text: root.snip-version-content;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         font-family: Theme.font-mono;
                         color: Theme.text-secondary;
                         wrap: word-wrap;

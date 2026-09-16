@@ -7,7 +7,7 @@ import { Theme } from "theme.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct EditorTabData {
     title: string,
@@ -186,7 +186,7 @@ export component TextEditorScreen inherits Rectangle {
                             if tab.is-modified : Text {
                                 text: "\u{25CF}";
                                 color: Theme.amber;
-                                font-size: 8px;
+                                font-size: Theme.fs-micro;
                                 vertical-alignment: center;
                             }
 
@@ -293,7 +293,7 @@ export component TextEditorScreen inherits Rectangle {
                         y: (parent.height - self.preferred-height) / 2;
                         width: parent.width - 16px;
                         color: Theme.text-primary;
-                        font-size: 13px;
+                        font-size: Theme.fs-body;
                         text <=> root.goto-line-input;
                         input-type: number;
                         single-line: true;
@@ -307,7 +307,7 @@ export component TextEditorScreen inherits Rectangle {
                 Text {
                     text: "of \{root.total-lines}";
                     color: Theme.text-dim;
-                    font-size: 12px;
+                    font-size: Theme.fs-caption;
                     vertical-alignment: center;
                 }
 
@@ -364,7 +364,7 @@ export component TextEditorScreen inherits Rectangle {
                             y: (parent.height - self.preferred-height) / 2;
                             width: parent.width - 20px;
                             color: Theme.text-primary;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             text <=> root.find-query;
                             input-type: text;
                             single-line: true;
@@ -377,14 +377,14 @@ export component TextEditorScreen inherits Rectangle {
                         width: match-count-text.preferred-width + 14px;
                         height: 22px;
                         border-radius: 11px;
-                        background: root.find-match-count > 0 ? Theme.tint-accent : Theme.color-danger-dim;
+                        background: root.find-match-count > 0 ? AppIdentity.tint : Theme.color-danger-dim;
 
                         match-count-text := Text {
                             text: root.find-match-count > 0
                                 ? "\{root.find-current-match} of \{root.find-match-count}"
                                 : "0";
-                            color: root.find-match-count > 0 ? Theme.accent : Theme.color-emotional;
-                            font-size: 10px;
+                            color: root.find-match-count > 0 ? AppIdentity.accent : Theme.color-emotional;
+                            font-size: Theme.fs-micro;
                             font-weight: 500;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -442,7 +442,7 @@ export component TextEditorScreen inherits Rectangle {
                             y: (parent.height - self.preferred-height) / 2;
                             width: parent.width - 20px;
                             color: Theme.text-primary;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             text <=> root.replace-text;
                             input-type: text;
                             single-line: true;
@@ -533,7 +533,7 @@ export component TextEditorScreen inherits Rectangle {
                             y: (parent.height - self.preferred-height) / 2;
                             width: parent.width - 20px;
                             color: Theme.text-primary;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             text <=> root.ai-prompt;
                             input-type: text;
                             wrap: word-wrap;
@@ -559,7 +559,7 @@ export component TextEditorScreen inherits Rectangle {
                             background: root.ai-is-working ? Theme.hover-fill : (send-ta.has-hover ? Theme.amber : Theme.hover-fill-strong);
                             border-width: send-ta.has-hover ? 0px : 1px;
                             border-color: Theme.amber-dim;
-                            Text { text: root.ai-is-working ? "..." : "Ask"; color: send-ta.has-hover && !root.ai-is-working ? Theme.bg-deep : Theme.amber; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: root.ai-is-working ? "..." : "Ask"; color: send-ta.has-hover && !root.ai-is-working ? Theme.bg-deep : Theme.amber; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -582,7 +582,7 @@ export component TextEditorScreen inherits Rectangle {
                             width: parent.width - 20px;
                             text: root.ai-response;
                             color: Theme.text-secondary;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             wrap: word-wrap;
                         }
                     }
@@ -599,10 +599,10 @@ export component TextEditorScreen inherits Rectangle {
                         clicked => { root.ai-insert(); }
                         Rectangle {
                             width: 100px; height: 26px; border-radius: 6px;
-                            background: ins-ta.has-hover ? Theme.accent : Theme.hover-fill-strong;
+                            background: ins-ta.has-hover ? AppIdentity.accent : Theme.hover-fill-strong;
                             border-width: ins-ta.has-hover ? 0px : 1px;
                             border-color: Theme.accent-dim;
-                            Text { text: "Insert into doc"; color: ins-ta.has-hover ? Theme.bg-deep : Theme.accent; font-size: 10px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "Insert into doc"; color: ins-ta.has-hover ? Theme.bg-deep : Theme.accent; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -624,7 +624,7 @@ export component TextEditorScreen inherits Rectangle {
 
                 HorizontalLayout {
                     spacing: 8px;
-                    Text { text: "Save As"; color: Theme.accent; font-size: 13px; font-weight: 600; horizontal-stretch: 1; vertical-alignment: center; }
+                    Text { text: "Save As"; color: Theme.accent; font-size: Theme.fs-body; font-weight: 600; horizontal-stretch: 1; vertical-alignment: center; }
                     saveas-close-ta := TouchArea {
                         width: 24px; height: 24px;
                         clicked => { root.show-save-dialog = false; }
@@ -643,13 +643,13 @@ export component TextEditorScreen inherits Rectangle {
 
                 VerticalLayout {
                     spacing: 4px;
-                    Text { text: "Directory"; color: Theme.text-dim; font-size: 10px; }
+                    Text { text: "Directory"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                     Rectangle {
                         height: 30px; border-radius: 6px; background: Theme.bg-input; clip: true;
                         border-width: 1px; border-color: Theme.border-subtle;
                         dir-input := TextInput {
                             x: 10px; y: (parent.height - self.preferred-height) / 2; width: parent.width - 20px;
-                            color: Theme.text-primary; font-size: 12px; text <=> root.save-dir;
+                            color: Theme.text-primary; font-size: Theme.fs-caption; text <=> root.save-dir;
                             accepted => { root.save-file-as(root.save-dir, root.save-filename); }
                         }
                     }
@@ -657,13 +657,13 @@ export component TextEditorScreen inherits Rectangle {
 
                 VerticalLayout {
                     spacing: 4px;
-                    Text { text: "Filename"; color: Theme.text-dim; font-size: 10px; }
+                    Text { text: "Filename"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                     Rectangle {
                         height: 30px; border-radius: 6px; background: Theme.bg-input; clip: true;
                         border-width: 1px; border-color: Theme.border-subtle;
                         name-input := TextInput {
                             x: 10px; y: (parent.height - self.preferred-height) / 2; width: parent.width - 20px;
-                            color: Theme.text-primary; font-size: 12px; text <=> root.save-filename;
+                            color: Theme.text-primary; font-size: Theme.fs-caption; text <=> root.save-filename;
                             accepted => { root.save-file-as(root.save-dir, root.save-filename); }
                         }
                     }
@@ -672,7 +672,7 @@ export component TextEditorScreen inherits Rectangle {
                 if root.save-error != "" : Text {
                     text: root.save-error;
                     color: Theme.color-emotional;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                 }
 
                 HorizontalLayout {
@@ -719,7 +719,7 @@ export component TextEditorScreen inherits Rectangle {
                 Text {
                     text: "Large file — some features disabled for performance";
                     color: Theme.amber;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     font-weight: 500;
                     vertical-alignment: center;
                 }
@@ -750,7 +750,7 @@ export component TextEditorScreen inherits Rectangle {
                         text: root.line-numbers-text;
                         color: Theme.text-dim.transparentize(20%);
                         font-family: Theme.font-mono;
-                        font-size: 13px;
+                        font-size: Theme.fs-body;
                         horizontal-alignment: right;
                         wrap: no-wrap;
                     }
@@ -778,7 +778,7 @@ export component TextEditorScreen inherits Rectangle {
                     text: root.is-readonly ? "This file is read-only." : "Start typing, or open a file from Files.";
                     color: Theme.text-dim.transparentize(25%);
                     font-family: Theme.font-mono;
-                    font-size: 13px;
+                    font-size: Theme.fs-body;
                 }
 
                 Flickable {
@@ -794,7 +794,7 @@ export component TextEditorScreen inherits Rectangle {
                         width: parent.width - 32px;
                         color: Theme.text-primary;
                         font-family: Theme.font-mono;
-                        font-size: 13px;
+                        font-size: Theme.fs-body;
                         text <=> root.file-content;
                         read-only: root.is-readonly;
                         single-line: false;
@@ -830,7 +830,7 @@ export component TextEditorScreen inherits Rectangle {
                 Text {
                     text: "Ln \{root.cursor-line}, Col \{root.cursor-col}";
                     color: Theme.text-dim;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     vertical-alignment: center;
                 }
 
@@ -838,7 +838,7 @@ export component TextEditorScreen inherits Rectangle {
                 Text {
                     text: "\{root.total-lines} lines";
                     color: Theme.text-dim;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     vertical-alignment: center;
                 }
 
@@ -846,7 +846,7 @@ export component TextEditorScreen inherits Rectangle {
                 if root.editor-file-size-text != "" : Text {
                     text: root.editor-file-size-text;
                     color: Theme.text-dim;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     vertical-alignment: center;
                 }
 
@@ -856,7 +856,7 @@ export component TextEditorScreen inherits Rectangle {
                 if root.autosave-enabled && root.last-saved-time != "" : Text {
                     text: "Saved \{root.last-saved-time}";
                     color: Theme.text-dim;
-                    font-size: 10px;
+                    font-size: Theme.fs-micro;
                     vertical-alignment: center;
                 }
 
@@ -875,8 +875,8 @@ export component TextEditorScreen inherits Rectangle {
 
                         enc-click-text := Text {
                             text: root.encoding;
-                            color: enc-ta.has-hover || root.editor-show-encoding-picker ? Theme.accent : Theme.text-dim;
-                            font-size: 11px;
+                            color: enc-ta.has-hover || root.editor-show-encoding-picker ? AppIdentity.accent : Theme.text-dim;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
                     }
@@ -904,9 +904,9 @@ export component TextEditorScreen inherits Rectangle {
                                 }
                                 Rectangle {
                                     height: 26px; border-radius: 6px;
-                                    background: root.encoding == "UTF-8" ? Theme.tint-accent : (enc-utf8-ta.has-hover ? Theme.hover-fill : transparent);
+                                    background: root.encoding == "UTF-8" ? AppIdentity.tint : (enc-utf8-ta.has-hover ? Theme.hover-fill : transparent);
                                     HorizontalLayout { padding-left: 10px;
-                                        Text { text: "UTF-8"; color: root.encoding == "UTF-8" ? Theme.accent : Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                        Text { text: "UTF-8"; color: root.encoding == "UTF-8" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                                     }
                                 }
                             }
@@ -919,9 +919,9 @@ export component TextEditorScreen inherits Rectangle {
                                 }
                                 Rectangle {
                                     height: 26px; border-radius: 6px;
-                                    background: root.encoding == "Latin-1" ? Theme.tint-accent : (enc-latin1-ta.has-hover ? Theme.hover-fill : transparent);
+                                    background: root.encoding == "Latin-1" ? AppIdentity.tint : (enc-latin1-ta.has-hover ? Theme.hover-fill : transparent);
                                     HorizontalLayout { padding-left: 10px;
-                                        Text { text: "Latin-1"; color: root.encoding == "Latin-1" ? Theme.accent : Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                        Text { text: "Latin-1"; color: root.encoding == "Latin-1" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                                     }
                                 }
                             }
@@ -934,9 +934,9 @@ export component TextEditorScreen inherits Rectangle {
                                 }
                                 Rectangle {
                                     height: 26px; border-radius: 6px;
-                                    background: root.encoding == "UTF-16" ? Theme.tint-accent : (enc-utf16-ta.has-hover ? Theme.hover-fill : transparent);
+                                    background: root.encoding == "UTF-16" ? AppIdentity.tint : (enc-utf16-ta.has-hover ? Theme.hover-fill : transparent);
                                     HorizontalLayout { padding-left: 10px;
-                                        Text { text: "UTF-16"; color: root.encoding == "UTF-16" ? Theme.accent : Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                        Text { text: "UTF-16"; color: root.encoding == "UTF-16" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                                     }
                                 }
                             }
@@ -959,8 +959,8 @@ export component TextEditorScreen inherits Rectangle {
 
                         le-click-text := Text {
                             text: root.line-ending;
-                            color: le-ta.has-hover || root.editor-show-line-ending-picker ? Theme.accent : Theme.text-dim;
-                            font-size: 11px;
+                            color: le-ta.has-hover || root.editor-show-line-ending-picker ? AppIdentity.accent : Theme.text-dim;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
                     }
@@ -988,9 +988,9 @@ export component TextEditorScreen inherits Rectangle {
                                 }
                                 Rectangle {
                                     height: 24px; border-radius: 6px;
-                                    background: root.line-ending == "LF" ? Theme.tint-accent : (le-lf-ta.has-hover ? Theme.hover-fill : transparent);
+                                    background: root.line-ending == "LF" ? AppIdentity.tint : (le-lf-ta.has-hover ? Theme.hover-fill : transparent);
                                     HorizontalLayout { padding-left: 10px;
-                                        Text { text: "LF"; color: root.line-ending == "LF" ? Theme.accent : Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                        Text { text: "LF"; color: root.line-ending == "LF" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                                     }
                                 }
                             }
@@ -1003,9 +1003,9 @@ export component TextEditorScreen inherits Rectangle {
                                 }
                                 Rectangle {
                                     height: 24px; border-radius: 6px;
-                                    background: root.line-ending == "CRLF" ? Theme.tint-accent : (le-crlf-ta.has-hover ? Theme.hover-fill : transparent);
+                                    background: root.line-ending == "CRLF" ? AppIdentity.tint : (le-crlf-ta.has-hover ? Theme.hover-fill : transparent);
                                     HorizontalLayout { padding-left: 10px;
-                                        Text { text: "CRLF"; color: root.line-ending == "CRLF" ? Theme.accent : Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                        Text { text: "CRLF"; color: root.line-ending == "CRLF" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                                     }
                                 }
                             }
@@ -1018,9 +1018,9 @@ export component TextEditorScreen inherits Rectangle {
                                 }
                                 Rectangle {
                                     height: 24px; border-radius: 6px;
-                                    background: root.line-ending == "CR" ? Theme.tint-accent : (le-cr-ta.has-hover ? Theme.hover-fill : transparent);
+                                    background: root.line-ending == "CR" ? AppIdentity.tint : (le-cr-ta.has-hover ? Theme.hover-fill : transparent);
                                     HorizontalLayout { padding-left: 10px;
-                                        Text { text: "CR"; color: root.line-ending == "CR" ? Theme.accent : Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                        Text { text: "CR"; color: root.line-ending == "CR" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                                     }
                                 }
                             }
@@ -1032,7 +1032,7 @@ export component TextEditorScreen inherits Rectangle {
                 Text {
                     text: root.file-type;
                     color: Theme.text-secondary;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     vertical-alignment: center;
                 }
             }

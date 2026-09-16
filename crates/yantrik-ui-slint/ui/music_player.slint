@@ -12,7 +12,7 @@ import { YButton, YIconButton } from "components/y_button.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 // Data model for a track in the library or queue
 export struct MusicTrackData {
@@ -378,7 +378,7 @@ export component MusicPlayerScreen inherits Rectangle {
                         property <bool> active: root.active-playlist-index == -1;
                         height: 30px;
                         border-radius: Theme.r-sm;
-                        background: active ? Theme.tint-accent
+                        background: active ? AppIdentity.tint
                                   : all-ta.has-hover ? Theme.hover-fill : transparent;
 
                         if active : Rectangle {
@@ -401,7 +401,7 @@ export component MusicPlayerScreen inherits Rectangle {
                             Icon {
                                 commands: Icons.music;
                                 size: 15px;
-                                tint: active ? Theme.accent : Theme.text-secondary;
+                                tint: active ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
                             Text {
@@ -414,7 +414,7 @@ export component MusicPlayerScreen inherits Rectangle {
                             }
                             Text {
                                 text: root.library-track-count;
-                                color: active ? Theme.accent : Theme.text-dim;
+                                color: active ? AppIdentity.accent : Theme.text-dim;
                                 font-size: Theme.fs-micro;
                                 font-family: Theme.font-mono;
                                 vertical-alignment: center;
@@ -476,7 +476,7 @@ export component MusicPlayerScreen inherits Rectangle {
                                     property <bool> renaming: pidx == root.rename-playlist-index;
                                     height: 30px;
                                     border-radius: Theme.r-sm;
-                                    background: active ? Theme.tint-accent
+                                    background: active ? AppIdentity.tint
                                               : pl-ta.has-hover ? Theme.hover-fill : transparent;
 
                                     if active : Rectangle {
@@ -499,7 +499,7 @@ export component MusicPlayerScreen inherits Rectangle {
                                         Icon {
                                             commands: Icons.list;
                                             size: 15px;
-                                            tint: active ? Theme.accent : Theme.text-secondary;
+                                            tint: active ? AppIdentity.accent : Theme.text-secondary;
                                             y: (parent.height - self.height) / 2;
                                         }
 
@@ -557,7 +557,7 @@ export component MusicPlayerScreen inherits Rectangle {
 
                                         if !pl-ta.has-hover && !renaming : Text {
                                             text: pl.track-count;
-                                            color: active ? Theme.accent : Theme.text-dim;
+                                            color: active ? AppIdentity.accent : Theme.text-dim;
                                             font-size: Theme.fs-micro;
                                             font-family: Theme.font-mono;
                                             vertical-alignment: center;
@@ -758,7 +758,7 @@ export component MusicPlayerScreen inherits Rectangle {
 
                                 for tr[tidx] in root.library-tracks : Rectangle {
                                     height: 40px;
-                                    background: tr.is-current ? Theme.tint-accent
+                                    background: tr.is-current ? AppIdentity.tint
                                               : row-ta.has-hover ? Theme.hover-fill
                                               : mod(tidx, 2) == 1 ? Theme.bg-surface.transparentize(60%)
                                               : transparent;
@@ -810,7 +810,7 @@ export component MusicPlayerScreen inherits Rectangle {
                                         Text {
                                             text: tr.title;
                                             horizontal-stretch: 1;
-                                            color: tr.is-current ? Theme.accent : Theme.text-primary;
+                                            color: tr.is-current ? AppIdentity.accent : Theme.text-primary;
                                             font-size: Theme.fs-body;
                                             font-weight: tr.is-current ? 500 : Theme.fw-body;
                                             overflow: elide;
@@ -861,7 +861,7 @@ export component MusicPlayerScreen inherits Rectangle {
                                                     Icon {
                                                         commands: Icons.skip-forward;
                                                         size: 12px;
-                                                        tint: queue-next-ta.has-hover ? Theme.accent : Theme.text-dim;
+                                                        tint: queue-next-ta.has-hover ? AppIdentity.accent : Theme.text-dim;
                                                         x: (parent.width - self.width) / 2;
                                                         y: (parent.height - self.height) / 2;
                                                     }
@@ -880,7 +880,7 @@ export component MusicPlayerScreen inherits Rectangle {
                                                     Icon {
                                                         commands: Icons.plus;
                                                         size: 13px;
-                                                        tint: queue-add-ta.has-hover ? Theme.accent : Theme.text-dim;
+                                                        tint: queue-add-ta.has-hover ? AppIdentity.accent : Theme.text-dim;
                                                         x: (parent.width - self.width) / 2;
                                                         y: (parent.height - self.height) / 2;
                                                     }
@@ -1123,7 +1123,7 @@ export component MusicPlayerScreen inherits Rectangle {
                                 commands: Icons.music;
                                 size: 72px;
                                 thickness: 1.2px;
-                                tint: root.now-title != "" ? Theme.accent.transparentize(25%) : Theme.text-dim.transparentize(30%);
+                                tint: root.now-title != "" ? AppIdentity.accent.transparentize(25%) : Theme.text-dim.transparentize(30%);
                                 x: (parent.width - self.width) / 2;
                                 y: (parent.height - self.height) / 2;
                             }
@@ -1252,7 +1252,7 @@ export component MusicPlayerScreen inherits Rectangle {
                                 for qt[qidx] in root.queue-tracks : Rectangle {
                                     property <bool> current: qidx == root.queue-current-index;
                                     height: 42px;
-                                    background: current ? Theme.tint-accent
+                                    background: current ? AppIdentity.tint
                                               : q-ta.has-hover ? Theme.hover-fill : transparent;
 
                                     q-ta := TouchArea {
@@ -1271,7 +1271,7 @@ export component MusicPlayerScreen inherits Rectangle {
                                             horizontal-stretch: 1;
                                             Text {
                                                 text: qt.title;
-                                                color: current ? Theme.accent : Theme.text-primary;
+                                                color: current ? AppIdentity.accent : Theme.text-primary;
                                                 font-size: Theme.fs-caption;
                                                 font-weight: current ? 500 : Theme.fw-body;
                                                 overflow: elide;
@@ -1400,7 +1400,7 @@ export component MusicPlayerScreen inherits Rectangle {
                     height: 24px;
                     y: (parent.height - 24px) / 2;
                     border-radius: Theme.r-pill;
-                    background: active ? Theme.tint-accent : eq-ta.has-hover ? Theme.hover-fill : transparent;
+                    background: active ? AppIdentity.tint : eq-ta.has-hover ? Theme.hover-fill : transparent;
                     border-width: 1px;
                     border-color: active ? Theme.accent-dim : Theme.border-subtle;
 
@@ -1411,7 +1411,7 @@ export component MusicPlayerScreen inherits Rectangle {
 
                     eq-txt := Text {
                         text: root.eq-label(preset);
-                        color: active ? Theme.accent : Theme.text-secondary;
+                        color: active ? AppIdentity.accent : Theme.text-secondary;
                         font-size: Theme.fs-micro;
                         font-weight: active ? 600 : Theme.fw-body;
                         horizontal-alignment: center;
@@ -1458,7 +1458,7 @@ export component MusicPlayerScreen inherits Rectangle {
                         Icon {
                             commands: Icons.music;
                             size: 20px;
-                            tint: root.now-title != "" ? Theme.accent : Theme.text-dim;
+                            tint: root.now-title != "" ? AppIdentity.accent : Theme.text-dim;
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
                         }
@@ -1504,12 +1504,12 @@ export component MusicPlayerScreen inherits Rectangle {
                             clicked => { root.toggle-shuffle(); }
                             Rectangle {
                                 border-radius: 15px;
-                                background: root.shuffle-on ? Theme.tint-accent
+                                background: root.shuffle-on ? AppIdentity.tint
                                           : shuffle-ta.has-hover ? Theme.hover-fill : transparent;
                                 Icon {
                                     commands: Icons.shuffle;
                                     size: 15px;
-                                    tint: root.shuffle-on ? Theme.accent : Theme.text-dim;
+                                    tint: root.shuffle-on ? AppIdentity.accent : Theme.text-dim;
                                     x: (parent.width - self.width) / 2;
                                     y: (parent.height - self.height) / 2;
                                 }
@@ -1592,12 +1592,12 @@ export component MusicPlayerScreen inherits Rectangle {
                             clicked => { root.cycle-repeat(); }
                             Rectangle {
                                 border-radius: 15px;
-                                background: root.repeat-mode > 0 ? Theme.tint-accent
+                                background: root.repeat-mode > 0 ? AppIdentity.tint
                                           : repeat-ta.has-hover ? Theme.hover-fill : transparent;
                                 Icon {
                                     commands: Icons.repeat;
                                     size: 15px;
-                                    tint: root.repeat-mode > 0 ? Theme.accent : Theme.text-dim;
+                                    tint: root.repeat-mode > 0 ? AppIdentity.accent : Theme.text-dim;
                                     x: (parent.width - self.width) / 2;
                                     y: (parent.height - self.height) / 2;
                                 }
@@ -1611,7 +1611,7 @@ export component MusicPlayerScreen inherits Rectangle {
                                     Text {
                                         text: "1";
                                         color: Theme.bg-deep;
-                                        font-size: 8px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 700;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -1743,11 +1743,11 @@ export component MusicPlayerScreen inherits Rectangle {
                         clicked => { root.show-speed-popup = !root.show-speed-popup; }
                         Rectangle {
                             border-radius: Theme.r-sm;
-                            background: root.show-speed-popup ? Theme.tint-accent
+                            background: root.show-speed-popup ? AppIdentity.tint
                                       : speed-ta.has-hover ? Theme.hover-fill : transparent;
                             Text {
                                 text: "\{root.playback-speed}x";
-                                color: root.playback-speed != 1.0 || root.show-speed-popup ? Theme.accent : Theme.text-dim;
+                                color: root.playback-speed != 1.0 || root.show-speed-popup ? AppIdentity.accent : Theme.text-dim;
                                 font-size: Theme.fs-micro;
                                 font-family: Theme.font-mono;
                                 horizontal-alignment: center;
@@ -1764,13 +1764,13 @@ export component MusicPlayerScreen inherits Rectangle {
                         clicked => { root.music-show-equalizer = !root.music-show-equalizer; }
                         Rectangle {
                             border-radius: Theme.r-sm;
-                            background: root.music-show-equalizer ? Theme.tint-accent
+                            background: root.music-show-equalizer ? AppIdentity.tint
                                       : eqt-ta.has-hover ? Theme.hover-fill : transparent;
                             Icon {
                                 commands: Icons.chart;
                                 size: 14px;
                                 tint: root.music-show-equalizer || root.music-equalizer-preset > 0
-                                    ? Theme.accent : Theme.text-dim;
+                                    ? AppIdentity.accent : Theme.text-dim;
                                 x: (parent.width - self.width) / 2;
                                 y: (parent.height - self.height) / 2;
                             }
@@ -1804,7 +1804,7 @@ export component MusicPlayerScreen inherits Rectangle {
                 width: 30px;
                 height: 26px;
                 border-radius: Theme.r-sm;
-                background: active ? Theme.accent : sp-ta.has-hover ? Theme.hover-fill : transparent;
+                background: active ? AppIdentity.accent : sp-ta.has-hover ? Theme.hover-fill : transparent;
 
                 sp-ta := TouchArea {
                     mouse-cursor: pointer;

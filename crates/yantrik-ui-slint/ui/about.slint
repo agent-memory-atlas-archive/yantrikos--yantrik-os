@@ -4,7 +4,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct ComponentVersionData {
     name: string,
@@ -123,7 +123,7 @@ export component AboutScreen inherits Rectangle {
                                 v-label := Text {
                                     text: "v" + root.version-text;
                                     color: Theme.cyan;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 600;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -153,7 +153,7 @@ export component AboutScreen inherits Rectangle {
                     Text {
                         text: "DEVICE";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         letter-spacing: 2px;
                         vertical-alignment: center;
                     }
@@ -302,7 +302,7 @@ export component AboutScreen inherits Rectangle {
                     Text {
                         text: "RUNTIME";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         letter-spacing: 2px;
                         vertical-alignment: center;
                     }
@@ -380,7 +380,7 @@ export component AboutScreen inherits Rectangle {
                     Text {
                         text: "AI READINESS";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         letter-spacing: 2px;
                         vertical-alignment: center;
                     }
@@ -415,7 +415,7 @@ export component AboutScreen inherits Rectangle {
                                     spacing: 8px;
                                     Text {
                                         text: root.ai-model-name != "" ? root.ai-model-name : "Not configured";
-                                        color: root.ai-model-name != "" ? Theme.accent : Theme.text-dim;
+                                        color: root.ai-model-name != "" ? AppIdentity.accent : Theme.text-dim;
                                         font-size: Theme.font-body;
                                         font-weight: 500;
                                         vertical-alignment: center;
@@ -425,17 +425,17 @@ export component AboutScreen inherits Rectangle {
                                         height: 20px;
                                         y: (parent.height - 20px) / 2;
                                         border-radius: 10px;
-                                        background: root.ai-model-tier == "Large" ? Theme.tint-accent
+                                        background: root.ai-model-tier == "Large" ? AppIdentity.tint
                                                   : root.ai-model-tier == "Medium" ? Theme.tint-cyan
                                                   : root.ai-model-tier == "Small" ? Theme.tint-amber
                                                   : Theme.border-default;
                                         about-tier-txt := Text {
                                             text: root.ai-model-tier;
-                                            color: root.ai-model-tier == "Large" ? Theme.accent
+                                            color: root.ai-model-tier == "Large" ? AppIdentity.accent
                                                  : root.ai-model-tier == "Medium" ? Theme.cyan
                                                  : root.ai-model-tier == "Small" ? Theme.amber
                                                  : Theme.text-secondary;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -545,7 +545,7 @@ export component AboutScreen inherits Rectangle {
                     Text {
                         text: "COMPONENTS";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         letter-spacing: 2px;
                         vertical-alignment: center;
                         horizontal-stretch: 1;
@@ -564,7 +564,7 @@ export component AboutScreen inherits Rectangle {
                             text: root.update-count > 0
                                 ? root.update-count + " update(s)"
                                 : "Check Updates";
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             color: root.update-count > 0 ? Theme.holo-blue : Theme.text-secondary;
                             font-weight: 500;
                             horizontal-alignment: center;
@@ -629,7 +629,7 @@ export component AboutScreen inherits Rectangle {
 
                                         upd-text := Text {
                                             text: comp.latest-version;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             color: Theme.holo-blue;
                                             font-weight: 600;
                                             horizontal-alignment: center;

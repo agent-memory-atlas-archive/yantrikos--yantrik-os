@@ -477,7 +477,7 @@ export component DesktopScreen inherits Rectangle {
                     Text {
                         text: item.label;
                         color: Theme.text-secondary;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         horizontal-alignment: center;
                         overflow: elide;
                     }
@@ -609,12 +609,12 @@ export component DesktopScreen inherits Rectangle {
                 VerticalLayout {
                     horizontal-stretch: 1;
                     Text { text: "MEMORIES"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: Theme.fw-micro; letter-spacing: 1px; }
-                    Text { text: root.memory-count; color: Theme.text-primary; font-size: 17px; font-weight: 500; }
+                    Text { text: root.memory-count; color: Theme.text-primary; font-size: Theme.fs-title-2; font-weight: 500; }
                 }
                 VerticalLayout {
                     horizontal-stretch: 1;
                     Text { text: "PENDING"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: Theme.fw-micro; letter-spacing: 1px; }
-                    Text { text: root.pending-count; color: root.pending-count > 0 ? Theme.accent : Theme.text-primary; font-size: 17px; font-weight: 500; }
+                    Text { text: root.pending-count; color: root.pending-count > 0 ? Theme.accent : Theme.text-primary; font-size: Theme.fs-title-2; font-weight: 500; }
                 }
             }
         }
@@ -917,7 +917,7 @@ export component DesktopScreen inherits Rectangle {
             Text {
                 text: "remaining";
                 color: Theme.text-dim;
-                font-size: 14px;
+                font-size: Theme.fs-body;
                 letter-spacing: 3px;
                 horizontal-alignment: center;
                 opacity: 0.5;
@@ -943,7 +943,7 @@ export component DesktopScreen inherits Rectangle {
                     Text {
                         text: "End Focus";
                         color: Theme.text-secondary;
-                        font-size: 13px;
+                        font-size: Theme.fs-body;
                         font-weight: 500;
                         horizontal-alignment: center;
                         vertical-alignment: center;

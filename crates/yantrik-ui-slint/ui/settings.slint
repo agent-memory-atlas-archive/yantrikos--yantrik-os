@@ -3,6 +3,7 @@
 // Data-driven sidebar with search. AI & Intelligence flagship page.
 
 import { Theme, AccentPreset } from "theme.slint";
+import { AppIdentity } from "components/app_color.slint";
 import { SkillStore, SkillData } from "skill_store.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { YInput } from "components/y_input.slint";
@@ -71,6 +72,10 @@ export struct AIStatusData {
 }
 
 export component SettingsScreen inherits Rectangle {
+    // This screen draws its own header rather than AppHeader, so it has to say what
+    // it is: AppIdentity is otherwise left holding whichever app was opened before it.
+    init => { AppIdentity.id = "settings"; }
+
     background: Theme.bg-deep;
 
     // Account
@@ -338,7 +343,7 @@ export component SettingsScreen inherits Rectangle {
                         property <bool> hovered: cat-ta.has-hover;
 
                         height: Theme.touch-target;
-                        background: is-active ? Theme.tint-accent
+                        background: is-active ? AppIdentity.tint
                                   : hovered ? Theme.hover-fill
                                   : transparent;
 
@@ -368,7 +373,7 @@ export component SettingsScreen inherits Rectangle {
                             Icon {
                                 commands: root.category-icon(cat.id);
                                 size: 15px;
-                                tint: cat.id == root.active-category ? Theme.accent : Theme.text-secondary;
+                                tint: cat.id == root.active-category ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
                             Text {
@@ -476,7 +481,7 @@ export component SettingsScreen inherits Rectangle {
                                                 width: 55px;
                                                 Text {
                                                     text: "Dark";
-                                                    color: root.dark-mode ? Theme.accent : Theme.text-dim;
+                                                    color: root.dark-mode ? AppIdentity.accent : Theme.text-dim;
                                                     font-size: Theme.fs-micro;
                                                     font-weight: root.dark-mode ? 600 : 400;
                                                     horizontal-alignment: center;
@@ -606,14 +611,14 @@ export component SettingsScreen inherits Rectangle {
                                             border-radius: Theme.r-sm;
                                             background: @radial-gradient(circle, #0a0a1c 0%, #050510 50%, #020206 100%);
                                             border-width: root.wallpaper-path == "" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "" ? Theme.accent : (wp-none-ta.has-hover ? Theme.border-default : Theme.border-subtle);
+                                            border-color: root.wallpaper-path == "" ? AppIdentity.accent : (wp-none-ta.has-hover ? Theme.border-default : Theme.border-subtle);
                                             drop-shadow-blur: root.wallpaper-path == "" ? 4px : 0px;
                                             drop-shadow-color: root.wallpaper-path == "" ? Theme.accent-glow : transparent;
 
                                             Text {
                                                 text: "None";
-                                                color: root.wallpaper-path == "" ? Theme.accent : Theme.text-dim;
-                                                font-size: 9px;
+                                                color: root.wallpaper-path == "" ? AppIdentity.accent : Theme.text-dim;
+                                                font-size: Theme.fs-micro;
                                                 horizontal-alignment: center;
                                                 vertical-alignment: center;
                                             }
@@ -637,7 +642,7 @@ export component SettingsScreen inherits Rectangle {
                                             clip: true;
                                             background: @linear-gradient(135deg, #0d2818 0%, #1a0a2e 50%, #0a3020 100%);
                                             border-width: root.wallpaper-path == "aurora" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "aurora" ? Theme.accent : (wp-aurora-ta.has-hover ? Theme.border-default : Theme.border-subtle);
+                                            border-color: root.wallpaper-path == "aurora" ? AppIdentity.accent : (wp-aurora-ta.has-hover ? Theme.border-default : Theme.border-subtle);
                                             drop-shadow-blur: root.wallpaper-path == "aurora" ? 4px : 0px;
                                             drop-shadow-color: root.wallpaper-path == "aurora" ? Theme.accent-glow : transparent;
 
@@ -652,8 +657,8 @@ export component SettingsScreen inherits Rectangle {
                                             Text {
                                                 y: parent.height - 12px;
                                                 text: "Aurora";
-                                                color: root.wallpaper-path == "aurora" ? Theme.accent : Theme.text-dim;
-                                                font-size: 8px;
+                                                color: root.wallpaper-path == "aurora" ? AppIdentity.accent : Theme.text-dim;
+                                                font-size: Theme.fs-micro;
                                                 horizontal-alignment: center;
                                                 width: 100%;
                                             }
@@ -677,7 +682,7 @@ export component SettingsScreen inherits Rectangle {
                                             clip: true;
                                             background: @linear-gradient(180deg, #3d1020 0%, #d4503a 50%, #e88c30 100%);
                                             border-width: root.wallpaper-path == "sunset" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "sunset" ? Theme.accent : (wp-sunset-ta.has-hover ? Theme.border-default : Theme.border-subtle);
+                                            border-color: root.wallpaper-path == "sunset" ? AppIdentity.accent : (wp-sunset-ta.has-hover ? Theme.border-default : Theme.border-subtle);
                                             drop-shadow-blur: root.wallpaper-path == "sunset" ? 4px : 0px;
                                             drop-shadow-color: root.wallpaper-path == "sunset" ? Theme.accent-glow : transparent;
 
@@ -685,7 +690,7 @@ export component SettingsScreen inherits Rectangle {
                                                 y: parent.height - 12px;
                                                 text: "Sunset";
                                                 color: root.wallpaper-path == "sunset" ? #ffd6b0 : Theme.text-dim;
-                                                font-size: 8px;
+                                                font-size: Theme.fs-micro;
                                                 horizontal-alignment: center;
                                                 width: 100%;
                                             }
@@ -709,7 +714,7 @@ export component SettingsScreen inherits Rectangle {
                                             clip: true;
                                             background: @linear-gradient(180deg, #041830 0%, #063050 50%, #0a4868 100%);
                                             border-width: root.wallpaper-path == "ocean" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "ocean" ? Theme.accent : (wp-ocean-ta.has-hover ? Theme.border-default : Theme.border-subtle);
+                                            border-color: root.wallpaper-path == "ocean" ? AppIdentity.accent : (wp-ocean-ta.has-hover ? Theme.border-default : Theme.border-subtle);
                                             drop-shadow-blur: root.wallpaper-path == "ocean" ? 4px : 0px;
                                             drop-shadow-color: root.wallpaper-path == "ocean" ? Theme.accent-glow : transparent;
 
@@ -725,7 +730,7 @@ export component SettingsScreen inherits Rectangle {
                                                 y: parent.height - 12px;
                                                 text: "Ocean";
                                                 color: root.wallpaper-path == "ocean" ? #b0e0ff : Theme.text-dim;
-                                                font-size: 8px;
+                                                font-size: Theme.fs-micro;
                                                 horizontal-alignment: center;
                                                 width: 100%;
                                             }
@@ -749,7 +754,7 @@ export component SettingsScreen inherits Rectangle {
                                             clip: true;
                                             background: @linear-gradient(135deg, #1a0838 0%, #2e0e58 50%, #0a0828 100%);
                                             border-width: root.wallpaper-path == "nebula" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "nebula" ? Theme.accent : (wp-nebula-ta.has-hover ? Theme.border-default : Theme.border-subtle);
+                                            border-color: root.wallpaper-path == "nebula" ? AppIdentity.accent : (wp-nebula-ta.has-hover ? Theme.border-default : Theme.border-subtle);
                                             drop-shadow-blur: root.wallpaper-path == "nebula" ? 4px : 0px;
                                             drop-shadow-color: root.wallpaper-path == "nebula" ? Theme.accent-glow : transparent;
 
@@ -771,7 +776,7 @@ export component SettingsScreen inherits Rectangle {
                                                 y: parent.height - 12px;
                                                 text: "Nebula";
                                                 color: root.wallpaper-path == "nebula" ? #d0b0ff : Theme.text-dim;
-                                                font-size: 8px;
+                                                font-size: Theme.fs-micro;
                                                 horizontal-alignment: center;
                                                 width: 100%;
                                             }
@@ -802,7 +807,7 @@ export component SettingsScreen inherits Rectangle {
 
                                             custom-btn-text := Text {
                                                 text: "Custom...";
-                                                color: root.custom-input-visible ? Theme.accent : Theme.text-secondary;
+                                                color: root.custom-input-visible ? AppIdentity.accent : Theme.text-secondary;
                                                 font-size: Theme.fs-caption;
                                                 horizontal-alignment: center;
                                                 vertical-alignment: center;
@@ -1093,14 +1098,14 @@ export component SettingsScreen inherits Rectangle {
                                                 width: tier-txt.preferred-width + 12px;
                                                 height: 20px;
                                                 border-radius: 10px;
-                                                background: root.ai-status.model-tier == "Large" ? Theme.tint-accent
+                                                background: root.ai-status.model-tier == "Large" ? AppIdentity.tint
                                                           : root.ai-status.model-tier == "Medium" ? Theme.tint-cyan
                                                           : root.ai-status.model-tier == "Small" ? Theme.tint-amber
                                                           : Theme.border-subtle;
                                                 tier-txt := Text {
                                                     text: root.ai-status.model-tier;
-                                                    color: root.ai-status.model-tier == "Large" ? Theme.accent
-                                                         : root.ai-status.model-tier == "Medium" ? Theme.accent
+                                                    color: root.ai-status.model-tier == "Large" ? AppIdentity.accent
+                                                         : root.ai-status.model-tier == "Medium" ? AppIdentity.accent
                                                          : root.ai-status.model-tier == "Small" ? Theme.amber
                                                          : Theme.text-secondary;
                                                     font-size: Theme.fs-micro;
@@ -1221,7 +1226,7 @@ export component SettingsScreen inherits Rectangle {
                                                     text: root.tool-permission == "safe" ? "Safe"
                                                         : (root.tool-permission == "standard" ? "Standard"
                                                         : "Sensitive");
-                                                    color: root.tool-permission == "safe" ? Theme.accent
+                                                    color: root.tool-permission == "safe" ? AppIdentity.accent
                                                         : (root.tool-permission == "standard" ? Theme.amber
                                                         : Theme.color-emotional);
                                                     font-size: Theme.fs-micro;
@@ -1566,7 +1571,7 @@ export component SettingsScreen inherits Rectangle {
 
                                 Rectangle {
                                     background: model.is-active
-                                        ? Theme.tint-accent
+                                        ? AppIdentity.tint
                                         : Theme.bg-card;
                                     border-radius: Theme.r-lg;
                                     border-width: 1px;
@@ -1594,7 +1599,7 @@ export component SettingsScreen inherits Rectangle {
                                             alignment: center;
                                             Text {
                                                 text: model.name;
-                                                color: model.is-active ? Theme.accent : Theme.text-primary;
+                                                color: model.is-active ? AppIdentity.accent : Theme.text-primary;
                                                 font-size: Theme.fs-body;
                                                 font-weight: model.is-active ? 600 : 400;
                                             }
@@ -1625,14 +1630,14 @@ export component SettingsScreen inherits Rectangle {
                                             height: 20px;
                                             y: (parent.height - 20px) / 2;
                                             border-radius: 10px;
-                                            background: model.tier == "Large" ? Theme.tint-accent
+                                            background: model.tier == "Large" ? AppIdentity.tint
                                                       : model.tier == "Medium" ? Theme.tint-cyan
                                                       : model.tier == "Small" ? Theme.tint-amber
                                                       : Theme.border-subtle;
                                             mtier-txt := Text {
                                                 text: model.tier;
-                                                color: model.tier == "Large" ? Theme.accent
-                                                     : model.tier == "Medium" ? Theme.accent
+                                                color: model.tier == "Large" ? AppIdentity.accent
+                                                     : model.tier == "Medium" ? AppIdentity.accent
                                                      : model.tier == "Small" ? Theme.amber
                                                      : Theme.text-secondary;
                                                 font-size: Theme.fs-micro;
@@ -1710,7 +1715,7 @@ export component SettingsScreen inherits Rectangle {
                                             clicked => { root.toggle-auto-fallback(); }
                                             Rectangle {
                                                 border-radius: Theme.r-lg;
-                                                background: root.ai-status.using-fallback ? Theme.accent : Theme.border-default;
+                                                background: root.ai-status.using-fallback ? AppIdentity.accent : Theme.border-default;
                                                 border-width: 1px;
                                                 border-color: root.ai-status.using-fallback ? Theme.accent-dim : Theme.border-subtle;
                                                 // Toggle knob
@@ -1986,7 +1991,7 @@ export component SettingsScreen inherits Rectangle {
                                             clicked => { root.privacy-cloud-confirm = !root.privacy-cloud-confirm; }
                                             Rectangle {
                                                 border-radius: Theme.r-lg;
-                                                background: root.privacy-cloud-confirm ? Theme.accent : Theme.border-default;
+                                                background: root.privacy-cloud-confirm ? AppIdentity.accent : Theme.border-default;
                                                 border-width: 1px;
                                                 border-color: root.privacy-cloud-confirm ? Theme.accent-dim : Theme.border-subtle;
                                                 Rectangle {
@@ -2543,7 +2548,7 @@ export component SettingsScreen inherits Rectangle {
                                     Text {
                                         text: "CLOUD";
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 600;
                                         letter-spacing: 2px;
                                     }
@@ -2563,10 +2568,10 @@ export component SettingsScreen inherits Rectangle {
                                                 border-radius: Theme.r-md;
                                                 background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
                                                 border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? Theme.accent : Theme.border-subtle;
+                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
                                                 Text {
                                                     text: p.label;
-                                                    color: root.selected-preset == p.value ? Theme.accent : Theme.text-primary;
+                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
                                                     font-size: Theme.fs-caption;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
@@ -2590,10 +2595,10 @@ export component SettingsScreen inherits Rectangle {
                                                 border-radius: Theme.r-md;
                                                 background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
                                                 border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? Theme.accent : Theme.border-subtle;
+                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
                                                 Text {
                                                     text: p.label;
-                                                    color: root.selected-preset == p.value ? Theme.accent : Theme.text-primary;
+                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
                                                     font-size: Theme.fs-caption;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
@@ -2617,10 +2622,10 @@ export component SettingsScreen inherits Rectangle {
                                                 border-radius: Theme.r-md;
                                                 background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
                                                 border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? Theme.accent : Theme.border-subtle;
+                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
                                                 Text {
                                                     text: p.label;
-                                                    color: root.selected-preset == p.value ? Theme.accent : Theme.text-primary;
+                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
                                                     font-size: Theme.fs-caption;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
@@ -2633,7 +2638,7 @@ export component SettingsScreen inherits Rectangle {
                                     Text {
                                         text: "AGGREGATORS & BUDGET";
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 600;
                                         letter-spacing: 2px;
                                     }
@@ -2653,10 +2658,10 @@ export component SettingsScreen inherits Rectangle {
                                                 border-radius: Theme.r-md;
                                                 background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
                                                 border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? Theme.accent : Theme.border-subtle;
+                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
                                                 Text {
                                                     text: p.label;
-                                                    color: root.selected-preset == p.value ? Theme.accent : Theme.text-primary;
+                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
                                                     font-size: Theme.fs-caption;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
@@ -2669,7 +2674,7 @@ export component SettingsScreen inherits Rectangle {
                                     Text {
                                         text: "LOCAL INFERENCE";
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 600;
                                         letter-spacing: 2px;
                                     }
@@ -2689,10 +2694,10 @@ export component SettingsScreen inherits Rectangle {
                                                 border-radius: Theme.r-md;
                                                 background: root.selected-preset == p.value ? Theme.accent-dim : Theme.hover-fill;
                                                 border-width: 1px;
-                                                border-color: root.selected-preset == p.value ? Theme.accent : Theme.border-subtle;
+                                                border-color: root.selected-preset == p.value ? AppIdentity.accent : Theme.border-subtle;
                                                 Text {
                                                     text: p.label;
-                                                    color: root.selected-preset == p.value ? Theme.accent : Theme.text-primary;
+                                                    color: root.selected-preset == p.value ? AppIdentity.accent : Theme.text-primary;
                                                     font-size: Theme.fs-caption;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
@@ -2708,10 +2713,10 @@ export component SettingsScreen inherits Rectangle {
                                             border-radius: Theme.r-md;
                                             background: root.selected-preset == "custom" ? Theme.accent-dim : Theme.hover-fill;
                                             border-width: 1px;
-                                            border-color: root.selected-preset == "custom" ? Theme.accent : Theme.border-subtle;
+                                            border-color: root.selected-preset == "custom" ? AppIdentity.accent : Theme.border-subtle;
                                             Text {
                                                 text: "Custom";
-                                                color: root.selected-preset == "custom" ? Theme.accent : Theme.text-primary;
+                                                color: root.selected-preset == "custom" ? AppIdentity.accent : Theme.text-primary;
                                                 font-size: Theme.fs-caption;
                                                 horizontal-alignment: center;
                                                 vertical-alignment: center;
@@ -3082,7 +3087,7 @@ export component SettingsScreen inherits Rectangle {
                                         text: root.wifi-connected
                                             ? (root.wifi-ssid != "" ? root.wifi-ssid : "Connected")
                                             : "Disconnected";
-                                        color: root.wifi-connected ? Theme.accent : Theme.text-dim;
+                                        color: root.wifi-connected ? AppIdentity.accent : Theme.text-dim;
                                         font-size: Theme.fs-body;
                                     }
                                 }
@@ -3874,7 +3879,7 @@ export component SettingsScreen inherits Rectangle {
                                         width: fb-status-text.preferred-width + 16px;
                                         height: 24px;
                                         border-radius: Theme.r-lg;
-                                        background: root.conn-facebook-status == "connected" ? Theme.tint-accent :
+                                        background: root.conn-facebook-status == "connected" ? AppIdentity.tint :
                                                     root.conn-facebook-status == "connecting" ? Theme.color-warning-dim : Theme.border-subtle;
                                         border-width: 1px;
                                         border-color: root.conn-facebook-status == "connected" ? Theme.accent-dim :
@@ -3883,7 +3888,7 @@ export component SettingsScreen inherits Rectangle {
                                         fb-status-text := Text {
                                             text: root.conn-facebook-status == "connected" ? "Connected" :
                                                   root.conn-facebook-status == "connecting" ? "Connecting..." : "Not Connected";
-                                            color: root.conn-facebook-status == "connected" ? Theme.accent :
+                                            color: root.conn-facebook-status == "connected" ? AppIdentity.accent :
                                                    root.conn-facebook-status == "connecting" ? Theme.color-warning : Theme.text-dim;
                                             font-size: Theme.fs-micro;
                                             font-weight: 600;
@@ -4184,7 +4189,7 @@ export component SettingsScreen inherits Rectangle {
                             border-width: 1px;
                             // The one answering is outlined in the accent: at a glance, before
                             // reading a word, you can see which mind you are talking to.
-                            border-color: h.active ? Theme.accent : Theme.border-subtle;
+                            border-color: h.active ? AppIdentity.accent : Theme.border-subtle;
                             // Tall enough that the action does not crowd the border it sits on:
                             // three rows plus padding, measured on the deployed screen rather
                             // than guessed.
@@ -4208,7 +4213,7 @@ export component SettingsScreen inherits Rectangle {
                                         width: pill-text.preferred-width + 20px;
                                         height: 22px;
                                         border-radius: 11px;
-                                        background: h.active ? Theme.accent : Theme.bg-elevated;
+                                        background: h.active ? AppIdentity.accent : Theme.bg-elevated;
                                         pill-text := Text {
                                             text: h.status;
                                             color: h.active ? Theme.bg-deep : Theme.text-dim;

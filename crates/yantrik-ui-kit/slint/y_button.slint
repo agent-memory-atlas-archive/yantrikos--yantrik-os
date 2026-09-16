@@ -16,6 +16,10 @@ export component YButton inherits Rectangle {
     in property <string> label: "Button";
     in property <string> icon: "";
     in property <string> icon-path: "";
+    // Draw the icon AFTER the label. For the one case that means something: a control that
+    // opens a menu, where the chevron is a promise about what happens next rather than a
+    // picture of the thing.
+    in property <bool> icon-trailing: false;
     in property <bool> disabled: false;
     in property <bool> loading: false;
     in property <bool> icon-only: false;
@@ -67,7 +71,7 @@ export component YButton inherits Rectangle {
             y: (parent.height - self.height) / 2;
         }
 
-        if root.icon-path != "" && !root.loading : Icon {
+        if root.icon-path != "" && !root.icon-trailing && !root.loading : Icon {
             commands: root.icon-path;
             size: root.glyph;
             tint: root.fg;
@@ -90,6 +94,14 @@ export component YButton inherits Rectangle {
             letter-spacing: 0.2px;
             vertical-alignment: center;
             horizontal-alignment: center;
+        }
+
+        if root.icon-path != "" && root.icon-trailing && !root.loading : Icon {
+            commands: root.icon-path;
+            size: root.glyph;
+            tint: root.fg;
+            thickness: 1.7px;
+            y: (parent.height - self.height) / 2;
         }
     }
 }

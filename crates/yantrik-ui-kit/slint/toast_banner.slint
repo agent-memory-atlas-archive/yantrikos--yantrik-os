@@ -67,7 +67,7 @@ export component ToastBanner inherits Rectangle {
                     text: toast.icon-char;
                     color: toast.urgency == 2 ? Theme.color-emotional :
                            toast.urgency == 1 ? Theme.amber : Theme.cyan;
-                    font-size: 14px;
+                    font-size: Theme.fs-body;
                     font-weight: 700;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -86,7 +86,7 @@ export component ToastBanner inherits Rectangle {
                     Text {
                         text: toast.app-name;
                         color: Theme.text-dim;
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                         letter-spacing: 1px;
                     }
                 }
@@ -94,7 +94,7 @@ export component ToastBanner inherits Rectangle {
                 Text {
                     text: toast.summary;
                     color: Theme.text-primary;
-                    font-size: 13px;
+                    font-size: Theme.fs-body;
                     font-weight: 500;
                     overflow: elide;
                 }
@@ -102,7 +102,7 @@ export component ToastBanner inherits Rectangle {
                 if toast.body != "" : Text {
                     text: toast.body;
                     color: Theme.text-secondary;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     overflow: elide;
                 }
             }

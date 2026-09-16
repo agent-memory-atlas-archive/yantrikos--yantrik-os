@@ -50,7 +50,7 @@ export component SkillStore inherits Rectangle {
             Text {
                 text: "SKILL STORE";
                 color: Theme.cyan;
-                font-size: 10px;
+                font-size: Theme.fs-micro;
                 font-weight: 600;
                 letter-spacing: 3px;
                 vertical-alignment: center;
@@ -105,7 +105,7 @@ export component SkillStore inherits Rectangle {
 
                 search-input := TextInput {
                     text <=> root.search-query;
-                    font-size: 13px;
+                    font-size: Theme.fs-body;
                     color: Theme.text-primary;
                     vertical-alignment: center;
 
@@ -122,7 +122,7 @@ export component SkillStore inherits Rectangle {
                 x: 34px;
                 text: "Search skills";
                 color: Theme.text-dim;
-                font-size: 13px;
+                font-size: Theme.fs-body;
                 vertical-alignment: center;
                 height: 100%;
             }
@@ -155,7 +155,7 @@ export component SkillStore inherits Rectangle {
                         cat-label := Text {
                             text: cat;
                             color: root.active-category == cat ? Theme.cyan : Theme.text-dim;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             font-weight: root.active-category == cat ? 600 : 400;
                             vertical-alignment: center;
                         }
@@ -220,7 +220,7 @@ export component SkillStore inherits Rectangle {
                                     Text {
                                         text: skill.name;
                                         color: Theme.text-primary;
-                                        font-size: 13px;
+                                        font-size: Theme.fs-body;
                                         font-weight: 500;
                                         vertical-alignment: center;
                                     }
@@ -235,7 +235,7 @@ export component SkillStore inherits Rectangle {
                                         cat-badge-text := Text {
                                             text: skill.category;
                                             color: Theme.text-dim;
-                                            font-size: 9px;
+                                            font-size: Theme.fs-micro;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
                                         }
@@ -247,7 +247,7 @@ export component SkillStore inherits Rectangle {
                                 Text {
                                     text: skill.description;
                                     color: Theme.text-dim;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     overflow: elide;
                                 }
                             }

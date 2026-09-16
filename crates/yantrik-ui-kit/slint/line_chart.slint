@@ -42,7 +42,7 @@ export component LineChart inherits Rectangle {
         Text {
             text: root.title;
             color: Theme.text-secondary;
-            font-size: 12px;
+            font-size: Theme.fs-caption;
             letter-spacing: 1.5px;
             vertical-alignment: center;
         }
@@ -50,7 +50,7 @@ export component LineChart inherits Rectangle {
         Text {
             text: root.current-text;
             color: root.accent-color;
-            font-size: 20px;
+            font-size: Theme.fs-display;
             font-weight: 700;
             vertical-alignment: center;
         }

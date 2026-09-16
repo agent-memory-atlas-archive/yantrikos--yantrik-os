@@ -87,7 +87,7 @@ export component BondScreen inherits Rectangle {
                 Text {
                     text: data.bond-level;
                     color: Theme.amber-light;
-                    font-size: 22px;
+                    font-size: Theme.fs-display;
                     font-weight: 600;
                     horizontal-alignment: center;
                     letter-spacing: 1px;
@@ -112,7 +112,7 @@ export component BondScreen inherits Rectangle {
                                 Text {
                                     text: data.total-interactions;
                                     color: Theme.text-primary;
-                                    font-size: 20px;
+                                    font-size: Theme.fs-display;
                                     font-weight: 600;
                                 }
                                 Text {
@@ -127,7 +127,7 @@ export component BondScreen inherits Rectangle {
                                 Text {
                                     text: data.days-together;
                                     color: Theme.text-primary;
-                                    font-size: 20px;
+                                    font-size: Theme.fs-display;
                                     font-weight: 600;
                                 }
                                 Text {
@@ -147,7 +147,7 @@ export component BondScreen inherits Rectangle {
                                 Text {
                                     text: data.current-streak + " days";
                                     color: Theme.text-primary;
-                                    font-size: 20px;
+                                    font-size: Theme.fs-display;
                                     font-weight: 600;
                                 }
                                 Text {
@@ -162,7 +162,7 @@ export component BondScreen inherits Rectangle {
                                 Text {
                                     text: @tr("{}%", Math.round(data.humor-rate * 100));
                                     color: Theme.text-primary;
-                                    font-size: 20px;
+                                    font-size: Theme.fs-display;
                                     font-weight: 600;
                                 }
                                 Text {
@@ -182,7 +182,7 @@ export component BondScreen inherits Rectangle {
                                 Text {
                                     text: data.vulnerability-events;
                                     color: Theme.text-primary;
-                                    font-size: 20px;
+                                    font-size: Theme.fs-display;
                                     font-weight: 600;
                                 }
                                 Text {
@@ -197,7 +197,7 @@ export component BondScreen inherits Rectangle {
                                 Text {
                                     text: data.shared-references;
                                     color: Theme.text-primary;
-                                    font-size: 20px;
+                                    font-size: Theme.fs-display;
                                     font-weight: 600;
                                 }
                                 Text {

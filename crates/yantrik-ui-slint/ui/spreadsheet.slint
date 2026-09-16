@@ -8,7 +8,7 @@ import { ScrollView, LineEdit } from "std-widgets.slint";
 import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButton, RibbonQuickAction, RibbonGroupLabel, RibbonColorButton, RibbonDropdown } from "components/app_ribbon.slint";
 import { Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct SpreadsheetCell {
     text: string,
@@ -54,12 +54,12 @@ component CellView inherits Rectangle {
     background: is-header
         ? (is-active-col ? Theme.bg-card : Theme.bg-elevated)
         : is-selected
-            ? Theme.accent.transparentize(80%)
+            ? AppIdentity.accent.transparentize(80%)
             : (is-active-row || is-active-col)
                 ? Theme.hover-fill
                 : cell-bg;
     border-width: is-selected ? 2px : 1px;
-    border-color: is-selected ? Theme.accent : Theme.border-subtle;
+    border-color: is-selected ? AppIdentity.accent : Theme.border-subtle;
 
     // Selected cell highlight
     Rectangle {
@@ -132,7 +132,7 @@ component ColorPalette inherits Rectangle {
             width: 14px; height: 14px; border-radius: 3px;
             background: transparent; border-width: 1px; border-color: Theme.border-subtle;
             TouchArea { clicked => { root.color-selected(0); } }
-            Text { text: "x"; font-size: 10px; color: Theme.text-dim; horizontal-alignment: center; vertical-alignment: center; }
+            Text { text: "x"; font-size: Theme.fs-micro; color: Theme.text-dim; horizontal-alignment: center; vertical-alignment: center; }
         }
         // Red
         Rectangle { width: 14px; height: 14px; border-radius: 3px; background: #e74c3c;
@@ -570,7 +570,7 @@ export component SpreadsheetScreen inherits Rectangle {
 
                     Text {
                         text: root.col-letter(root.active-col) + "\{root.active-row + 1}";
-                        font-size: 14px;
+                        font-size: Theme.fs-body;
                         font-weight: 700;
                         color: Theme.accent;
                         horizontal-alignment: center;
@@ -590,7 +590,7 @@ export component SpreadsheetScreen inherits Rectangle {
                     width: 32px;
                     height: 32px;
                     border-radius: 4px;
-                    background: fx-ta.has-hover ? Theme.hover-fill : (root.sheet-formula-help-open ? Theme.accent.transparentize(0.8) : transparent);
+                    background: fx-ta.has-hover ? Theme.hover-fill : (root.sheet-formula-help-open ? AppIdentity.accent.transparentize(0.8) : transparent);
 
                     fx-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -600,10 +600,10 @@ export component SpreadsheetScreen inherits Rectangle {
                     Text {
                         width: 32px;
                         text: "fx";
-                        font-size: 15px;
+                        font-size: Theme.fs-headline;
                         font-italic: true;
                         font-weight: 600;
-                        color: root.sheet-formula-help-open ? Theme.accent : Theme.text-secondary;
+                        color: root.sheet-formula-help-open ? AppIdentity.accent : Theme.text-secondary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -673,7 +673,7 @@ export component SpreadsheetScreen inherits Rectangle {
                 Text {
                     text: "Available Functions";
                     color: Theme.accent;
-                    font-size: 12px;
+                    font-size: Theme.fs-caption;
                     font-weight: 700;
                 }
 
@@ -688,7 +688,7 @@ export component SpreadsheetScreen inherits Rectangle {
                                 x: 8px;
                                 text: hint;
                                 color: Theme.text-primary;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 font-family: Theme.font-mono;
                                 vertical-alignment: center;
                             }
@@ -751,7 +751,7 @@ export component SpreadsheetScreen inherits Rectangle {
                                     text: "\{row-idx + 1}";
                                     font-size: Theme.fs-caption;
                                     font-weight: row-idx == root.active-row ? 700 : 600;
-                                    color: row-idx == root.active-row ? Theme.accent : Theme.text-secondary;
+                                    color: row-idx == root.active-row ? AppIdentity.accent : Theme.text-secondary;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -812,14 +812,14 @@ export component SpreadsheetScreen inherits Rectangle {
                     Text {
                         text: "Cell Comment";
                         color: Theme.text-secondary;
-                        font-size: 12px;
+                        font-size: Theme.fs-caption;
                         font-weight: 600;
                     }
 
                     Text {
                         text: root.col-letter(root.active-col) + "\{root.active-row + 1}";
                         color: Theme.accent;
-                        font-size: 13px;
+                        font-size: Theme.fs-body;
                         font-weight: 600;
                     }
 
@@ -840,7 +840,7 @@ export component SpreadsheetScreen inherits Rectangle {
                             width: parent.width - 16px;
                             text: root.active-comment;
                             color: Theme.text-primary;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             wrap: word-wrap;
                             overflow: elide;
                         }
@@ -861,7 +861,7 @@ export component SpreadsheetScreen inherits Rectangle {
                             height: parent.height - 8px;
                             text <=> root.comment-input;
                             color: Theme.text-primary;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             wrap: word-wrap;
                             vertical-alignment: top;
                         }
@@ -873,7 +873,7 @@ export component SpreadsheetScreen inherits Rectangle {
                         Rectangle {
                             height: 28px;
                             border-radius: 4px;
-                            background: add-cmt-ta.has-hover ? Theme.accent : Theme.accent.transparentize(20%);
+                            background: add-cmt-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(20%);
 
                             add-cmt-ta := TouchArea {
                                 clicked => {
@@ -885,7 +885,7 @@ export component SpreadsheetScreen inherits Rectangle {
                             Text {
                                 text: root.active-comment != "" ? "Update" : "Add";
                                 color: white;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                                 font-weight: 600;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -903,7 +903,7 @@ export component SpreadsheetScreen inherits Rectangle {
                             Text {
                                 text: "Delete";
                                 color: white;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -936,7 +936,7 @@ export component SpreadsheetScreen inherits Rectangle {
                     border-radius: 4px;
                     background: tab.is-active ? Theme.bg-card : (tab-touch.has-hover ? Theme.hover-fill : transparent);
                     border-width: tab.is-active ? 1px : 0px;
-                    border-color: tab.is-active ? Theme.accent : transparent;
+                    border-color: tab.is-active ? AppIdentity.accent : transparent;
 
                     tab-touch := TouchArea {
                         clicked => { root.switch-sheet(tab-idx); }
@@ -945,7 +945,7 @@ export component SpreadsheetScreen inherits Rectangle {
                     Text {
                         text: tab.name;
                         font-size: Theme.fs-caption;
-                        color: tab.is-active ? Theme.accent : Theme.text-secondary;
+                        color: tab.is-active ? AppIdentity.accent : Theme.text-secondary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -962,7 +962,7 @@ export component SpreadsheetScreen inherits Rectangle {
 
                     Text {
                         text: "+";
-                        font-size: 16px;
+                        font-size: Theme.fs-title-2;
                         font-weight: 700;
                         color: Theme.text-dim;
                         horizontal-alignment: center;
@@ -983,7 +983,7 @@ export component SpreadsheetScreen inherits Rectangle {
 
                     Text {
                         text: "Frozen " + root.freeze-rows + "R " + root.freeze-cols + "C";
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                         color: Theme.accent;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -1000,7 +1000,7 @@ export component SpreadsheetScreen inherits Rectangle {
 
                     Text {
                         text: "Filtered";
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                         color: Theme.color-warning;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -1043,7 +1043,7 @@ export component SpreadsheetScreen inherits Rectangle {
                 Text {
                     text: "AI Assistant";
                     color: Theme.accent;
-                    font-size: 13px;
+                    font-size: Theme.fs-body;
                     font-weight: 600;
                     vertical-alignment: center;
                 }
@@ -1054,14 +1054,14 @@ export component SpreadsheetScreen inherits Rectangle {
                     width: 24px; height: 24px; border-radius: 4px;
                     background: close-ai-ta.has-hover ? Theme.hover-fill : transparent;
                     close-ai-ta := TouchArea { clicked => { root.show-ai-panel = false; } }
-                    Text { text: "x"; color: Theme.text-dim; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "x"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 
             Rectangle { height: 1px; background: Theme.separator; }
 
             // Quick actions
-            Text { text: "Quick Actions"; color: Theme.text-secondary; font-size: 10px; }
+            Text { text: "Quick Actions"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
             HorizontalLayout {
                 spacing: 4px;
@@ -1069,53 +1069,53 @@ export component SpreadsheetScreen inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: formula-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: formula-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
 
                     formula-ta := TouchArea {
                         clicked => { root.sheet-ai-formula(root.sheet-ai-prompt); }
                     }
-                    Text { text: "Formula"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Formula"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: analyze-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: analyze-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
 
                     analyze-ta := TouchArea {
                         clicked => { root.sheet-ai-analyze(); }
                     }
-                    Text { text: "Analyze"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Analyze"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: chart-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: chart-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
 
                     chart-ta := TouchArea {
                         clicked => { root.sheet-ai-suggest-chart(); }
                     }
-                    Text { text: "Chart"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Chart"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: insights-ta.has-hover ? Theme.accent.transparentize(20%) : Theme.accent.transparentize(50%);
+                    background: insights-ta.has-hover ? AppIdentity.accent.transparentize(20%) : Theme.accent.transparentize(50%);
                     border-width: 1px;
                     border-color: Theme.accent;
 
                     insights-ta := TouchArea {
                         clicked => { root.sheet-ai-insights(); }
                     }
-                    Text { text: "Insights"; color: Theme.accent-light; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Insights"; color: Theme.accent-light; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
@@ -1128,14 +1128,14 @@ export component SpreadsheetScreen inherits Rectangle {
                     gen-data-ta := TouchArea {
                         clicked => { root.sheet-ai-generate-data(root.sheet-ai-prompt); }
                     }
-                    Text { text: "Generate"; color: Theme.amber-light; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Generate"; color: Theme.amber-light; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 
             Rectangle { height: 1px; background: Theme.separator; }
 
             // Prompt input
-            Text { text: "Ask AI"; color: Theme.text-secondary; font-size: 10px; }
+            Text { text: "Ask AI"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
             Rectangle {
                 height: 60px;
@@ -1149,7 +1149,7 @@ export component SpreadsheetScreen inherits Rectangle {
                     width: parent.width - 16px;
                     height: parent.height - 12px;
                     color: Theme.text-primary;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     wrap: word-wrap;
                     single-line: false;
                     text <=> root.sheet-ai-prompt;
@@ -1161,7 +1161,7 @@ export component SpreadsheetScreen inherits Rectangle {
             Rectangle {
                 height: 28px;
                 border-radius: 4px;
-                background: root.sheet-ai-working ? Theme.text-dim : (submit-ai-ta.has-hover ? Theme.accent : Theme.accent.transparentize(0.2));
+                background: root.sheet-ai-working ? Theme.text-dim : (submit-ai-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2));
 
                 submit-ai-ta := TouchArea {
                     enabled: !root.sheet-ai-working;
@@ -1170,7 +1170,7 @@ export component SpreadsheetScreen inherits Rectangle {
                 Text {
                     text: root.sheet-ai-working ? "Thinking..." : "Ask";
                     color: white;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     font-weight: 600;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -1187,7 +1187,7 @@ export component SpreadsheetScreen inherits Rectangle {
                     ai-response-text := Text {
                         text: root.sheet-ai-response;
                         color: Theme.text-primary;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         wrap: word-wrap;
                         width: parent.width;
                     }

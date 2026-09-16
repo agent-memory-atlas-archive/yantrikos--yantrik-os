@@ -51,6 +51,16 @@ export struct AppAction {
     // A pressed toggle — meeting mode on, sidebar showing, muted. Drawn as primary.
     active: bool,
     disabled: bool,
+    // Draw a divider in this slot instead of a button. id/label/icon are ignored.
+    //
+    // Notes' toolbar is eleven controls in one undifferentiated run -- a people icon, Export,
+    // Import, a clock icon, Structure, Summarize, New, Template, Save, a bin and a cross --
+    // and nothing in it says which of those belong together. Every toolbar worth copying
+    // groups: file things, then document things, then the destructive ones off on their own.
+    // A separator is how a row says that without a word.
+    separator: bool,
+    // The icon goes after the label. For menu buttons, where it is a chevron.
+    trailing-icon: bool,
     // Work in flight — YButton draws its spinner and swallows the click.
     loading: bool,
 }
@@ -282,19 +292,34 @@ export component AppHeader inherits Rectangle {
             padding-top: (root.height - Theme.h-compact) / 2;
             padding-bottom: (root.height - Theme.h-compact) / 2;
 
-            for a in root.actions : YButton {
-                label: a.label;
-                icon-path: a.icon;
-                icon-only: a.label == "";
-                size: 0;
-                disabled: a.disabled;
-                loading: a.loading;
-                variant: a.active ? 0
-                       : a.emphasis == 3 ? 3
-                       : a.emphasis == 2 ? 0
-                       : a.emphasis == 1 ? 1
-                       : 2;
-                clicked => { root.action(a.id); }
+            for a in root.actions : VerticalLayout {
+                alignment: center;
+                // A separator is a slot in the same list rather than a second property, so the
+                // order of a toolbar is still one readable array in the app.
+                if a.separator : Rectangle {
+                    width: 1px;
+                    height: 18px;
+                    // border-strong, not separator: Theme.separator is 3% white, which is right
+                    // for a hairline between two large surfaces and invisible as an 18px tick
+                    // between two buttons. Measured off a screenshot, not guessed -- at 3% the
+                    // groups read as uneven spacing rather than as groups.
+                    background: Theme.border-strong;
+                }
+                if !a.separator : YButton {
+                    label: a.label;
+                    icon-path: a.icon;
+                    icon-trailing: a.trailing-icon;
+                    icon-only: a.label == "";
+                    size: 0;
+                    disabled: a.disabled;
+                    loading: a.loading;
+                    variant: a.active ? 0
+                           : a.emphasis == 3 ? 3
+                           : a.emphasis == 2 ? 0
+                           : a.emphasis == 1 ? 1
+                           : 2;
+                    clicked => { root.action(a.id); }
+                }
             }
         }
 

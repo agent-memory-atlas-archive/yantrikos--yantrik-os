@@ -203,7 +203,7 @@ export component WindowFrame inherits Rectangle {
                         if root.icon-path == "" : Text {
                             text: root.icon-char;
                             color: root.icon-color;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -213,7 +213,7 @@ export component WindowFrame inherits Rectangle {
                     if root.title != "" : Text {
                         text: root.title;
                         color: Theme.text-secondary;
-                        font-size: 13px;
+                        font-size: Theme.fs-body;
                         font-weight: 500;
                         vertical-alignment: center;
                         overflow: elide;

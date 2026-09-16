@@ -104,7 +104,7 @@ export component MemoryBrowser inherits Rectangle {
                                 color: mem.memory-type == "episodic" ? Theme.amber :
                                        mem.memory-type == "semantic" ? Theme.color-follow-up :
                                        Theme.amber-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -132,7 +132,7 @@ export component MemoryBrowser inherits Rectangle {
                             color: mem.valence > 0.2 ? Theme.color-check-in :
                                    mem.valence < -0.2 ? Theme.color-conflict :
                                    Theme.text-dim;
-                            font-size: 14px;
+                            font-size: Theme.fs-body;
                             font-weight: 700;
                             vertical-alignment: center;
                         }
@@ -162,7 +162,7 @@ export component MemoryBrowser inherits Rectangle {
                         Text {
                             text: "relevance ";
                             color: Theme.text-dim;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                         }
                         Rectangle {
                             width: 50px;

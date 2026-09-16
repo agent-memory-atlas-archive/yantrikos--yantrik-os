@@ -6,7 +6,7 @@ import { Theme } from "theme.slint";
 import { YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 // ── Data structs ──
 
@@ -227,7 +227,7 @@ export component SystemMonitor inherits Rectangle {
                         text: root.health-status;
                         color: root.health-status == "Critical" ? Theme.color-emotional :
                                root.health-status == "Degraded" ? Theme.amber : Theme.color-success;
-                        font-size: 13px;
+                        font-size: Theme.fs-body;
                         font-weight: 600;
                         vertical-alignment: center;
                         animate color { duration: 150ms; easing: ease-in-out; }
@@ -244,7 +244,7 @@ export component SystemMonitor inherits Rectangle {
                         text: Math.round(root.health-score) + "%";
                         color: root.health-status == "Critical" ? Theme.color-emotional :
                                root.health-status == "Degraded" ? Theme.amber : Theme.color-success;
-                        font-size: 14px;
+                        font-size: Theme.fs-body;
                         font-weight: 700;
                         vertical-alignment: center;
                         min-width: 36px;
@@ -273,7 +273,7 @@ export component SystemMonitor inherits Rectangle {
                 Text {
                     text: root.health-summary;
                     color: Theme.text-dim;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     horizontal-stretch: 0;
                     vertical-alignment: center;
                     overflow: elide;
@@ -310,7 +310,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "CPU";
                                 color: Theme.text-dim;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 2px;
                             }
 
@@ -351,7 +351,7 @@ export component SystemMonitor inherits Rectangle {
                                         text: Math.round(root.cpu-usage) + "%";
                                         color: root.cpu-usage > 80 ? Theme.color-emotional :
                                                root.cpu-usage > 50 ? Theme.amber : Theme.accent;
-                                        font-size: 18px;
+                                        font-size: Theme.fs-title-1;
                                         font-weight: 700;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -366,14 +366,14 @@ export component SystemMonitor inherits Rectangle {
                                     if root.cpu-model != "" : Text {
                                         text: root.cpu-model;
                                         color: Theme.text-primary;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         overflow: elide;
                                     }
 
                                     if root.cpu-frequency != "" : Text {
                                         text: root.cpu-frequency;
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                     }
 
                                     // Load averages. `alignment: start` because a Text in a
@@ -387,33 +387,33 @@ export component SystemMonitor inherits Rectangle {
                                         Text {
                                             text: "LOAD";
                                             color: Theme.text-dim;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             letter-spacing: 0.6px;
                                             vertical-alignment: center;
                                         }
                                         Text {
                                             text: root.load-avg-1;
                                             color: Theme.text-primary;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             vertical-alignment: center;
                                         }
                                         Text {
                                             text: root.load-avg-5;
                                             color: Theme.text-secondary;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             vertical-alignment: center;
                                         }
                                         Text {
                                             text: root.load-avg-15;
                                             color: Theme.text-dim;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             vertical-alignment: center;
                                         }
                                         Text {
                                             text: "1 / 5 / 15 min";
                                             color: Theme.text-dim.transparentize(35%);
-                                            font-size: 9px;
+                                            font-size: Theme.fs-micro;
                                             vertical-alignment: center;
                                         }
                                     }
@@ -426,7 +426,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "CORES";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                             }
 
@@ -437,7 +437,7 @@ export component SystemMonitor inherits Rectangle {
                                 Text {
                                     text: core.core-id;
                                     color: Theme.text-dim;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     min-width: 16px;
                                     horizontal-alignment: right;
                                     vertical-alignment: center;
@@ -463,7 +463,7 @@ export component SystemMonitor inherits Rectangle {
                                     text: Math.round(core.usage) + "%";
                                     color: core.usage > 80 ? Theme.color-emotional :
                                            core.usage > 50 ? Theme.amber : Theme.text-dim;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     min-width: 32px;
                                     horizontal-alignment: right;
                                     vertical-alignment: center;
@@ -487,7 +487,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "MEMORY";
                                 color: Theme.text-dim;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 2px;
                             }
 
@@ -524,7 +524,7 @@ export component SystemMonitor inherits Rectangle {
                                         text: Math.round(root.memory-usage) + "%";
                                         color: root.memory-usage > 85 ? Theme.color-emotional :
                                                root.memory-usage > 60 ? Theme.amber : Theme.accent;
-                                        font-size: 18px;
+                                        font-size: Theme.fs-title-1;
                                         font-weight: 700;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -539,14 +539,14 @@ export component SystemMonitor inherits Rectangle {
                                     Text {
                                         text: root.memory-used-text + " / " + root.memory-total-text;
                                         color: Theme.text-primary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         font-weight: 500;
                                     }
 
                                     if root.memory-available-text != "" : Text {
                                         text: "Available: " + root.memory-available-text;
                                         color: Theme.text-secondary;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                     }
                                 }
                             }
@@ -557,30 +557,30 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "BREAKDOWN";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                             }
 
                             // Breakdown rows
                             HorizontalLayout {
                                 height: 20px;
-                                Text { text: "Used"; color: Theme.text-secondary; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; }
-                                Text { text: root.memory-used-text; color: Theme.text-primary; font-size: 11px; font-weight: 500; vertical-alignment: center; }
+                                Text { text: "Used"; color: Theme.text-secondary; font-size: Theme.fs-micro; horizontal-stretch: 1; vertical-alignment: center; }
+                                Text { text: root.memory-used-text; color: Theme.text-primary; font-size: Theme.fs-micro; font-weight: 500; vertical-alignment: center; }
                             }
                             HorizontalLayout {
                                 height: 20px;
-                                Text { text: "Cached"; color: Theme.text-secondary; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; }
-                                Text { text: root.memory-cached-text; color: Theme.text-primary; font-size: 11px; font-weight: 500; vertical-alignment: center; }
+                                Text { text: "Cached"; color: Theme.text-secondary; font-size: Theme.fs-micro; horizontal-stretch: 1; vertical-alignment: center; }
+                                Text { text: root.memory-cached-text; color: Theme.text-primary; font-size: Theme.fs-micro; font-weight: 500; vertical-alignment: center; }
                             }
                             HorizontalLayout {
                                 height: 20px;
-                                Text { text: "Buffers"; color: Theme.text-secondary; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; }
-                                Text { text: root.memory-buffers-text; color: Theme.text-primary; font-size: 11px; font-weight: 500; vertical-alignment: center; }
+                                Text { text: "Buffers"; color: Theme.text-secondary; font-size: Theme.fs-micro; horizontal-stretch: 1; vertical-alignment: center; }
+                                Text { text: root.memory-buffers-text; color: Theme.text-primary; font-size: Theme.fs-micro; font-weight: 500; vertical-alignment: center; }
                             }
                             HorizontalLayout {
                                 height: 20px;
-                                Text { text: "Available"; color: Theme.text-secondary; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; }
-                                Text { text: root.memory-available-text; color: Theme.text-primary; font-size: 11px; font-weight: 500; vertical-alignment: center; }
+                                Text { text: "Available"; color: Theme.text-secondary; font-size: Theme.fs-micro; horizontal-stretch: 1; vertical-alignment: center; }
+                                Text { text: root.memory-available-text; color: Theme.text-primary; font-size: Theme.fs-micro; font-weight: 500; vertical-alignment: center; }
                             }
 
                             Rectangle { height: 1px; background: Theme.bg-elevated; }
@@ -589,7 +589,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "SWAP";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                             }
 
@@ -600,7 +600,7 @@ export component SystemMonitor inherits Rectangle {
                                     text: root.swap-used-text + " / " + root.swap-total-text;
                                     color: root.swap-usage > 80 ? Theme.color-emotional :
                                            root.swap-usage > 50 ? Theme.amber : Theme.text-secondary;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     horizontal-stretch: 1;
                                     vertical-alignment: center;
                                 }
@@ -609,7 +609,7 @@ export component SystemMonitor inherits Rectangle {
                                     text: Math.round(root.swap-usage) + "%";
                                     color: root.swap-usage > 80 ? Theme.color-emotional :
                                            root.swap-usage > 50 ? Theme.amber : Theme.text-dim;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 600;
                                     vertical-alignment: center;
                                 }
@@ -652,7 +652,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "DISK";
                                 color: Theme.text-dim;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 2px;
                             }
 
@@ -669,7 +669,7 @@ export component SystemMonitor inherits Rectangle {
                                     Text {
                                         text: disk.mount-point;
                                         color: Theme.text-primary;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 500;
                                         horizontal-stretch: 1;
                                         overflow: elide;
@@ -677,7 +677,7 @@ export component SystemMonitor inherits Rectangle {
                                     Text {
                                         text: disk.used-bytes + " / " + disk.total-bytes;
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                     }
                                 }
 
@@ -704,7 +704,7 @@ export component SystemMonitor inherits Rectangle {
                                         text: Math.round(disk.usage-percent) + "%";
                                         color: disk.usage-percent > 90 ? Theme.color-emotional :
                                                disk.usage-percent > 75 ? Theme.amber : Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 600;
                                         min-width: 32px;
                                         horizontal-alignment: right;
@@ -714,7 +714,7 @@ export component SystemMonitor inherits Rectangle {
                                 if disk.filesystem != "" : Text {
                                     text: disk.filesystem;
                                     color: Theme.text-dim;
-                                    font-size: 9px;
+                                    font-size: Theme.fs-micro;
                                 }
 
                                 Rectangle { height: 1px; background: Theme.bg-elevated; }
@@ -736,7 +736,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "NETWORK";
                                 color: Theme.text-dim;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 2px;
                             }
 
@@ -765,7 +765,7 @@ export component SystemMonitor inherits Rectangle {
                                     Text {
                                         text: iface.name;
                                         color: Theme.text-primary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         font-weight: 600;
                                         vertical-alignment: center;
                                     }
@@ -775,7 +775,7 @@ export component SystemMonitor inherits Rectangle {
                                     if iface.ip-address != "" : Text {
                                         text: iface.ip-address;
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -797,7 +797,7 @@ export component SystemMonitor inherits Rectangle {
                                         Text {
                                             text: iface.rx-speed;
                                             color: Theme.text-secondary;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             vertical-alignment: center;
                                         }
                                     }
@@ -814,7 +814,7 @@ export component SystemMonitor inherits Rectangle {
                                         Text {
                                             text: iface.tx-speed;
                                             color: Theme.text-secondary;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             vertical-alignment: center;
                                         }
                                     }
@@ -828,13 +828,13 @@ export component SystemMonitor inherits Rectangle {
                                     Text {
                                         text: "Total RX: " + iface.rx-bytes;
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         vertical-alignment: center;
                                     }
                                     Text {
                                         text: "TX: " + iface.tx-bytes;
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -902,17 +902,17 @@ export component SystemMonitor inherits Rectangle {
                                 width: ai-tier-txt.preferred-width + 12px;
                                 height: 20px;
                                 border-radius: 10px;
-                                background: root.ai-model-tier == "Large" ? Theme.tint-accent
+                                background: root.ai-model-tier == "Large" ? AppIdentity.tint
                                           : root.ai-model-tier == "Medium" ? Theme.tint-cyan
                                           : root.ai-model-tier == "Small" ? Theme.tint-amber
                                           : Theme.hover-fill;
                                 ai-tier-txt := Text {
                                     text: root.ai-model-tier;
-                                    color: root.ai-model-tier == "Large" ? Theme.accent
-                                         : root.ai-model-tier == "Medium" ? Theme.accent
+                                    color: root.ai-model-tier == "Large" ? AppIdentity.accent
+                                         : root.ai-model-tier == "Medium" ? AppIdentity.accent
                                          : root.ai-model-tier == "Small" ? Theme.amber
                                          : Theme.text-secondary;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 600;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -933,7 +933,7 @@ export component SystemMonitor inherits Rectangle {
                                 Text {
                                     text: "Tokens/sec";
                                     color: Theme.text-dim;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                 }
                                 Text {
                                     text: root.ai-tokens-per-sec > 0.0 ? round(root.ai-tokens-per-sec) + " t/s" : "—";
@@ -950,7 +950,7 @@ export component SystemMonitor inherits Rectangle {
                                 Text {
                                     text: "Today";
                                     color: Theme.text-dim;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                 }
                                 Text {
                                     text: root.ai-tokens-today > 0 ? root.ai-tokens-today + "" : "—";
@@ -967,7 +967,7 @@ export component SystemMonitor inherits Rectangle {
                                 Text {
                                     text: "Latency";
                                     color: Theme.text-dim;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                 }
                                 Text {
                                     text: root.ai-provider-latency-ms >= 0 ? root.ai-provider-latency-ms + "ms" : "—";
@@ -986,7 +986,7 @@ export component SystemMonitor inherits Rectangle {
                                 Text {
                                     text: "Error Rate";
                                     color: Theme.text-dim;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                 }
                                 Text {
                                     text: root.ai-error-rate > 0.0 ? round(root.ai-error-rate * 100.0) + "%" : "0%";
@@ -1008,7 +1008,7 @@ export component SystemMonitor inherits Rectangle {
                                 Text {
                                     text: "Active Request";
                                     color: Theme.text-dim;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     vertical-alignment: center;
                                 }
                                 Rectangle {
@@ -1028,7 +1028,7 @@ export component SystemMonitor inherits Rectangle {
                                 Text {
                                     text: round(root.ai-request-progress) + "%";
                                     color: Theme.accent;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 600;
                                     vertical-alignment: center;
                                 }
@@ -1054,7 +1054,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "PROCESSES";
                                 color: Theme.text-dim;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 2px;
                                 vertical-alignment: center;
                             }
@@ -1077,7 +1077,7 @@ export component SystemMonitor inherits Rectangle {
                                         Text {
                                             text: "End";
                                             color: Theme.text-primary;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 500;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -1097,7 +1097,7 @@ export component SystemMonitor inherits Rectangle {
                                         Text {
                                             text: "Force Kill";
                                             color: Theme.text-on-accent;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 500;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -1109,7 +1109,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: root.processes.length + " shown";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 vertical-alignment: center;
                             }
                         }
@@ -1137,7 +1137,7 @@ export component SystemMonitor inherits Rectangle {
 
                                 proc-search-input := TextInput {
                                     vertical-alignment: center;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                     color: Theme.text-primary;
                                     horizontal-stretch: 1;
                                     text: root.process-search;
@@ -1159,7 +1159,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "PID";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                                 min-width: 52px;
                                 vertical-alignment: center;
@@ -1168,7 +1168,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "NAME";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                                 horizontal-stretch: 1;
                                 vertical-alignment: center;
@@ -1184,8 +1184,8 @@ export component SystemMonitor inherits Rectangle {
                                     spacing: 2px;
                                     Text {
                                         text: "CPU%";
-                                        color: root.sort-column == 0 ? Theme.accent : Theme.text-dim;
-                                        font-size: 10px;
+                                        color: root.sort-column == 0 ? AppIdentity.accent : Theme.text-dim;
+                                        font-size: Theme.fs-micro;
                                         letter-spacing: 1px;
                                         font-weight: root.sort-column == 0 ? 700 : 400;
                                         horizontal-alignment: right;
@@ -1210,8 +1210,8 @@ export component SystemMonitor inherits Rectangle {
                                     spacing: 2px;
                                     Text {
                                         text: "MEM%";
-                                        color: root.sort-column == 1 ? Theme.accent : Theme.text-dim;
-                                        font-size: 10px;
+                                        color: root.sort-column == 1 ? AppIdentity.accent : Theme.text-dim;
+                                        font-size: Theme.fs-micro;
                                         letter-spacing: 1px;
                                         font-weight: root.sort-column == 1 ? 700 : 400;
                                         horizontal-alignment: right;
@@ -1229,7 +1229,7 @@ export component SystemMonitor inherits Rectangle {
                             Text {
                                 text: "STATUS";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                                 min-width: 44px;
                                 horizontal-alignment: right;
@@ -1270,7 +1270,7 @@ export component SystemMonitor inherits Rectangle {
                                 Text {
                                     text: proc.pid;
                                     color: Theme.text-dim;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     min-width: 52px;
                                     vertical-alignment: center;
                                 }
@@ -1308,10 +1308,10 @@ export component SystemMonitor inherits Rectangle {
 
                                 Text {
                                     text: proc.status;
-                                    color: proc.status == "R" ? Theme.accent :
+                                    color: proc.status == "R" ? AppIdentity.accent :
                                            proc.status == "S" ? Theme.text-dim :
                                            proc.status == "Z" ? Theme.color-emotional : Theme.text-dim;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     min-width: 44px;
                                     horizontal-alignment: right;
                                     vertical-alignment: center;

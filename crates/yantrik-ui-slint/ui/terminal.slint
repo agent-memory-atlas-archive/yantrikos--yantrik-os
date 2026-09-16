@@ -6,7 +6,7 @@
 import { Theme } from "theme.slint";
 import { Icons, Icon } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct TerminalTabData {
     title: string,
@@ -122,10 +122,14 @@ export component TerminalScreen inherits Rectangle {
             actions: [
                 { id: "ai",      icon: Icons.spark,        label: "AI",    active: root.show-ai-bar },
                 { id: "profile", icon: Icons.chevron-down, label: root.terminal-profile-name,
-                  active: root.terminal-show-profiles },
+                  active: root.terminal-show-profiles, trailing-icon: true },
                 { id: "split",   icon: Icons.sidebar,      label: "Split", active: root.terminal-split-active },
                 { id: "search",  icon: Icons.search,       active: root.show-search },
-                { id: "restart", icon: Icons.refresh,      label: "Restart", emphasis: 3,
+                // emphasis 1, not 3. Danger is for actions that destroy something the user
+                // cannot get back; restarting a shell that has already exited destroys
+                // nothing, and spending the one red control in the toolbar on it means the
+                // colour says nothing when something really is destructive.
+                { id: "restart", icon: Icons.refresh,      label: "Restart", emphasis: 1,
                   disabled: root.is-alive },
             ];
             action(id) => {
@@ -246,7 +250,7 @@ export component TerminalScreen inherits Rectangle {
 
                         Text {
                             text: "+";
-                            color: parent.is-hov ? Theme.accent : Theme.text-dim;
+                            color: parent.is-hov ? AppIdentity.accent : Theme.text-dim;
                             font-size: Theme.fs-title-2;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -352,7 +356,7 @@ export component TerminalScreen inherits Rectangle {
                         Text {
                             text: "Run";
                             color: parent.is-hov ? Theme.bg-deep : Theme.color-success;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -421,7 +425,7 @@ export component TerminalScreen inherits Rectangle {
                         text: root.search-match-count > 0
                             ? "\{root.search-current-match}/\{root.search-match-count}"
                             : "0";
-                        color: root.search-match-count > 0 ? Theme.accent : Theme.color-danger;
+                        color: root.search-match-count > 0 ? AppIdentity.accent : Theme.color-danger;
                         font-size: Theme.fs-micro;
                         font-weight: 500;
                         horizontal-alignment: center;
@@ -457,7 +461,7 @@ export component TerminalScreen inherits Rectangle {
                     Rectangle {
                         width: 24px; height: 24px; border-radius: Theme.r-sm;
                         background: parent.has-hover ? Theme.hover-fill-strong : transparent;
-                        Text { text: "×"; color: Theme.text-dim; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { text: "×"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; }
                     }
                 }
             }
@@ -719,7 +723,7 @@ export component TerminalScreen inherits Rectangle {
                             width: 64px; height: 30px; border-radius: Theme.r-sm;
                             background: parent.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
                             border-width: 1px; border-color: Theme.border-default;
-                            Text { text: "Cancel"; color: Theme.text-secondary; font-size: 12px; font-weight: 500; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "Cancel"; color: Theme.text-secondary; font-size: Theme.fs-caption; font-weight: 500; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
 
@@ -732,7 +736,7 @@ export component TerminalScreen inherits Rectangle {
                             width: 72px; height: 30px; border-radius: Theme.r-sm;
                             background: parent.has-hover ? Theme.color-danger : Theme.color-danger-dim;
                             border-width: 1px; border-color: Theme.color-danger;
-                            Text { text: "Proceed"; color: parent.is-hov ? Theme.bg-deep : Theme.color-danger; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "Proceed"; color: parent.is-hov ? Theme.bg-deep : Theme.color-danger; font-size: Theme.fs-caption; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -780,7 +784,7 @@ export component TerminalScreen inherits Rectangle {
                                     background: help-ta.has-hover ? Theme.amber : Theme.hover-fill-strong;
                                     border-width: help-ta.has-hover ? 0px : 1px;
                                     border-color: Theme.amber-dim;
-                                    Text { text: "Help"; color: help-ta.has-hover ? Theme.bg-deep : Theme.amber; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                    Text { text: "Help"; color: help-ta.has-hover ? Theme.bg-deep : Theme.amber; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 }
                             }
 
@@ -791,7 +795,7 @@ export component TerminalScreen inherits Rectangle {
                                 Rectangle {
                                     width: 26px; height: 26px; border-radius: Theme.r-sm;
                                     background: dismiss-ta.has-hover ? Theme.hover-fill-strong : transparent;
-                                    Text { text: "×"; color: Theme.text-dim; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                                    Text { text: "×"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; }
                                 }
                             }
                         }
@@ -855,7 +859,7 @@ export component TerminalScreen inherits Rectangle {
                         padding-left: 10px;
                         Text {
                             text: profile-name;
-                            color: root.terminal-profile-name == profile-name ? Theme.accent : Theme.text-secondary;
+                            color: root.terminal-profile-name == profile-name ? AppIdentity.accent : Theme.text-secondary;
                             font-size: Theme.fs-caption;
                             font-weight: root.terminal-profile-name == profile-name ? 600 : 400;
                             vertical-alignment: center;

@@ -6,7 +6,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 
 component ToolbarButton inherits TouchArea {
@@ -27,13 +27,13 @@ component ToolbarButton inherits TouchArea {
         if root.icon-path != "" : Icon {
             commands: root.icon-path;
             size: 14px;
-            tint: root.active ? Theme.accent : Theme.text-secondary;
+            tint: root.active ? AppIdentity.accent : Theme.text-secondary;
             y: (parent.height - self.height) / 2;
         }
         txt := Text {
             text: root.label;
             color: active ? Theme.accent-light : Theme.text-secondary;
-            font-size: 12px;
+            font-size: Theme.fs-caption;
             font-weight: active ? 600 : 400;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -372,7 +372,7 @@ export component ImageViewer inherits Rectangle {
                         Text {
                             text: "AI Description";
                             color: Theme.accent;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             font-weight: 600;
                             vertical-alignment: center;
                         }
@@ -404,7 +404,7 @@ export component ImageViewer inherits Rectangle {
                     Text {
                         text: root.ai-response;
                         color: Theme.text-primary;
-                        font-size: 12px;
+                        font-size: Theme.fs-caption;
                         wrap: word-wrap;
                     }
                 }
@@ -584,7 +584,7 @@ export component ImageViewer inherits Rectangle {
                         Text {
                             text: root.file-name;
                             color: Theme.text-primary;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                             overflow: elide;
                         }
@@ -592,21 +592,21 @@ export component ImageViewer inherits Rectangle {
                         Text {
                             text: root.viewer-exif-dimensions;
                             color: Theme.text-secondary;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
 
                         Text {
                             text: root.zoom-text;
                             color: Theme.text-secondary;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
 
                         if root.viewer-rotation != 0 : Text {
                             text: root.viewer-rotation + "\u{00b0}";
                             color: Theme.text-secondary;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
                     }
@@ -649,7 +649,7 @@ export component ImageViewer inherits Rectangle {
                         Text {
                             text: "Select crop area";
                             color: Theme.text-primary;
-                            font-size: 18px;
+                            font-size: Theme.fs-title-1;
                             font-weight: 600;
                             horizontal-alignment: center;
                         }
@@ -657,7 +657,7 @@ export component ImageViewer inherits Rectangle {
                         Text {
                             text: "Drag to select region (scaffold — full crop selection coming soon)";
                             color: Theme.text-secondary;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             horizontal-alignment: center;
                         }
 
@@ -675,12 +675,12 @@ export component ImageViewer inherits Rectangle {
                                     width: crop-apply-txt.preferred-width + 28px;
                                     height: 34px;
                                     border-radius: 8px;
-                                    background: parent.has-hover ? Theme.accent : Theme.accent-dim;
+                                    background: parent.has-hover ? AppIdentity.accent : Theme.accent-dim;
 
                                     crop-apply-txt := Text {
                                         text: "Apply Crop";
                                         color: Theme.text-primary;
-                                        font-size: 13px;
+                                        font-size: Theme.fs-body;
                                         font-weight: 600;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -703,7 +703,7 @@ export component ImageViewer inherits Rectangle {
                                     crop-cancel-txt := Text {
                                         text: "Cancel";
                                         color: Theme.text-primary;
-                                        font-size: 13px;
+                                        font-size: Theme.fs-body;
                                         font-weight: 500;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -746,7 +746,7 @@ export component ImageViewer inherits Rectangle {
                             Text {
                                 text: "Image Info";
                                 color: Theme.text-primary;
-                                font-size: 14px;
+                                font-size: Theme.fs-body;
                                 font-weight: 600;
                                 vertical-alignment: center;
                             }
@@ -777,18 +777,18 @@ export component ImageViewer inherits Rectangle {
                         Text {
                             text: "File";
                             color: Theme.accent;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             font-weight: 600;
                         }
 
                         // Filename
                         VerticalLayout {
                             spacing: 2px;
-                            Text { text: "Name"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "Name"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.file-name;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                                 wrap: word-wrap;
                             }
                         }
@@ -796,33 +796,33 @@ export component ImageViewer inherits Rectangle {
                         // Dimensions
                         if root.viewer-exif-dimensions != "" : VerticalLayout {
                             spacing: 2px;
-                            Text { text: "Dimensions"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "Dimensions"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.viewer-exif-dimensions;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                             }
                         }
 
                         // File size
                         if root.viewer-exif-file-size != "" : VerticalLayout {
                             spacing: 2px;
-                            Text { text: "File Size"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "File Size"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.viewer-exif-file-size;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                             }
                         }
 
                         // Format
                         if root.viewer-exif-format != "" : VerticalLayout {
                             spacing: 2px;
-                            Text { text: "Format"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "Format"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.viewer-exif-format;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                             }
                         }
 
@@ -838,18 +838,18 @@ export component ImageViewer inherits Rectangle {
                             || root.viewer-exif-iso != "" : Text {
                             text: "EXIF Data";
                             color: Theme.accent;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             font-weight: 600;
                         }
 
                         // Camera
                         if root.viewer-exif-camera != "" : VerticalLayout {
                             spacing: 2px;
-                            Text { text: "Camera"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "Camera"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.viewer-exif-camera;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                                 wrap: word-wrap;
                             }
                         }
@@ -857,55 +857,55 @@ export component ImageViewer inherits Rectangle {
                         // Focal length
                         if root.viewer-exif-focal-length != "" : VerticalLayout {
                             spacing: 2px;
-                            Text { text: "Focal Length"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "Focal Length"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.viewer-exif-focal-length;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                             }
                         }
 
                         // ISO
                         if root.viewer-exif-iso != "" : VerticalLayout {
                             spacing: 2px;
-                            Text { text: "ISO"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "ISO"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.viewer-exif-iso;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                             }
                         }
 
                         // Exposure
                         if root.viewer-exif-exposure != "" : VerticalLayout {
                             spacing: 2px;
-                            Text { text: "Exposure"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "Exposure"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.viewer-exif-exposure;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                             }
                         }
 
                         // Date taken
                         if root.viewer-exif-date-taken != "" : VerticalLayout {
                             spacing: 2px;
-                            Text { text: "Date Taken"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "Date Taken"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.viewer-exif-date-taken;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                             }
                         }
 
                         // GPS
                         if root.viewer-exif-gps != "" : VerticalLayout {
                             spacing: 2px;
-                            Text { text: "GPS"; color: Theme.text-dim; font-size: 10px; }
+                            Text { text: "GPS"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                             Text {
                                 text: root.viewer-exif-gps;
                                 color: Theme.text-primary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                             }
                         }
                     }
@@ -942,7 +942,7 @@ export component ImageViewer inherits Rectangle {
                             Text {
                                 text: "Batch Operations";
                                 color: Theme.text-primary;
-                                font-size: 14px;
+                                font-size: Theme.fs-body;
                                 font-weight: 600;
                                 vertical-alignment: center;
                             }
@@ -973,7 +973,7 @@ export component ImageViewer inherits Rectangle {
                         Text {
                             text: "Rotate All Images";
                             color: Theme.accent;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             font-weight: 600;
                         }
 
@@ -994,7 +994,7 @@ export component ImageViewer inherits Rectangle {
                                     batch-rot-90-txt := Text {
                                         text: "90\u{00b0} CW";
                                         color: Theme.text-secondary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -1015,7 +1015,7 @@ export component ImageViewer inherits Rectangle {
                                     batch-rot-180-txt := Text {
                                         text: "180\u{00b0}";
                                         color: Theme.text-secondary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -1036,7 +1036,7 @@ export component ImageViewer inherits Rectangle {
                                     batch-rot-270-txt := Text {
                                         text: "90\u{00b0} CCW";
                                         color: Theme.text-secondary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                     }
@@ -1051,7 +1051,7 @@ export component ImageViewer inherits Rectangle {
                         Text {
                             text: "Resize All Images";
                             color: Theme.accent;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             font-weight: 600;
                         }
 
@@ -1061,7 +1061,7 @@ export component ImageViewer inherits Rectangle {
 
                             VerticalLayout {
                                 spacing: 4px;
-                                Text { text: "Width"; color: Theme.text-dim; font-size: 10px; }
+                                Text { text: "Width"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                 Rectangle {
                                     width: 80px;
                                     height: 30px;
@@ -1075,7 +1075,7 @@ export component ImageViewer inherits Rectangle {
                                         height: 100%;
                                         text <=> root.batch-resize-w;
                                         color: Theme.text-primary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                     }
                                 }
                             }
@@ -1089,7 +1089,7 @@ export component ImageViewer inherits Rectangle {
 
                             VerticalLayout {
                                 spacing: 4px;
-                                Text { text: "Height"; color: Theme.text-dim; font-size: 10px; }
+                                Text { text: "Height"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                 Rectangle {
                                     width: 80px;
                                     height: 30px;
@@ -1103,7 +1103,7 @@ export component ImageViewer inherits Rectangle {
                                         height: 100%;
                                         text <=> root.batch-resize-h;
                                         color: Theme.text-primary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                     }
                                 }
                             }
@@ -1120,11 +1120,11 @@ export component ImageViewer inherits Rectangle {
                                 width: batch-resize-btn-txt.preferred-width + 24px;
                                 height: 34px;
                                 border-radius: 8px;
-                                background: parent.has-hover ? Theme.accent : Theme.accent-dim;
+                                background: parent.has-hover ? AppIdentity.accent : Theme.accent-dim;
                                 batch-resize-btn-txt := Text {
                                     text: "Resize All";
                                     color: Theme.text-primary;
-                                    font-size: 13px;
+                                    font-size: Theme.fs-body;
                                     font-weight: 600;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -1144,13 +1144,13 @@ export component ImageViewer inherits Rectangle {
                                 Text {
                                     text: "Progress:";
                                     color: Theme.text-dim;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     vertical-alignment: center;
                                 }
                                 Text {
                                     text: root.viewer-batch-done + " / " + root.viewer-batch-total;
                                     color: Theme.text-primary;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 600;
                                     vertical-alignment: center;
                                 }
@@ -1179,7 +1179,7 @@ export component ImageViewer inherits Rectangle {
                             if root.viewer-batch-status != "" : Text {
                                 text: root.viewer-batch-status;
                                 color: Theme.text-secondary;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 wrap: word-wrap;
                             }
                         }

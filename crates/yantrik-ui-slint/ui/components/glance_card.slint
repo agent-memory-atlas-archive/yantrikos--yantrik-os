@@ -64,7 +64,7 @@ export component GlanceCard inherits Rectangle {
             Text {
                 text: data.reason;
                 color: Theme.text-primary;
-                font-size: 14px;
+                font-size: Theme.fs-body;
                 wrap: word-wrap;
                 overflow: elide;
             }
@@ -81,7 +81,7 @@ export component GlanceCard inherits Rectangle {
                     instinct-text := Text {
                         text: data.instinct-name;
                         color: Theme.text-dim;
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }

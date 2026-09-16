@@ -11,7 +11,7 @@ import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButto
          RibbonAccentButton } from "components/app_ribbon.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct SlideData {
     title: string,
@@ -269,7 +269,7 @@ export component PresentationScreen inherits Rectangle {
                         Text {
                             text: "Speaker Notes";
                             color: Theme.text-secondary;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             font-weight: 700;
                             letter-spacing: 0.5px;
                         }
@@ -278,7 +278,7 @@ export component PresentationScreen inherits Rectangle {
                             Text {
                                 text: root.current-notes != "" ? root.current-notes : "(No notes for this slide)";
                                 color: root.current-notes != "" ? Theme.text-primary : Theme.text-dim;
-                                font-size: 14px;
+                                font-size: Theme.fs-body;
                                 wrap: word-wrap;
                             }
                         }
@@ -295,7 +295,7 @@ export component PresentationScreen inherits Rectangle {
                         Text {
                             text: "Next Slide";
                             color: Theme.text-dim;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             font-weight: 700;
                             letter-spacing: 0.5px;
                         }
@@ -315,7 +315,7 @@ export component PresentationScreen inherits Rectangle {
                                 Text {
                                     text: root.next-title;
                                     color: slide-text;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 600;
                                     overflow: elide;
                                 }
@@ -323,7 +323,7 @@ export component PresentationScreen inherits Rectangle {
                                 Text {
                                     text: root.next-body;
                                     color: slide-text;
-                                    font-size: 8px;
+                                    font-size: Theme.fs-micro;
                                     overflow: elide;
                                     wrap: word-wrap;
                                     opacity: 0.7;
@@ -345,7 +345,7 @@ export component PresentationScreen inherits Rectangle {
                                 Text {
                                     text: root.timer-text;
                                     color: Theme.text-primary;
-                                    font-size: 20px;
+                                    font-size: Theme.fs-display;
                                     font-weight: 700;
                                     vertical-alignment: center;
                                 }
@@ -380,7 +380,7 @@ export component PresentationScreen inherits Rectangle {
                         Text {
                             text: root.slide-progress;
                             color: Theme.text-secondary;
-                            font-size: 13px;
+                            font-size: Theme.fs-body;
                             font-weight: 600;
                             horizontal-alignment: center;
                         }
@@ -401,7 +401,7 @@ export component PresentationScreen inherits Rectangle {
             Text {
                 text: "Exit (Esc)";
                 color: Theme.text-primary;
-                font-size: 13px;
+                font-size: Theme.fs-body;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -632,7 +632,7 @@ export component PresentationScreen inherits Rectangle {
                     spacing: 8px;
                     alignment: start;
 
-                    Text { text: "Templates:"; color: Theme.text-primary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                    Text { text: "Templates:"; color: Theme.text-primary; font-size: Theme.fs-caption; font-weight: 600; vertical-alignment: center; }
 
                     RibbonToolButtonWide { label: "Blank"; clicked => { root.use-template(0); root.show-templates = false; } }
                     RibbonToolButtonWide { label: "Status"; clicked => { root.use-template(1); root.show-templates = false; } }
@@ -698,7 +698,7 @@ export component PresentationScreen inherits Rectangle {
                             Text {
                                 text: "SLIDES";
                                 color: Theme.text-secondary;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 font-weight: 700;
                                 letter-spacing: 1px;
                                 vertical-alignment: center;
@@ -709,7 +709,7 @@ export component PresentationScreen inherits Rectangle {
                             Text {
                                 text: root.slide-count + "";
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 vertical-alignment: center;
                             }
                         }
@@ -735,12 +735,12 @@ export component PresentationScreen inherits Rectangle {
                                             width: 22px;
                                             height: 16px;
                                             border-radius: 4px;
-                                            background: idx == root.current-slide-index ? Theme.accent.transparentize(0.7) : transparent;
+                                            background: idx == root.current-slide-index ? AppIdentity.accent.transparentize(0.7) : transparent;
 
                                             Text {
                                                 text: "" + (idx + 1);
-                                                color: idx == root.current-slide-index ? Theme.accent : Theme.text-dim;
-                                                font-size: 10px;
+                                                color: idx == root.current-slide-index ? AppIdentity.accent : Theme.text-dim;
+                                                font-size: Theme.fs-micro;
                                                 font-weight: idx == root.current-slide-index ? 700 : 400;
                                                 horizontal-alignment: center;
                                                 vertical-alignment: center;
@@ -756,7 +756,7 @@ export component PresentationScreen inherits Rectangle {
                                         background: idx == root.current-slide-index ? Theme.bg-elevated : Theme.bg-surface;
                                         border-radius: 6px;
                                         border-width: idx == root.current-slide-index ? 2px : 1px;
-                                        border-color: idx == root.current-slide-index ? Theme.accent : Theme.border-subtle;
+                                        border-color: idx == root.current-slide-index ? AppIdentity.accent : Theme.border-subtle;
                                         opacity: idx == root.current-slide-index ? 1.0 : 0.75;
 
                                         // Active slide glow
@@ -775,7 +775,7 @@ export component PresentationScreen inherits Rectangle {
                                             Text {
                                                 text: slide.title;
                                                 color: idx == root.current-slide-index ? Theme.text-primary : Theme.text-secondary;
-                                                font-size: 9px;
+                                                font-size: Theme.fs-micro;
                                                 font-weight: 600;
                                                 overflow: elide;
                                             }
@@ -783,7 +783,7 @@ export component PresentationScreen inherits Rectangle {
                                             Text {
                                                 text: slide.body;
                                                 color: Theme.text-dim;
-                                                font-size: 8px;
+                                                font-size: Theme.fs-micro;
                                                 overflow: elide;
                                                 wrap: word-wrap;
                                             }
@@ -808,8 +808,8 @@ export component PresentationScreen inherits Rectangle {
                                 height: 28px;
                                 border-radius: 6px;
                                 border-width: 1px;
-                                border-color: add-rail-ta.has-hover ? Theme.accent.transparentize(0.5) : Theme.border-subtle;
-                                background: add-rail-ta.has-hover ? Theme.accent.transparentize(0.9) : transparent;
+                                border-color: add-rail-ta.has-hover ? AppIdentity.accent.transparentize(0.5) : Theme.border-subtle;
+                                background: add-rail-ta.has-hover ? AppIdentity.accent.transparentize(0.9) : transparent;
 
                                 HorizontalLayout {
                                     alignment: center;
@@ -817,15 +817,15 @@ export component PresentationScreen inherits Rectangle {
 
                                     Text {
                                         text: "+";
-                                        color: add-rail-ta.has-hover ? Theme.accent : Theme.text-dim;
-                                        font-size: 14px;
+                                        color: add-rail-ta.has-hover ? AppIdentity.accent : Theme.text-dim;
+                                        font-size: Theme.fs-body;
                                         font-weight: 600;
                                         vertical-alignment: center;
                                     }
                                     Text {
                                         text: "Add Slide";
                                         color: add-rail-ta.has-hover ? Theme.text-primary : Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -947,7 +947,7 @@ export component PresentationScreen inherits Rectangle {
                                     Text {
                                         text: "Column 2\n(use body text)";
                                         color: t-text;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                         opacity: 0.4;
@@ -979,7 +979,7 @@ export component PresentationScreen inherits Rectangle {
                                         Text {
                                             text: "Image placeholder";
                                             color: t-text;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             horizontal-alignment: center;
                                             opacity: 0.3;
                                         }
@@ -995,7 +995,7 @@ export component PresentationScreen inherits Rectangle {
                                     Text {
                                         text: "Blank Slide";
                                         color: t-text;
-                                        font-size: 14px;
+                                        font-size: Theme.fs-body;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
                                         opacity: 0.15;
@@ -1036,7 +1036,7 @@ export component PresentationScreen inherits Rectangle {
                                     Text {
                                         text: "Speaker Notes";
                                         color: Theme.text-primary;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 600;
                                         vertical-alignment: center;
                                     }
@@ -1048,7 +1048,7 @@ export component PresentationScreen inherits Rectangle {
                                         width: 76px;
                                         height: 22px;
                                         border-radius: 4px;
-                                        background: gen-ta.has-hover ? Theme.accent.transparentize(0.8) : transparent;
+                                        background: gen-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : transparent;
                                         border-width: 1px;
                                         border-color: Theme.accent.transparentize(0.6);
 
@@ -1056,7 +1056,7 @@ export component PresentationScreen inherits Rectangle {
 
                                         Text {
                                             text: "AI Generate";
-                                            font-size: 9px;
+                                            font-size: Theme.fs-micro;
                                             color: Theme.accent;
                                             font-weight: 500;
                                             horizontal-alignment: center;
@@ -1070,7 +1070,7 @@ export component PresentationScreen inherits Rectangle {
                                     Text {
                                         text: root.slide-progress;
                                         color: Theme.text-secondary;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         vertical-alignment: center;
                                     }
 
@@ -1082,7 +1082,7 @@ export component PresentationScreen inherits Rectangle {
                                             : current-layout == 4 ? "Blank"
                                             : "Image + Text";
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         vertical-alignment: center;
                                     }
 
@@ -1097,7 +1097,7 @@ export component PresentationScreen inherits Rectangle {
                                         Text {
                                             text: "Modified";
                                             color: Theme.amber;
-                                            font-size: 9px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 500;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -1108,7 +1108,7 @@ export component PresentationScreen inherits Rectangle {
                                         visible: root.save-status != "";
                                         text: root.save-status;
                                         color: Theme.text-dim;
-                                        font-size: 9px;
+                                        font-size: Theme.fs-micro;
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
@@ -1127,7 +1127,7 @@ export component PresentationScreen inherits Rectangle {
                                     height: parent.height - 12px;
                                     text <=> root.current-notes;
                                     color: Theme.text-secondary;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                     single-line: false;
                                     wrap: word-wrap;
                                     vertical-alignment: top;
@@ -1141,7 +1141,7 @@ export component PresentationScreen inherits Rectangle {
                                     y: 6px;
                                     text: "Add speaker notes for this slide...";
                                     color: Theme.text-dim;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                 }
                             }
                         }
@@ -1174,7 +1174,7 @@ export component PresentationScreen inherits Rectangle {
                 Text {
                     text: "AI Assistant";
                     color: Theme.accent;
-                    font-size: 13px;
+                    font-size: Theme.fs-body;
                     font-weight: 600;
                     vertical-alignment: center;
                 }
@@ -1183,14 +1183,14 @@ export component PresentationScreen inherits Rectangle {
                     width: 24px; height: 24px; border-radius: 4px;
                     background: close-pres-ai-ta.has-hover ? Theme.hover-fill : transparent;
                     close-pres-ai-ta := TouchArea { clicked => { root.show-ai-panel = false; } }
-                    Text { text: "x"; color: Theme.text-dim; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "x"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 
             Rectangle { height: 1px; background: Theme.separator; }
 
             // ── Section B: Global Actions ──
-            Text { text: "Global"; color: Theme.text-secondary; font-size: 10px; }
+            Text { text: "Global"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
             HorizontalLayout {
                 spacing: 4px;
@@ -1198,21 +1198,21 @@ export component PresentationScreen inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: gen-deck-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: gen-deck-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     gen-deck-ta := TouchArea { clicked => { root.pres-ai-generate-deck(root.pres-ai-instruction); } }
-                    Text { text: "Generate Deck"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Generate Deck"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: struct-text-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: struct-text-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     struct-text-ta := TouchArea { clicked => { root.pres-ai-structure-text(root.pres-ai-instruction); } }
-                    Text { text: "Structure Text"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Structure Text"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 
@@ -1222,11 +1222,11 @@ export component PresentationScreen inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: all-notes-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: all-notes-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     all-notes-ta := TouchArea { clicked => { root.pres-ai-generate-all-notes(); } }
-                    Text { text: "All Notes"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "All Notes"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 // spacer to keep row balanced
@@ -1236,7 +1236,7 @@ export component PresentationScreen inherits Rectangle {
             Rectangle { height: 1px; background: Theme.separator; }
 
             // ── Section C: Slide Actions ──
-            Text { text: "Current Slide"; color: Theme.text-secondary; font-size: 10px; }
+            Text { text: "Current Slide"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
             HorizontalLayout {
                 spacing: 4px;
@@ -1244,21 +1244,21 @@ export component PresentationScreen inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: improve-slide-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: improve-slide-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     improve-slide-ta := TouchArea { clicked => { root.pres-ai-improve-slide(); } }
-                    Text { text: "Improve Slide"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Improve Slide"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: gen-notes-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: gen-notes-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     gen-notes-ta := TouchArea { clicked => { root.pres-ai-generate-notes(); } }
-                    Text { text: "Generate Notes"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Generate Notes"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 
@@ -1268,21 +1268,21 @@ export component PresentationScreen inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: simplify-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: simplify-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     simplify-ta := TouchArea { clicked => { root.pres-ai-simplify(root.pres-ai-instruction); } }
-                    Text { text: "Simplify"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Simplify"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: split-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: split-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     split-ta := TouchArea { clicked => { root.pres-ai-split-slide(); } }
-                    Text { text: "Split Slide"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Split Slide"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 
@@ -1292,11 +1292,11 @@ export component PresentationScreen inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: layout-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: layout-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     layout-ta := TouchArea { clicked => { root.pres-ai-suggest-layout(); } }
-                    Text { text: "Suggest Layout"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Suggest Layout"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle { height: 28px; background: transparent; }
@@ -1318,7 +1318,7 @@ export component PresentationScreen inherits Rectangle {
                     width: parent.width - 16px;
                     height: parent.height;
                     color: Theme.text-primary;
-                    font-size: 10px;
+                    font-size: Theme.fs-micro;
                     wrap: word-wrap;
                     single-line: false;
                     text <=> root.pres-ai-instruction;
@@ -1330,7 +1330,7 @@ export component PresentationScreen inherits Rectangle {
                     x: 8px;
                     text: "Optional: audience, tone, instructions...";
                     color: Theme.text-dim;
-                    font-size: 10px;
+                    font-size: Theme.fs-micro;
                     vertical-alignment: center;
                 }
             }
@@ -1354,7 +1354,7 @@ export component PresentationScreen inherits Rectangle {
                 Text {
                     text: root.pres-ai-status != "" ? root.pres-ai-status : "Working...";
                     color: Theme.text-secondary;
-                    font-size: 10px;
+                    font-size: Theme.fs-micro;
                     vertical-alignment: center;
                 }
             }
@@ -1375,7 +1375,7 @@ export component PresentationScreen inherits Rectangle {
                         Text {
                             text: root.pres-ai-proposal.action-name;
                             color: Theme.accent;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             font-weight: 600;
                             vertical-alignment: center;
                         }
@@ -1384,7 +1384,7 @@ export component PresentationScreen inherits Rectangle {
                             visible: root.pres-ai-proposal.is-deck-proposal;
                             text: root.pres-ai-proposal.slide-count + " slides";
                             color: Theme.text-dim;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
                     }
@@ -1405,13 +1405,13 @@ export component PresentationScreen inherits Rectangle {
                                     }
                                 }
                             }
-                            Text { text: "<"; color: Theme.text-secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "<"; color: Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
                         }
 
                         Text {
                             text: "Slide " + (root.pres-ai-proposal.current-preview-index + 1) + " of " + root.pres-ai-proposal.slide-count;
                             color: Theme.text-secondary;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -1426,7 +1426,7 @@ export component PresentationScreen inherits Rectangle {
                                     }
                                 }
                             }
-                            Text { text: ">"; color: Theme.text-secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: ">"; color: Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
 
@@ -1444,7 +1444,7 @@ export component PresentationScreen inherits Rectangle {
                                     visible: root.pres-ai-proposal.title-changed;
                                     spacing: 2px;
 
-                                    Text { text: "Title"; color: Theme.accent; font-size: 9px; font-weight: 600; }
+                                    Text { text: "Title"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 600; }
 
                                     Rectangle {
                                         border-radius: 4px;
@@ -1452,11 +1452,11 @@ export component PresentationScreen inherits Rectangle {
                                         clip: true;
                                         VerticalLayout {
                                             padding: 4px;
-                                            Text { text: "Current:"; color: Theme.text-dim; font-size: 8px; }
+                                            Text { text: "Current:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                             Text {
                                                 text: root.pres-ai-proposal.original-title;
                                                 color: Theme.text-secondary;
-                                                font-size: 10px;
+                                                font-size: Theme.fs-micro;
                                                 overflow: elide;
                                             }
                                         }
@@ -1468,11 +1468,11 @@ export component PresentationScreen inherits Rectangle {
                                         clip: true;
                                         VerticalLayout {
                                             padding: 4px;
-                                            Text { text: "Proposed:"; color: Theme.text-dim; font-size: 8px; }
+                                            Text { text: "Proposed:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                             Text {
                                                 text: root.pres-ai-proposal.proposed-title;
                                                 color: Theme.text-primary;
-                                                font-size: 10px;
+                                                font-size: Theme.fs-micro;
                                                 overflow: elide;
                                             }
                                         }
@@ -1484,7 +1484,7 @@ export component PresentationScreen inherits Rectangle {
                                     visible: root.pres-ai-proposal.body-changed;
                                     spacing: 2px;
 
-                                    Text { text: "Body"; color: Theme.accent; font-size: 9px; font-weight: 600; }
+                                    Text { text: "Body"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 600; }
 
                                     Rectangle {
                                         border-radius: 4px;
@@ -1492,11 +1492,11 @@ export component PresentationScreen inherits Rectangle {
                                         clip: true;
                                         VerticalLayout {
                                             padding: 4px;
-                                            Text { text: "Current:"; color: Theme.text-dim; font-size: 8px; }
+                                            Text { text: "Current:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                             Text {
                                                 text: root.pres-ai-proposal.original-body;
                                                 color: Theme.text-secondary;
-                                                font-size: 10px;
+                                                font-size: Theme.fs-micro;
                                                 wrap: word-wrap;
                                             }
                                         }
@@ -1508,11 +1508,11 @@ export component PresentationScreen inherits Rectangle {
                                         clip: true;
                                         VerticalLayout {
                                             padding: 4px;
-                                            Text { text: "Proposed:"; color: Theme.text-dim; font-size: 8px; }
+                                            Text { text: "Proposed:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                             Text {
                                                 text: root.pres-ai-proposal.proposed-body;
                                                 color: Theme.text-primary;
-                                                font-size: 10px;
+                                                font-size: Theme.fs-micro;
                                                 wrap: word-wrap;
                                             }
                                         }
@@ -1524,7 +1524,7 @@ export component PresentationScreen inherits Rectangle {
                                     visible: root.pres-ai-proposal.notes-changed;
                                     spacing: 2px;
 
-                                    Text { text: "Notes"; color: Theme.accent; font-size: 9px; font-weight: 600; }
+                                    Text { text: "Notes"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 600; }
 
                                     Rectangle {
                                         border-radius: 4px;
@@ -1532,11 +1532,11 @@ export component PresentationScreen inherits Rectangle {
                                         clip: true;
                                         VerticalLayout {
                                             padding: 4px;
-                                            Text { text: "Current:"; color: Theme.text-dim; font-size: 8px; }
+                                            Text { text: "Current:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                             Text {
                                                 text: root.pres-ai-proposal.original-notes;
                                                 color: Theme.text-secondary;
-                                                font-size: 10px;
+                                                font-size: Theme.fs-micro;
                                                 wrap: word-wrap;
                                             }
                                         }
@@ -1548,11 +1548,11 @@ export component PresentationScreen inherits Rectangle {
                                         clip: true;
                                         VerticalLayout {
                                             padding: 4px;
-                                            Text { text: "Proposed:"; color: Theme.text-dim; font-size: 8px; }
+                                            Text { text: "Proposed:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                             Text {
                                                 text: root.pres-ai-proposal.proposed-notes;
                                                 color: Theme.text-primary;
-                                                font-size: 10px;
+                                                font-size: Theme.fs-micro;
                                                 wrap: word-wrap;
                                             }
                                         }
@@ -1564,7 +1564,7 @@ export component PresentationScreen inherits Rectangle {
                                     visible: root.pres-ai-proposal.slide-type-changed;
                                     spacing: 2px;
 
-                                    Text { text: "Layout"; color: Theme.accent; font-size: 9px; font-weight: 600; }
+                                    Text { text: "Layout"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 600; }
 
                                     Rectangle {
                                         height: 24px;
@@ -1575,7 +1575,7 @@ export component PresentationScreen inherits Rectangle {
                                             x: 6px;
                                             text: root.pres-ai-proposal.proposed-slide-type;
                                             color: Theme.text-primary;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -1587,7 +1587,7 @@ export component PresentationScreen inherits Rectangle {
                     Rectangle { height: 1px; background: Theme.separator; }
 
                     // Field checkboxes
-                    Text { text: "Apply fields:"; color: Theme.text-secondary; font-size: 9px; }
+                    Text { text: "Apply fields:"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
                     HorizontalLayout {
                         spacing: 8px;
@@ -1601,15 +1601,15 @@ export component PresentationScreen inherits Rectangle {
                                 width: 16px; height: 16px; border-radius: 3px;
                                 border-width: 1px;
                                 border-color: Theme.accent;
-                                background: root.pres-ai-apply-title ? Theme.accent : transparent;
+                                background: root.pres-ai-apply-title ? AppIdentity.accent : transparent;
                                 TouchArea { clicked => { root.pres-ai-apply-title = !root.pres-ai-apply-title; } }
                                 Text {
                                     text: root.pres-ai-apply-title ? "✓" : "";
-                                    color: white; font-size: 10px;
+                                    color: white; font-size: Theme.fs-micro;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
-                            Text { text: "Title"; color: Theme.text-secondary; font-size: 10px; vertical-alignment: center; }
+                            Text { text: "Title"; color: Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                         }
 
                         // Body checkbox
@@ -1620,15 +1620,15 @@ export component PresentationScreen inherits Rectangle {
                                 width: 16px; height: 16px; border-radius: 3px;
                                 border-width: 1px;
                                 border-color: Theme.accent;
-                                background: root.pres-ai-apply-body ? Theme.accent : transparent;
+                                background: root.pres-ai-apply-body ? AppIdentity.accent : transparent;
                                 TouchArea { clicked => { root.pres-ai-apply-body = !root.pres-ai-apply-body; } }
                                 Text {
                                     text: root.pres-ai-apply-body ? "✓" : "";
-                                    color: white; font-size: 10px;
+                                    color: white; font-size: Theme.fs-micro;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
-                            Text { text: "Body"; color: Theme.text-secondary; font-size: 10px; vertical-alignment: center; }
+                            Text { text: "Body"; color: Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                         }
                     }
 
@@ -1644,15 +1644,15 @@ export component PresentationScreen inherits Rectangle {
                                 width: 16px; height: 16px; border-radius: 3px;
                                 border-width: 1px;
                                 border-color: Theme.accent;
-                                background: root.pres-ai-apply-notes ? Theme.accent : transparent;
+                                background: root.pres-ai-apply-notes ? AppIdentity.accent : transparent;
                                 TouchArea { clicked => { root.pres-ai-apply-notes = !root.pres-ai-apply-notes; } }
                                 Text {
                                     text: root.pres-ai-apply-notes ? "✓" : "";
-                                    color: white; font-size: 10px;
+                                    color: white; font-size: Theme.fs-micro;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
-                            Text { text: "Notes"; color: Theme.text-secondary; font-size: 10px; vertical-alignment: center; }
+                            Text { text: "Notes"; color: Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                         }
 
                         // Layout checkbox
@@ -1663,15 +1663,15 @@ export component PresentationScreen inherits Rectangle {
                                 width: 16px; height: 16px; border-radius: 3px;
                                 border-width: 1px;
                                 border-color: Theme.accent;
-                                background: root.pres-ai-apply-slide-type ? Theme.accent : transparent;
+                                background: root.pres-ai-apply-slide-type ? AppIdentity.accent : transparent;
                                 TouchArea { clicked => { root.pres-ai-apply-slide-type = !root.pres-ai-apply-slide-type; } }
                                 Text {
                                     text: root.pres-ai-apply-slide-type ? "✓" : "";
-                                    color: white; font-size: 10px;
+                                    color: white; font-size: Theme.fs-micro;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
-                            Text { text: "Layout"; color: Theme.text-secondary; font-size: 10px; vertical-alignment: center; }
+                            Text { text: "Layout"; color: Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
                         }
                     }
 
@@ -1684,19 +1684,19 @@ export component PresentationScreen inherits Rectangle {
                             border-radius: 4px;
                             background: pres-apply-ta.has-hover ? Theme.color-success : Theme.color-success.transparentize(0.2);
                             pres-apply-ta := TouchArea { clicked => { root.pres-ai-apply(); } }
-                            Text { text: "Apply"; color: Theme.text-on-accent; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "Apply"; color: Theme.text-on-accent; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         }
                         Rectangle {
                             border-radius: 4px;
-                            background: pres-regen-ta.has-hover ? Theme.accent : Theme.accent.transparentize(0.2);
+                            background: pres-regen-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2);
                             pres-regen-ta := TouchArea { clicked => { root.pres-ai-regenerate(); } }
-                            Text { text: "Regenerate"; color: Theme.text-on-accent; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "Regenerate"; color: Theme.text-on-accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                         }
                         Rectangle {
                             border-radius: 4px;
                             background: pres-dismiss-ta.has-hover ? Theme.color-danger : Theme.color-danger.transparentize(0.2);
                             pres-dismiss-ta := TouchArea { clicked => { root.pres-ai-dismiss(); } }
-                            Text { text: "Dismiss"; color: Theme.text-on-accent; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "Dismiss"; color: Theme.text-on-accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -1705,7 +1705,7 @@ export component PresentationScreen inherits Rectangle {
             Rectangle { height: 1px; background: Theme.separator; }
 
             // ── Section G: Freeform ──
-            Text { text: "Ask AI"; color: Theme.text-secondary; font-size: 10px; }
+            Text { text: "Ask AI"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
             HorizontalLayout {
                 spacing: 4px;
@@ -1723,7 +1723,7 @@ export component PresentationScreen inherits Rectangle {
                         width: parent.width - 16px;
                         height: parent.height;
                         color: Theme.text-primary;
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                         wrap: word-wrap;
                         single-line: false;
                         vertical-alignment: center;
@@ -1734,7 +1734,7 @@ export component PresentationScreen inherits Rectangle {
                         x: 8px;
                         text: "Ask anything about this deck...";
                         color: Theme.text-dim;
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                         vertical-alignment: center;
                     }
                 }
@@ -1742,12 +1742,12 @@ export component PresentationScreen inherits Rectangle {
                 Rectangle {
                     width: 48px; height: 28px;
                     border-radius: 4px;
-                    background: root.pres-ai-working ? Theme.text-dim : (freeform-ask-ta.has-hover ? Theme.accent : Theme.accent.transparentize(0.2));
+                    background: root.pres-ai-working ? Theme.text-dim : (freeform-ask-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2));
                     freeform-ask-ta := TouchArea {
                         enabled: !root.pres-ai-working;
                         clicked => { root.pres-ai-freeform(pres-ai-freeform-input.text); pres-ai-freeform-input.text = ""; }
                     }
-                    Text { text: "Ask"; color: white; font-size: 10px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Ask"; color: white; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
         }
@@ -1786,7 +1786,7 @@ export component PresentationScreen inherits Rectangle {
                 Text {
                     text: "Template Gallery";
                     color: Theme.accent;
-                    font-size: 16px;
+                    font-size: Theme.fs-title-2;
                     font-weight: 700;
                     horizontal-alignment: center;
                 }
@@ -1794,7 +1794,7 @@ export component PresentationScreen inherits Rectangle {
                 Text {
                     text: "Select a template to apply a theme to your presentation";
                     color: Theme.text-secondary;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     horizontal-alignment: center;
                 }
 
@@ -1809,9 +1809,9 @@ export component PresentationScreen inherits Rectangle {
                             width: 70px;
                             height: 90px;
                             border-radius: 8px;
-                            background: tpl-ta.has-hover ? Theme.accent.transparentize(0.7) : Theme.hover-fill;
+                            background: tpl-ta.has-hover ? AppIdentity.accent.transparentize(0.7) : Theme.hover-fill;
                             border-width: 1px;
-                            border-color: tpl-ta.has-hover ? Theme.accent.transparentize(0.4) : Theme.border-subtle;
+                            border-color: tpl-ta.has-hover ? AppIdentity.accent.transparentize(0.4) : Theme.border-subtle;
 
                             tpl-ta := TouchArea {
                                 mouse-cursor: pointer;
@@ -1832,7 +1832,7 @@ export component PresentationScreen inherits Rectangle {
                                     height: 28px;
                                     border-radius: 4px;
                                     background: idx == 0 ? Theme.bg-card
-                                        : idx == 1 ? Theme.accent.transparentize(70%)
+                                        : idx == 1 ? AppIdentity.accent.transparentize(70%)
                                         : idx == 2 ? Theme.color-danger.transparentize(50%)
                                         : idx == 3 ? Theme.color-success.transparentize(70%)
                                         : Theme.bg-elevated;
@@ -1846,7 +1846,7 @@ export component PresentationScreen inherits Rectangle {
                                             : idx == 2 ? Theme.color-warning
                                             : idx == 3 ? Theme.color-success
                                             : Theme.color-danger;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         font-weight: 600;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -1855,8 +1855,8 @@ export component PresentationScreen inherits Rectangle {
 
                                 Text {
                                     text: tpl;
-                                    color: tpl-ta.has-hover ? Theme.accent : Theme.text-primary;
-                                    font-size: 10px;
+                                    color: tpl-ta.has-hover ? AppIdentity.accent : Theme.text-primary;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 500;
                                     horizontal-alignment: center;
                                 }
@@ -1877,7 +1877,7 @@ export component PresentationScreen inherits Rectangle {
                         background: close-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
 
                         close-ta := TouchArea { clicked => { root.pres-template-gallery-open = false; } }
-                        Text { text: "Close"; color: Theme.text-secondary; font-size: 11px; font-weight: 500; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { text: "Close"; color: Theme.text-secondary; font-size: Theme.fs-micro; font-weight: 500; horizontal-alignment: center; vertical-alignment: center; }
                     }
                 }
             }

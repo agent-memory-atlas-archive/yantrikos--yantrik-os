@@ -1,6 +1,7 @@
 // Device Dashboard — hardware device overview. Screen 27.
 
 import { Theme } from "theme.slint";
+import { AppIdentity } from "components/app_color.slint";
 import { Icon, Icons } from "components/icon.slint";
 
 // ── Data structs ──
@@ -66,18 +67,18 @@ component DevTabButton inherits TouchArea {
             if root.icon-path != "" : Icon {
                 commands: root.icon-path;
                 size: 14px;
-                tint: root.active ? Theme.accent : Theme.text-secondary;
+                tint: root.active ? AppIdentity.accent : Theme.text-secondary;
                 y: (parent.height - self.height) / 2;
             }
             if root.icon-path == "" : Text {
                 text: icon;
-                color: active ? Theme.accent : Theme.text-secondary;
+                color: active ? AppIdentity.accent : Theme.text-secondary;
                 font-size: Theme.fs-title-2;
                 vertical-alignment: center;
             }
             Text {
                 text: label;
-                color: active ? Theme.accent : Theme.text-secondary;
+                color: active ? AppIdentity.accent : Theme.text-secondary;
                 font-size: Theme.fs-body;
                 font-weight: active ? 600 : 400;
                 vertical-alignment: center;
@@ -372,7 +373,7 @@ component InputDeviceRow inherits Rectangle {
             height: 36px;
             border-radius: Theme.r-md;
             background: data.device-type == "keyboard" ? Theme.holo-blue.with-alpha(0.12)
-                      : data.device-type == "mouse" ? Theme.accent.with-alpha(0.12)
+                      : data.device-type == "mouse" ? AppIdentity.accent.with-alpha(0.12)
                       : data.device-type == "touchpad" ? Theme.color-pattern.with-alpha(0.12)
                       : Theme.text-dim.with-alpha(0.12);
 
@@ -383,7 +384,7 @@ component InputDeviceRow inherits Rectangle {
                     : Icons.settings;
                 size: 16px;
                 tint: data.device-type == "keyboard" ? Theme.holo-blue
-                     : data.device-type == "mouse" ? Theme.accent
+                     : data.device-type == "mouse" ? AppIdentity.accent
                      : data.device-type == "touchpad" ? Theme.color-pattern
                      : Theme.text-dim;
                 x: (parent.width - self.width) / 2;
@@ -416,7 +417,7 @@ component InputDeviceRow inherits Rectangle {
         TypeBadge {
             label: data.device-type;
             badge-color: data.device-type == "keyboard" ? Theme.holo-blue
-                       : data.device-type == "mouse" ? Theme.accent
+                       : data.device-type == "mouse" ? AppIdentity.accent
                        : data.device-type == "touchpad" ? Theme.color-pattern
                        : Theme.text-dim;
         }
@@ -453,7 +454,7 @@ component StorageDeviceRow inherits Rectangle {
             width: 36px;
             height: 36px;
             border-radius: Theme.r-md;
-            background: data.device-type == "disk" ? Theme.accent.with-alpha(0.12)
+            background: data.device-type == "disk" ? AppIdentity.accent.with-alpha(0.12)
                       : data.device-type == "part" ? Theme.holo-blue.with-alpha(0.12)
                       : data.device-type == "lvm" ? Theme.color-pattern.with-alpha(0.12)
                       : Theme.text-dim.with-alpha(0.12);
@@ -485,7 +486,7 @@ component StorageDeviceRow inherits Rectangle {
                 }
                 TypeBadge {
                     label: data.device-type;
-                    badge-color: data.device-type == "disk" ? Theme.accent
+                    badge-color: data.device-type == "disk" ? AppIdentity.accent
                                : data.device-type == "part" ? Theme.holo-blue
                                : data.device-type == "lvm" ? Theme.color-pattern
                                : Theme.text-dim;
@@ -832,6 +833,10 @@ component CountChip inherits Rectangle {
 // ── Main component ──
 
 export component DeviceDashboardScreen inherits Rectangle {
+    // This screen draws its own header rather than AppHeader, so it has to say what
+    // it is: AppIdentity is otherwise left holding whichever app was opened before it.
+    init => { AppIdentity.id = "devices"; }
+
     background: Theme.bg-deep;
 
     // Active tab: 0=USB, 1=PCI, 2=Input, 3=Storage, 4=Display
@@ -960,7 +965,7 @@ export component DeviceDashboardScreen inherits Rectangle {
                     ai-dev-btn := Rectangle {
                         height: 32px;
                         border-radius: Theme.r-pill;
-                        background: root.ai-is-working ? Theme.accent
+                        background: root.ai-is-working ? AppIdentity.accent
                             : (parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated);
                         border-width: 1px;
                         border-color: Theme.border-subtle;

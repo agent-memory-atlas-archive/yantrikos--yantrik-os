@@ -8,7 +8,7 @@ import { YButton, YIconButton } from "components/y_button.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 // ── Data Structures ──
 
@@ -284,7 +284,7 @@ export component EmailClient inherits Rectangle {
                             spacing: 12px;
 
                             Rectangle { height: 1px; background: Theme.hover-fill-strong; }
-                            Text { text: "or use App Password"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                            Text { text: "or use App Password"; color: Theme.text-dim; font-size: Theme.fs-micro; vertical-alignment: center; }
                             Rectangle { height: 1px; background: Theme.hover-fill-strong; }
                         }
 
@@ -295,7 +295,7 @@ export component EmailClient inherits Rectangle {
                             Text {
                                 text: "Email Provider";
                                 color: Theme.text-secondary;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                                 font-weight: 600;
                             }
 
@@ -311,9 +311,9 @@ export component EmailClient inherits Rectangle {
                                 ] : Rectangle {
                                     height: Theme.h-prominent;
                                     border-radius: Theme.r-md;
-                                    background: root.setup-provider == prov.id ? Theme.tint-accent : Theme.bg-deep;
+                                    background: root.setup-provider == prov.id ? AppIdentity.tint : Theme.bg-deep;
                                     border-width: root.setup-provider == prov.id ? 2px : 1px;
-                                    border-color: root.setup-provider == prov.id ? Theme.accent : Theme.border-subtle;
+                                    border-color: root.setup-provider == prov.id ? AppIdentity.accent : Theme.border-subtle;
 
                                     TouchArea {
                                         clicked => {
@@ -325,7 +325,7 @@ export component EmailClient inherits Rectangle {
 
                                     Text {
                                         text: prov.label;
-                                        color: root.setup-provider == prov.id ? Theme.accent : Theme.text-secondary;
+                                        color: root.setup-provider == prov.id ? AppIdentity.accent : Theme.text-secondary;
                                         font-size: Theme.fs-body;
                                         font-weight: root.setup-provider == prov.id ? Theme.fw-headline : Theme.fw-body;
                                         horizontal-alignment: center;
@@ -343,7 +343,7 @@ export component EmailClient inherits Rectangle {
                                     : root.setup-provider == "yahoo" ? "Requires App Password: Yahoo Account > Security > App passwords."
                                     : "Requires App-specific password: appleid.apple.com > Security > App passwords.";
                                 color: Theme.amber;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 wrap: word-wrap;
                             }
                         }
@@ -351,13 +351,13 @@ export component EmailClient inherits Rectangle {
                         // Display Name
                         VerticalLayout {
                             spacing: 4px;
-                            Text { text: "Your Name"; color: Theme.text-secondary; font-size: 12px; font-weight: 600; }
+                            Text { text: "Your Name"; color: Theme.text-secondary; font-size: Theme.fs-caption; font-weight: 600; }
                             Rectangle {
                                 height: 42px; border-radius: 8px; background: Theme.bg-deep;
                                 border-width: 1px; border-color: Theme.border-subtle; clip: true;
                                 HorizontalLayout {
                                     padding-left: 14px; padding-right: 14px;
-                                    TextInput { text <=> root.setup-display-name; color: Theme.text-primary; font-size: 14px; vertical-alignment: center; }
+                                    TextInput { text <=> root.setup-display-name; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                                 }
                             }
                         }
@@ -365,13 +365,13 @@ export component EmailClient inherits Rectangle {
                         // Email Address
                         VerticalLayout {
                             spacing: 4px;
-                            Text { text: "Email Address"; color: Theme.text-secondary; font-size: 12px; font-weight: 600; }
+                            Text { text: "Email Address"; color: Theme.text-secondary; font-size: Theme.fs-caption; font-weight: 600; }
                             Rectangle {
                                 height: 42px; border-radius: 8px; background: Theme.bg-deep; clip: true;
                                 border-width: 1px; border-color: Theme.border-subtle;
                                 HorizontalLayout {
                                     padding-left: 14px; padding-right: 14px;
-                                    TextInput { text <=> root.setup-email; color: Theme.text-primary; font-size: 14px; vertical-alignment: center; }
+                                    TextInput { text <=> root.setup-email; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                                 }
                             }
                         }
@@ -379,13 +379,13 @@ export component EmailClient inherits Rectangle {
                         // Password
                         VerticalLayout {
                             spacing: 4px;
-                            Text { text: "Password"; color: Theme.text-secondary; font-size: 12px; font-weight: 600; }
+                            Text { text: "Password"; color: Theme.text-secondary; font-size: Theme.fs-caption; font-weight: 600; }
                             Rectangle {
                                 height: 42px; border-radius: 8px; background: Theme.bg-deep; clip: true;
                                 border-width: 1px; border-color: Theme.border-subtle;
                                 HorizontalLayout {
                                     padding-left: 14px; padding-right: 14px;
-                                    TextInput { text <=> root.setup-password; color: Theme.text-primary; font-size: 14px; vertical-alignment: center; input-type: password; }
+                                    TextInput { text <=> root.setup-password; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; input-type: password; }
                                 }
                             }
                             Text {
@@ -396,7 +396,7 @@ export component EmailClient inherits Rectangle {
                                     : root.setup-provider == "icloud"
                                     ? "App-specific password: appleid.apple.com > Sign-In and Security > App-Specific Passwords"
                                     : "Use your email account password or app password.";
-                                color: Theme.amber; font-size: 11px; wrap: word-wrap;
+                                color: Theme.amber; font-size: Theme.fs-micro; wrap: word-wrap;
                             }
                         }
 
@@ -405,32 +405,32 @@ export component EmailClient inherits Rectangle {
                             spacing: 12px;
 
                             Rectangle { height: 1px; background: Theme.border-subtle; }
-                            Text { text: "Server Settings"; color: Theme.text-secondary; font-size: 12px; font-weight: 600; }
+                            Text { text: "Server Settings"; color: Theme.text-secondary; font-size: Theme.fs-caption; font-weight: 600; }
 
                             // IMAP row
                             HorizontalLayout {
                                 spacing: 8px;
                                 VerticalLayout {
                                     spacing: 4px;
-                                    Text { text: "IMAP Server"; color: Theme.text-dim; font-size: 11px; }
+                                    Text { text: "IMAP Server"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                     Rectangle {
                                         height: 38px; border-radius: 8px; background: Theme.bg-deep; clip: true;
                                         border-width: 1px; border-color: Theme.border-subtle;
                                         HorizontalLayout {
                                             padding-left: 12px; padding-right: 12px;
-                                            TextInput { text <=> root.setup-imap-server; color: Theme.text-primary; font-size: 13px; vertical-alignment: center; }
+                                            TextInput { text <=> root.setup-imap-server; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                                         }
                                     }
                                 }
                                 VerticalLayout {
                                     spacing: 4px; max-width: 80px;
-                                    Text { text: "Port"; color: Theme.text-dim; font-size: 11px; }
+                                    Text { text: "Port"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                     Rectangle {
                                         height: 38px; border-radius: 8px; background: Theme.bg-deep; clip: true;
                                         border-width: 1px; border-color: Theme.border-subtle;
                                         HorizontalLayout {
                                             padding-left: 12px; padding-right: 12px;
-                                            TextInput { text <=> root.setup-imap-port; color: Theme.text-primary; font-size: 13px; vertical-alignment: center; }
+                                            TextInput { text <=> root.setup-imap-port; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                                         }
                                     }
                                 }
@@ -441,25 +441,25 @@ export component EmailClient inherits Rectangle {
                                 spacing: 8px;
                                 VerticalLayout {
                                     spacing: 4px;
-                                    Text { text: "SMTP Server"; color: Theme.text-dim; font-size: 11px; }
+                                    Text { text: "SMTP Server"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                     Rectangle {
                                         height: 38px; border-radius: 8px; background: Theme.bg-deep; clip: true;
                                         border-width: 1px; border-color: Theme.border-subtle;
                                         HorizontalLayout {
                                             padding-left: 12px; padding-right: 12px;
-                                            TextInput { text <=> root.setup-smtp-server; color: Theme.text-primary; font-size: 13px; vertical-alignment: center; }
+                                            TextInput { text <=> root.setup-smtp-server; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                                         }
                                     }
                                 }
                                 VerticalLayout {
                                     spacing: 4px; max-width: 80px;
-                                    Text { text: "Port"; color: Theme.text-dim; font-size: 11px; }
+                                    Text { text: "Port"; color: Theme.text-dim; font-size: Theme.fs-micro; }
                                     Rectangle {
                                         height: 38px; border-radius: 8px; background: Theme.bg-deep; clip: true;
                                         border-width: 1px; border-color: Theme.border-subtle;
                                         HorizontalLayout {
                                             padding-left: 12px; padding-right: 12px;
-                                            TextInput { text <=> root.setup-smtp-port; color: Theme.text-primary; font-size: 13px; vertical-alignment: center; }
+                                            TextInput { text <=> root.setup-smtp-port; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                                         }
                                     }
                                 }
@@ -469,8 +469,8 @@ export component EmailClient inherits Rectangle {
                         // Status message
                         if root.setup-status != "" : Text {
                             text: root.setup-status;
-                            color: root.setup-status == "Connected!" ? Theme.accent : Theme.amber;
-                            font-size: 12px; horizontal-alignment: center; wrap: word-wrap;
+                            color: root.setup-status == "Connected!" ? AppIdentity.accent : Theme.amber;
+                            font-size: Theme.fs-caption; horizontal-alignment: center; wrap: word-wrap;
                         }
 
                         // Action buttons
@@ -488,7 +488,7 @@ export component EmailClient inherits Rectangle {
                                 }
                                 Text {
                                     text: root.setup-testing ? "Testing..." : "Test Connection";
-                                    color: Theme.text-secondary; font-size: 13px; font-weight: 500;
+                                    color: Theme.text-secondary; font-size: Theme.fs-body; font-weight: 500;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
@@ -503,7 +503,7 @@ export component EmailClient inherits Rectangle {
                                 }
                                 Text {
                                     text: "Sign In"; color: Theme.bg-deep;
-                                    font-size: 14px; font-weight: 600;
+                                    font-size: Theme.fs-body; font-weight: 600;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
@@ -622,7 +622,7 @@ export component EmailClient inherits Rectangle {
 
                         height: Theme.h-regular;
                         border-radius: Theme.r-md;
-                        background: folder.is-selected ? Theme.tint-accent
+                        background: folder.is-selected ? AppIdentity.tint
                                   : hovered ? Theme.hover-fill
                                   : transparent;
 
@@ -659,7 +659,7 @@ export component EmailClient inherits Rectangle {
                                     : folder.folder-type == "spam" ? Icons.warning
                                     : Icons.folder;
                                 size: 15px;
-                                tint: folder.is-selected ? Theme.accent : Theme.text-secondary;
+                                tint: folder.is-selected ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
 
@@ -684,7 +684,7 @@ export component EmailClient inherits Rectangle {
                                 badge-ct := Text {
                                     text: folder.unread-count >= 1000 ? "999+" : folder.unread-count;
                                     color: Theme.text-on-accent;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 700;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -752,14 +752,14 @@ export component EmailClient inherits Rectangle {
                                         commands: Icons.search;
                                         size: 14px;
                                         thickness: 1.7px;
-                                        tint: root.email-search-active ? Theme.accent : Theme.text-dim;
+                                        tint: root.email-search-active ? AppIdentity.accent : Theme.text-dim;
                                         y: (parent.height - self.height) / 2;
                                     }
 
                                     search-input := TextInput {
                                         text <=> root.email-search-query;
                                         color: Theme.text-primary;
-                                        font-size: 13px;
+                                        font-size: Theme.fs-body;
                                         vertical-alignment: center;
 
                                         accepted => {
@@ -782,7 +782,7 @@ export component EmailClient inherits Rectangle {
                                         match-count-text := Text {
                                             text: root.email-search-count;
                                             color: Theme.accent;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -817,7 +817,7 @@ export component EmailClient inherits Rectangle {
                                     height: 100%;
                                     text: "Search mail";
                                     color: Theme.text-dim;
-                                    font-size: 13px;
+                                    font-size: Theme.fs-body;
                                     vertical-alignment: center;
                                 }
                             }
@@ -849,7 +849,7 @@ export component EmailClient inherits Rectangle {
 
                                 height: Theme.h-compact;
                                 border-radius: Theme.r-pill;
-                                background: is-active ? Theme.tint-accent
+                                background: is-active ? AppIdentity.tint
                                           : hovered ? Theme.hover-fill
                                           : transparent;
                                 border-width: is-active ? 1px : 0px;
@@ -870,7 +870,7 @@ export component EmailClient inherits Rectangle {
 
                                     Text {
                                         text: triage-item.label;
-                                        color: is-active ? Theme.accent : Theme.text-secondary;
+                                        color: is-active ? AppIdentity.accent : Theme.text-secondary;
                                         font-size: Theme.fs-caption;
                                         font-weight: is-active ? Theme.fw-headline : Theme.fw-body;
                                         vertical-alignment: center;
@@ -886,7 +886,7 @@ export component EmailClient inherits Rectangle {
                                         Text {
                                             text: root.email-priority-count;
                                             color: Theme.amber;
-                                            font-size: 9px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 700;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -1012,7 +1012,7 @@ export component EmailClient inherits Rectangle {
                                                     Text {
                                                         text: email.thread-count;
                                                         color: Theme.text-secondary;
-                                                        font-size: 9px;
+                                                        font-size: Theme.fs-micro;
                                                         font-weight: Theme.fw-headline;
                                                         horizontal-alignment: center;
                                                         vertical-alignment: center;
@@ -1161,17 +1161,17 @@ export component EmailClient inherits Rectangle {
                         border-width: 1px; border-color: Theme.border-subtle;
                         HorizontalLayout {
                             padding-left: 12px; spacing: 8px;
-                            Text { text: "To"; color: Theme.text-dim; font-size: 13px; font-weight: 500; vertical-alignment: center; width: 55px; }
+                            Text { text: "To"; color: Theme.text-dim; font-size: Theme.fs-body; font-weight: 500; vertical-alignment: center; width: 55px; }
                             Rectangle { width: 1px; height: 20px; background: Theme.border-subtle; }
-                            TextInput { text <=> root.compose-to; color: Theme.text-primary; font-size: 13px; vertical-alignment: center; }
+                            TextInput { text <=> root.compose-to; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                             // CC/BCC toggle
                             Rectangle {
                                 width: 60px;
                                 TouchArea { clicked => { root.show-cc-bcc = !root.show-cc-bcc; } mouse-cursor: pointer; }
                                 Text {
                                     text: "Cc/Bcc";
-                                    color: root.show-cc-bcc ? Theme.accent : Theme.text-dim;
-                                    font-size: 11px;
+                                    color: root.show-cc-bcc ? AppIdentity.accent : Theme.text-dim;
+                                    font-size: Theme.fs-micro;
                                     font-weight: root.show-cc-bcc ? 600 : 400;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -1186,9 +1186,9 @@ export component EmailClient inherits Rectangle {
                         border-width: 1px; border-color: Theme.border-subtle;
                         HorizontalLayout {
                             padding-left: 12px; spacing: 8px;
-                            Text { text: "Cc"; color: Theme.text-dim; font-size: 13px; font-weight: 500; vertical-alignment: center; width: 55px; }
+                            Text { text: "Cc"; color: Theme.text-dim; font-size: Theme.fs-body; font-weight: 500; vertical-alignment: center; width: 55px; }
                             Rectangle { width: 1px; height: 20px; background: Theme.border-subtle; }
-                            TextInput { text <=> root.compose-cc; color: Theme.text-primary; font-size: 13px; vertical-alignment: center; }
+                            TextInput { text <=> root.compose-cc; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                         }
                     }
 
@@ -1198,9 +1198,9 @@ export component EmailClient inherits Rectangle {
                         border-width: 1px; border-color: Theme.border-subtle;
                         HorizontalLayout {
                             padding-left: 12px; spacing: 8px;
-                            Text { text: "Bcc"; color: Theme.text-dim; font-size: 13px; font-weight: 500; vertical-alignment: center; width: 55px; }
+                            Text { text: "Bcc"; color: Theme.text-dim; font-size: Theme.fs-body; font-weight: 500; vertical-alignment: center; width: 55px; }
                             Rectangle { width: 1px; height: 20px; background: Theme.border-subtle; }
-                            TextInput { text <=> root.compose-bcc; color: Theme.text-primary; font-size: 13px; vertical-alignment: center; }
+                            TextInput { text <=> root.compose-bcc; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                         }
                     }
 
@@ -1210,9 +1210,9 @@ export component EmailClient inherits Rectangle {
                         border-width: 1px; border-color: Theme.border-subtle;
                         HorizontalLayout {
                             padding-left: 12px; spacing: 8px;
-                            Text { text: "Subject"; color: Theme.text-dim; font-size: 13px; font-weight: 500; vertical-alignment: center; width: 55px; }
+                            Text { text: "Subject"; color: Theme.text-dim; font-size: Theme.fs-body; font-weight: 500; vertical-alignment: center; width: 55px; }
                             Rectangle { width: 1px; height: 20px; background: Theme.border-subtle; }
-                            TextInput { text <=> root.compose-subject; color: Theme.text-primary; font-size: 13px; vertical-alignment: center; }
+                            TextInput { text <=> root.compose-subject; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                         }
                     }
 
@@ -1233,23 +1233,23 @@ export component EmailClient inherits Rectangle {
                             // Bold
                             Rectangle {
                                 width: 32px; height: 28px; border-radius: 6px;
-                                background: root.compose-bold-active ? Theme.accent.with-alpha(0.15) : transparent;
+                                background: root.compose-bold-active ? AppIdentity.accent.with-alpha(0.15) : transparent;
                                 TouchArea {
                                     clicked => { root.compose-bold-active = !root.compose-bold-active; }
                                     mouse-cursor: pointer;
                                 }
-                                Text { text: "B"; color: root.compose-bold-active ? Theme.accent : Theme.text-secondary; font-size: 13px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { text: "B"; color: root.compose-bold-active ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-body; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
                             }
 
                             // Italic
                             Rectangle {
                                 width: 32px; height: 28px; border-radius: 6px;
-                                background: root.compose-italic-active ? Theme.accent.with-alpha(0.15) : transparent;
+                                background: root.compose-italic-active ? AppIdentity.accent.with-alpha(0.15) : transparent;
                                 TouchArea {
                                     clicked => { root.compose-italic-active = !root.compose-italic-active; }
                                     mouse-cursor: pointer;
                                 }
-                                Text { text: "I"; color: root.compose-italic-active ? Theme.accent : Theme.text-secondary; font-size: 13px; font-weight: 400; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { text: "I"; color: root.compose-italic-active ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-body; font-weight: 400; horizontal-alignment: center; vertical-alignment: center; }
                             }
 
                             // Link
@@ -1277,7 +1277,7 @@ export component EmailClient inherits Rectangle {
                             Text {
                                 text: "Yantrik";
                                 color: Theme.accent;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 font-weight: 700;
                                 vertical-alignment: center;
                             }
@@ -1290,7 +1290,7 @@ export component EmailClient inherits Rectangle {
                                     clicked => { root.show-ai-prompt = !root.show-ai-prompt; }
                                     mouse-cursor: pointer;
                                 }
-                                Text { text: "AI Draft"; color: Theme.accent; font-size: 11px; font-weight: 500; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { text: "AI Draft"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 500; horizontal-alignment: center; vertical-alignment: center; }
                             }
 
                             // Enhance button
@@ -1303,7 +1303,7 @@ export component EmailClient inherits Rectangle {
                                 }
                                 Text {
                                     text: root.ai-is-working ? "..." : "Enhance";
-                                    color: Theme.text-secondary; font-size: 11px; font-weight: 500;
+                                    color: Theme.text-secondary; font-size: Theme.fs-micro; font-weight: 500;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
@@ -1316,7 +1316,7 @@ export component EmailClient inherits Rectangle {
                                     clicked => { root.enhance-text("Make this email professional and formal:\n\n" + root.compose-body); }
                                     mouse-cursor: pointer;
                                 }
-                                Text { text: "Professional"; color: Theme.text-dim; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { text: "Professional"; color: Theme.text-dim; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                             }
 
                             // Tone: Casual
@@ -1327,7 +1327,7 @@ export component EmailClient inherits Rectangle {
                                     clicked => { root.enhance-text("Make this email casual and friendly:\n\n" + root.compose-body); }
                                     mouse-cursor: pointer;
                                 }
-                                Text { text: "Casual"; color: Theme.text-dim; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { text: "Casual"; color: Theme.text-dim; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                             }
 
                             // Tone: Concise
@@ -1338,7 +1338,7 @@ export component EmailClient inherits Rectangle {
                                     clicked => { root.enhance-text("Make this email shorter and more concise:\n\n" + root.compose-body); }
                                     mouse-cursor: pointer;
                                 }
-                                Text { text: "Concise"; color: Theme.text-dim; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { text: "Concise"; color: Theme.text-dim; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                             }
                         }
                     }
@@ -1362,12 +1362,12 @@ export component EmailClient inherits Rectangle {
                                 Text {
                                     text: "Describe what you want to write...";
                                     color: Theme.text-dim;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                 }
                                 TextInput {
                                     text <=> root.ai-draft-prompt;
                                     color: Theme.text-primary;
-                                    font-size: 13px;
+                                    font-size: Theme.fs-body;
                                     wrap: word-wrap;
                                 }
                             }
@@ -1384,7 +1384,7 @@ export component EmailClient inherits Rectangle {
                                     }
                                     mouse-cursor: pointer;
                                 }
-                                Text { text: "Draft"; color: Theme.bg-deep; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { text: "Draft"; color: Theme.bg-deep; font-size: Theme.fs-caption; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                             }
                         }
                     }
@@ -1403,7 +1403,7 @@ export component EmailClient inherits Rectangle {
                                 TextInput {
                                     text <=> root.compose-body;
                                     color: Theme.text-primary;
-                                    font-size: 13px;
+                                    font-size: Theme.fs-body;
                                     wrap: word-wrap;
                                 }
                             }
@@ -1426,7 +1426,7 @@ export component EmailClient inherits Rectangle {
                             Text {
                                 text: "Signature:";
                                 color: Theme.text-dim;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 font-weight: 500;
                                 vertical-alignment: center;
                                 width: 65px;
@@ -1438,7 +1438,7 @@ export component EmailClient inherits Rectangle {
                                 height: 26px;
                                 border-radius: 6px;
                                 background: root.email-active-signature == sidx
-                                    ? Theme.accent.with-alpha(0.15)
+                                    ? AppIdentity.accent.with-alpha(0.15)
                                     : Theme.border-subtle;
                                 border-width: root.email-active-signature == sidx ? 1px : 0px;
                                 border-color: Theme.accent.with-alpha(0.3);
@@ -1452,9 +1452,9 @@ export component EmailClient inherits Rectangle {
                                 sig-label := Text {
                                     text: sig.name;
                                     color: root.email-active-signature == sidx
-                                        ? Theme.accent
+                                        ? AppIdentity.accent
                                         : Theme.text-secondary;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: root.email-active-signature == sidx ? 600 : 400;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -1519,7 +1519,7 @@ export component EmailClient inherits Rectangle {
                             Text {
                                 text: root.email-detail.subject;
                                 color: Theme.text-primary;
-                                font-size: 18px;
+                                font-size: Theme.fs-title-1;
                                 font-weight: 700;
                                 wrap: word-wrap;
                             }
@@ -1549,7 +1549,7 @@ export component EmailClient inherits Rectangle {
                                         : root.email-ai-intent == "meeting" ? Theme.color-success
                                         : root.email-ai-intent == "newsletter" ? Theme.color-purple
                                         : Theme.accent;
-                                    font-size: 10px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 700;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -1595,13 +1595,13 @@ export component EmailClient inherits Rectangle {
                                             Text {
                                                 text: root.email-detail.from-name != "" ? root.email-detail.from-name : root.email-detail.from-addr;
                                                 color: Theme.text-primary;
-                                                font-size: 14px;
+                                                font-size: Theme.fs-body;
                                                 font-weight: 600;
                                             }
                                             Text {
                                                 text: "<" + root.email-detail.from-addr + ">";
                                                 color: Theme.text-dim;
-                                                font-size: 12px;
+                                                font-size: Theme.fs-caption;
                                                 vertical-alignment: center;
                                             }
                                         }
@@ -1612,12 +1612,12 @@ export component EmailClient inherits Rectangle {
                                             if root.email-detail.to-addr != "" : Text {
                                                 text: "To: " + root.email-detail.to-addr;
                                                 color: Theme.text-dim;
-                                                font-size: 11px;
+                                                font-size: Theme.fs-micro;
                                             }
                                             if root.email-detail.cc-addr != "" : Text {
                                                 text: "Cc: " + root.email-detail.cc-addr;
                                                 color: Theme.text-dim;
-                                                font-size: 11px;
+                                                font-size: Theme.fs-micro;
                                             }
                                         }
                                     }
@@ -1647,7 +1647,7 @@ export component EmailClient inherits Rectangle {
                                     Text {
                                         text: root.email-detail.date-text;
                                         color: Theme.text-dim;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -1670,7 +1670,7 @@ export component EmailClient inherits Rectangle {
                                     Text {
                                         text: root.email-detail.attachment-names != "" ? root.email-detail.attachment-names : "Attachments";
                                         color: Theme.text-secondary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
@@ -1697,9 +1697,9 @@ export component EmailClient inherits Rectangle {
                                     for att[aidx] in root.email-attachments : Rectangle {
                                         height: 32px;
                                         border-radius: 8px;
-                                        background: att.is-downloaded ? Theme.accent.with-alpha(0.08) : Theme.border-subtle;
+                                        background: att.is-downloaded ? AppIdentity.accent.with-alpha(0.08) : Theme.border-subtle;
                                         border-width: 1px;
-                                        border-color: att.is-downloaded ? Theme.accent.with-alpha(0.2) : Theme.border-subtle;
+                                        border-color: att.is-downloaded ? AppIdentity.accent.with-alpha(0.2) : Theme.border-subtle;
                                         width: att-chip-content.preferred-width + 24px;
 
                                         att-chip-content := HorizontalLayout {
@@ -1713,7 +1713,7 @@ export component EmailClient inherits Rectangle {
                                                     : att.mime-type == "image/png" || att.mime-type == "image/jpeg" ? Icons.image
                                                     : Icons.file;
                                                 size: 12px;
-                                                tint: att.is-downloaded ? Theme.accent : Theme.text-secondary;
+                                                tint: att.is-downloaded ? AppIdentity.accent : Theme.text-secondary;
                                                 y: (parent.height - self.height) / 2;
                                             }
 
@@ -1721,7 +1721,7 @@ export component EmailClient inherits Rectangle {
                                             Text {
                                                 text: att.name;
                                                 color: Theme.text-secondary;
-                                                font-size: 11px;
+                                                font-size: Theme.fs-micro;
                                                 font-weight: 500;
                                                 vertical-alignment: center;
                                                 overflow: elide;
@@ -1732,7 +1732,7 @@ export component EmailClient inherits Rectangle {
                                             Text {
                                                 text: att.size-text;
                                                 color: Theme.text-dim;
-                                                font-size: 10px;
+                                                font-size: Theme.fs-micro;
                                                 vertical-alignment: center;
                                             }
 
@@ -1798,7 +1798,7 @@ export component EmailClient inherits Rectangle {
                                         Text {
                                             text: "Yantrik AI Summary";
                                             color: Theme.accent;
-                                            font-size: 12px;
+                                            font-size: Theme.fs-caption;
                                             font-weight: 600;
                                             vertical-alignment: center;
                                         }
@@ -1806,7 +1806,7 @@ export component EmailClient inherits Rectangle {
                                     Text {
                                         text: root.email-detail.ai-summary;
                                         color: Theme.text-secondary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         wrap: word-wrap;
                                     }
                                 }
@@ -1834,7 +1834,7 @@ export component EmailClient inherits Rectangle {
                                     Text {
                                         text: root.email-detail.thread-count + " messages in this thread";
                                         color: Theme.text-secondary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         font-weight: 500;
                                         vertical-alignment: center;
                                     }
@@ -1872,7 +1872,7 @@ export component EmailClient inherits Rectangle {
                                         Text {
                                             text: tmsg.from-name != "" ? tmsg.from-name : tmsg.from-addr;
                                             color: Theme.text-primary;
-                                            font-size: 13px;
+                                            font-size: Theme.fs-body;
                                             font-weight: 600;
                                             vertical-alignment: center;
                                             overflow: elide;
@@ -1881,7 +1881,7 @@ export component EmailClient inherits Rectangle {
                                         Text {
                                             text: tmsg.date-text;
                                             color: Theme.text-dim;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             vertical-alignment: center;
                                         }
                                     }
@@ -1902,7 +1902,7 @@ export component EmailClient inherits Rectangle {
                                         thread-body-text := Text {
                                             text: tmsg.body;
                                             color: Theme.text-primary;
-                                            font-size: 13px;
+                                            font-size: Theme.fs-body;
                                             wrap: word-wrap;
                                         }
                                     }
@@ -1922,7 +1922,7 @@ export component EmailClient inherits Rectangle {
                                     Text {
                                         text: root.email-detail.body;
                                         color: Theme.text-primary;
-                                        font-size: 13px;
+                                        font-size: Theme.fs-body;
                                         wrap: word-wrap;
                                     }
                                 }
@@ -1973,7 +1973,7 @@ export component EmailClient inherits Rectangle {
                     Text {
                         text: root.email-folder-total + " emails";
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         vertical-alignment: center;
                     }
                 }
@@ -1992,7 +1992,7 @@ export component EmailClient inherits Rectangle {
                     Text {
                         text: root.email-folder-unread + " unread";
                         color: Theme.accent;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         font-weight: 500;
                         vertical-alignment: center;
                     }
@@ -2013,7 +2013,7 @@ export component EmailClient inherits Rectangle {
                     Text {
                         text: root.email-sync-status;
                         color: root.is-loading ? Theme.amber : Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         vertical-alignment: center;
                     }
                 }

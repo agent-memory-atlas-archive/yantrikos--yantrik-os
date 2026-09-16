@@ -8,7 +8,7 @@ import { YButton, YIconButton } from "components/y_button.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct NoteEntry {
     title: string,
@@ -39,6 +39,62 @@ export struct NoteImage {
     path: string,
     source: image,
     found: bool,
+}
+
+
+// One notebook row: icon, name, count.
+//
+// The selected row wears the app's colour, not the house accent -- this is the sidebar of
+// Notes, and which app you are in is exactly what a selected sidebar row is saying.
+component FolderRow inherits TouchArea {
+    in property <string> label;
+    in property <string> icon;
+    in property <int> count;
+    in property <bool> selected;
+
+    height: 30px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.r-sm;
+        background: root.selected ? AppIdentity.tint
+                  : parent.has-hover ? Theme.hover-fill
+                  : transparent;
+
+        HorizontalLayout {
+            padding-left: Theme.sp-2;
+            padding-right: Theme.sp-2;
+            spacing: Theme.sp-2;
+
+            Icon {
+                commands: root.icon;
+                size: 14px;
+                // Every notebook icon wears the app's colour, dimmed when the row is not the
+                // one you are in. That is what Mail and Notes and Finder all do: the sidebar
+                // is the one place an app says its own name in colour on every row, and
+                // selection is carried by the tint behind and the weight of the word.
+                tint: root.selected ? AppIdentity.accent : AppIdentity.accent.transparentize(50%);
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: root.label;
+                color: root.selected ? AppIdentity.accent : Theme.text-primary;
+                font-size: Theme.fs-caption;
+                font-weight: root.selected ? 600 : 400;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Text {
+                text: root.count > 0 ? "\{root.count}" : "";
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                vertical-alignment: center;
+            }
+        }
+    }
 }
 
 export component NotesEditor inherits Rectangle {
@@ -159,18 +215,30 @@ export component NotesEditor inherits Rectangle {
             modified: root.is-modified;
             status: root.export-status;
             actions: [
+                // The note: what you can do to the thing you are looking at.
                 { id: "meeting",   icon: Icons.people,       active: root.meeting-mode,      disabled: root.selected-index < 0 },
+                { id: "history",   icon: Icons.history,      active: root.version-panel-open, disabled: root.selected-index < 0 },
                 { id: "export",    icon: Icons.export,       label: "Export",                disabled: root.selected-index < 0 },
                 { id: "import",    icon: Icons.import,       label: "Import",                disabled: root.selected-index < 0 },
-                { id: "history",   icon: Icons.history,      active: root.version-panel-open, disabled: root.selected-index < 0 },
+                { separator: true },
+
+                // The companion.
                 { id: "structure", icon: Icons.spark,        label: root.ai-is-working ? "Working" : "Structure",
                   emphasis: 1, loading: root.ai-is-working,  disabled: root.selected-index < 0 },
                 { id: "summarize", icon: Icons.template,     label: "Summarize", emphasis: 1, disabled: root.selected-index < 0 },
+                { separator: true },
+
+                // Making and keeping.
+                { id: "template",  icon: Icons.chevron-down, label: "Template",  active: root.template-menu-open,
+                  trailing-icon: true },
                 { id: "new",       icon: Icons.plus,         label: "New",       emphasis: 2 },
-                { id: "template",  icon: Icons.chevron-down, label: "Template",  active: root.template-menu-open },
                 { id: "save",      icon: Icons.save,         label: "Save",      emphasis: 1, active: root.is-modified },
-                { id: "delete",    icon: Icons.trash,        disabled: root.selected-index < 0 },
-                { id: "close",     icon: Icons.close,        disabled: root.selected-index < 0 },
+                { separator: true },
+
+                // Getting rid of it. On its own, and last, because a bin beside a Save button
+                // with nothing between them is a row that invites the wrong click.
+                { id: "delete",    icon: Icons.trash,        label: "Delete",    emphasis: 3, disabled: root.selected-index < 0 },
+                { id: "close",     icon: Icons.close,        label: "Close",     disabled: root.selected-index < 0 },
             ];
             action(id) => {
                 if (id == "meeting") { root.toggle-meeting-mode(); }
@@ -213,7 +281,7 @@ export component NotesEditor inherits Rectangle {
                         HorizontalLayout {
                             padding-left: 10px; spacing: 8px;
                             Icon { commands: Icons.calendar; size: 14px; tint: Theme.text-secondary; y: (parent.height - self.height) / 2; }
-                            Text { text: "Meeting Notes"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                            Text { text: "Meeting Notes"; color: Theme.text-primary; font-size: Theme.fs-caption; vertical-alignment: center; }
                         }
                     }
                 }
@@ -231,7 +299,7 @@ export component NotesEditor inherits Rectangle {
                         HorizontalLayout {
                             padding-left: 10px; spacing: 8px;
                             Icon { commands: Icons.template; size: 14px; tint: Theme.text-secondary; y: (parent.height - self.height) / 2; }
-                            Text { text: "Project Brief"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                            Text { text: "Project Brief"; color: Theme.text-primary; font-size: Theme.fs-caption; vertical-alignment: center; }
                         }
                     }
                 }
@@ -249,7 +317,7 @@ export component NotesEditor inherits Rectangle {
                         HorizontalLayout {
                             padding-left: 10px; spacing: 8px;
                             Icon { commands: Icons.check; size: 14px; tint: Theme.text-secondary; y: (parent.height - self.height) / 2; }
-                            Text { text: "Decision Log"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                            Text { text: "Decision Log"; color: Theme.text-primary; font-size: Theme.fs-caption; vertical-alignment: center; }
                         }
                     }
                 }
@@ -267,7 +335,7 @@ export component NotesEditor inherits Rectangle {
                         HorizontalLayout {
                             padding-left: 10px; spacing: 8px;
                             Icon { commands: Icons.checkbox; size: 14px; tint: Theme.text-secondary; y: (parent.height - self.height) / 2; }
-                            Text { text: "TODO List"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                            Text { text: "TODO List"; color: Theme.text-primary; font-size: Theme.fs-caption; vertical-alignment: center; }
                         }
                     }
                 }
@@ -285,7 +353,7 @@ export component NotesEditor inherits Rectangle {
                         HorizontalLayout {
                             padding-left: 10px; spacing: 8px;
                             Icon { commands: Icons.doc; size: 14px; tint: Theme.text-secondary; y: (parent.height - self.height) / 2; }
-                            Text { text: "Standard Operating Procedure"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                            Text { text: "Standard Operating Procedure"; color: Theme.text-primary; font-size: Theme.fs-caption; vertical-alignment: center; }
                         }
                     }
                 }
@@ -317,7 +385,7 @@ export component NotesEditor inherits Rectangle {
                         Text {
                             text: "AI Result";
                             color: Theme.accent;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             font-weight: 600;
                             vertical-alignment: center;
                         }
@@ -345,7 +413,7 @@ export component NotesEditor inherits Rectangle {
                     Text {
                         text: root.ai-response;
                         color: Theme.text-primary;
-                        font-size: 12px;
+                        font-size: Theme.fs-caption;
                         wrap: word-wrap;
                     }
                 }
@@ -386,112 +454,20 @@ export component NotesEditor inherits Rectangle {
                                 vertical-alignment: center;
                             }
 
-                            // All Notes
-                            TouchArea {
-                                height: 28px;
+                            FolderRow {
+                                label: "All Notes"; icon: Icons.doc;   count: root.folder-all-count;
+                                selected: root.active-folder == 0;
                                 clicked => { root.select-folder(0); }
-                                Rectangle {
-                                    height: 28px;
-                                    border-radius: Theme.r-sm;
-                                    background: root.active-folder == 0 ? Theme.hover-fill-strong : (parent.has-hover ? Theme.hover-fill : transparent);
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        spacing: 8px;
-                                        Icon {
-                                            commands: Icons.doc;
-                                            size: 14px;
-                                            tint: root.active-folder == 0 ? Theme.accent : Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                        Text {
-                                            text: "All Notes";
-                                            color: root.active-folder == 0 ? Theme.accent : Theme.text-primary;
-                                            font-size: 12px;
-                                            font-weight: root.active-folder == 0 ? 600 : 400;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                        }
-                                        Text {
-                                            text: "\{root.folder-all-count}";
-                                            color: Theme.text-dim;
-                                            font-size: 10px;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
                             }
-
-                            // Favorites
-                            TouchArea {
-                                height: 28px;
+                            FolderRow {
+                                label: "Favorites"; icon: Icons.star;  count: root.folder-fav-count;
+                                selected: root.active-folder == 1;
                                 clicked => { root.select-folder(1); }
-                                Rectangle {
-                                    height: 28px;
-                                    border-radius: Theme.r-sm;
-                                    background: root.active-folder == 1 ? Theme.hover-fill-strong : (parent.has-hover ? Theme.hover-fill : transparent);
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        spacing: 8px;
-                                        Icon {
-                                            commands: Icons.star;
-                                            size: 14px;
-                                            tint: root.active-folder == 1 ? Theme.amber : Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                        Text {
-                                            text: "Favorites";
-                                            color: root.active-folder == 1 ? Theme.amber : Theme.text-primary;
-                                            font-size: 12px;
-                                            font-weight: root.active-folder == 1 ? 600 : 400;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                        }
-                                        Text {
-                                            text: "\{root.folder-fav-count}";
-                                            color: Theme.text-dim;
-                                            font-size: 10px;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
                             }
-
-                            // Recent
-                            TouchArea {
-                                height: 28px;
+                            FolderRow {
+                                label: "Recent";    icon: Icons.clock; count: root.folder-recent-count;
+                                selected: root.active-folder == 2;
                                 clicked => { root.select-folder(2); }
-                                Rectangle {
-                                    height: 28px;
-                                    border-radius: Theme.r-sm;
-                                    background: root.active-folder == 2 ? Theme.hover-fill-strong : (parent.has-hover ? Theme.hover-fill : transparent);
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        spacing: 8px;
-                                        Icon {
-                                            commands: Icons.clock;
-                                            size: 14px;
-                                            tint: root.active-folder == 2 ? Theme.holo-blue : Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                        Text {
-                                            text: "Recent";
-                                            color: root.active-folder == 2 ? Theme.holo-blue : Theme.text-primary;
-                                            font-size: 12px;
-                                            font-weight: root.active-folder == 2 ? 600 : 400;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                        }
-                                        Text {
-                                            text: "\{root.folder-recent-count}";
-                                            color: Theme.text-dim;
-                                            font-size: 10px;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
                             }
                         }
                     }
@@ -529,7 +505,7 @@ export component NotesEditor inherits Rectangle {
                                 horizontal-stretch: 1;
                                 vertical-alignment: center;
                                 single-line: true;
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                                 color: Theme.text-primary;
                                 text <=> root.search-query;
                                 edited => { root.search-notes(self.text); }
@@ -541,7 +517,7 @@ export component NotesEditor inherits Rectangle {
                             height: 100%;
                             text: "Search notes";
                             color: Theme.text-dim;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             vertical-alignment: center;
                         }
                     }
@@ -559,7 +535,7 @@ export component NotesEditor inherits Rectangle {
                                     ? "\{root.note-count} notes"
                                     : "No notes");
                             color: Theme.text-dim;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
                     }
@@ -612,9 +588,9 @@ export component NotesEditor inherits Rectangle {
                                             Text {
                                                 text: entry.title;
                                                 color: idx == root.selected-index
-                                                    ? Theme.accent
+                                                    ? AppIdentity.accent
                                                     : Theme.text-primary;
-                                                font-size: 13px;
+                                                font-size: Theme.fs-body;
                                                 font-weight: 500;
                                                 overflow: elide;
                                                 horizontal-stretch: 1;
@@ -644,7 +620,7 @@ export component NotesEditor inherits Rectangle {
                                         Text {
                                             text: entry.preview;
                                             color: Theme.text-dim;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             overflow: elide;
                                         }
 
@@ -661,7 +637,7 @@ export component NotesEditor inherits Rectangle {
                                                 tag-chip-text := Text {
                                                     text: entry.tags;
                                                     color: Theme.accent;
-                                                    font-size: 9px;
+                                                    font-size: Theme.fs-micro;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
                                                     overflow: elide;
@@ -736,7 +712,7 @@ export component NotesEditor inherits Rectangle {
                                 Text {
                                     text: "B";
                                     color: Theme.text-primary;
-                                    font-size: 13px;
+                                    font-size: Theme.fs-body;
                                     font-weight: 700;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -755,7 +731,7 @@ export component NotesEditor inherits Rectangle {
                                 Text {
                                     text: "I";
                                     color: Theme.text-primary;
-                                    font-size: 13px;
+                                    font-size: Theme.fs-body;
                                     font-weight: 400;
                                     font-italic: true;
                                     horizontal-alignment: center;
@@ -775,7 +751,7 @@ export component NotesEditor inherits Rectangle {
                                 Text {
                                     text: "#";
                                     color: Theme.text-primary;
-                                    font-size: 14px;
+                                    font-size: Theme.fs-body;
                                     font-weight: 600;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -894,7 +870,7 @@ export component NotesEditor inherits Rectangle {
                             horizontal-stretch: 1;
                             vertical-alignment: center;
                             single-line: true;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             color: Theme.text-secondary;
                             text <=> root.current-tags;
                             edited => { root.update-tags(self.text); }
@@ -906,7 +882,7 @@ export component NotesEditor inherits Rectangle {
                         height: 100%;
                         text: "Add tags, comma separated";
                         color: Theme.text-dim;
-                        font-size: 12px;
+                        font-size: Theme.fs-caption;
                         vertical-alignment: center;
                     }
                 }
@@ -933,7 +909,7 @@ export component NotesEditor inherits Rectangle {
                             text: "Start writing. Use [[note title]] to link another note.";
                             color: Theme.text-dim.transparentize(25%);
                             font-family: Theme.font-ui;
-                            font-size: 15px;
+                            font-size: Theme.fs-headline;
                         }
 
                         // Prose, not code: the UI face and word wrap, with the generous
@@ -952,7 +928,7 @@ export component NotesEditor inherits Rectangle {
                                 text <=> root.current-content;
                                 color: Theme.text-primary;
                                 font-family: Theme.font-ui;
-                                font-size: 15px;
+                                font-size: Theme.fs-headline;
                                 single-line: false;
                                 wrap: word-wrap;
                                 selection-foreground-color: Theme.bg-deep;
@@ -988,7 +964,7 @@ export component NotesEditor inherits Rectangle {
                                 Text {
                                     text: "Links";
                                     color: Theme.accent;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                     font-weight: 600;
                                     vertical-alignment: center;
                                 }
@@ -1008,7 +984,7 @@ export component NotesEditor inherits Rectangle {
                                         Text {
                                             text: "Scan";
                                             color: Theme.text-secondary;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 500;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -1042,7 +1018,7 @@ export component NotesEditor inherits Rectangle {
                                     if root.outbound-links.length == 0 && root.backlinks.length == 0 : Text {
                                         text: "No links yet. Click Scan.";
                                         color: Theme.text-dim;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                     }
 
                                     if root.outbound-links.length > 0 : Text {
@@ -1072,13 +1048,13 @@ export component NotesEditor inherits Rectangle {
                                                 Icon {
                                                     commands: ol.filename != "" ? Icons.doc : Icons.plus;
                                                     size: 12px;
-                                                    tint: ol.filename != "" ? Theme.accent : Theme.text-dim;
+                                                    tint: ol.filename != "" ? AppIdentity.accent : Theme.text-dim;
                                                     y: (parent.height - self.height) / 2;
                                                 }
                                                 Text {
                                                     text: ol.title;
-                                                    color: ol.filename != "" ? Theme.accent : Theme.text-dim;
-                                                    font-size: 11px;
+                                                    color: ol.filename != "" ? AppIdentity.accent : Theme.text-dim;
+                                                    font-size: Theme.fs-micro;
                                                     font-weight: 500;
                                                     vertical-alignment: center;
                                                     overflow: elide;
@@ -1126,7 +1102,7 @@ export component NotesEditor inherits Rectangle {
                                                 Text {
                                                     text: bl.title;
                                                     color: Theme.accent;
-                                                    font-size: 11px;
+                                                    font-size: Theme.fs-micro;
                                                     font-weight: 500;
                                                     vertical-alignment: center;
                                                     overflow: elide;
@@ -1163,7 +1139,7 @@ export component NotesEditor inherits Rectangle {
                                 Text {
                                     text: "Images";
                                     color: Theme.accent;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                     font-weight: 600;
                                     vertical-alignment: center;
                                 }
@@ -1279,7 +1255,7 @@ export component NotesEditor inherits Rectangle {
 
                                             Rectangle {
                                                 border-radius: Theme.r-sm;
-                                                background: idx == root.image-preview-index ? Theme.tint-accent
+                                                background: idx == root.image-preview-index ? AppIdentity.tint
                                                           : parent.has-hover ? Theme.hover-fill : transparent;
 
                                                 HorizontalLayout {
@@ -1312,8 +1288,8 @@ export component NotesEditor inherits Rectangle {
 
                                                     Text {
                                                         text: img.name;
-                                                        color: idx == root.image-preview-index ? Theme.accent : Theme.text-primary;
-                                                        font-size: 11px;
+                                                        color: idx == root.image-preview-index ? AppIdentity.accent : Theme.text-primary;
+                                                        font-size: Theme.fs-micro;
                                                         vertical-alignment: center;
                                                         horizontal-stretch: 1;
                                                         overflow: elide;
@@ -1369,7 +1345,7 @@ export component NotesEditor inherits Rectangle {
                         if root.meta-created != "" : Text {
                             text: "Created: \{root.meta-created}";
                             color: Theme.text-dim;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
 
@@ -1377,7 +1353,7 @@ export component NotesEditor inherits Rectangle {
                         if root.meta-modified != "" : Text {
                             text: "Modified: \{root.meta-modified}";
                             color: Theme.text-dim;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
 
@@ -1397,13 +1373,13 @@ export component NotesEditor inherits Rectangle {
                                 Icon {
                                     commands: Icons.image;
                                     size: 11px;
-                                    tint: root.images-panel-open ? Theme.accent : Theme.text-dim;
+                                    tint: root.images-panel-open ? AppIdentity.accent : Theme.text-dim;
                                     y: (parent.height - self.height) / 2;
                                 }
                                 Text {
                                     text: "Images";
-                                    color: root.images-panel-open ? Theme.accent : Theme.text-dim;
-                                    font-size: 10px;
+                                    color: root.images-panel-open ? AppIdentity.accent : Theme.text-dim;
+                                    font-size: Theme.fs-micro;
                                     font-weight: root.images-panel-open ? 600 : 400;
                                     vertical-alignment: center;
                                 }
@@ -1421,13 +1397,13 @@ export component NotesEditor inherits Rectangle {
                                 Icon {
                                     commands: Icons.link;
                                     size: 11px;
-                                    tint: root.backlinks-panel-open ? Theme.accent : Theme.text-dim;
+                                    tint: root.backlinks-panel-open ? AppIdentity.accent : Theme.text-dim;
                                     y: (parent.height - self.height) / 2;
                                 }
                                 Text {
                                     text: "Links";
-                                    color: root.backlinks-panel-open ? Theme.accent : Theme.text-dim;
-                                    font-size: 10px;
+                                    color: root.backlinks-panel-open ? AppIdentity.accent : Theme.text-dim;
+                                    font-size: Theme.fs-micro;
                                     font-weight: root.backlinks-panel-open ? 600 : 400;
                                     vertical-alignment: center;
                                 }
@@ -1440,7 +1416,7 @@ export component NotesEditor inherits Rectangle {
                                 ? "1 word"
                                 : "\{root.meta-word-count} words";
                             color: Theme.text-dim;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             vertical-alignment: center;
                         }
                     }
@@ -1465,7 +1441,7 @@ export component NotesEditor inherits Rectangle {
                         Text {
                             text: "Versions";
                             color: Theme.accent;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             font-weight: 600;
                             vertical-alignment: center;
                         }
@@ -1495,7 +1471,7 @@ export component NotesEditor inherits Rectangle {
                             if root.version-history.length == 0 : Text {
                                 text: "No versions yet.\nVersions are created on save.";
                                 color: Theme.text-dim;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 wrap: word-wrap;
                             }
 
@@ -1515,7 +1491,7 @@ export component NotesEditor inherits Rectangle {
                                     Text {
                                         text: ver.label;
                                         color: Theme.text-primary;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 500;
                                         overflow: elide;
                                     }
@@ -1523,7 +1499,7 @@ export component NotesEditor inherits Rectangle {
                                     Text {
                                         text: ver.timestamp;
                                         color: Theme.text-dim;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                     }
 
                                     HorizontalLayout {
@@ -1541,7 +1517,7 @@ export component NotesEditor inherits Rectangle {
                                                 Text {
                                                     text: "View";
                                                     color: Theme.accent;
-                                                    font-size: 9px;
+                                                    font-size: Theme.fs-micro;
                                                     font-weight: 500;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;
@@ -1560,7 +1536,7 @@ export component NotesEditor inherits Rectangle {
                                                 Text {
                                                     text: "Restore";
                                                     color: Theme.amber;
-                                                    font-size: 9px;
+                                                    font-size: Theme.fs-micro;
                                                     font-weight: 500;
                                                     horizontal-alignment: center;
                                                     vertical-alignment: center;

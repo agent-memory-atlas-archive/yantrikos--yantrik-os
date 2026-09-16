@@ -77,7 +77,7 @@ component WhisperCard inherits Rectangle {
         Text {
             text: card.title;
             color: Theme.text-primary;
-            font-size: 13px;
+            font-size: Theme.fs-body;
             font-weight: 600;
             overflow: elide;
         }
@@ -86,7 +86,7 @@ component WhisperCard inherits Rectangle {
         Text {
             text: card.context;
             color: Theme.text-secondary;
-            font-size: 11px;
+            font-size: Theme.fs-micro;
             overflow: elide;
         }
 
@@ -104,7 +104,7 @@ component WhisperCard inherits Rectangle {
                 source-text := Text {
                     text: card.source;
                     color: Theme.text-dim;
-                    font-size: 9px;
+                    font-size: Theme.fs-micro;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -126,7 +126,7 @@ component WhisperCard inherits Rectangle {
                 action-text := Text {
                     text: card.action-label;
                     color: Theme.bg-deep;
-                    font-size: 10px;
+                    font-size: Theme.fs-micro;
                     font-weight: 700;
                     horizontal-alignment: center;
                     vertical-alignment: center;

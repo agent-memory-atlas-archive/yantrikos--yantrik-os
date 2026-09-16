@@ -42,7 +42,7 @@ component BriefSectionRow inherits Rectangle {
 
             Text {
                 text: icon;
-                font-size: 14px;
+                font-size: Theme.fs-body;
                 vertical-alignment: center;
                 width: 20px;
             }
@@ -50,7 +50,7 @@ component BriefSectionRow inherits Rectangle {
             Text {
                 text: label;
                 color: Theme.text-primary;
-                font-size: 13px;
+                font-size: Theme.fs-body;
                 font-weight: 600;
                 vertical-alignment: center;
                 letter-spacing: 0.5px;
@@ -60,7 +60,7 @@ component BriefSectionRow inherits Rectangle {
             Text {
                 text: expanded ? "▾" : "▸";
                 color: Theme.text-dim;
-                font-size: 12px;
+                font-size: Theme.fs-caption;
                 vertical-alignment: center;
                 horizontal-alignment: right;
             }
@@ -77,7 +77,7 @@ component BriefSectionRow inherits Rectangle {
                 width: parent.width - 32px;
                 text: content;
                 color: Theme.text-secondary;
-                font-size: 12px;
+                font-size: Theme.fs-caption;
                 wrap: word-wrap;
             }
         }
@@ -140,7 +140,7 @@ export component MorningBriefCard inherits Rectangle {
                 Text {
                     text: greeting;
                     color: Theme.cyan;
-                    font-size: 16px;
+                    font-size: Theme.fs-title-2;
                     font-weight: 500;
                     letter-spacing: 1px;
                 }
@@ -195,7 +195,7 @@ export component MorningBriefCard inherits Rectangle {
             Text {
                 text: "Have a great day.";
                 color: Theme.text-dim;
-                font-size: 11px;
+                font-size: Theme.fs-micro;
                 vertical-alignment: center;
                 letter-spacing: 0.5px;
             }

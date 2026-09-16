@@ -3,7 +3,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 
 // ── Data structs ──
@@ -42,7 +42,7 @@ component ActionButton inherits TouchArea {
 
     Rectangle {
         border-radius: Theme.radius-card;
-        background: primary ? Theme.accent
+        background: primary ? AppIdentity.accent
                   : danger ? Theme.color-danger-dim
                   : (parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated);
         border-width: 1px;
@@ -82,7 +82,7 @@ component StatusBadge inherits Rectangle {
     border-width: 1px;
     border-color: status == "running" ? Theme.color-success.transparentize(60%)
                : status == "paused" ? Theme.color-warning.transparentize(60%)
-               : status == "restarting" ? Theme.accent.transparentize(60%)
+               : status == "restarting" ? AppIdentity.accent.transparentize(60%)
                : Theme.color-danger.transparentize(60%);
 
     Text {
@@ -92,7 +92,7 @@ component StatusBadge inherits Rectangle {
             : "Stopped";
         color: status == "running" ? Theme.color-success
              : status == "paused" ? Theme.color-warning
-             : status == "restarting" ? Theme.accent
+             : status == "restarting" ? AppIdentity.accent
              : Theme.color-danger;
         font-size: Theme.fs-micro;
         font-weight: 600;

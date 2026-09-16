@@ -4,9 +4,14 @@
 // Supports: play/pause, stop, seek, volume, speed, shuffle, repeat.
 
 import { Theme } from "theme.slint";
+import { AppIdentity } from "components/app_color.slint";
 import { Icon, Icons } from "components/icon.slint";
 
 export component MediaPlayer inherits Rectangle {
+    // This screen draws its own header rather than AppHeader, so it has to say what
+    // it is: AppIdentity is otherwise left holding whichever app was opened before it.
+    init => { AppIdentity.id = "media"; }
+
     background: Theme.bg-deep;
 
     in property <string> track-name: "";
@@ -128,7 +133,7 @@ export component MediaPlayer inherits Rectangle {
                 Text {
                     text: root.track-name;
                     color: Theme.text-primary;
-                    font-size: 18px;
+                    font-size: Theme.fs-title-1;
                     font-weight: 600;
                     horizontal-alignment: center;
                     overflow: elide;
@@ -137,14 +142,14 @@ export component MediaPlayer inherits Rectangle {
                 if root.track-artist != "" : Text {
                     text: root.track-artist;
                     color: Theme.text-secondary;
-                    font-size: 13px;
+                    font-size: Theme.fs-body;
                     horizontal-alignment: center;
                 }
 
                 if root.track-album != "" : Text {
                     text: root.track-album;
                     color: Theme.text-dim;
-                    font-size: 12px;
+                    font-size: Theme.fs-caption;
                     horizontal-alignment: center;
                 }
             }
@@ -161,7 +166,7 @@ export component MediaPlayer inherits Rectangle {
                     Text {
                         text: root.time-current;
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         vertical-alignment: center;
                         width: 44px;
                     }
@@ -230,7 +235,7 @@ export component MediaPlayer inherits Rectangle {
                     Text {
                         text: root.time-total;
                         color: Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         vertical-alignment: center;
                         width: 44px;
                         horizontal-alignment: right;
@@ -362,7 +367,7 @@ export component MediaPlayer inherits Rectangle {
                         Text {
                             text: "CC";
                             color: root.player-subtitle-active >= 0 ? Theme.cyan : Theme.text-dim;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -383,7 +388,7 @@ export component MediaPlayer inherits Rectangle {
                         Text {
                             text: "A";
                             color: root.player-ab-repeat-active ? Theme.amber : Theme.text-dim;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -404,7 +409,7 @@ export component MediaPlayer inherits Rectangle {
                         Text {
                             text: "B";
                             color: root.player-ab-repeat-active ? Theme.amber : Theme.text-dim;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -425,7 +430,7 @@ export component MediaPlayer inherits Rectangle {
                         Text {
                             text: "A-B";
                             color: root.player-ab-repeat-active ? Theme.amber : Theme.text-dim;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -470,7 +475,7 @@ export component MediaPlayer inherits Rectangle {
                                     Text {
                                         text: "Off";
                                         color: root.player-subtitle-active < 0 ? Theme.cyan : Theme.text-primary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         font-weight: root.player-subtitle-active < 0 ? 600 : 400;
                                         vertical-alignment: center;
                                     }
@@ -499,7 +504,7 @@ export component MediaPlayer inherits Rectangle {
                                     Text {
                                         text: sub-track;
                                         color: root.player-subtitle-active == sidx ? Theme.cyan : Theme.text-primary;
-                                        font-size: 12px;
+                                        font-size: Theme.fs-caption;
                                         font-weight: root.player-subtitle-active == sidx ? 600 : 400;
                                         vertical-alignment: center;
                                         overflow: elide;
@@ -578,7 +583,7 @@ export component MediaPlayer inherits Rectangle {
                     Text {
                         text: root.speed-text;
                         color: root.speed-index != 3 ? Theme.cyan : Theme.text-dim;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         font-weight: root.speed-index != 3 ? 600 : 400;
                         vertical-alignment: center;
                     }
@@ -597,7 +602,7 @@ export component MediaPlayer inherits Rectangle {
                         Rectangle {
                             width: 20px; height: 20px; border-radius: 4px;
                             background: parent.has-hover ? Theme.hover-fill : transparent;
-                            Text { text: "-"; color: Theme.text-dim; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "-"; color: Theme.text-dim; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
 
@@ -615,7 +620,7 @@ export component MediaPlayer inherits Rectangle {
                         Rectangle {
                             width: 20px; height: 20px; border-radius: 4px;
                             background: parent.has-hover ? Theme.hover-fill : transparent;
-                            Text { text: "+"; color: Theme.text-dim; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "+"; color: Theme.text-dim; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -633,7 +638,7 @@ export component MediaPlayer inherits Rectangle {
                     fmt-text := Text {
                         text: root.track-format;
                         color: Theme.text-dim;
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -643,7 +648,7 @@ export component MediaPlayer inherits Rectangle {
                 if root.queue-count > 0 : Text {
                     text: "\{root.queue-position} / \{root.queue-count}";
                     color: Theme.text-dim;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     vertical-alignment: center;
                 }
             }
@@ -672,7 +677,7 @@ export component MediaPlayer inherits Rectangle {
                                 tint: Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
-                            Text { text: "AI Analysis"; color: Theme.accent; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                            Text { text: "AI Analysis"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 600; vertical-alignment: center; }
                             Rectangle { horizontal-stretch: 1; }
                             TouchArea {
                                 width: 20px; height: 20px;
@@ -693,7 +698,7 @@ export component MediaPlayer inherits Rectangle {
                         Text {
                             text: root.ai-response;
                             color: Theme.text-primary;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             wrap: word-wrap;
                         }
                     }

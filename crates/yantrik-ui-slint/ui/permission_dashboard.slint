@@ -1,6 +1,7 @@
 // Permission Dashboard — file & system permissions viewer. Screen 28.
 
 import { Theme } from "theme.slint";
+import { AppIdentity } from "components/app_color.slint";
 import { Icon, Icons } from "components/icon.slint";
 
 // ── Data structs ──
@@ -66,18 +67,18 @@ component PermTabButton inherits TouchArea {
             if root.icon-path != "" : Icon {
                 commands: root.icon-path;
                 size: 14px;
-                tint: root.active ? Theme.accent : Theme.text-secondary;
+                tint: root.active ? AppIdentity.accent : Theme.text-secondary;
                 y: (parent.height - self.height) / 2;
             }
             if root.icon-path == "" : Text {
                 text: icon;
-                color: active ? Theme.accent : Theme.text-secondary;
+                color: active ? AppIdentity.accent : Theme.text-secondary;
                 font-size: Theme.fs-headline;
                 vertical-alignment: center;
             }
             Text {
                 text: label;
-                color: active ? Theme.accent : Theme.text-secondary;
+                color: active ? AppIdentity.accent : Theme.text-secondary;
                 font-size: Theme.font-body;
                 font-weight: active ? 600 : 400;
                 vertical-alignment: center;
@@ -148,7 +149,7 @@ component RiskSummaryCard inherits Rectangle {
             Text {
                 text: count;
                 color: badge-color;
-                font-size: 18px;  // No exact token — intentionally larger than fs-headline
+                font-size: Theme.fs-title-1;  // No exact token — intentionally larger than fs-headline
                 font-weight: 700;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -183,7 +184,7 @@ component PermActionButton inherits TouchArea {
 
     Rectangle {
         border-radius: Theme.r-md;
-        background: primary ? Theme.accent
+        background: primary ? AppIdentity.accent
                   : (parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated);
         border-width: 1px;
         border-color: primary ? Theme.accent-dim : Theme.border-subtle;
@@ -540,6 +541,10 @@ component FileDetailPanel inherits Rectangle {
 // ── Main component ──
 
 export component PermissionDashboardScreen inherits Rectangle {
+    // This screen draws its own header rather than AppHeader, so it has to say what
+    // it is: AppIdentity is otherwise left holding whichever app was opened before it.
+    init => { AppIdentity.id = "permissions"; }
+
     background: Theme.bg-deep;
 
     // Active tab: 0=Users & Groups, 1=SUID/SGID Files, 2=World-Writable
@@ -663,7 +668,7 @@ export component PermissionDashboardScreen inherits Rectangle {
                             border-radius: Theme.r-md;
                             background: Theme.bg-card;
                             border-width: 1px;
-                            border-color: scan-path-input.has-focus ? Theme.accent : Theme.border-subtle;
+                            border-color: scan-path-input.has-focus ? AppIdentity.accent : Theme.border-subtle;
                             clip: true;
 
                             HorizontalLayout {
@@ -788,7 +793,7 @@ export component PermissionDashboardScreen inherits Rectangle {
                     border-radius: Theme.r-md;
                     background: Theme.bg-card;
                     border-width: 1px;
-                    border-color: search-input.has-focus ? Theme.accent : Theme.border-subtle;
+                    border-color: search-input.has-focus ? AppIdentity.accent : Theme.border-subtle;
                     clip: true;
 
                     HorizontalLayout {
@@ -835,7 +840,7 @@ export component PermissionDashboardScreen inherits Rectangle {
                     ai-perm-btn := Rectangle {
                         height: 32px;
                         border-radius: Theme.radius-pill;
-                        background: root.ai-is-working ? Theme.accent
+                        background: root.ai-is-working ? AppIdentity.accent
                             : (parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated);
                         border-width: 1px;
                         border-color: Theme.border-subtle;
@@ -1677,7 +1682,7 @@ export component PermissionDashboardScreen inherits Rectangle {
                 // View ACL button
                 Rectangle {
                     height: 34px;
-                    background: acl-view-ta.has-hover ? Theme.accent : Theme.accent-dim;
+                    background: acl-view-ta.has-hover ? AppIdentity.accent : Theme.accent-dim;
                     border-radius: Theme.radius-pill;
 
                     Text {

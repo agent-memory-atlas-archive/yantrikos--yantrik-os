@@ -175,7 +175,7 @@ export component IntentLens inherits Rectangle {
                             y: (parent.height - self.preferred-height) / 2;
                             width: parent.width;
                             color: Theme.text-primary;
-                            font-size: 18px;
+                            font-size: Theme.fs-title-1;
                             // single-line: true is REQUIRED for `accepted` to fire.
                             // With single-line: false, Slint treats Return as "insert
                             // newline" and never invokes accepted — which made the
@@ -207,7 +207,7 @@ export component IntentLens inherits Rectangle {
                             y: (parent.height - self.preferred-height) / 2;
                             text: "Search, ask, or do anything...";
                             color: Theme.text-dim;
-                            font-size: 18px;
+                            font-size: Theme.fs-title-1;
                         }
                     }
 
@@ -224,7 +224,7 @@ export component IntentLens inherits Rectangle {
                         Text {
                             text: "esc";
                             color: Theme.text-dim;
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -348,7 +348,7 @@ export component IntentLens inherits Rectangle {
                             Text {
                                 text: result.title;
                                 color: Theme.text-dim;
-                                font-size: 9px;
+                                font-size: Theme.fs-micro;
                                 letter-spacing: 1px;
                             }
                             Rectangle { horizontal-stretch: 1; height: 1px; background: Theme.separator; }
@@ -395,7 +395,7 @@ export component IntentLens inherits Rectangle {
                                     Text {
                                         text: result.icon-char;
                                         color: Theme.color-answer;
-                                        font-size: 13px;
+                                        font-size: Theme.fs-body;
                                         font-weight: 700;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -411,14 +411,14 @@ export component IntentLens inherits Rectangle {
                                     Text {
                                         text: result.title;
                                         color: Theme.text-dim;
-                                        font-size: 11px;
+                                        font-size: Theme.fs-micro;
                                         letter-spacing: 1px;
                                     }
 
                                     Text {
                                         text: result.inline-value;
                                         color: Theme.color-answer;
-                                        font-size: 22px;
+                                        font-size: Theme.fs-display;
                                         font-weight: 600;
                                     }
                                 }
@@ -484,7 +484,7 @@ export component IntentLens inherits Rectangle {
                                         result.result-type == "context"   ? Theme.color-context :
                                         result.result-type == "recent"    ? Theme.color-recent :
                                         Theme.color-setting;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     font-weight: 700;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -500,14 +500,14 @@ export component IntentLens inherits Rectangle {
                                 Text {
                                     text: result.title;
                                     color: Theme.text-primary;
-                                    font-size: 14px;
+                                    font-size: Theme.fs-body;
                                     overflow: elide;
                                 }
 
                                 if result.subtitle != "" : Text {
                                     text: result.subtitle;
                                     color: Theme.text-dim;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     overflow: elide;
                                 }
                             }
@@ -533,7 +533,7 @@ export component IntentLens inherits Rectangle {
                                 Text {
                                     text: "↵";
                                     color: Theme.text-dim;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -560,7 +560,7 @@ export component IntentLens inherits Rectangle {
                         Text {
                             text: "AI offline — apps and tools still work";
                             color: Theme.text-dim;
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                         }
                     }
                 }
@@ -588,7 +588,7 @@ export component IntentLens inherits Rectangle {
                                     Text {
                                         text: "SUGGESTED";
                                         color: Theme.color-context;
-                                        font-size: 9px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 700;
                                         letter-spacing: 2px;
                                     }
@@ -643,7 +643,7 @@ export component IntentLens inherits Rectangle {
                                         Text {
                                             text: sg.icon-char;
                                             color: Theme.color-context;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 700;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -658,13 +658,13 @@ export component IntentLens inherits Rectangle {
                                         Text {
                                             text: sg.title;
                                             color: Theme.text-primary;
-                                            font-size: 14px;
+                                            font-size: Theme.fs-body;
                                             overflow: elide;
                                         }
                                         if sg.subtitle != "" : Text {
                                             text: sg.subtitle;
                                             color: Theme.text-dim;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             overflow: elide;
                                         }
                                     }
@@ -692,7 +692,7 @@ export component IntentLens inherits Rectangle {
                                     Text {
                                         text: "RECENT";
                                         color: Theme.color-recent;
-                                        font-size: 9px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 700;
                                         letter-spacing: 2px;
                                     }
@@ -735,7 +735,7 @@ export component IntentLens inherits Rectangle {
                                         Text {
                                             text: rc.icon-char;
                                             color: Theme.color-recent;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 700;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -750,7 +750,7 @@ export component IntentLens inherits Rectangle {
                                         Text {
                                             text: rc.title;
                                             color: Theme.text-secondary;
-                                            font-size: 14px;
+                                            font-size: Theme.fs-body;
                                             overflow: elide;
                                             opacity: 0.8;
                                         }
@@ -772,7 +772,7 @@ export component IntentLens inherits Rectangle {
                                     ? "Type to search, ask, or command"
                                     : "Type to search apps and tools";
                                 color: Theme.text-dim;
-                                font-size: 13px;
+                                font-size: Theme.fs-body;
                             }
                         }
                     }
@@ -881,7 +881,7 @@ export component IntentLens inherits Rectangle {
                                 y: (parent.height - self.preferred-height) / 2;
                                 width: parent.width - 24px;
                                 color: Theme.text-primary;
-                                font-size: 14px;
+                                font-size: Theme.fs-body;
                                 wrap: word-wrap;
                                 single-line: false;
                                 text <=> chat-text;
@@ -898,7 +898,7 @@ export component IntentLens inherits Rectangle {
                                 y: (parent.height - self.preferred-height) / 2;
                                 text: "Continue conversation...";
                                 color: Theme.text-dim;
-                                font-size: 14px;
+                                font-size: Theme.fs-body;
                             }
                         }
 
@@ -923,7 +923,7 @@ export component IntentLens inherits Rectangle {
                                 Text {
                                     text: ">";
                                     color: chat-input.chat-text != "" ? Theme.bg-deep : Theme.text-dim;
-                                    font-size: 16px;
+                                    font-size: Theme.fs-title-2;
                                     font-weight: 700;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;

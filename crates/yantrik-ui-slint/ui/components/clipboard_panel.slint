@@ -82,7 +82,7 @@ export component ClipboardPanel inherits Rectangle {
                     pill-text := Text {
                         text: root.entries.length + " items";
                         color: Theme.accent;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         font-weight: 500;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -108,7 +108,7 @@ export component ClipboardPanel inherits Rectangle {
                     Text {
                         text: "/";
                         color: Theme.text-dim;
-                        font-size: 14px;
+                        font-size: Theme.fs-body;
                         font-weight: 600;
                         vertical-alignment: center;
                         width: 16px;
@@ -117,7 +117,7 @@ export component ClipboardPanel inherits Rectangle {
                     search-input := TextInput {
                         horizontal-stretch: 1;
                         vertical-alignment: center;
-                        font-size: 13px;
+                        font-size: Theme.fs-body;
                         color: Theme.text-primary;
                         text <=> root.search-query;
                         accepted => { /* enter does nothing special */ }
@@ -178,7 +178,7 @@ export component ClipboardPanel inherits Rectangle {
                             Text {
                                 text: i < 9 ? (i + 1) + "" : "\u{00B7}";
                                 color: i < 9 ? Theme.accent : Theme.text-dim;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 font-weight: 600;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -194,14 +194,14 @@ export component ClipboardPanel inherits Rectangle {
                             Text {
                                 text: entry.preview;
                                 color: Theme.text-primary;
-                                font-size: 13px;
+                                font-size: Theme.fs-body;
                                 overflow: elide;
                             }
 
                             Text {
                                 text: entry.time-ago;
                                 color: Theme.text-dim;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                             }
                         }
                     }
@@ -219,14 +219,14 @@ export component ClipboardPanel inherits Rectangle {
                     Text {
                         text: "Super+V";
                         color: Theme.text-dim;
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                         vertical-alignment: center;
                     }
 
                     Text {
                         text: "to toggle";
                         color: Theme.text-dim;
-                        font-size: 10px;
+                        font-size: Theme.fs-micro;
                         vertical-alignment: center;
                         opacity: 0.6;
                     }

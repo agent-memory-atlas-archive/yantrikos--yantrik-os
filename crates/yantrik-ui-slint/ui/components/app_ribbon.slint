@@ -45,7 +45,7 @@ export component RibbonToolButton inherits Rectangle {
         tt := Text {
             text: root.tooltip-text;
             color: Theme.text-secondary;
-            font-size: 10px;
+            font-size: Theme.fs-micro;
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -63,7 +63,7 @@ export component RibbonToolButton inherits Rectangle {
     if root.icon-path == "" : Text {
         text: root.label;
         color: root.is-active ? Theme.accent : (ta.has-hover ? Theme.text-primary : Theme.text-secondary);
-        font-size: 13px;
+        font-size: Theme.fs-body;
         font-weight: root.is-active ? 700 : 500;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -109,7 +109,7 @@ export component RibbonToolButtonWide inherits Rectangle {
         lbl := Text {
             text: root.label;
             color: root.is-active ? Theme.accent : (ta.has-hover ? Theme.text-primary : Theme.text-secondary);
-            font-size: 12px;
+            font-size: Theme.fs-caption;
             font-weight: root.is-active ? 600 : 500;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -150,7 +150,7 @@ export component RibbonTabButton inherits Rectangle {
             color: root.is-active ? Theme.text-primary
                 : ta.has-hover ? Theme.text-secondary
                 : Theme.text-dim;
-            font-size: 12px;
+            font-size: Theme.fs-caption;
             font-weight: root.is-active ? 600 : 400;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -200,7 +200,7 @@ export component RibbonQuickAction inherits Rectangle {
         tt := Text {
             text: root.tooltip-text;
             color: Theme.text-secondary;
-            font-size: 10px;
+            font-size: Theme.fs-micro;
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -218,7 +218,7 @@ export component RibbonQuickAction inherits Rectangle {
     if root.icon-path == "" : Text {
         text: root.label;
         color: ta.has-hover ? Theme.text-primary : Theme.text-dim;
-        font-size: 12px;
+        font-size: Theme.fs-caption;
         font-weight: 500;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -259,7 +259,7 @@ export component RibbonAccentButton inherits Rectangle {
         Text {
             text: root.label;
             color: Theme.text-on-accent;
-            font-size: 12px;
+            font-size: Theme.fs-caption;
             font-weight: 600;
             vertical-alignment: center;
         }
@@ -295,14 +295,14 @@ export component RibbonDropdown inherits Rectangle {
         if label != "" : Text {
             text: root.label;
             color: Theme.text-dim;
-            font-size: 10px;
+            font-size: Theme.fs-micro;
             vertical-alignment: center;
         }
 
         Text {
             text: root.value;
             color: Theme.text-primary;
-            font-size: 11px;
+            font-size: Theme.fs-micro;
             font-weight: 500;
             vertical-alignment: center;
         }
@@ -340,7 +340,7 @@ export component RibbonColorButton inherits Rectangle {
 
         Text {
             text: root.label;
-            font-size: 12px;
+            font-size: Theme.fs-caption;
             font-weight: 700;
             color: Theme.text-primary;
             horizontal-alignment: center;
@@ -372,7 +372,7 @@ export component RibbonGroupLabel inherits Rectangle {
         gl := Text {
             text: root.label;
             color: Theme.text-dim;
-            font-size: 9px;
+            font-size: Theme.fs-micro;
             font-weight: 600;
             letter-spacing: 0.5px;
             horizontal-alignment: center;

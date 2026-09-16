@@ -4,7 +4,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 // ── Data structs ──
 
@@ -83,28 +83,28 @@ component SignalBars inherits HorizontalLayout {
         width: 4px;
         height: 8px;
         border-radius: 1px;
-        background: strength > 0 ? Theme.accent : Theme.text-dim;
+        background: strength > 0 ? AppIdentity.accent : Theme.text-dim;
         vertical-stretch: 0;
     }
     Rectangle {
         width: 4px;
         height: 12px;
         border-radius: 1px;
-        background: strength > 25 ? Theme.accent : Theme.text-dim;
+        background: strength > 25 ? AppIdentity.accent : Theme.text-dim;
         vertical-stretch: 0;
     }
     Rectangle {
         width: 4px;
         height: 16px;
         border-radius: 1px;
-        background: strength > 50 ? Theme.accent : Theme.text-dim;
+        background: strength > 50 ? AppIdentity.accent : Theme.text-dim;
         vertical-stretch: 0;
     }
     Rectangle {
         width: 4px;
         height: 20px;
         border-radius: 1px;
-        background: strength > 75 ? Theme.accent : Theme.text-dim;
+        background: strength > 75 ? AppIdentity.accent : Theme.text-dim;
         vertical-stretch: 0;
     }
 }
@@ -142,7 +142,7 @@ component ToggleSwitch inherits TouchArea {
             width: 44px;
             height: 24px;
             border-radius: Theme.r-lg;
-            background: checked ? Theme.accent : Theme.bg-elevated;
+            background: checked ? AppIdentity.accent : Theme.bg-elevated;
             border-width: 1px;
             border-color: checked ? Theme.accent-dim : Theme.text-dim;
 
@@ -169,7 +169,7 @@ component ActionButton inherits TouchArea {
 
     Rectangle {
         border-radius: Theme.r-lg;
-        background: primary ? Theme.accent
+        background: primary ? AppIdentity.accent
                   : danger ? Theme.color-danger-dim
                   : (parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated);
         border-width: 1px;
@@ -429,7 +429,7 @@ export component NetworkManager inherits Rectangle {
                         property <bool> active: root.active-tab == 0;
                         height: 46px;
                         border-radius: Theme.r-sm;
-                        background: active ? Theme.tint-accent : ta0.has-hover ? Theme.hover-fill : transparent;
+                        background: active ? AppIdentity.tint : ta0.has-hover ? Theme.hover-fill : transparent;
 
                         if active : Rectangle {
                             x: 0; width: 3px; height: 22px;
@@ -451,7 +451,7 @@ export component NetworkManager inherits Rectangle {
                             Icon {
                                 commands: Icons.wifi;
                                 size: 16px;
-                                tint: active ? Theme.accent : Theme.text-secondary;
+                                tint: active ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
 
@@ -483,7 +483,7 @@ export component NetworkManager inherits Rectangle {
                         property <bool> active: root.active-tab == 1;
                         height: 46px;
                         border-radius: Theme.r-sm;
-                        background: active ? Theme.tint-accent : ta1.has-hover ? Theme.hover-fill : transparent;
+                        background: active ? AppIdentity.tint : ta1.has-hover ? Theme.hover-fill : transparent;
 
                         if active : Rectangle {
                             x: 0; width: 3px; height: 22px;
@@ -505,7 +505,7 @@ export component NetworkManager inherits Rectangle {
                             Icon {
                                 commands: Icons.network;
                                 size: 16px;
-                                tint: active ? Theme.accent : Theme.text-secondary;
+                                tint: active ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
 
@@ -537,7 +537,7 @@ export component NetworkManager inherits Rectangle {
                         property <bool> active: root.active-tab == 2;
                         height: 46px;
                         border-radius: Theme.r-sm;
-                        background: active ? Theme.tint-accent : ta2.has-hover ? Theme.hover-fill : transparent;
+                        background: active ? AppIdentity.tint : ta2.has-hover ? Theme.hover-fill : transparent;
 
                         if active : Rectangle {
                             x: 0; width: 3px; height: 22px;
@@ -559,7 +559,7 @@ export component NetworkManager inherits Rectangle {
                             Icon {
                                 commands: Icons.keyboard;
                                 size: 16px;
-                                tint: active ? Theme.accent : Theme.text-secondary;
+                                tint: active ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
 
@@ -591,7 +591,7 @@ export component NetworkManager inherits Rectangle {
                         property <bool> active: root.active-tab == 3;
                         height: 46px;
                         border-radius: Theme.r-sm;
-                        background: active ? Theme.tint-accent : ta3.has-hover ? Theme.hover-fill : transparent;
+                        background: active ? AppIdentity.tint : ta3.has-hover ? Theme.hover-fill : transparent;
 
                         if active : Rectangle {
                             x: 0; width: 3px; height: 22px;
@@ -613,7 +613,7 @@ export component NetworkManager inherits Rectangle {
                             Icon {
                                 commands: Icons.lock;
                                 size: 16px;
-                                tint: active ? Theme.accent : Theme.text-secondary;
+                                tint: active ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
 
@@ -645,7 +645,7 @@ export component NetworkManager inherits Rectangle {
                         property <bool> active: root.active-tab == 4;
                         height: 46px;
                         border-radius: Theme.r-sm;
-                        background: active ? Theme.tint-accent : ta4.has-hover ? Theme.hover-fill : transparent;
+                        background: active ? AppIdentity.tint : ta4.has-hover ? Theme.hover-fill : transparent;
 
                         if active : Rectangle {
                             x: 0; width: 3px; height: 22px;
@@ -667,7 +667,7 @@ export component NetworkManager inherits Rectangle {
                             Icon {
                                 commands: Icons.shield;
                                 size: 16px;
-                                tint: active ? Theme.accent : Theme.text-secondary;
+                                tint: active ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
 
@@ -699,7 +699,7 @@ export component NetworkManager inherits Rectangle {
                         property <bool> active: root.active-tab == 5;
                         height: 46px;
                         border-radius: Theme.r-sm;
-                        background: active ? Theme.tint-accent : ta5.has-hover ? Theme.hover-fill : transparent;
+                        background: active ? AppIdentity.tint : ta5.has-hover ? Theme.hover-fill : transparent;
 
                         if active : Rectangle {
                             x: 0; width: 3px; height: 22px;
@@ -721,7 +721,7 @@ export component NetworkManager inherits Rectangle {
                             Icon {
                                 commands: Icons.settings;
                                 size: 16px;
-                                tint: active ? Theme.accent : Theme.text-secondary;
+                                tint: active ? AppIdentity.accent : Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
 
@@ -1047,7 +1047,7 @@ export component NetworkManager inherits Rectangle {
                             }
 
                             Rectangle {
-                                background: network.is-connected ? Theme.tint-accent
+                                background: network.is-connected ? AppIdentity.tint
                                           : net-ta.has-hover ? Theme.hover-fill
                                           : Theme.bg-card;
                                 border-radius: Theme.r-lg;
@@ -1078,7 +1078,7 @@ export component NetworkManager inherits Rectangle {
                                             }
                                             Text {
                                                 text: network.is-connected ? "Connected" : network.security;
-                                                color: network.is-connected ? Theme.accent : Theme.text-dim;
+                                                color: network.is-connected ? AppIdentity.accent : Theme.text-dim;
                                                 font-size: Theme.fs-caption;
                                             }
                                         }
@@ -1210,7 +1210,7 @@ export component NetworkManager inherits Rectangle {
                                         background: iface.status == "UP" ? Theme.accent-glow : Theme.bg-elevated;
                                         eth-status-text := Text {
                                             text: iface.status;
-                                            color: iface.status == "UP" ? Theme.accent : Theme.text-dim;
+                                            color: iface.status == "UP" ? AppIdentity.accent : Theme.text-dim;
                                             font-size: Theme.fs-caption;
                                             font-weight: 600;
                                             horizontal-alignment: center;
@@ -1357,7 +1357,7 @@ export component NetworkManager inherits Rectangle {
                                             : device.device-type == "speaker" ? Icons.volume
                                             : Icons.chip;
                                         size: 18px;
-                                        tint: device.is-connected ? Theme.accent : Theme.text-secondary;
+                                        tint: device.is-connected ? AppIdentity.accent : Theme.text-secondary;
                                         y: (parent.height - self.height) / 2;
                                     }
 
@@ -1371,7 +1371,7 @@ export component NetworkManager inherits Rectangle {
                                         }
                                         Text {
                                             text: device.is-connected ? "Connected" : "Not connected";
-                                            color: device.is-connected ? Theme.accent : Theme.text-dim;
+                                            color: device.is-connected ? AppIdentity.accent : Theme.text-dim;
                                             font-size: Theme.fs-caption;
                                         }
                                     }
@@ -1973,7 +1973,7 @@ export component NetworkManager inherits Rectangle {
                                                 : test.status == "ok" ? test.latency
                                                 : test.status == "fail" ? "unreachable"
                                                 : "Not tested";
-                                            color: test.status == "ok" ? Theme.accent
+                                            color: test.status == "ok" ? AppIdentity.accent
                                                  : test.status == "fail" ? Theme.color-danger
                                                  : test.status == "running" ? Theme.color-warning
                                                  : Theme.text-dim;

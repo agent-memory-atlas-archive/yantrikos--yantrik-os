@@ -135,7 +135,7 @@ export component NotificationCenter inherits Rectangle {
                                 Rectangle {
                                     width: max(20px, gct.preferred-width + Theme.sp-2);
                                     height: 20px; border-radius: Theme.r-pill; background: Theme.bg-elevated;
-                                    gct := Text { text: notif.group-count; color: Theme.text-dim; font-size: 10px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                    gct := Text { text: notif.group-count; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 }
 
                                 TouchArea {

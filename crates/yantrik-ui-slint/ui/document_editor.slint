@@ -8,7 +8,7 @@ import { ListView, LineEdit, ScrollView } from "std-widgets.slint";
 import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButton, RibbonQuickAction, RibbonGroupLabel } from "components/app_ribbon.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct DocHeadingEntry {
     title: string,
@@ -366,7 +366,7 @@ export component DocumentEditorScreen inherits Rectangle {
                 Text {
                     text: root.doc-export-status;
                     color: Theme.color-success;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     font-weight: 500;
                     vertical-alignment: center;
                 }
@@ -392,33 +392,33 @@ export component DocumentEditorScreen inherits Rectangle {
                     spacing: 2px;
                     alignment: center;
 
-                    Text { text: "Page Size"; color: Theme.text-dim; font-size: 10px; font-weight: 600; }
+                    Text { text: "Page Size"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 600; }
                     HorizontalLayout {
                         spacing: 4px;
 
                         Rectangle {
                             width: 44px; height: 26px; border-radius: 4px;
-                            background: root.doc-page-size == "A4" ? Theme.accent.transparentize(0.7) : Theme.bg-card;
+                            background: root.doc-page-size == "A4" ? AppIdentity.accent.transparentize(0.7) : Theme.bg-card;
                             border-width: root.doc-page-size == "A4" ? 1px : 0px;
                             border-color: Theme.accent.transparentize(0.5);
                             TouchArea { clicked => { root.doc-set-page-layout("A4"); } }
-                            Text { text: "A4"; color: root.doc-page-size == "A4" ? Theme.accent : Theme.text-secondary; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "A4"; color: root.doc-page-size == "A4" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         }
                         Rectangle {
                             width: 54px; height: 26px; border-radius: 4px;
-                            background: root.doc-page-size == "Letter" ? Theme.accent.transparentize(0.7) : Theme.bg-card;
+                            background: root.doc-page-size == "Letter" ? AppIdentity.accent.transparentize(0.7) : Theme.bg-card;
                             border-width: root.doc-page-size == "Letter" ? 1px : 0px;
                             border-color: Theme.accent.transparentize(0.5);
                             TouchArea { clicked => { root.doc-set-page-layout("Letter"); } }
-                            Text { text: "Letter"; color: root.doc-page-size == "Letter" ? Theme.accent : Theme.text-secondary; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "Letter"; color: root.doc-page-size == "Letter" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         }
                         Rectangle {
                             width: 50px; height: 26px; border-radius: 4px;
-                            background: root.doc-page-size == "Legal" ? Theme.accent.transparentize(0.7) : Theme.bg-card;
+                            background: root.doc-page-size == "Legal" ? AppIdentity.accent.transparentize(0.7) : Theme.bg-card;
                             border-width: root.doc-page-size == "Legal" ? 1px : 0px;
                             border-color: Theme.accent.transparentize(0.5);
                             TouchArea { clicked => { root.doc-set-page-layout("Legal"); } }
-                            Text { text: "Legal"; color: root.doc-page-size == "Legal" ? Theme.accent : Theme.text-secondary; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            Text { text: "Legal"; color: root.doc-page-size == "Legal" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -428,11 +428,11 @@ export component DocumentEditorScreen inherits Rectangle {
                     spacing: 2px;
                     alignment: center;
 
-                    Text { text: "Margins"; color: Theme.text-dim; font-size: 10px; font-weight: 600; }
+                    Text { text: "Margins"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 600; }
                     Text {
                         text: "Top: \{root.doc-margin-top}mm  Bottom: \{root.doc-margin-bottom}mm";
                         color: Theme.text-secondary;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                     }
                 }
             }
@@ -530,10 +530,10 @@ export component DocumentEditorScreen inherits Rectangle {
                                 height: 30px;
                                 border-radius: 5px;
                                 background: root.doc-sidebar-mode == 0
-                                    ? Theme.accent.transparentize(0.82) : transparent;
+                                    ? AppIdentity.accent.transparentize(0.82) : transparent;
                                 border-width: root.doc-sidebar-mode == 0 ? 1px : 0px;
                                 border-color: root.doc-sidebar-mode == 0
-                                    ? Theme.accent.transparentize(0.6) : transparent;
+                                    ? AppIdentity.accent.transparentize(0.6) : transparent;
 
                                 TouchArea {
                                     mouse-cursor: pointer;
@@ -543,8 +543,8 @@ export component DocumentEditorScreen inherits Rectangle {
                                 Text {
                                     text: "Outline";
                                     color: root.doc-sidebar-mode == 0
-                                        ? Theme.accent : Theme.text-secondary;
-                                    font-size: 11px;
+                                        ? AppIdentity.accent : Theme.text-secondary;
+                                    font-size: Theme.fs-micro;
                                     font-weight: root.doc-sidebar-mode == 0 ? 700 : 500;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -556,10 +556,10 @@ export component DocumentEditorScreen inherits Rectangle {
                                 height: 30px;
                                 border-radius: 5px;
                                 background: root.doc-sidebar-mode == 1
-                                    ? Theme.accent.transparentize(0.82) : transparent;
+                                    ? AppIdentity.accent.transparentize(0.82) : transparent;
                                 border-width: root.doc-sidebar-mode == 1 ? 1px : 0px;
                                 border-color: root.doc-sidebar-mode == 1
-                                    ? Theme.accent.transparentize(0.6) : transparent;
+                                    ? AppIdentity.accent.transparentize(0.6) : transparent;
 
                                 TouchArea {
                                     mouse-cursor: pointer;
@@ -573,8 +573,8 @@ export component DocumentEditorScreen inherits Rectangle {
                                     Text {
                                         text: "Notes";
                                         color: root.doc-sidebar-mode == 1
-                                            ? Theme.accent : Theme.text-secondary;
-                                        font-size: 11px;
+                                            ? AppIdentity.accent : Theme.text-secondary;
+                                        font-size: Theme.fs-micro;
                                         font-weight: root.doc-sidebar-mode == 1 ? 700 : 500;
                                         vertical-alignment: center;
                                     }
@@ -586,12 +586,12 @@ export component DocumentEditorScreen inherits Rectangle {
                                         height: 16px;
                                         border-radius: 8px;
                                         background: root.doc-sidebar-mode == 1
-                                            ? Theme.accent : Theme.text-dim;
+                                            ? AppIdentity.accent : Theme.text-dim;
 
                                         Text {
                                             text: root.doc-comments.length;
                                             color: Theme.text-on-accent;
-                                            font-size: 9px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 700;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -605,10 +605,10 @@ export component DocumentEditorScreen inherits Rectangle {
                                 height: 30px;
                                 border-radius: 5px;
                                 background: root.doc-sidebar-mode == 2
-                                    ? Theme.accent.transparentize(0.82) : transparent;
+                                    ? AppIdentity.accent.transparentize(0.82) : transparent;
                                 border-width: root.doc-sidebar-mode == 2 ? 1px : 0px;
                                 border-color: root.doc-sidebar-mode == 2
-                                    ? Theme.accent.transparentize(0.6) : transparent;
+                                    ? AppIdentity.accent.transparentize(0.6) : transparent;
 
                                 TouchArea {
                                     mouse-cursor: pointer;
@@ -622,8 +622,8 @@ export component DocumentEditorScreen inherits Rectangle {
                                     Text {
                                         text: "Changes";
                                         color: root.doc-sidebar-mode == 2
-                                            ? Theme.accent : Theme.text-secondary;
-                                        font-size: 11px;
+                                            ? AppIdentity.accent : Theme.text-secondary;
+                                        font-size: Theme.fs-micro;
                                         font-weight: root.doc-sidebar-mode == 2 ? 700 : 500;
                                         vertical-alignment: center;
                                     }
@@ -635,12 +635,12 @@ export component DocumentEditorScreen inherits Rectangle {
                                         height: 16px;
                                         border-radius: 8px;
                                         background: root.doc-sidebar-mode == 2
-                                            ? Theme.accent : Theme.text-dim;
+                                            ? AppIdentity.accent : Theme.text-dim;
 
                                         Text {
                                             text: root.doc-changes.length;
                                             color: Theme.text-on-accent;
-                                            font-size: 9px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 700;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
@@ -654,10 +654,10 @@ export component DocumentEditorScreen inherits Rectangle {
                                 height: 30px;
                                 border-radius: 5px;
                                 background: root.doc-sidebar-mode == 3
-                                    ? Theme.accent.transparentize(0.82) : transparent;
+                                    ? AppIdentity.accent.transparentize(0.82) : transparent;
                                 border-width: root.doc-sidebar-mode == 3 ? 1px : 0px;
                                 border-color: root.doc-sidebar-mode == 3
-                                    ? Theme.accent.transparentize(0.6) : transparent;
+                                    ? AppIdentity.accent.transparentize(0.6) : transparent;
 
                                 TouchArea {
                                     mouse-cursor: pointer;
@@ -667,8 +667,8 @@ export component DocumentEditorScreen inherits Rectangle {
                                 Text {
                                     text: "History";
                                     color: root.doc-sidebar-mode == 3
-                                        ? Theme.accent : Theme.text-secondary;
-                                    font-size: 11px;
+                                        ? AppIdentity.accent : Theme.text-secondary;
+                                    font-size: Theme.fs-micro;
                                     font-weight: root.doc-sidebar-mode == 3 ? 700 : 500;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -744,7 +744,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                         Text {
                                             text: heading.level == 1 ? "H1" : (heading.level == 2 ? "H2" : "H3");
                                             color: Theme.accent;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 700;
                                             vertical-alignment: center;
                                             width: 20px;
@@ -787,7 +787,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                     height: parent.height - 8px;
                                     text <=> root.doc-comment-input;
                                     color: Theme.text-primary;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                     wrap: word-wrap;
                                     vertical-alignment: top;
                                 }
@@ -796,7 +796,7 @@ export component DocumentEditorScreen inherits Rectangle {
                             Rectangle {
                                 height: 28px;
                                 border-radius: 4px;
-                                background: add-cmt.has-hover ? Theme.accent : Theme.accent.transparentize(0.2);
+                                background: add-cmt.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2);
 
                                 add-cmt := TouchArea {
                                     clicked => {
@@ -808,7 +808,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                 Text {
                                     text: "Add Comment";
                                     color: white;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                     font-weight: 600;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -863,7 +863,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                             Text {
                                                 text: "L" + comment.line-hint;
                                                 color: Theme.accent;
-                                                font-size: 10px;
+                                                font-size: Theme.fs-micro;
                                                 font-weight: 600;
                                                 vertical-alignment: center;
                                             }
@@ -871,7 +871,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                             Text {
                                                 text: comment.timestamp;
                                                 color: Theme.text-secondary;
-                                                font-size: 9px;
+                                                font-size: Theme.fs-micro;
                                                 vertical-alignment: center;
                                             }
 
@@ -908,7 +908,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                         Text {
                                             text: comment.text;
                                             color: comment.resolved ? Theme.text-secondary : Theme.text-primary;
-                                            font-size: 12px;
+                                            font-size: Theme.fs-caption;
                                             wrap: word-wrap;
                                             overflow: elide;
                                         }
@@ -940,7 +940,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                     Text {
                                         text: root.doc-track-changes-on ? "Tracking ON" : "Tracking OFF";
                                         color: root.doc-track-changes-on ? white : Theme.text-secondary;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 600;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -960,7 +960,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                 spacing: 3px;
                                 alignment: center;
                                 Icon { commands: Icons.check; size: 11px; tint: Theme.color-success; y: (parent.height - self.height) / 2; }
-                                Text { text: "All"; font-size: 10px; color: Theme.color-success; vertical-alignment: center; }
+                                Text { text: "All"; font-size: Theme.fs-micro; color: Theme.color-success; vertical-alignment: center; }
                             }
                                 }
 
@@ -977,7 +977,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                 spacing: 3px;
                                 alignment: center;
                                 Icon { commands: Icons.close; size: 10px; tint: Theme.color-danger; y: (parent.height - self.height) / 2; }
-                                Text { text: "All"; font-size: 10px; color: Theme.color-danger; vertical-alignment: center; }
+                                Text { text: "All"; font-size: Theme.fs-micro; color: Theme.color-danger; vertical-alignment: center; }
                             }
                                 }
                             }
@@ -1033,7 +1033,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                                 text: change.change-type == "insert" ? "+" : change.change-type == "delete" ? "-" : "~";
                                                 color: change.change-type == "insert" ? Theme.color-success
                                                     : change.change-type == "delete" ? Theme.color-danger : Theme.color-warning;
-                                                font-size: 12px;
+                                                font-size: Theme.fs-caption;
                                                 font-weight: 700;
                                                 vertical-alignment: center;
                                             }
@@ -1041,7 +1041,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                             Text {
                                                 text: "L" + change.line-hint + " " + change.timestamp;
                                                 color: Theme.text-secondary;
-                                                font-size: 9px;
+                                                font-size: Theme.fs-micro;
                                                 vertical-alignment: center;
                                             }
 
@@ -1065,7 +1065,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                         Text {
                                             text: change.new-text != "" ? change.new-text : change.old-text;
                                             color: Theme.text-secondary;
-                                            font-size: 11px;
+                                            font-size: Theme.fs-micro;
                                             overflow: elide;
                                         }
                                     }
@@ -1086,7 +1086,7 @@ export component DocumentEditorScreen inherits Rectangle {
                             Rectangle {
                                 height: 28px;
                                 border-radius: 4px;
-                                background: save-ver-ta.has-hover ? Theme.accent : Theme.accent.transparentize(0.2);
+                                background: save-ver-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2);
 
                                 save-ver-ta := TouchArea {
                                     clicked => {
@@ -1097,7 +1097,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                 Text {
                                     text: "Save Version";
                                     color: white;
-                                    font-size: 12px;
+                                    font-size: Theme.fs-caption;
                                     font-weight: 600;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -1153,7 +1153,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                         Text {
                                             text: ver.label;
                                             color: Theme.text-primary;
-                                            font-size: 12px;
+                                            font-size: Theme.fs-caption;
                                             font-weight: 500;
                                             overflow: elide;
                                         }
@@ -1161,7 +1161,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                         Text {
                                             text: ver.timestamp;
                                             color: Theme.text-secondary;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                         }
                                     }
                                 }
@@ -1269,7 +1269,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                             width: 100%;
                                             text: "Start writing. Markdown works here \{"\u{2014}"} # for a heading, - for a list.";
                                             color: Theme.text-dim.transparentize(20%);
-                                            font-size: 15px;
+                                            font-size: Theme.fs-headline;
                                             wrap: word-wrap;
                                         }
 
@@ -1280,7 +1280,7 @@ export component DocumentEditorScreen inherits Rectangle {
                                             height: 100%;
                                             text <=> root.doc-content;
                                             color: Theme.text-primary;
-                                            font-size: 15px;
+                                            font-size: Theme.fs-headline;
                                             single-line: false;
                                             wrap: word-wrap;
                                             edited => { root.doc-content-changed(self.text); }
@@ -1356,7 +1356,7 @@ export component DocumentEditorScreen inherits Rectangle {
 
                     Text {
                         text: "Tracking";
-                        font-size: 9px;
+                        font-size: Theme.fs-micro;
                         color: Theme.color-success;
                         font-weight: 600;
                         horizontal-alignment: center;
@@ -1407,7 +1407,7 @@ export component DocumentEditorScreen inherits Rectangle {
                 Text {
                     text: "AI Assistant";
                     color: Theme.accent;
-                    font-size: 13px;
+                    font-size: Theme.fs-body;
                     font-weight: 600;
                     vertical-alignment: center;
                 }
@@ -1416,13 +1416,13 @@ export component DocumentEditorScreen inherits Rectangle {
                     width: 24px; height: 24px; border-radius: 4px;
                     background: close-ai-ta.has-hover ? Theme.hover-fill : transparent;
                     close-ai-ta := TouchArea { clicked => { root.show-ai-panel = false; } }
-                    Text { text: "x"; color: Theme.text-secondary; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "x"; color: Theme.text-secondary; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 
             Rectangle { height: 1px; background: Theme.separator; }
 
-            Text { text: "Quick Actions"; color: Theme.text-secondary; font-size: 10px; }
+            Text { text: "Quick Actions"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
             HorizontalLayout {
                 spacing: 4px;
@@ -1430,21 +1430,21 @@ export component DocumentEditorScreen inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: draft-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: draft-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     draft-ta := TouchArea { clicked => { root.doc-ai-draft(root.doc-ai-prompt); } }
-                    Text { text: "Draft"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Draft"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: summarize-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: summarize-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     summarize-ta := TouchArea { clicked => { root.doc-ai-summarize(); } }
-                    Text { text: "Summarize"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Summarize"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 
@@ -1454,21 +1454,21 @@ export component DocumentEditorScreen inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: improve-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: improve-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     improve-ta := TouchArea { clicked => { root.doc-ai-improve(); } }
-                    Text { text: "Improve"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Improve"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
                     height: 28px;
                     border-radius: 4px;
-                    background: translate-ta.has-hover ? Theme.accent.transparentize(0.8) : Theme.bg-elevated;
+                    background: translate-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     translate-ta := TouchArea { clicked => { root.doc-ai-translate("Spanish"); } }
-                    Text { text: "Translate"; color: Theme.accent; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Translate"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 
@@ -1480,12 +1480,12 @@ export component DocumentEditorScreen inherits Rectangle {
                 border-color: Theme.color-purple;
 
                 doc-insights-ta := TouchArea { clicked => { root.doc-ai-insights(); } }
-                Text { text: "Contextual Insights"; color: Theme.color-purple; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                Text { text: "Contextual Insights"; color: Theme.color-purple; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
             }
 
             Rectangle { height: 1px; background: Theme.separator; }
 
-            Text { text: "Ask AI"; color: Theme.text-secondary; font-size: 10px; }
+            Text { text: "Ask AI"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
             Rectangle {
                 height: 60px;
@@ -1499,7 +1499,7 @@ export component DocumentEditorScreen inherits Rectangle {
                     width: parent.width - 16px;
                     height: parent.height - 12px;
                     color: Theme.text-primary;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     wrap: word-wrap;
                     single-line: false;
                     text <=> root.doc-ai-prompt;
@@ -1510,7 +1510,7 @@ export component DocumentEditorScreen inherits Rectangle {
             Rectangle {
                 height: 28px;
                 border-radius: 4px;
-                background: root.doc-ai-working ? Theme.text-dim : (submit-doc-ai-ta.has-hover ? Theme.accent : Theme.accent.transparentize(0.2));
+                background: root.doc-ai-working ? Theme.text-dim : (submit-doc-ai-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2));
                 submit-doc-ai-ta := TouchArea {
                     enabled: !root.doc-ai-working;
                     clicked => { root.doc-ai-submit(root.doc-ai-prompt); }
@@ -1518,7 +1518,7 @@ export component DocumentEditorScreen inherits Rectangle {
                 Text {
                     text: root.doc-ai-working ? "Thinking..." : "Ask";
                     color: white;
-                    font-size: 11px;
+                    font-size: Theme.fs-micro;
                     font-weight: 600;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -1533,7 +1533,7 @@ export component DocumentEditorScreen inherits Rectangle {
                     Text {
                         text: root.doc-ai-response;
                         color: Theme.text-primary;
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         wrap: word-wrap;
                         width: parent.width;
                     }
@@ -1549,13 +1549,13 @@ export component DocumentEditorScreen inherits Rectangle {
                     border-radius: 4px;
                     background: doc-apply-ta.has-hover ? Theme.color-success : Theme.color-success;
                     doc-apply-ta := TouchArea { clicked => { root.doc-ai-apply(); } }
-                    Text { text: "Apply"; color: white; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Apply"; color: white; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
                 Rectangle {
                     border-radius: 4px;
                     background: doc-dismiss-ta.has-hover ? Theme.color-danger : Theme.color-danger;
                     doc-dismiss-ta := TouchArea { clicked => { root.doc-ai-dismiss(); } }
-                    Text { text: "Dismiss"; color: white; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Dismiss"; color: white; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
         }

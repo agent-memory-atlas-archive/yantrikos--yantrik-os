@@ -4,6 +4,7 @@
 // Firelight treatment: glassmorphism, holographic glows, gradient accents.
 
 import { Theme } from "theme.slint";
+import { AppIdentity } from "components/app_color.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { ListView, LineEdit } from "std-widgets.slint";
 
@@ -23,6 +24,10 @@ export struct PendingAction {
 }
 
 export component PackageManager inherits Rectangle {
+    // This screen draws its own header rather than AppHeader, so it has to say what
+    // it is: AppIdentity is otherwise left holding whichever app was opened before it.
+    init => { AppIdentity.id = "packages"; }
+
     background: transparent;
 
     in property <[PackageData]> packages: [];
@@ -89,7 +94,7 @@ export component PackageManager inherits Rectangle {
                     background: Theme.bg-input;
                     border-radius: Theme.radius-pill;
                     border-width: 1px;
-                    border-color: search-focus.has-focus ? Theme.accent : Theme.border-subtle;
+                    border-color: search-focus.has-focus ? AppIdentity.accent : Theme.border-subtle;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -128,7 +133,7 @@ export component PackageManager inherits Rectangle {
                     Text {
                         text: "All";
                         font-size: Theme.font-small;
-                        color: root.active-filter == 0 ? Theme.accent : Theme.text-secondary;
+                        color: root.active-filter == 0 ? AppIdentity.accent : Theme.text-secondary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -153,7 +158,7 @@ export component PackageManager inherits Rectangle {
                     Text {
                         text: "Installed";
                         font-size: Theme.font-small;
-                        color: root.active-filter == 1 ? Theme.accent : Theme.text-secondary;
+                        color: root.active-filter == 1 ? AppIdentity.accent : Theme.text-secondary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -182,7 +187,7 @@ export component PackageManager inherits Rectangle {
                         Text {
                             text: "Upgradable";
                             font-size: Theme.font-small;
-                            color: root.active-filter == 2 ? Theme.accent : Theme.text-secondary;
+                            color: root.active-filter == 2 ? AppIdentity.accent : Theme.text-secondary;
                             vertical-alignment: center;
                         }
 
@@ -194,7 +199,7 @@ export component PackageManager inherits Rectangle {
 
                             Text {
                                 text: root.upgradable-count;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-on-accent;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -222,7 +227,7 @@ export component PackageManager inherits Rectangle {
                     Text {
                         text: "Available";
                         font-size: Theme.font-small;
-                        color: root.active-filter == 3 ? Theme.accent : Theme.text-secondary;
+                        color: root.active-filter == 3 ? AppIdentity.accent : Theme.text-secondary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -251,7 +256,7 @@ export component PackageManager inherits Rectangle {
                     ai-pkg-btn := Rectangle {
                         height: 32px;
                         border-radius: Theme.radius-pill;
-                        background: root.ai-is-working ? Theme.accent
+                        background: root.ai-is-working ? AppIdentity.accent
                             : (root.detail-name != "" ? Theme.bg-card : Theme.hover-fill);
                         border-width: 1px;
                         border-color: root.detail-name != "" ? Theme.border-subtle : transparent;
@@ -270,7 +275,7 @@ export component PackageManager inherits Rectangle {
                                 text: root.ai-is-working ? "Analyzing..." : "AI Explain";
                                 color: root.ai-is-working ? Theme.text-on-accent
                                     : (root.detail-name != "" ? Theme.text-secondary : Theme.text-dim);
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 font-weight: 500;
                                 vertical-alignment: center;
                             }
@@ -288,7 +293,7 @@ export component PackageManager inherits Rectangle {
                     Icon {
                         commands: Icons.refresh;
                         size: 18px;
-                        tint: root.is-loading ? Theme.accent : Theme.text-secondary;
+                        tint: root.is-loading ? AppIdentity.accent : Theme.text-secondary;
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
                     }
@@ -350,7 +355,7 @@ export component PackageManager inherits Rectangle {
                         Text {
                             text: "AI Analysis";
                             color: Theme.accent;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             font-weight: 600;
                             vertical-alignment: center;
                         }
@@ -380,7 +385,7 @@ export component PackageManager inherits Rectangle {
                     Text {
                         text: root.ai-response;
                         color: Theme.text-primary;
-                        font-size: 12px;
+                        font-size: Theme.fs-caption;
                         wrap: word-wrap;
                     }
                 }
@@ -503,7 +508,7 @@ export component PackageManager inherits Rectangle {
 
                                     repo-text := Text {
                                         text: pkg.repo;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         color: Theme.text-dim;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -529,7 +534,7 @@ export component PackageManager inherits Rectangle {
                                         : transparent;
                                     border-radius: 12px;
                                     border-width: pkg.installed || pkg.upgradable ? 1px : 0;
-                                    border-color: pkg.upgradable ? Theme.accent.transparentize(60%)
+                                    border-color: pkg.upgradable ? AppIdentity.accent.transparentize(60%)
                                         : pkg.installed ? Theme.color-success.transparentize(60%)
                                         : transparent;
 
@@ -537,7 +542,7 @@ export component PackageManager inherits Rectangle {
                                         text: pkg.upgradable ? "Upgradable"
                                             : pkg.installed ? "Installed"
                                             : "";
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         color: pkg.upgradable ? Theme.holo-blue
                                             : pkg.installed ? Theme.color-success
                                             : transparent;
@@ -626,7 +631,7 @@ export component PackageManager inherits Rectangle {
 
                                 Text {
                                     text: root.detail-name;
-                                    font-size: 20px;
+                                    font-size: Theme.fs-display;
                                     font-weight: 700;
                                     color: Theme.text-primary;
                                 }
@@ -668,7 +673,7 @@ export component PackageManager inherits Rectangle {
                             if root.detail-upgradable : Rectangle {
                                 width: 100px;
                                 height: 36px;
-                                background: upg-ta.has-hover ? Theme.accent.brighter(20%) : Theme.accent;
+                                background: upg-ta.has-hover ? AppIdentity.accent.brighter(20%) : Theme.accent;
                                 border-radius: Theme.radius-pill;
 
                                 Text {
@@ -844,7 +849,7 @@ export component PackageManager inherits Rectangle {
 
                             Text {
                                 text: root.pending-actions.length;
-                                font-size: 10px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-on-accent;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -927,7 +932,7 @@ export component PackageManager inherits Rectangle {
 
                             Text {
                                 text: action.action-type;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 color: action.action-type == "install" ? Theme.color-success
                                     : action.action-type == "remove" ? Theme.color-danger
                                     : Theme.accent;
@@ -938,7 +943,7 @@ export component PackageManager inherits Rectangle {
 
                             Text {
                                 text: action.package-name;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-primary;
                                 horizontal-stretch: 1;
                                 overflow: elide;

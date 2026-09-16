@@ -7,7 +7,7 @@ import { ListView } from "std-widgets.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
-import { AppColor } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct DownloadItem {
     id: int,
@@ -149,7 +149,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         Text {
                             text: "AI Analysis";
                             color: Theme.accent;
-                            font-size: 12px;
+                            font-size: Theme.fs-caption;
                             font-weight: 600;
                             vertical-alignment: center;
                         }
@@ -167,7 +167,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     Text {
                         text: root.ai-response;
                         color: Theme.text-primary;
-                        font-size: 12px;
+                        font-size: Theme.fs-caption;
                         wrap: word-wrap;
                     }
                 }
@@ -197,7 +197,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         background: Theme.bg-input;
                         border-radius: Theme.r-pill;
                         border-width: 1px;
-                        border-color: url-input-ta.has-focus ? Theme.accent : Theme.border-subtle;
+                        border-color: url-input-ta.has-focus ? AppIdentity.accent : Theme.border-subtle;
                         clip: true;
 
                         HorizontalLayout {
@@ -264,7 +264,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         background: Theme.bg-input;
                         border-radius: Theme.r-pill;
                         border-width: 1px;
-                        border-color: checksum-input.has-focus ? Theme.accent : Theme.border-subtle;
+                        border-color: checksum-input.has-focus ? AppIdentity.accent : Theme.border-subtle;
                         clip: true;
 
                         HorizontalLayout {
@@ -275,7 +275,7 @@ export component DownloadManagerScreen inherits Rectangle {
 
                             Text {
                                 text: "#";
-                                font-size: 12px;
+                                font-size: Theme.fs-caption;
                                 color: Theme.text-dim;
                                 vertical-alignment: center;
                             }
@@ -283,7 +283,7 @@ export component DownloadManagerScreen inherits Rectangle {
                             checksum-input := TextInput {
                                 horizontal-stretch: 1;
                                 text <=> root.add-checksum-text;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-primary;
                                 input-type: text;
                             }
@@ -293,7 +293,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     // Placeholder label when empty
                     if root.add-checksum-text == "" : Text {
                         text: "Expected hash (optional)";
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         color: Theme.text-dim;
                         vertical-alignment: center;
                     }
@@ -305,7 +305,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         background: Theme.bg-input;
                         border-radius: Theme.r-pill;
                         border-width: 1px;
-                        border-color: savedir-input.has-focus ? Theme.accent : Theme.border-subtle;
+                        border-color: savedir-input.has-focus ? AppIdentity.accent : Theme.border-subtle;
                         clip: true;
 
                         HorizontalLayout {
@@ -324,7 +324,7 @@ export component DownloadManagerScreen inherits Rectangle {
                             savedir-input := TextInput {
                                 horizontal-stretch: 1;
                                 text <=> root.add-save-dir-text;
-                                font-size: 11px;
+                                font-size: Theme.fs-micro;
                                 color: Theme.text-primary;
                                 input-type: text;
                             }
@@ -333,7 +333,7 @@ export component DownloadManagerScreen inherits Rectangle {
 
                     if root.add-save-dir-text == "" : Text {
                         text: "Save to... (optional)";
-                        font-size: 11px;
+                        font-size: Theme.fs-micro;
                         color: Theme.text-dim;
                         vertical-alignment: center;
                     }
@@ -361,7 +361,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     background: select-all-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
                     border-radius: 6px;
                     border-width: 1px;
-                    border-color: root.dl-all-selected ? Theme.accent : Theme.border-subtle;
+                    border-color: root.dl-all-selected ? AppIdentity.accent : Theme.border-subtle;
 
                     Rectangle {
                         width: 14px;
@@ -369,7 +369,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         x: 7px;
                         y: 7px;
                         border-radius: 3px;
-                        background: root.dl-all-selected ? Theme.accent : transparent;
+                        background: root.dl-all-selected ? AppIdentity.accent : transparent;
                         border-width: root.dl-all-selected ? 0 : 1px;
                         border-color: Theme.text-dim;
 
@@ -397,7 +397,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     background: Theme.bg-input;
                     border-radius: Theme.r-pill;
                     border-width: 1px;
-                    border-color: search-input.has-focus ? Theme.accent : Theme.border-subtle;
+                    border-color: search-input.has-focus ? AppIdentity.accent : Theme.border-subtle;
                     clip: true;
 
                     if root.dl-search-text == "" : Text {
@@ -434,7 +434,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         // Match count
                         if root.dl-search-text != "" : Text {
                             text: root.dl-search-match-count + " found";
-                            font-size: 10px;
+                            font-size: Theme.fs-micro;
                             color: Theme.text-dim;
                             vertical-alignment: center;
                         }
@@ -490,7 +490,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                 : root.dl-sort-mode == 1 ? "Name"
                                 : root.dl-sort-mode == 2 ? "Size"
                                 : "Status";
-                            font-size: 11px;
+                            font-size: Theme.fs-micro;
                             color: Theme.text-secondary;
                             vertical-alignment: center;
                         }
@@ -576,8 +576,8 @@ export component DownloadManagerScreen inherits Rectangle {
                                     height: 18px;
                                     border-radius: 4px;
                                     border-width: 1px;
-                                    border-color: dl.is-selected ? Theme.accent : Theme.text-dim;
-                                    background: dl.is-selected ? Theme.accent : transparent;
+                                    border-color: dl.is-selected ? AppIdentity.accent : Theme.text-dim;
+                                    background: dl.is-selected ? AppIdentity.accent : transparent;
                                     y: (parent.height - self.height) / 2;
 
                                     if dl.is-selected : Icon {
@@ -600,7 +600,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                     border-radius: 5px;
                                     y: (parent.height - self.height) / 2;
                                     background:
-                                        dl.status == "downloading" ? Theme.accent
+                                        dl.status == "downloading" ? AppIdentity.accent
                                       : dl.status == "paused" ? Theme.amber
                                       : dl.status == "completed" ? Theme.color-success
                                       : dl.status == "failed" ? Theme.color-emotional
@@ -632,7 +632,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         text: dl.checksum-status == "pass" ? "Hash OK"
                                             : dl.checksum-status == "fail" ? "Mismatch"
                                             : "Verifying";
-                                        font-size: 9px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 500;
                                         color:
                                             dl.checksum-status == "pass" ? Theme.color-success
@@ -654,7 +654,7 @@ export component DownloadManagerScreen inherits Rectangle {
 
                                     Text {
                                         text: "Verify";
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         color: Theme.text-secondary;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -668,7 +668,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                 // Checksum result text (when verified without an expected checksum)
                                 if dl.status == "completed" && root.dl-checksum-result != "" && dl.checksum-expected == "" && dl.checksum-status != "none" : Text {
                                     text: "SHA-256: " + root.dl-checksum-result;
-                                    font-size: 9px;
+                                    font-size: Theme.fs-micro;
                                     color: Theme.text-dim;
                                     overflow: elide;
                                     max-width: 200px;
@@ -718,10 +718,10 @@ export component DownloadManagerScreen inherits Rectangle {
                                             : dl.status == "completed" ? "Completed"
                                             : dl.status == "failed" ? "Failed"
                                             : "Queued";
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         font-weight: 500;
                                         color:
-                                            dl.status == "downloading" ? Theme.accent
+                                            dl.status == "downloading" ? AppIdentity.accent
                                           : dl.status == "paused" ? Theme.amber
                                           : dl.status == "completed" ? Theme.color-success
                                           : dl.status == "failed" ? Theme.color-emotional
@@ -845,7 +845,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                 // URL preview (truncated)
                                 Text {
                                     text: dl.url;
-                                    font-size: 11px;
+                                    font-size: Theme.fs-micro;
                                     color: Theme.text-dim;
                                     overflow: elide;
                                     horizontal-stretch: 1;
@@ -863,7 +863,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                     }
                                     Text {
                                         text: dl.save-dir;
-                                        font-size: 10px;
+                                        font-size: Theme.fs-micro;
                                         color: Theme.text-dim;
                                         overflow: elide;
                                         max-width: 200px;
@@ -883,7 +883,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                     height: 100%;
                                     border-radius: 2px;
                                     background:
-                                        dl.status == "downloading" ? Theme.accent
+                                        dl.status == "downloading" ? AppIdentity.accent
                                       : dl.status == "paused" ? Theme.amber
                                       : Theme.text-dim;
                                     animate width { duration: 300ms; }
@@ -922,7 +922,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         spacing: 8px;
                                         Text {
                                             text: "URL:";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             color: Theme.text-dim;
                                             width: 70px;
@@ -930,7 +930,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         }
                                         Text {
                                             text: dl.url;
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             color: Theme.text-secondary;
                                             overflow: elide;
                                             horizontal-stretch: 1;
@@ -943,7 +943,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         spacing: 8px;
                                         Text {
                                             text: "Save Path:";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             color: Theme.text-dim;
                                             width: 70px;
@@ -951,7 +951,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         }
                                         Text {
                                             text: dl.save-dir != "" ? dl.save-dir : "~/Downloads";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             color: Theme.text-secondary;
                                             overflow: elide;
                                             horizontal-stretch: 1;
@@ -964,7 +964,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         spacing: 8px;
                                         Text {
                                             text: "Started:";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             color: Theme.text-dim;
                                             width: 70px;
@@ -972,7 +972,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         }
                                         Text {
                                             text: dl.start-time != "" ? dl.start-time : "-";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             color: Theme.text-secondary;
                                             vertical-alignment: center;
                                         }
@@ -981,7 +981,7 @@ export component DownloadManagerScreen inherits Rectangle {
 
                                         Text {
                                             text: "Ended:";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             color: Theme.text-dim;
                                             width: 50px;
@@ -989,7 +989,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         }
                                         Text {
                                             text: dl.end-time != "" ? dl.end-time : "-";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             color: Theme.text-secondary;
                                             vertical-alignment: center;
                                         }
@@ -1000,7 +1000,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         spacing: 8px;
                                         Text {
                                             text: "Type:";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             color: Theme.text-dim;
                                             width: 70px;
@@ -1008,7 +1008,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         }
                                         Text {
                                             text: dl.file-type != "" ? dl.file-type : "unknown";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             color: Theme.text-secondary;
                                             vertical-alignment: center;
                                         }
@@ -1017,7 +1017,7 @@ export component DownloadManagerScreen inherits Rectangle {
 
                                         Text {
                                             text: "SHA-256:";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             font-weight: 600;
                                             color: Theme.text-dim;
                                             width: 50px;
@@ -1025,7 +1025,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                         }
                                         Text {
                                             text: dl.file-hash != "" ? dl.file-hash : "-";
-                                            font-size: 10px;
+                                            font-size: Theme.fs-micro;
                                             color: Theme.text-secondary;
                                             overflow: elide;
                                             horizontal-stretch: 1;
@@ -1105,7 +1105,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         text: "All";
                         font-size: Theme.fs-caption;
                         font-weight: root.active-filter == 0 ? 600 : 400;
-                        color: root.active-filter == 0 ? Theme.accent : Theme.text-secondary;
+                        color: root.active-filter == 0 ? AppIdentity.accent : Theme.text-secondary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -1131,7 +1131,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         text: "Active";
                         font-size: Theme.fs-caption;
                         font-weight: root.active-filter == 1 ? 600 : 400;
-                        color: root.active-filter == 1 ? Theme.accent : Theme.text-secondary;
+                        color: root.active-filter == 1 ? AppIdentity.accent : Theme.text-secondary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -1157,7 +1157,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         text: "Completed";
                         font-size: Theme.fs-caption;
                         font-weight: root.active-filter == 2 ? 600 : 400;
-                        color: root.active-filter == 2 ? Theme.accent : Theme.text-secondary;
+                        color: root.active-filter == 2 ? AppIdentity.accent : Theme.text-secondary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -1183,7 +1183,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         text: "Failed";
                         font-size: Theme.fs-caption;
                         font-weight: root.active-filter == 3 ? 600 : 400;
-                        color: root.active-filter == 3 ? Theme.accent : Theme.text-secondary;
+                        color: root.active-filter == 3 ? AppIdentity.accent : Theme.text-secondary;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
