@@ -221,10 +221,28 @@ PYEOF" || fail "manifest update failed"
   # Verify by fetching, not by trusting the upload. The checksum is the whole point of
   # publishing one: a 200 with the wrong bytes reads exactly like a 200 with the right ones.
   say "Verifying what is actually being served"
-  # The URL cloud-init is configured with, read from the file rather than reconstructed —
-  # a publisher and an installer that each derive the name separately can drift apart.
-  URL="$(grep -o 'http[^"]*yantrik-os-latest[^"]*' "$SCRIPT_DIR/cloud-init/user-data.yaml" 2>/dev/null | head -1)"
-  URL="${URL:-http://releases.yantrikos.com/$PUBLISH_CHANNEL/yantrik-os-latest-linux-amd64.$EXT}"
+  #
+  # Fetch the channel THIS RUN published to. That sounds obvious; it was not what happened.
+  #
+  # This used to read the URL out of cloud-init/user-data.yaml, on the reasoning that a
+  # publisher and an installer which each derive the name separately will drift apart. The
+  # reasoning is right and the implementation was wrong: that file names one specific channel
+  # (nightly), so publishing to any other channel downloaded nightly's bundle and compared it
+  # against the bundle we had just built somewhere else. A correct publish to `stable` failed
+  # verification with a hash that, read against the manifest, turned out to be nightly's.
+  #
+  # So the URL comes from the channel, and cloud-init is used for what it can actually
+  # settle — the host — with a warning rather than a failure if it points somewhere else.
+  CI_URL="$(grep -o 'http[^"]*yantrik-os-latest[^"]*' "$SCRIPT_DIR/cloud-init/user-data.yaml" 2>/dev/null | head -1)"
+  HOST_URL="$(printf '%s' "$CI_URL" | sed -n 's#^\(https\?://[^/]*\)/.*#\1#p')"
+  URL="${HOST_URL:-http://releases.yantrikos.com}/$PUBLISH_CHANNEL/yantrik-os-latest-linux-amd64.$EXT"
+
+  CI_CHANNEL="$(printf '%s' "$CI_URL" | sed -n 's#.*/\([^/]*\)/yantrik-os-latest.*#\1#p')"
+  if [ -n "$CI_CHANNEL" ] && [ "$CI_CHANNEL" != "$PUBLISH_CHANNEL" ]; then
+    printf '   note: a fresh install follows %s, and this build went to %s\n' \
+      "$CI_CHANNEL" "$PUBLISH_CHANNEL"
+  fi
+
   GOT="$(curl -sfL "$URL" | sha256sum | cut -d' ' -f1)" || fail "cannot fetch $URL"
   WANT="$(cut -d' ' -f1 < "$TARBALL.sha256")"
   if [ "$GOT" = "$WANT" ]; then
