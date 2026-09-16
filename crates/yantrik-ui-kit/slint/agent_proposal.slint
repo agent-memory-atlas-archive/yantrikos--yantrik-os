@@ -1,0 +1,178 @@
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// agent_proposal.slint — the companion proposes, the person decides
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//
+// One card, one grammar, everywhere the companion wants to change something.
+//
+// # Why this is a component and not a panel in each app
+//
+// The Rust side has had the approval primitive from the start: `Action::defers()` marks an
+// action as one that cannot answer immediately, and `yos act` grades every action safe /
+// standard / sensitive / dangerous. None of that reached the screen. Searching every .slint
+// file in the OS for the word "approve" returned nothing.
+//
+// What Notes had instead was a bespoke panel: a text blob with Apply and Dismiss under it. The
+// instinct was right -- Apply appends the text and deliberately leaves the note UNSAVED, so
+// generated words have to be looked at before they are kept -- but it was one app's private
+// answer to a question every app has. Sixteen private answers is how an OS ends up with
+// sixteen different ideas of what "the computer wants to do something" looks like, which is
+// the opposite of trustworthy.
+//
+// # What a proposal must say
+//
+// Three things, and it will not draw without them:
+//
+//   what it is        — the title, and the text itself
+//   where it came from — provenance. "from this note", "from memory", "from your calendar".
+//                        An answer with no stated source is a claim, and this OS does not
+//                        make claims it cannot attribute.
+//   what it will do   — the impact line. Empty means nothing changes and this is just an
+//                        answer to read. Non-empty means something is about to move, and it
+//                        says exactly what before the button is pressed.
+//
+// # Why there is no "Approve" button
+//
+// Because the verb should be the thing that happens. "Apply", "Replace", "Move 14 files",
+// "Send". A button labelled Approve makes the person agree to something abstract; a button
+// labelled with the change makes them agree to the change.
+
+import { Theme } from "theme.slint";
+import { Icon, Icons } from "icon.slint";
+import { YButton } from "y_button.slint";
+import { AppIdentity } from "app_color.slint";
+
+export struct AgentProposal {
+    // What this is, in three or four words: "Summary ready", "Drafted reply".
+    title: string,
+    // The proposal itself.
+    body: string,
+    // Where it came from. Required in spirit: a card with no source reads as a machine
+    // asserting something, which is what this OS is trying not to be.
+    source: string,
+    // What changes if this is applied. Empty = nothing changes, this is only an answer.
+    impact: string,
+    // Applying cannot be undone by pressing the other button.
+    destructive: bool,
+    // The verb on the button. Empty falls back to "Apply".
+    verb: string,
+}
+
+export component AgentProposalCard inherits Rectangle {
+    in property <AgentProposal> data;
+    in property <bool> working: false;
+
+    callback apply();
+    callback dismiss();
+
+    height: body-col.preferred-height;
+    border-radius: Theme.r-lg;
+    background: Theme.glass-card;
+    border-width: 1px;
+    // A proposal that changes something is outlined in the app's colour so it reads as the
+    // companion speaking rather than as another panel of the app's own chrome.
+    border-color: root.data.impact != ""
+        ? AppIdentity.accent.transparentize(60%)
+        : Theme.glass-border;
+
+    body-col := VerticalLayout {
+        padding: Theme.sp-4;
+        spacing: Theme.sp-3;
+        alignment: start;
+
+        // ── Who is talking, and about what ──
+        HorizontalLayout {
+            spacing: Theme.sp-2;
+            alignment: start;
+
+            Rectangle {
+                width: 22px;
+                height: 22px;
+                border-radius: Theme.r-sm;
+                background: AppIdentity.tint;
+                Icon {
+                    commands: Icons.spark;
+                    size: 14px;
+                    tint: AppIdentity.accent;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 1px;
+                horizontal-stretch: 1;
+
+                Text {
+                    text: root.working ? "Working…" : root.data.title;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-headline;
+                    font-weight: Theme.fw-headline;
+                    overflow: elide;
+                }
+                // Provenance sits under the title, always, in the dim colour metadata uses.
+                // Not a chip and not a badge: it is not a thing to click, it is the answer to
+                // "how do you know that".
+                if root.data.source != "" : Text {
+                    text: root.data.source;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // ── The proposal ──
+        if root.data.body != "" : Text {
+            text: root.data.body;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-caption;
+            wrap: word-wrap;
+        }
+
+        // ── What pressing the button does ──
+        //
+        // Above the button, not beside it, and in the danger colour when it cannot be undone.
+        // The person reads downward; the consequence should arrive before the control.
+        if root.data.impact != "" : HorizontalLayout {
+            spacing: Theme.sp-2;
+            alignment: start;
+
+            Icon {
+                commands: root.data.destructive ? Icons.warning : Icons.arrow-right;
+                size: 13px;
+                tint: root.data.destructive ? Theme.color-danger : Theme.text-dim;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: root.data.impact;
+                color: root.data.destructive ? Theme.color-danger : Theme.text-dim;
+                font-size: Theme.fs-micro;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        // ── The decision ──
+        HorizontalLayout {
+            spacing: Theme.sp-2;
+            alignment: end;
+
+            YButton {
+                label: "Dismiss";
+                size: 0;
+                variant: 2;
+                clicked => { root.dismiss(); }
+            }
+            YButton {
+                // The verb is the change. See the header.
+                label: root.data.verb != "" ? root.data.verb : "Apply";
+                size: 0;
+                variant: root.data.destructive ? 3 : 0;
+                disabled: root.working;
+                loading: root.working;
+                clicked => { root.apply(); }
+            }
+        }
+    }
+}

@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
 use yantrik_ipc_transport::SyncRpcClient;
 
@@ -404,8 +404,147 @@ fn index_of(ui: &NotesApp, filename: &str) -> Option<i32> {
     })
 }
 
-/// Refresh whichever side panels are open for `id`.
+/// How close a memory has to be before it is worth showing.
+///
+/// Without a floor the rail filled with the companion's own telemetry — "App opened:
+/// yantrik-notes", 9% match, against a note about quarterly planning. Recall always returns
+/// its best N; "best" is not the same as "relevant", and a row that is 9% related is not
+/// context, it is noise with a number on it. The whole claim the rail makes is that what it
+/// shows is true and relevant; one junk row costs more than the three good ones gain.
+const MEMORY_FLOOR: f64 = 0.35;
+
+/// Fill the agent rail for the open note.
+///
+/// # The rule
+///
+/// Every row comes from something the app or the companion actually holds, and carries the
+/// word for where it came from. Nothing is added to fill the column. When there is nothing
+/// true to say the rail collapses and the editor is wider, which is an honest answer and the
+/// one a fresh machine should get.
+///
+/// This matters more here than it looks. The OS ships fifty-five controls that promise
+/// intelligence and, before this, one of them was wired; the rest logged "standalone mode" and
+/// returned. A rail that behaved the same way on every screen would not read as an intelligent
+/// system, it would read as a broken one.
+///
+/// The links are computed locally and cost nothing. Memory needs the shell, so it is fetched on
+/// a worker thread and appended when it arrives — never blocking the note you are typing in.
+fn refresh_agent_rail(ui: &NotesApp, note_id: &str) {
+    let note_open = ui.get_selected_index() >= 0;
+    let title = ui.get_current_title().to_string();
+    let body = ui.get_current_content().to_string();
+
+    // ── Context: what this note is already connected to ──
+    let mut context: Vec<AgentContextItem> = Vec::new();
+    if note_open {
+        let (inbound, outbound) = links_for(note_id, &body);
+        // A note that links here AND is linked from here is ONE related note, not two rows
+        // with the same title one above the other — which is what it looked like, and reads as
+        // a duplicate rather than as a fact about the link going both ways.
+        for b in inbound.iter().take(5) {
+            let mutual = outbound.iter().any(|o| o.filename == b.filename);
+            context.push(AgentContextItem {
+                id: format!("note:{}", b.filename).into(),
+                label: b.title.clone(),
+                detail: if mutual { "links both ways" } else { "mentions this note" }.into(),
+                source: "linked".into(),
+            });
+        }
+        for b in outbound.iter().take(5) {
+            if inbound.iter().any(|i| i.filename == b.filename) {
+                continue;
+            }
+            context.push(AgentContextItem {
+                id: format!("note:{}", b.filename).into(),
+                label: b.title.clone(),
+                detail: "this note links to it".into(),
+                source: "linked".into(),
+            });
+        }
+    }
+    ui.set_agent_context(ModelRc::new(VecModel::from(context.clone())));
+
+    // ── What it can do next ──
+    //
+    // Only actions that work. Structure and Summarize call companion::ask; Related calls
+    // companion::recall. Nothing is offered that would log a line and return.
+    let online = companion::is_online();
+    let mut next: Vec<AgentSuggestion> = Vec::new();
+    if note_open && online {
+        let working = ui.get_ai_is_working();
+        next.push(AgentSuggestion {
+            id: "summarize".into(),
+            label: "Summarise this note".into(),
+            detail: "five bullets, from what it says".into(),
+            icon: "template".into(),
+            running: working,
+            proposes: true,
+        });
+        next.push(AgentSuggestion {
+            id: "structure".into(),
+            label: "Give it headings".into(),
+            detail: "reorganise, keeping every fact".into(),
+            icon: "spark".into(),
+            running: working,
+            proposes: true,
+        });
+        next.push(AgentSuggestion {
+            id: "related".into(),
+            label: "Find related".into(),
+            detail: "search what Yantrik remembers".into(),
+            icon: "search".into(),
+            running: false,
+            proposes: false,
+        });
+    }
+    ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
+
+    // ── When the shell is not there ──
+    //
+    // Said once, plainly, instead of every row failing on its own. Running an app on its own
+    // is a supported thing to do, not an error.
+    ui.set_agent_unavailable(if online || !note_open {
+        SharedString::new()
+    } else {
+        "Not connected. Start the Yantrik shell for memory and suggestions.".into()
+    });
+
+    // ── Memory, when there is something to search with ──
+    if note_open && online && !title.trim().is_empty() {
+        let query = title.clone();
+        let back = ui.as_weak();
+        std::thread::spawn(move || {
+            let found: Vec<_> = companion::recall(&query, 6)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| m.score >= MEMORY_FLOOR)
+                .take(3)
+                .collect();
+            if found.is_empty() {
+                return;
+            }
+            let _ = back.upgrade_in_event_loop(move |ui| {
+                let mut rows: Vec<AgentContextItem> = context;
+                for m in found {
+                    // One line of the memory, not the whole thing: this is a pointer, and a
+                    // paragraph in a 280px column is a wall.
+                    let line = m.text.lines().next().unwrap_or("").trim().to_string();
+                    rows.push(AgentContextItem {
+                        id: format!("memory:{}", m.rid).into(),
+                        label: line.into(),
+                        detail: format!("{}% match", (m.score * 100.0).round() as i64).into(),
+                        source: "memory".into(),
+                    });
+                }
+                ui.set_agent_context(ModelRc::new(VecModel::from(rows)));
+            });
+        });
+    }
+}
+
+/// Refresh whichever side panels are open for `id`, and the agent rail, which is always on.
 fn refresh_panels(ui: &NotesApp, id: &str) {
+    refresh_agent_rail(ui, id);
     if ui.get_backlinks_panel_open() {
         let (inbound, outbound) = links_for(id, &ui.get_current_content().to_string());
         ui.set_backlinks(ModelRc::new(VecModel::from(inbound)));
@@ -567,6 +706,14 @@ enum AiAction {
 }
 
 impl AiAction {
+    /// What the card calls this while it is working and when it lands.
+    fn proposal_title(self) -> &'static str {
+        match self {
+            AiAction::Structure => "Restructured note",
+            AiAction::Summarize => "Summary",
+        }
+    }
+
     fn prompt(self, title: &str, body: &str) -> String {
         match self {
             AiAction::Structure => format!(
@@ -602,6 +749,15 @@ fn wire_ai_action(app: &NotesApp, current_file: Rc<RefCell<String>>, action: AiA
         ui.set_ai_is_working(true);
         ui.set_ai_panel_open(true);
         ui.set_ai_response("".into());
+        ui.set_proposal_working(true);
+        ui.set_proposal(AgentProposal {
+            title: action.proposal_title().into(),
+            body: SharedString::new(),
+            source: "from this note".into(),
+            impact: SharedString::new(),
+            destructive: false,
+            verb: "Apply".into(),
+        });
 
         let prompt = action.prompt(&title, &body);
         let back = ui.as_weak();
@@ -611,14 +767,40 @@ fn wire_ai_action(app: &NotesApp, current_file: Rc<RefCell<String>>, action: AiA
             // would be a data race.
             let _ = back.upgrade_in_event_loop(move |ui| {
                 ui.set_ai_is_working(false);
+                ui.set_proposal_working(false);
                 match outcome {
-                    Ok(text) => ui.set_ai_response(text.into()),
+                    Ok(text) => {
+                        let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+                        ui.set_ai_response(text.clone().into());
+                        ui.set_proposal(AgentProposal {
+                            title: action.proposal_title().into(),
+                            body: text.into(),
+                            source: "from this note".into(),
+                            // What pressing the button does, said before it is pressed. Apply
+                            // appends and leaves the note unsaved, and both halves of that
+                            // belong on the card rather than in anyone's memory.
+                            impact: format!(
+                                "Appends {lines} line{} to this note, unsaved",
+                                if lines == 1 { "" } else { "s" }
+                            )
+                            .into(),
+                            destructive: false,
+                            verb: "Apply".into(),
+                        });
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "Companion call failed");
-                        ui.set_ai_response(
-                            format!("The companion did not answer: {e}\n\nIs the Yantrik shell running?")
-                                .into(),
-                        );
+                        ui.set_ai_response(SharedString::new());
+                        ui.set_proposal(AgentProposal {
+                            title: "The companion did not answer".into(),
+                            body: format!("{e}\n\nIs the Yantrik shell running?").into(),
+                            source: SharedString::new(),
+                            impact: SharedString::new(),
+                            destructive: false,
+                            // Nothing to apply, so the only button that means anything is the
+                            // one that closes it.
+                            verb: "Close".into(),
+                        });
                     }
                 }
             });
@@ -1144,6 +1326,7 @@ fn wire(app: &NotesApp) -> slint::Timer {
             ui.set_is_modified(true);
             ui.set_ai_panel_open(false);
             ui.set_ai_response("".into());
+            ui.set_proposal(AgentProposal::default());
         });
     }
 
@@ -1157,6 +1340,88 @@ fn wire(app: &NotesApp) -> slint::Timer {
     }
     app.on_view_version(|_| {});
     app.on_restore_version(|_| {});
+    // ── The agent rail ──
+    //
+    // Both callbacks dispatch into the SAME handlers the toolbar buttons use. That is the rule
+    // the control surface already follows and it holds here for the same reason: a suggestion
+    // that runs its own copy of an action is a second implementation, and the two drift.
+    {
+        let weak = app.as_weak();
+        app.on_agent_suggestion_activated(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            match id.as_str() {
+                "summarize" => ui.invoke_ai_summarize(),
+                "structure" => ui.invoke_ai_structure(),
+                // "Find related" is the one suggestion that does not propose anything: it
+                // searches memory and fills the context section above. Nothing changes, so
+                // nothing is asked.
+                "related" => {
+                    let query = ui.get_current_title().to_string();
+                    if query.trim().is_empty() {
+                        return;
+                    }
+                    let back = ui.as_weak();
+                    std::thread::spawn(move || {
+                        let found = companion::recall(&query, 10).map(|rows| {
+                            rows.into_iter()
+                                .filter(|m| m.score >= MEMORY_FLOOR)
+                                .take(5)
+                                .collect::<Vec<_>>()
+                        });
+                        let _ = back.upgrade_in_event_loop(move |ui| match found {
+                            Ok(rows) if !rows.is_empty() => {
+                                let mut items: Vec<AgentContextItem> =
+                                    ui.get_agent_context().iter().collect();
+                                items.retain(|i| !i.id.starts_with("memory:"));
+                                for m in rows {
+                                    let line =
+                                        m.text.lines().next().unwrap_or("").trim().to_string();
+                                    items.push(AgentContextItem {
+                                        id: format!("memory:{}", m.rid).into(),
+                                        label: line.into(),
+                                        detail: format!(
+                                            "{}% match",
+                                            (m.score * 100.0).round() as i64
+                                        )
+                                        .into(),
+                                        source: "memory".into(),
+                                    });
+                                }
+                                ui.set_agent_context(ModelRc::new(VecModel::from(items)));
+                            }
+                            Ok(_) => {
+                                // Nothing found is an answer, and saying so beats a rail that
+                                // looks like it is still thinking.
+                                ui.set_agent_unavailable(
+                                    "Nothing in memory mentions this note yet.".into(),
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "recall failed");
+                                ui.set_agent_unavailable(format!("Memory search failed: {e}").into());
+                            }
+                        });
+                    });
+                }
+                other => tracing::warn!(id = other, "unknown rail suggestion"),
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_agent_context_activated(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            // A linked note opens. A memory row is a pointer, not a place to go: the Memory
+            // screen owns that, and inventing a half-view of a memory inside Notes would be a
+            // second answer to a question another screen already answers.
+            if let Some(file) = id.strip_prefix("note:") {
+                if let Some(idx) = index_of(&ui, file) {
+                    ui.invoke_select_note(idx);
+                }
+            }
+        });
+    }
+
     // ── Backlinks ──
     {
         let weak = app.as_weak();

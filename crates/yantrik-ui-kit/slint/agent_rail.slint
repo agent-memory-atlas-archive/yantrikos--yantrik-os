@@ -1,0 +1,244 @@
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// agent_rail.slint — what Yantrik knows about the thing you are looking at
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//
+// The third column. The app's own work is the middle; this is the context beside it.
+//
+// # The rule this rail lives or dies by
+//
+// Every row here is something the OS actually holds, and says where it got it. Nothing is
+// invented to fill the column, and a section with nothing in it does not draw.
+//
+// That rule is not fastidiousness, it is the whole difference between this working and this
+// being worse than nothing. The OS currently ships fifty-five controls that promise
+// intelligence -- Structure, Summarize, AI Explain, Describe, AI Logs, AI Insights -- and one
+// of them is wired; the other fifty-four log "standalone mode" and return. A context rail
+// that behaves the same way, sixteen times, on every screen, would not read as an intelligent
+// system. It would read as a broken one, and it would be right.
+//
+// So: if the rail has nothing true to say, it collapses and the app is wider. An empty column
+// is an honest answer.
+//
+// # Provenance
+//
+// Each item carries its source, shown in the dim metadata colour: linked, memory, file,
+// calendar, mail. This is the bit that makes the intelligence inspectable rather than magic --
+// "why is this here" has an answer on the row itself, and a wrong answer can be spotted.
+
+import { Theme } from "theme.slint";
+import { Icon, Icons } from "icon.slint";
+import { AppIdentity } from "app_color.slint";
+
+export struct AgentContextItem {
+    id: string,
+    label: string,
+    // The second line: what this is, or why it is here. "mentions this note", "3 days ago".
+    detail: string,
+    // Where it came from: "linked", "memory", "file", "calendar", "mail".
+    //
+    // This is both the provenance tag AND what picks the icon. One field, because a row whose
+    // picture disagrees with its stated source is worse than a row with no picture, and two
+    // fields is how that happens. It also keeps the Rust side free of Slint's Icons global --
+    // the app says where a row came from, which it knows, and not which SVG path to draw,
+    // which is not its business.
+    source: string,
+}
+
+export struct AgentSuggestion {
+    id: string,
+    label: string,
+    // Why this is being offered. Shown small, under the label.
+    detail: string,
+    // Keyword, resolved below. Same reasoning as AgentContextItem.source.
+    icon: string,
+    running: bool,
+    // Pressing this changes something, so it is proposed rather than done.
+    proposes: bool,
+}
+
+component SectionLabel inherits Text {
+    color: Theme.text-dim;
+    font-size: Theme.fs-micro;
+    font-weight: Theme.fw-micro;
+    letter-spacing: 1px;
+}
+
+component ContextRow inherits TouchArea {
+    in property <AgentContextItem> item;
+    height: 38px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.r-sm;
+        background: parent.has-hover ? Theme.hover-fill : transparent;
+
+        HorizontalLayout {
+            padding-left: Theme.sp-2;
+            padding-right: Theme.sp-2;
+            spacing: Theme.sp-2;
+
+            Icon {
+                commands: root.item.source == "memory"   ? Icons.chip
+                        : root.item.source == "file"     ? Icons.file
+                        : root.item.source == "calendar" ? Icons.calendar
+                        : root.item.source == "mail"     ? Icons.mail
+                        : Icons.link;
+                size: 14px;
+                tint: AppIdentity.accent.transparentize(45%);
+                y: (parent.height - self.height) / 2;
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 1px;
+                horizontal-stretch: 1;
+
+                Text {
+                    text: root.item.label;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-caption;
+                    overflow: elide;
+                }
+                if root.item.detail != "" : Text {
+                    text: root.item.detail;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    overflow: elide;
+                }
+            }
+
+            // Where this came from. The one piece of chrome on the row, and the reason the
+            // row can be trusted.
+            if root.item.source != "" : Text {
+                text: root.item.source;
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+component SuggestionRow inherits TouchArea {
+    in property <AgentSuggestion> item;
+    height: root.item.detail != "" ? 42px : 32px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.r-sm;
+        background: parent.has-hover ? AppIdentity.tint : transparent;
+
+        HorizontalLayout {
+            padding-left: Theme.sp-2;
+            padding-right: Theme.sp-2;
+            spacing: Theme.sp-2;
+
+            Icon {
+                commands: root.item.running       ? Icons.spark
+                        : root.item.icon == "search"   ? Icons.search
+                        : root.item.icon == "template" ? Icons.template
+                        : Icons.spark;
+                size: 14px;
+                tint: AppIdentity.accent;
+                y: (parent.height - self.height) / 2;
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 1px;
+                horizontal-stretch: 1;
+
+                Text {
+                    text: root.item.running ? "Working…" : root.item.label;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-caption;
+                    overflow: elide;
+                }
+                if root.item.detail != "" : Text {
+                    text: root.item.detail;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    overflow: elide;
+                }
+            }
+
+            // An ellipsis means it will come back and ask before doing anything. Nothing means
+            // pressing it does the thing.
+            if root.item.proposes : Text {
+                text: "…";
+                color: Theme.text-dim;
+                font-size: Theme.fs-caption;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component AgentRail inherits Rectangle {
+    in property <[AgentContextItem]> context-items: [];
+    in property <[AgentSuggestion]> suggestions: [];
+    // "" when the companion is reachable and idle; otherwise what is wrong, said plainly.
+    in property <string> unavailable: "";
+
+    callback context-activated(string);
+    callback suggestion-activated(string);
+
+    // Nothing true to say, nothing drawn. See the header.
+    property <bool> has-content:
+        root.context-items.length > 0 || root.suggestions.length > 0 || root.unavailable != "";
+
+    width: root.has-content ? 280px : 0px;
+    visible: root.has-content;
+    background: Theme.bg-surface;
+
+    Rectangle { x: 0; width: 1px; height: 100%; background: Theme.separator; }
+
+    VerticalLayout {
+        padding: Theme.sp-4;
+        spacing: 0;
+
+        // ── When the companion cannot be reached ──
+        //
+        // Said once, at the top, instead of every row failing separately. An app started on
+        // its own with no shell behind it is a real state, not an error.
+        if root.unavailable != "" : VerticalLayout {
+            vertical-stretch: 0;
+            spacing: Theme.sp-2;
+            SectionLabel { text: "COMPANION"; }
+            Text {
+                text: root.unavailable;
+                color: Theme.text-dim;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+            Rectangle { height: Theme.sp-4; }
+        }
+
+        if root.context-items.length > 0 : VerticalLayout {
+            vertical-stretch: 0;
+            spacing: Theme.sp-2;
+            SectionLabel { text: "CONTEXT"; }
+            for c in root.context-items : ContextRow {
+                item: c;
+                clicked => { root.context-activated(c.id); }
+            }
+            Rectangle { height: Theme.sp-4; }
+        }
+
+        if root.suggestions.length > 0 : VerticalLayout {
+            vertical-stretch: 0;
+            spacing: Theme.sp-2;
+            SectionLabel { text: "NEXT"; }
+            for s in root.suggestions : SuggestionRow {
+                item: s;
+                clicked => { root.suggestion-activated(s.id); }
+            }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+    }
+}

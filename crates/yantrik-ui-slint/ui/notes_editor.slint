@@ -8,6 +8,8 @@ import { YButton, YIconButton } from "components/y_button.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct NoteEntry {
@@ -142,6 +144,21 @@ export component NotesEditor inherits Rectangle {
     // AI Assist
     in property <bool> ai-is-working: false;
     in property <string> ai-response: "";
+    // ── The agent layer ──
+    //
+    // Everything here is filled from something the app or the companion actually holds --
+    // backlinks the note really has, memories the companion really recalled -- and each row
+    // says which. Nothing is invented to fill the column; see agent_rail.slint.
+    in property <[AgentContextItem]> agent-context: [];
+    in property <[AgentSuggestion]> agent-suggestions: [];
+    in property <string> agent-unavailable: "";
+    callback agent-context-activated(string);
+    callback agent-suggestion-activated(string);
+
+    // What the companion is proposing to do to this note, if anything.
+    in property <AgentProposal> proposal;
+    in property <bool> proposal-working: false;
+
     in-out property <bool> ai-panel-open: false;
     callback ai-structure();
     callback ai-summarize();
@@ -360,65 +377,6 @@ export component NotesEditor inherits Rectangle {
             }
         }
 
-        // ── AI Response Panel ──
-        if root.ai-panel-open && root.ai-response != "" : Rectangle {
-            height: min(200px, ai-notes-resp.preferred-height + 16px);
-            background: Theme.bg-overlay-panel;
-            border-width: 1px;
-            border-color: Theme.accent.transparentize(70%);
-
-            Flickable {
-                viewport-height: ai-notes-resp.preferred-height + 16px;
-
-                ai-notes-resp := VerticalLayout {
-                    alignment: start;
-                    padding: Theme.sp-3;
-                    spacing: Theme.sp-2;
-
-                    HorizontalLayout {
-                        spacing: 6px;
-                        Icon {
-                            commands: Icons.spark;
-                            size: 14px; tint: Theme.accent;
-                            y: (parent.height - self.height) / 2;
-                        }
-                        Text {
-                            text: "AI Result";
-                            color: Theme.accent;
-                            font-size: Theme.fs-caption;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-
-                        // Apply button
-                        YButton {
-                            label: "Apply";
-                            variant: 0;
-                            size: 0;
-                            clicked => { root.ai-apply(); }
-                        }
-
-                        // Dismiss button
-                        YIconButton {
-                            icon-path: Icons.close;
-                            variant: 2;
-                            clicked => {
-                                root.ai-panel-open = false;
-                                root.ai-dismiss();
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: root.ai-response;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-caption;
-                        wrap: word-wrap;
-                    }
-                }
-            }
-        }
 
         // ── Main content: folders + note list + editor ──
         HorizontalLayout {
@@ -681,6 +639,24 @@ export component NotesEditor inherits Rectangle {
             VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 0px;
+
+                // ── What the companion is proposing ──
+                //
+                // In the editor column, not across the whole window: it is about this note, and a
+                // card that also spans the notebook list is claiming to be about more than it is.
+                if root.proposal.title != "" : Rectangle {
+                    height: card.height + Theme.sp-4;
+                    background: Theme.bg-deep;
+                    card := AgentProposalCard {
+                        x: Theme.sp-4;
+                        y: Theme.sp-3;
+                        width: parent.width - Theme.sp-4 * 2;
+                        data: root.proposal;
+                        working: root.proposal-working;
+                        apply => { root.ai-apply(); }
+                        dismiss => { root.ai-panel-open = false; root.ai-dismiss(); }
+                    }
+                }
 
                 // ── Formatting toolbar (only when note selected) ──
                 if root.selected-index >= 0 : Rectangle {
@@ -1549,6 +1525,18 @@ export component NotesEditor inherits Rectangle {
                         }
                     }
                 }
+            }
+
+            // ── What Yantrik knows about this note ──
+            //
+            // Collapses to nothing when there is nothing true to say, which on a fresh machine
+            // with no notes and no shell is most of the time.
+            AgentRail {
+                context-items: root.agent-context;
+                suggestions: root.agent-suggestions;
+                unavailable: root.agent-unavailable;
+                context-activated(id) => { root.agent-context-activated(id); }
+                suggestion-activated(id) => { root.agent-suggestion-activated(id); }
             }
         }
     }

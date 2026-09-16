@@ -4,8 +4,12 @@
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
 import { AppIdentity } from "app_color.slint";
 import { NotesEditor, NoteEntry, NoteVersionEntry, NoteBacklink, NoteImage } from "notes_editor.slint";
+import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposal } from "components/agent_proposal.slint";
 
 export { NoteEntry, NoteVersionEntry, NoteBacklink, NoteImage, ThemeMode, AccentPreset }
+// The agent layer's types, so the Rust side can build them.
+export { AgentContextItem, AgentSuggestion, AgentProposal }
 
 export component NotesApp inherits Window {
     // What app this window is.
@@ -56,6 +60,15 @@ export component NotesApp inherits Window {
 
     // ── AI ──
     in property <bool> ai-is-working <=> editor.ai-is-working;
+    // ── The agent layer ──
+    in property <[AgentContextItem]> agent-context <=> editor.agent-context;
+    in property <[AgentSuggestion]> agent-suggestions <=> editor.agent-suggestions;
+    in property <string> agent-unavailable <=> editor.agent-unavailable;
+    callback agent-context-activated <=> editor.agent-context-activated;
+    callback agent-suggestion-activated <=> editor.agent-suggestion-activated;
+    in property <AgentProposal> proposal <=> editor.proposal;
+    in property <bool> proposal-working <=> editor.proposal-working;
+
     in property <string> ai-response <=> editor.ai-response;
     in-out property <bool> ai-panel-open <=> editor.ai-panel-open;
 
