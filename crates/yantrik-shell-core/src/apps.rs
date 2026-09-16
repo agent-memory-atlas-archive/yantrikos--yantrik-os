@@ -33,11 +33,17 @@ DesktopEntry {
             categories: "System;FileManager;".into(), comment: "Browse files".into(),
             app_id: "files".into(), icon_char: "F".into(),
         },
-DesktopEntry {
-            name: "Editor".into(), exec: "__builtin__".into(), icon: String::new(),
-            categories: "Development;TextEditor;".into(), comment: "Text editor with AI assist".into(),
-            app_id: "editor".into(), icon_char: "\u{2261}".into(),
-        },
+// "Editor" is NOT listed here, though the shell does have an editor screen.
+        //
+        // yantrik-text-editor is a real application with its own window and its own taskbar
+        // entry, and it ships a .desktop file. Listing the shell's embedded editor beside it
+        // put two entries called "Editor", with the same icon, next to each other in the
+        // launcher — photographed doing exactly that. One of them opened a window and the
+        // other changed the shell's screen, and nothing distinguished them.
+        //
+        // The application wins: it is the one you can alt-tab to. Screen 12 is still reached
+        // by the dock, by the file browser opening a text file, and by the editor_* actions on
+        // the control surface — none of which go through this list.
         DesktopEntry {
             name: "Media Player".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "AudioVideo;Player;".into(), comment: "Music & media".into(),
@@ -369,5 +375,44 @@ fn derive_icon_char(categories: &str, name: &str) -> String {
             .next()
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "?".to_string())
+    }
+}
+
+#[cfg(test)]
+mod name_collision_tests {
+    use super::builtin_apps;
+
+    /// The names of the applications this OS ships, from APP_NAMES in yantrik-ui.
+    ///
+    /// Duplicated here rather than imported because yantrik-shell-core sits BELOW yantrik-ui
+    /// and must not depend on it. The list is small and changes rarely; the test failing with
+    /// a clear message is worth more than the coupling would be.
+    const SHIPPED_APP_NAMES: &[&str] = &[
+        "Calendar", "Containers", "yDoc", "Downloads", "Email", "Images", "Music", "Network",
+        "Notes", "yPresent", "Snippets", "ySheets", "System Monitor", "Terminal", "Editor",
+        "Weather",
+    ];
+
+    /// No shell screen may share a name with an application.
+    ///
+    /// The launcher lists both, one after the other, so a collision reads as the same thing
+    /// listed twice — and the two behave differently: one opens a window you can alt-tab to,
+    /// the other changes the shell's screen. "Editor" was exactly this, and it took a
+    /// photograph of the launcher to notice.
+    #[test]
+    fn no_builtin_screen_shares_a_name_with_an_app() {
+        let clashes: Vec<String> = builtin_apps()
+            .iter()
+            .filter(|e| SHIPPED_APP_NAMES.contains(&e.name.as_str()))
+            .map(|e| format!("builtin `{}` is also the name of a shipped app", e.name))
+            .collect();
+
+        assert!(
+            clashes.is_empty(),
+            "{}\n\nThe launcher shows both, side by side, and nothing tells them apart. \
+             Either rename the screen or drop it from builtin_apps() and let the application \
+             be the one that answers to the name.",
+            clashes.join("\n")
+        );
     }
 }
