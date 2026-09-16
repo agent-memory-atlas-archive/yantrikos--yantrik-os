@@ -22,7 +22,27 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/target-yantrik}/release"
+# Where cargo ACTUALLY puts things, asked of cargo rather than assumed.
+#
+# This used to read "${CARGO_TARGET_DIR:-$HOME/target-yantrik}/release". On a machine with
+# CARGO_TARGET_DIR unset -- which is the normal case, and was the case on the build box --
+# cargo writes to $PROJECT_ROOT/target/release while this script packaged $HOME/target-yantrik.
+# It built one directory and shipped another, reported "29 binaries" and a green publish, and
+# put a release on the server whose app binaries were five hours old. Every UI change in it was
+# missing, and nothing anywhere said so.
+#
+# `cargo metadata` is the authoritative answer: it accounts for the environment variable, for
+# build.target-dir in any .cargo/config.toml, and for the default. An explicit TARGET_DIR still
+# wins, for the case where someone is packaging binaries built elsewhere on purpose.
+resolve_target_dir() {
+  if [ -n "${TARGET_DIR:-}" ]; then printf '%s' "$TARGET_DIR"; return; fi
+  local d
+  d="$(cd "$PROJECT_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null \
+       | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+  [ -n "$d" ] || d="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
+  printf '%s/release' "$d"
+}
+TARGET_DIR="$(resolve_target_dir)"
 OUT_DIR="$PROJECT_ROOT/dist"
 WITH_MODELS=0
 DO_BUILD=1
@@ -49,15 +69,32 @@ NAME="yantrik-os-${VERSION}-${STAMP}-${GITREV}-linux-amd64"
 
 if [ "$DO_BUILD" = 1 ]; then
   say "Building the workspace"
+  # A marker to compare the output against. The check below is the only thing standing between
+  # a mis-resolved target directory and a release that looks fine and contains nothing new.
+  BUILD_MARKER="$(mktemp)"
   # One rustc in this workspace peaks near 14 GB of RSS (Slint macro expansion), so this
   # is the step that decides what machine can build a release at all.
   ( cd "$PROJECT_ROOT" && RUSTFLAGS="-A warnings" cargo build --release --workspace ) \
     || fail "cargo build failed"
+
+  # Did the build we just ran actually land in the directory we are about to package? If the
+  # newest binary there predates the build, the answer is no, and shipping it would put stale
+  # code on every machine that follows this channel while reporting success.
+  NEWEST="$(find "$TARGET_DIR" -maxdepth 1 -type f -perm -u+x -newer "$BUILD_MARKER" 2>/dev/null | head -1)"
+  if [ -z "$NEWEST" ]; then
+    rm -f "$BUILD_MARKER"
+    fail "nothing in $TARGET_DIR was written by the build that just ran.
+   cargo builds into the directory it reports in \`cargo metadata\`; this script packages
+   \$TARGET_DIR. If those differ you get a green publish full of old binaries.
+   Set TARGET_DIR explicitly if you are packaging binaries built elsewhere on purpose."
+  fi
+  rm -f "$BUILD_MARKER"
 fi
 
 [ -d "$TARGET_DIR" ] || fail "no release directory at $TARGET_DIR (set CARGO_TARGET_DIR)"
 
 say "Discovering what the OS is made of"
+echo "   from $TARGET_DIR"
 mapfile -t BINS < <(
   find "$TARGET_DIR" -maxdepth 1 -type f -executable \
     ! -name "*.so" ! -name "*.d" ! -name "*.rlib" ! -name "build-script*" ! -name "test-*" ! -name "*-test" ! -name "bench-*" \
