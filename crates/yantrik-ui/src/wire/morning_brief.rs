@@ -26,6 +26,28 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     wire_brief_section_action(ui, ctx);
 }
 
+/// Take today's brief slot, returning false if it has already been taken.
+///
+/// A dated marker beside the rest of the shell's state. Deliberately not in memory: the point
+/// is to survive the restart, which is the whole thing that was going wrong.
+fn claim_brief_for_today() -> bool {
+    let Some(home) = std::env::var_os("HOME") else {
+        return true;
+    };
+    let dir = std::path::PathBuf::from(home).join(".local/share/yantrik");
+    let marker = dir.join("last-brief");
+    let today = crate::app_context::current_date_short();
+
+    if std::fs::read_to_string(&marker).is_ok_and(|s| s.trim() == today) {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    // If the write fails the brief still shows; showing it twice is a smaller fault than
+    // never showing it because a directory was read-only.
+    let _ = std::fs::write(&marker, &today);
+    true
+}
+
 /// Timer: request structured brief 8 seconds after boot, populate the card.
 fn wire_brief_card(ui: &App, ctx: &AppContext) {
     let bridge = ctx.bridge.clone();
@@ -38,6 +60,17 @@ fn wire_brief_card(ui: &App, ctx: &AppContext) {
         // Only show if companion is online
         if !bridge.is_online() {
             tracing::info!("Morning brief card skipped — companion offline");
+            return;
+        }
+
+        // And only once a day.
+        //
+        // It fired three seconds after every boot, so a morning of restarts meant the brief
+        // arrived over and over — and during this work the shell was restarted dozens of times
+        // an hour. A daily brief that appears on the fourth restart before lunch is not a
+        // briefing, it is a popup.
+        if !claim_brief_for_today() {
+            tracing::info!("Morning brief already shown today");
             return;
         }
 

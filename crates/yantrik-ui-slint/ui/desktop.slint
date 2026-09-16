@@ -1065,10 +1065,20 @@ export component DesktopScreen inherits Rectangle {
 
     // ── Layer 2.7: Morning Brief Card (floating, upper-left) ──
     MorningBriefCard {
-        // Top-left is where the desktop icons live now, and the brief was landing
-        // on top of them. In agent mode there are no icons, so it keeps its corner.
-        x: root.agent-mode ? 24px : parent.width - self.width - 24px;
-        y: Theme.status-bar-height + 16px;
+        // Where there is actually nothing.
+        //
+        // "In agent mode there are no icons, so it keeps its corner" was true when it was
+        // written and stopped being true the moment agent mode grew a working-set rail in that
+        // corner. The card then sat on top of PROJECT and RECENT *and* across the hero, with
+        // three layers of text overlapping in the same 400 pixels.
+        //
+        // Agent mode: the foot of the centre column, above the taskbar. Clear of both rails,
+        // clear of the hero, and where a transient card belongs — it is an announcement, not
+        // part of the layout.
+        x: root.agent-mode ? 296px + Theme.sp-5 : parent.width - self.width - 24px;
+        y: root.agent-mode
+            ? parent.height - 40px - self.height - Theme.sp-4
+            : Theme.status-bar-height + 16px;
         // A child of a plain Rectangle fills its parent by default, so the card
         // ignored its own preferred-height and ran the whole height of the screen.
         height: self.preferred-height;

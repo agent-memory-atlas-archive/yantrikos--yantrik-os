@@ -9,6 +9,23 @@ use sysinfo::{Disks, System};
 
 use crate::events::SystemEvent;
 
+/// Whether this entry is a THREAD rather than a process.
+///
+/// sysinfo enumerates tasks, and on Linux every thread is a task with its own /proc entry and
+/// its own `comm`. So the monitor was announcing a process start for every thread any program
+/// spawned, under names like `pool-269`, `async-io`, `PerfettoTrace` and `smithay-clipboa` --
+/// that last one fifteen characters, because `comm` is truncated to fifteen and the truncation
+/// is the giveaway.
+///
+/// Downstream this went into the companion's memory as "App opened: pool-269". A sample of
+/// twenty recalled memories on a machine that had been running for a few hours came back
+/// nineteen-twentieths thread churn, and the database was 15 MB with two notes on the machine.
+/// Nothing on this path was a bug in the filter above it -- the events should never have been
+/// emitted.
+fn is_thread(process: &sysinfo::Process) -> bool {
+    process.thread_kind().is_some()
+}
+
 /// Main loop for the process/resource monitor thread.
 /// Polls every `process_secs` for process changes, every `resource_secs` for CPU/RAM/disk.
 pub fn run_process_monitor(tx: Sender<SystemEvent>, process_secs: u64, resource_secs: u64) {
@@ -18,6 +35,9 @@ pub fn run_process_monitor(tx: Sender<SystemEvent>, process_secs: u64, resource_
     // Initial snapshot — record all currently running processes
     sys.refresh_all();
     for (pid, process) in sys.processes() {
+        if is_thread(process) {
+            continue;
+        }
         known_pids.insert(pid.as_u32(), process.name().to_string_lossy().to_string());
     }
 
@@ -34,6 +54,9 @@ pub fn run_process_monitor(tx: Sender<SystemEvent>, process_secs: u64, resource_
 
             let mut current_pids: HashMap<u32, String> = HashMap::new();
             for (pid, process) in sys.processes() {
+                if is_thread(process) {
+                    continue;
+                }
                 let pid_u32 = pid.as_u32();
                 let name = process.name().to_string_lossy().to_string();
                 current_pids.insert(pid_u32, name.clone());

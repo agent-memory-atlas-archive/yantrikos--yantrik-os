@@ -2454,7 +2454,18 @@ fn worker_loop(
             Ok(CompanionCommand::GetMorningBrief { reply_tx }) => {
                 // Build structured brief from active day context sections
                 let user_name = &companion.config.user_name;
-                let greeting = format!("Good morning, {}!", user_name);
+                // The clock decides, not the name of the feature.
+                //
+                // This was hardcoded to "Good morning", so a machine booted at 20:29 greeted
+                // its user with a card saying good morning directly beside a hero saying good
+                // evening. Both were on screen at once; one of them was wrong every day after
+                // lunch. The hero already had the answer -- there is one function for this and
+                // this call site was not using it.
+                let greeting = format!(
+                    "{}, {}!",
+                    crate::app_context::time_of_day_greeting(),
+                    user_name
+                );
                 let sections: Vec<MorningBriefSectionData> = companion
                     .active_context
                     .sections_by_priority()

@@ -128,7 +128,7 @@ pub fn event_to_memory(event: &yantrik_os::SystemEvent) -> Option<(String, Strin
             ))
         }
         SystemEvent::ProcessStarted { name, .. } => {
-            if is_noisy_process(name) {
+            if !is_application(name) {
                 return None;
             }
             let safe_name: String = name.chars().filter(|c| !c.is_control()).take(50).collect();
@@ -139,7 +139,7 @@ pub fn event_to_memory(event: &yantrik_os::SystemEvent) -> Option<(String, Strin
             ))
         }
         SystemEvent::ProcessStopped { name, .. } => {
-            if is_noisy_process(name) {
+            if !is_application(name) {
                 return None;
             }
             let safe_name: String = name.chars().filter(|c| !c.is_control()).take(50).collect();
@@ -214,6 +214,41 @@ pub fn event_to_memory(event: &yantrik_os::SystemEvent) -> Option<(String, Strin
 
 /// Transient/noisy processes that churn constantly and don't represent
 /// meaningful user activity (browser helpers, system daemons, etc.).
+/// Whether this process is an APPLICATION -- something the user could have launched.
+///
+/// The test used to be a denylist of names, and a denylist cannot work here: the space of
+/// process names is unbounded and partly generated, so `pool-269`, `pool-137` and `pool-290`
+/// all walked past a list that carefully excluded `kworker` and `chrome_crashpad`. Filtering
+/// noise by naming it is a losing race against a machine that invents new names.
+///
+/// So the question is inverted. The OS already knows what its applications are: the desktop
+/// entries the launcher reads. If a process does not correspond to one of those, its lifecycle
+/// is not a memory -- it is telemetry, and the hourly rollup is where telemetry goes.
+///
+/// (The thread flood that made this obvious is fixed upstream, in the process monitor: a thread
+/// is not a process and should never have reached here. This is the second line of defence, and
+/// the one that also covers daemons, helpers and one-shot subprocesses.)
+fn is_application(name: &str) -> bool {
+    let base = name.split_whitespace().next().unwrap_or(name);
+    if base.is_empty() {
+        return false;
+    }
+    // This OS's own applications, which are named for their binaries.
+    if base.starts_with("yantrik-") {
+        return true;
+    }
+    // Anything with a desktop entry — the same list the launcher shows, so "an app" means the
+    // same thing to the memory as it does to the person.
+    crate::apps::Catalogue::shared().get().iter().any(|e| {
+        e.exec
+            .split_whitespace()
+            .next()
+            .and_then(|c| c.rsplit('/').next())
+            .is_some_and(|c| c.eq_ignore_ascii_case(base))
+    })
+}
+
+#[allow(dead_code)]
 fn is_noisy_process(name: &str) -> bool {
     const NOISY: &[&str] = &[
         // Browser/app helpers
