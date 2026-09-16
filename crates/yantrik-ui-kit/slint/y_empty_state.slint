@@ -3,6 +3,7 @@
 // A stroke glyph in a tinted circle, a title, one sentence, and at most two actions. No emoji:
 // an empty inbox is not a party.
 import { Theme } from "theme.slint";
+import { AppIdentity } from "app_color.slint";
 import { Icon, Icons } from "icon.slint";
 import { YButton } from "y_button.slint";
 
@@ -33,7 +34,7 @@ export component YEmptyState inherits Rectangle {
                 Icon {
                     commands: root.icon-path;
                     size: 26px;
-                    tint: Theme.accent;
+                    tint: AppIdentity.accent;
                     thickness: 1.5px;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;

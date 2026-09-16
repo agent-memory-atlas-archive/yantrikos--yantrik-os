@@ -2,11 +2,20 @@
 // Wraps the shared NotesEditor component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppIdentity } from "app_color.slint";
 import { NotesEditor, NoteEntry, NoteVersionEntry, NoteBacklink, NoteImage } from "notes_editor.slint";
 
 export { NoteEntry, NoteVersionEntry, NoteBacklink, NoteImage, ThemeMode, AccentPreset }
 
 export component NotesApp inherits Window {
+    // What app this window is.
+    //
+    // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
+    // the screens that have one, and Email's account-setup screen has none -- so the app that
+    // most needs to look like itself on first run was the one screen still drawing the house
+    // teal. The window is the only element every screen of an app is inside.
+    init => { AppIdentity.id = "notes"; }
+
     default-font-family: Theme.font-ui;
     title: "Notes";
     // preferred-, not fixed: a fixed size makes the window unresizable, and the content

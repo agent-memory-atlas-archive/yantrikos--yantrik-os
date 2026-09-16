@@ -2,6 +2,7 @@
 // Wraps the shared EmailClient component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppIdentity } from "app_color.slint";
 import { EmailClient, EmailFolderData, EmailListItem, EmailDetailData,
          EmailThreadMessage, EmailAttachmentData, EmailSignatureData } from "email.slint";
 
@@ -9,6 +10,14 @@ export { EmailFolderData, EmailListItem, EmailDetailData, EmailThreadMessage,
          EmailAttachmentData, EmailSignatureData, ThemeMode, AccentPreset }
 
 export component EmailApp inherits Window {
+    // What app this window is.
+    //
+    // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
+    // the screens that have one, and Email's account-setup screen has none -- so the app that
+    // most needs to look like itself on first run was the one screen still drawing the house
+    // teal. The window is the only element every screen of an app is inside.
+    init => { AppIdentity.id = "email"; }
+
     default-font-family: Theme.font-ui;
     title: "Email";
     // preferred-, not fixed: a fixed size makes the window unresizable, and the content

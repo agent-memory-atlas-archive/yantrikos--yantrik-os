@@ -4,6 +4,7 @@
 // the accent tint — a shape, not just a colour change. Section titles use the same small
 // letter-spaced label the shell's rails use, so an app's sidebar reads as part of the OS.
 import { Theme } from "theme.slint";
+import { AppIdentity } from "app_color.slint";
 import { Icon } from "icon.slint";
 
 export struct YSidebarItem {
@@ -81,7 +82,7 @@ export component YSidebar inherits Rectangle {
                         height: 16px;
                         y: (parent.height - 16px) / 2;
                         border-radius: 1.5px;
-                        background: Theme.accent;
+                        background: AppIdentity.accent;
                     }
 
                     item-ta := TouchArea {
@@ -97,12 +98,12 @@ export component YSidebar inherits Rectangle {
                         if item.icon-path != "" : Icon {
                             commands: item.icon-path;
                             size: 15px;
-                            tint: is-active ? Theme.accent : Theme.text-secondary;
+                            tint: is-active ? AppIdentity.accent : Theme.text-secondary;
                             y: (parent.height - self.height) / 2;
                         }
                         if item.icon-path == "" && item.icon != "" : Text {
                             text: item.icon;
-                            color: is-active ? Theme.accent : Theme.text-secondary;
+                            color: is-active ? AppIdentity.accent : Theme.text-secondary;
                             font-size: Theme.fs-body;
                             vertical-alignment: center;
                             width: 16px;
@@ -120,7 +121,7 @@ export component YSidebar inherits Rectangle {
 
                         if item.badge-count > 0 : Text {
                             text: item.badge-count < 100 ? item.badge-count : "99+";
-                            color: is-active ? Theme.accent : Theme.text-dim;
+                            color: is-active ? AppIdentity.accent : Theme.text-dim;
                             font-size: Theme.fs-micro;
                             font-weight: 500;
                             vertical-alignment: center;

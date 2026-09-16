@@ -2,11 +2,20 @@
 // Wraps the shared SpreadsheetScreen component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppIdentity } from "app_color.slint";
 import { SpreadsheetScreen, SpreadsheetCell, SheetTab, ChartData } from "spreadsheet.slint";
 
 export { SpreadsheetCell, SheetTab, ChartData, ThemeMode, AccentPreset }
 
 export component SpreadsheetApp inherits Window {
+    // What app this window is.
+    //
+    // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
+    // the screens that have one, and Email's account-setup screen has none -- so the app that
+    // most needs to look like itself on first run was the one screen still drawing the house
+    // teal. The window is the only element every screen of an app is inside.
+    init => { AppIdentity.id = "spreadsheet"; }
+
     default-font-family: Theme.font-ui;
     title: "ySheets";
     // preferred-, not fixed: a fixed size makes the window unresizable, and the content

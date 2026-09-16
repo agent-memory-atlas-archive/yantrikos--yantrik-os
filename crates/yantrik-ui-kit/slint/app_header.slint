@@ -28,7 +28,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 import { YButton } from "y_button.slint";
-import { AppColor } from "app_color.slint";
+import { AppColor, AppIdentity } from "app_color.slint";
 
 // ── One action in an app's header ───────────────────────────────────────────────────────
 //
@@ -66,6 +66,12 @@ export component AppHeader inherits Rectangle {
     // what every header used to get — sixteen apps wearing one tint, distinguishable only by
     // reading the word next to it.
     in property <string> app-id: "";
+
+    // Tell the rest of the window what it is. Every app already passes app-id here, so this is
+    // the one place it can be picked up without twenty-two apps each repeating themselves.
+    init => {
+        if (root.app-id != "") { AppIdentity.id = root.app-id; }
+    }
     // Unsaved-changes dot, beside the title.
     in property <bool> modified: false;
     // A transient word from the app — "Exported", "Saving…" — in the accent colour.

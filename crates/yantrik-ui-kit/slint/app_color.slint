@@ -105,3 +105,28 @@ export global AppColor {
         return root.for-app(id).transparentize(ThemeMode.dark ? 0.86 : 0.90);
     }
 }
+
+/// Which app this window belongs to, and the two colours that follow from it.
+///
+/// Set once, by AppHeader, from the app-id every app already gives it -- so no app has to say
+/// what it is twice and none of them can drift.
+///
+/// # Why identity and not the accent
+///
+/// The obvious move is to make Theme.accent itself app-coloured and let all seven hundred
+/// existing call sites follow. That is wrong, and the palette above is the reason: these hues
+/// were tuned as ICON TINTS on a dark surface. Theme.accent is also a FILL -- the background of
+/// a primary button, with light text on it -- and #e8c44a behind white text is unreadable. One
+/// token cannot be both.
+///
+/// So the split is the one macOS makes: colour is identity, the accent is action. Notes wears
+/// yellow in its header, its sidebar selection and its empty state; the button that creates a
+/// note is still the system accent, because "this is the primary action" is not a fact about
+/// Notes. Anything added here has to pass the same test -- is this saying WHICH app, or is it
+/// saying WHAT this control does?
+export global AppIdentity {
+    in-out property <string> id: "";
+
+    out property <color> accent: root.id != "" ? AppColor.for-app(root.id) : Theme.accent;
+    out property <color> tint:   root.id != "" ? AppColor.tint-for-app(root.id) : Theme.tint-accent;
+}

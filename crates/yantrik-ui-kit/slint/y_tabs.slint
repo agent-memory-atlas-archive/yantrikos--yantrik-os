@@ -1,5 +1,6 @@
 // YTabs — a tab strip with a 2px accent underline on the active tab.
 import { Theme } from "theme.slint";
+import { AppIdentity } from "app_color.slint";
 import { Icon } from "icon.slint";
 
 export struct YTabItem {
@@ -50,12 +51,12 @@ export component YTabs inherits Rectangle {
                 if tab.icon-path != "" : Icon {
                     commands: tab.icon-path;
                     size: 14px;
-                    tint: is-active ? Theme.accent : Theme.text-secondary;
+                    tint: is-active ? AppIdentity.accent : Theme.text-secondary;
                     y: (parent.height - self.height) / 2;
                 }
                 if tab.icon-path == "" && tab.icon != "" : Text {
                     text: tab.icon;
-                    color: is-active ? Theme.accent : Theme.text-secondary;
+                    color: is-active ? AppIdentity.accent : Theme.text-secondary;
                     font-size: Theme.fs-body;
                     vertical-alignment: center;
                 }
@@ -79,7 +80,7 @@ export component YTabs inherits Rectangle {
                     background: is-active ? Theme.tint-accent : Theme.hover-fill;
                     cnt := Text {
                         text: tab.badge-count;
-                        color: is-active ? Theme.accent : Theme.text-secondary;
+                        color: is-active ? AppIdentity.accent : Theme.text-secondary;
                         font-size: Theme.fs-micro;
                         font-weight: 600;
                         horizontal-alignment: center;
@@ -94,7 +95,7 @@ export component YTabs inherits Rectangle {
                 width: is-active ? parent.width - Theme.sp-3 : 0;
                 x: (parent.width - self.width) / 2;
                 border-radius: 1px;
-                background: Theme.accent;
+                background: AppIdentity.accent;
                 animate width { duration: Theme.dur-fast; easing: ease-out; }
             }
         }
