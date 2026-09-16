@@ -13,8 +13,23 @@
 
 # ── Frame ───────────────────────────────────────────────────────────
 border.width: 1
-padding.height: 7
 padding.width: 9
+
+# The title bar and its buttons, sized deliberately.
+#
+# They were not sized at all: padding.height alone, so the bar was however tall the font made it
+# and the buttons were whatever labwc drew by default. Measured off a screenshot, the three of
+# them together lit 64 pixels -- about twenty each, hairline strokes on a 26px bar. The colour
+# was never the problem (#e8eaef on #161622 is as much contrast as this palette has); the
+# problem was that there was almost nothing there to see, and nothing like a target to aim at.
+# Reported, accurately, as "the close, min, max window buttons are not there".
+#
+# 32px is the height Windows 11 and GNOME both land on, and a 26px square button gives a hit
+# target a person can actually click without aiming.
+titlebar.height: 32
+button.width: 26
+button.height: 26
+button.spacing: 2
 
 # ── Active window ───────────────────────────────────────────────────
 # The title bar is bg-surface, so it reads as the top edge of the app rather than a separate

@@ -154,6 +154,12 @@ cp "$PROJECT_ROOT/config/yantrik-ollama.yaml" "$ROOT/config.yaml" 2>/dev/null \
 mkdir -p "$ROOT/share/labwc" "$ROOT/share/fonts"
 cp "$PROJECT_ROOT/config/labwc/rc.xml" "$ROOT/share/labwc/rc.xml"
 cp "$PROJECT_ROOT/config/labwc/themerc" "$ROOT/share/labwc/themerc"
+# The titlebar buttons, which labwc loads from the theme directory in place of its built-in
+# six-by-six bitmaps. Rendered by scripts/render-window-buttons.py. Not optional decoration: the
+# built-ins lit 64 pixels between the three of them on this palette, which is how a machine
+# comes to have no visible way to close a window.
+cp "$PROJECT_ROOT/config/labwc/"*.png "$ROOT/share/labwc/" 2>/dev/null \
+  || fail "no titlebar button icons in config/labwc — run scripts/render-window-buttons.py"
 # What starts with the desktop: the notification daemon and the polkit agent.
 cp "$PROJECT_ROOT/config/labwc/autostart" "$ROOT/share/labwc/autostart"
 # Barlow is embedded in each app binary, which the compositor cannot read a font out of, so the

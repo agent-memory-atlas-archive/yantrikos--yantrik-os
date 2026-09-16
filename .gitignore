@@ -37,6 +37,7 @@ memory.db.bak
 scripts/*
 !scripts/render-wallpapers.py
 !scripts/render-scene-wallpapers.py
+!scripts/render-window-buttons.py
 
 # Python
 __pycache__/
@@ -64,6 +65,9 @@ lib.long-type-*.txt
 # not a smaller version of this project, it is a broken one. They are 60-270 KB each and they
 # are reproducible from the scripts above, so they belong in the tree next to them.
 !crates/yantrik-ui-slint/ui/wallpapers/*.png
+# ...and the titlebar buttons, for the same reason: generated, tiny, and the window has no
+# close button without them.
+!config/labwc/*.png
 
 # Secrets
 google_client_*
