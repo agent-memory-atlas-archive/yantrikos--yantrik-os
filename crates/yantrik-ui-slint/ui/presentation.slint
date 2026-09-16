@@ -428,7 +428,7 @@ export component PresentationScreen inherits Rectangle {
             // belong in one. The deck's name, whether it is saved, and the verbs that apply to
             // the whole file belong in the frame every app wears.
             AppHeader {
-            app-id: "presentation";
+                app-id: "presentation";
                 icon: Icons.present;
                 title: root.presentation-title != "" ? root.presentation-title : "yPresent";
                 subtitle: root.slide-progress;
@@ -441,13 +441,16 @@ export component PresentationScreen inherits Rectangle {
                 ];
                 actions: [
                     { id: "find",    icon: Icons.search, label: "Find", active: root.show-search },
-                    { id: "present", icon: Icons.play,   label: "Present", emphasis: 1 },
+                    { id: "ai",      icon: Icons.spark,  label: "AI", emphasis: 1,
+                      active: root.show-ai-panel },
+                    { id: "present", icon: Icons.play,   label: "Present", emphasis: 2 },
                 ];
                 action(id) => {
                     if (id == "save") { root.save-presentation(); }
                     else if (id == "undo") { root.undo(); }
                     else if (id == "redo") { root.redo(); }
                     else if (id == "find") { root.show-search = !root.show-search; }
+                    else if (id == "ai") { root.show-ai-panel = !root.show-ai-panel; }
                     else if (id == "present") { root.toggle-present(); }
                 }
             }
@@ -461,10 +464,14 @@ export component PresentationScreen inherits Rectangle {
                     padding-right: 8px;
                     spacing: 0px;
 
-                    // Quick actions
-                    RibbonQuickAction { icon-path: Icons.save; tooltip-text: "Save"; clicked => { root.save-presentation(); } }
-                    RibbonQuickAction { icon-path: Icons.rotate-ccw; tooltip-text: "Undo"; clicked => { root.undo(); } }
-                    RibbonQuickAction { icon-path: Icons.rotate-cw; tooltip-text: "Redo"; clicked => { root.redo(); } }
+                    // The ribbon's tab strip, and nothing else.
+                    //
+                    // It used to open with Save / Undo / Redo and close with Find and AI -- all five of which
+                    // are already in the AppHeader one row above, doing the same thing to the same document.
+                    // Converting this app to the SDK header gave it the commands and left the old row intact,
+                    // so the window opened with two command bars stacked, the top one and the bottom one
+                    // offering the same five buttons eighteen pixels apart. The tabs are the part that was
+                    // never anywhere else.
 
                     Rectangle { width: 12px; }
 
@@ -474,30 +481,7 @@ export component PresentationScreen inherits Rectangle {
                     RibbonTabButton { label: "Insert"; is-active: ribbon-tab == 2; clicked => { ribbon-tab = 2; } }
                     RibbonTabButton { label: "Export"; is-active: ribbon-tab == 3; clicked => { ribbon-tab = 3; } }
 
-                    // Spacer
                     Rectangle {}
-
-                    // Far-right: Search + AI + Present
-                    RibbonQuickAction {
-                        icon-path: Icons.search;
-                        tooltip-text: "Search";
-                        clicked => { root.show-search = !root.show-search; }
-                    }
-                    RibbonToolButton {
-                        label: "AI";
-                        is-active: root.show-ai-panel;
-                        tooltip-text: "AI Assist";
-                        clicked => { root.show-ai-panel = !root.show-ai-panel; }
-                    }
-
-                    Rectangle { width: 8px; }
-
-                    RibbonAccentButton {
-                        label: "Present";
-                        icon: "▶";
-                        accent-color: Theme.accent;
-                        clicked => { root.toggle-present(); }
-                    }
                 }
 
                 Rectangle { y: parent.height - 1px; height: 1px; background: Theme.separator; }

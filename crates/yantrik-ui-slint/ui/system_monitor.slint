@@ -43,6 +43,14 @@ export struct MonitorProcessData {
 // ── Main component ──
 
 export component SystemMonitor inherits Rectangle {
+    // Whether there is anywhere to go back TO.
+    //
+    // The header's back arrow was hardcoded on, which is right inside the shell -- back means
+    // the desktop -- and meaningless in the standalone window, where it was the first control
+    // in the title row of an app that has no history and no parent. Default true, so the shell
+    // keeps what it had; the standalone wrappers say false.
+    in property <bool> show-back: true;
+
     background: Theme.bg-deep;
 
     // CPU
@@ -118,7 +126,7 @@ export component SystemMonitor inherits Rectangle {
         // -- Header --
         AppHeader {
             app-id: "sysmonitor";
-            show-back: true;
+            show-back: root.show-back;
             icon: Icons.monitor;
             title: "System Monitor";
             subtitle: root.uptime-text != "" ? "Up " + root.uptime-text : "";

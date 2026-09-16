@@ -133,6 +133,14 @@ component MetricTile inherits Rectangle {
 }
 
 export component WeatherDashboard inherits Rectangle {
+    // Whether there is anywhere to go back TO.
+    //
+    // The header's back arrow was hardcoded on, which is right inside the shell -- back means
+    // the desktop -- and meaningless in the standalone window, where it was the first control
+    // in the title row of an app that has no history and no parent. Default true, so the shell
+    // keeps what it had; the standalone wrappers say false.
+    in property <bool> show-back: true;
+
     background: Theme.bg-deep;
 
     // The hero is a two-column grid: an icon column and a text column. Both the
@@ -219,7 +227,7 @@ export component WeatherDashboard inherits Rectangle {
         // with thirty lines of its own geometry.
         AppHeader {
             app-id: "weather";
-            show-back: true;
+            show-back: root.show-back;
             icon: Icons.weather;
             title: "Weather";
             subtitle: root.weather-last-updated != ""

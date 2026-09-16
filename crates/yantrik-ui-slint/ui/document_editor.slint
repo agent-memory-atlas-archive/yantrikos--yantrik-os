@@ -202,34 +202,20 @@ export component DocumentEditorScreen inherits Rectangle {
                 padding-right: 8px;
                 spacing: 0px;
 
-                // Quick actions: Save, Undo, Redo
-                RibbonQuickAction { icon-path: Icons.save; tooltip-text: "Save"; clicked => { root.doc-save(); } }
-                RibbonQuickAction { icon-path: Icons.rotate-ccw; tooltip-text: "Undo"; clicked => { root.doc-undo(); } }
-                RibbonQuickAction { icon-path: Icons.rotate-cw; tooltip-text: "Redo"; clicked => { root.doc-redo(); } }
-
-                Rectangle { width: 12px; }
-
-                // Tab strip
+                // The ribbon's tab strip, and nothing else.
+                //
+                // It used to open with Save / Undo / Redo and close with Find and AI -- all five of which
+                // are already in the AppHeader one row above, doing the same thing to the same document.
+                // Converting this app to the SDK header gave it the commands and left the old row intact,
+                // so the window opened with two command bars stacked, the top one and the bottom one
+                // offering the same five buttons eighteen pixels apart. The tabs are the part that was
+                // never anywhere else.
                 RibbonTabButton { label: "Home"; is-active: root.ribbon-tab == 0; clicked => { root.ribbon-tab = 0; } }
                 RibbonTabButton { label: "Insert"; is-active: root.ribbon-tab == 1; clicked => { root.ribbon-tab = 1; } }
                 RibbonTabButton { label: "Review"; is-active: root.ribbon-tab == 2; clicked => { root.ribbon-tab = 2; } }
                 RibbonTabButton { label: "Export"; is-active: root.ribbon-tab == 3; clicked => { root.ribbon-tab = 3; } }
 
-                // Spacer
                 Rectangle {}
-
-                // Far-right: Find + AI
-                RibbonQuickAction {
-                    icon-path: Icons.search;
-                    tooltip-text: "Find";
-                    clicked => { root.doc-show-find = !root.doc-show-find; }
-                }
-                RibbonToolButton {
-                    label: "AI";
-                    is-active: root.show-ai-panel;
-                    tooltip-text: "AI Assist";
-                    clicked => { root.show-ai-panel = !root.show-ai-panel; }
-                }
             }
 
             // Bottom border

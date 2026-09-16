@@ -143,6 +143,7 @@ export component CalendarScreen inherits Rectangle {
                 { id: "ai",    icon: Icons.spark, label: root.ai-is-working ? "Working" : "AI",
                   emphasis: 1, loading: root.ai-is-working, active: root.ai-panel-open },
                 { id: "new",   icon: Icons.plus, label: "New Event", emphasis: 2 },
+                { id: "templates", icon: Icons.menu, active: root.cal-template-panel-open },
             ];
             action(id) => {
                 if (id == "view-0") { root.view-mode = 0; root.switch-view(0); }
@@ -156,6 +157,7 @@ export component CalendarScreen inherits Rectangle {
                     else { root.ai-explain-pressed(); root.ai-panel-open = true; }
                 }
                 else if (id == "new") { root.add-event(); }
+                else if (id == "templates") { root.cal-toggle-template-panel(); }
             }
         }
 
@@ -171,124 +173,14 @@ export component CalendarScreen inherits Rectangle {
                 padding: Theme.sp-5;
                 spacing: Theme.sp-4;
 
-                // Navigation header
-                HorizontalLayout {
-                    alignment: space-between;
-                    height: Theme.touch-target;
-
-                    HorizontalLayout {
-                        spacing: Theme.sp-2;
-
-                        YIconButton {
-                            icon: "<";
-                            variant: 1;
-                            clicked => { root.prev-month(); }
-                        }
-
-                        YIconButton {
-                            icon: ">";
-                            variant: 1;
-                            clicked => { root.next-month(); }
-                        }
-
-                        Text {
-                            text: root.view-mode == 2 ? root.day-view-title : root.month-title;
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-title-1;
-                            font-weight: Theme.fw-title-1;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    HorizontalLayout {
-                        spacing: Theme.sp-2;
-
-                        // View mode toggle (segmented control)
-                        Rectangle {
-                            width: 192px;
-                            height: Theme.h-prominent;
-                            border-radius: Theme.r-md;
-                            background: Theme.bg-elevated;
-                            clip: true;
-
-                            HorizontalLayout {
-                                spacing: 0px;
-
-                                for view-item[vidx] in [
-                                    { label: "Month", idx: 0 },
-                                    { label: "Week", idx: 1 },
-                                    { label: "Day", idx: 2 },
-                                ] : Rectangle {
-                                    property <bool> is-active: root.view-mode == view-item.idx;
-                                    property <bool> hovered: view-ta.has-hover;
-
-                                    width: 64px;
-                                    height: Theme.h-prominent;
-                                    border-radius: Theme.r-md;
-                                    background: is-active ? Theme.accent : transparent;
-
-                                    animate background { duration: Theme.dur-fast; }
-
-                                    view-ta := TouchArea {
-                                        clicked => {
-                                            root.view-mode = view-item.idx;
-                                            root.switch-view(view-item.idx);
-                                        }
-                                        mouse-cursor: pointer;
-                                    }
-
-                                    Text {
-                                        text: view-item.label;
-                                        color: is-active ? Theme.text-on-accent : (hovered ? Theme.text-primary : Theme.text-secondary);
-                                        font-size: Theme.fs-caption;
-                                        font-weight: is-active ? Theme.fw-headline : Theme.fw-body;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                        }
-
-                        YButton {
-                            label: "Today";
-                            variant: 1;
-                            size: 0;
-                            clicked => { root.today-pressed(); }
-                        }
-
-                        // AI Insights button
-                        YButton {
-                            label: root.ai-is-working ? "..." : "AI";
-                            icon-path: root.ai-is-working ? Icons.spark : Icons.spark;
-                            variant: root.ai-is-working ? 0 : 1;
-                            size: 0;
-                            loading: root.ai-is-working;
-                            clicked => {
-                                if root.ai-panel-open {
-                                    root.ai-dismiss();
-                                    root.ai-panel-open = false;
-                                } else {
-                                    root.ai-explain-pressed();
-                                    root.ai-panel-open = true;
-                                }
-                            }
-                        }
-
-                        YIconButton {
-                            icon: "+";
-                            variant: 0;
-                            clicked => { root.add-event(); }
-                        }
-
-                        // Template quick-create button
-                        YIconButton {
-                            icon-path: Icons.menu;
-                            variant: root.cal-template-panel-open ? 0 : 1;
-                            clicked => { root.cal-toggle-template-panel(); }
-                        }
-                    }
-                }
-
+                // The toolbar that was here is gone.
+                //
+                // It was the app's original one -- < > September 2026, Month/Week/Day, Today,
+                // AI, +, the template menu -- and when Calendar was converted to AppHeader the
+                // header got all of it and this kept all of it too. Two toolbars, stacked, with
+                // the same seven controls in the same order: one row apart, both live, both
+                // working. The only thing the header did not have is the template panel, which
+                // is now an action on it like everything else.
                 // AI Response Panel
                 if root.ai-panel-open && root.ai-response != "" : Rectangle {
                     height: min(140px, ai-cal-resp.preferred-height + Theme.sp-4);

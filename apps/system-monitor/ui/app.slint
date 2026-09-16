@@ -91,6 +91,8 @@ export component SystemMonitorApp inherits Window {
     callback back-pressed <=> inner.back-pressed;
 
     inner := SystemMonitor {
+        // No parent screen in a window of its own.
+        show-back: false;
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).
         // The screen's own layouts may report a bounded maximum (a stretch layout of fixed rows);
         // the window must still open at its preferred size and grow with the user.
