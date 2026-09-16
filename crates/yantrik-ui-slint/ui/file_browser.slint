@@ -1799,7 +1799,7 @@ export component FileBrowser inherits Rectangle {
                                     animate background { duration: Theme.dur-fast; }
                                     HorizontalLayout {
                                         padding-left: 8px; spacing: 8px;
-                                        Text { text: ">_"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 700; vertical-alignment: center; }
+                                        Icon { commands: Icons.terminal; size: 13px; tint: Theme.text-dim; y: (parent.height - self.height) / 2; }
                                         Text { text: "Open Terminal Here"; color: term-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; }
                                     }
                                 }

@@ -70,9 +70,19 @@ export component SkillStore inherits Rectangle {
             wrap: word-wrap;
         }
 
-        // ── Search Bar ──
+        // -- Search --
+        //
+        // The magnifying glass here was the LETTER Q. At 13px on a dark panel it read as a
+        // zero, which is what the survey photograph showed: a thousand-pixel-wide empty box
+        // with what looked like a stray 0 in it and no hint of what it was for.
+        //
+        // Three things were wrong and only one of them was the glyph: no placeholder, so an
+        // empty field said nothing about itself; and no width, so a search box for a list of
+        // skills stretched the full width of the settings pane.
         Rectangle {
             height: 36px;
+            max-width: 360px;
+            horizontal-stretch: 0;
             border-radius: 8px;
             background: Theme.hover-fill;
             border-width: 1px;
@@ -84,11 +94,12 @@ export component SkillStore inherits Rectangle {
                 padding-right: 12px;
                 spacing: 8px;
 
-                Text {
-                    text: "Q";
-                    color: Theme.text-dim;
-                    font-size: 13px;
-                    vertical-alignment: center;
+                Icon {
+                    commands: Icons.search;
+                    size: 14px;
+                    tint: Theme.text-dim;
+                    thickness: 1.6px;
+                    y: (parent.height - self.height) / 2;
                 }
 
                 search-input := TextInput {
@@ -104,6 +115,15 @@ export component SkillStore inherits Rectangle {
                         root.search-skills(self.text);
                     }
                 }
+            }
+
+            if root.search-query == "" && !search-input.has-focus : Text {
+                x: 34px;
+                text: "Search skills";
+                color: Theme.text-dim;
+                font-size: 13px;
+                vertical-alignment: center;
+                height: 100%;
             }
         }
 

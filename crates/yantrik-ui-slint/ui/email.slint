@@ -215,12 +215,15 @@ export component EmailClient inherits Rectangle {
                         VerticalLayout {
                             spacing: Theme.sp-2;
 
-                            Text {
-                                text: "@";
-                                color: Theme.accent;
-                                font-size: Theme.fs-display;
-                                font-weight: Theme.fw-display;
-                                horizontal-alignment: center;
+                            // Was the character "@" at display size. It happens to render, but
+                            // a letter standing in for an icon is the look this kit exists to
+                            // retire, and this one is the first thing a new user sees.
+                            Icon {
+                                commands: Icons.mail;
+                                size: 40px;
+                                tint: Theme.accent;
+                                thickness: 1.6px;
+                                x: (parent.width - self.width) / 2;
                             }
                             Text {
                                 text: "Add Email Account";
@@ -575,13 +578,12 @@ export component EmailClient inherits Rectangle {
                                 border-radius: 14px;
                                 background: Theme.tint-accent;
 
-                                Text {
-                                    text: "@";
-                                    color: Theme.accent;
-                                    font-size: Theme.fs-body;
-                                    font-weight: 700;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                Icon {
+                                    commands: Icons.mail;
+                                    size: 15px;
+                                    tint: Theme.accent;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
                                 }
                             }
 
