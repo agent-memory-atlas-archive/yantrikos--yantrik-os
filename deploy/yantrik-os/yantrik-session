@@ -91,4 +91,20 @@ if [ -d "$CHROME/fonts" ]; then
   fc-cache -f "$HOME/.local/share/fonts" >/dev/null 2>&1 || true
 fi
 
-exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml'
+# ── Start the compositor, and keep what it says ──
+#
+# The shell's own output went nowhere on the supported start path. /opt/yantrik/logs was
+# written only by yantrik-update's fallback spawn, so on a machine started the normal way --
+# by systemd, which is every machine -- the log's last entry was from whenever someone last
+# updated it by hand, and the journal had only systemd's five lines about the unit.
+#
+# That is how a companion that panics at boot goes unnoticed: `companion.sock` is listening,
+# the desktop says the companion is online, every AI action in every app fails, and there is
+# no file anywhere that says why. Diagnosing it meant reading a log that had stopped being
+# written eight hours earlier and not noticing that it had.
+LOG_DIR=/opt/yantrik/logs
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+# Rotate on start rather than growing without bound; one previous boot is enough to compare.
+[ -f "$LOG_DIR/yantrik-os.log" ] && mv -f "$LOG_DIR/yantrik-os.log" "$LOG_DIR/yantrik-os.log.1" 2>/dev/null
+
+exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml'   >>"$LOG_DIR/yantrik-os.log" 2>&1

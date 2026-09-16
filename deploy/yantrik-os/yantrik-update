@@ -94,6 +94,25 @@ sys.exit(1)
 PY
 }
 
+# Keep the newest RETAIN_BACKUPS rollback copies and delete the rest.
+#
+# Also clears the downloaded tarballs: they are ~230 MB each, they are re-downloadable, and
+# keeping them is how /opt/yantrik/updates reached 823 MB of things nobody would ever read.
+RETAIN_BACKUPS="${YANTRIK_RETAIN_BACKUPS:-2}"
+prune_backups() {
+  [ -d "$BACKUP_DIR" ] || return 0
+  local old
+  old="$(ls -1t "$BACKUP_DIR" 2>/dev/null | tail -n +$((RETAIN_BACKUPS + 1)))"
+  if [ -n "$old" ]; then
+    local n; n="$(printf '%s\n' "$old" | wc -l | tr -d ' ')"
+    info "removing $n old backup(s), keeping the newest $RETAIN_BACKUPS"
+    printf '%s\n' "$old" | while IFS= read -r d; do
+      [ -n "$d" ] && rm -rf -- "$BACKUP_DIR/$d"
+    done
+  fi
+  rm -f "$UPDATES_DIR"/*.tar.* 2>/dev/null || true
+}
+
 # Read a KEY from the installed BUILD marker, or empty if absent.
 build_field() {
   [ -f "$BUILD_FILE" ] || return 0
@@ -216,6 +235,32 @@ cmd_apply() {
   info "$n binaries staged"
 
   # ── Back up what is there now, so a bad build is recoverable ──
+  #
+  # And throw the old ones away, which this did not do.
+  #
+  # A backup is a full copy of bin/ and share/ -- about 570 MB. Thirty-five of them
+  # accumulated on a 24 GB disk: 20 GB of backups, no free space, and then the install loop's
+  # `cp` wrote THIRTY-FOUR ZERO-BYTE FILES over the binaries it was replacing, including
+  # yantrik-update itself. An empty script exits 0, so every subsequent `apply` reported
+  # success and did nothing at all. The machine could no longer update itself and said the
+  # update had worked.
+  #
+  # Two is enough: the build you are replacing, and the one before it. The publisher has
+  # pruned its channel to three since the day it was written; the installer pruned nothing.
+  prune_backups
+
+  # Refuse rather than half-install.
+  #
+  # `cp` onto a full disk is how the zero-byte binaries happened, and the install loop's
+  # `&&` chain did not catch it -- a short write can still exit 0. The cheapest guard is to
+  # not start: a release is ~600 MB unpacked and the backup is another ~600 MB.
+  local need_kb=1500000
+  local free_kb; free_kb="$(df -Pk "$PREFIX" | awk 'NR==2 {print $4}')"
+  if [ -n "$free_kb" ] && [ "$free_kb" -lt "$need_kb" ]; then
+    fail "only $((free_kb / 1024)) MB free on $PREFIX; need $((need_kb / 1024)) MB to install \
+safely. Old backups live in $BACKUP_DIR."
+  fi
+
   local ts; ts="$(date -u +%Y%m%d-%H%M%S)"
   local backup="$BACKUP_DIR/$ts"
   say "Backing up current build to $backup"
@@ -231,7 +276,9 @@ cmd_apply() {
   while IFS= read -r f; do
     local base; base="$(basename "$f")"
     local tmp="$BIN_DIR/.$base.new"
-    if cp "$f" "$tmp" 2>/dev/null && chmod 755 "$tmp" && mv -f "$tmp" "$BIN_DIR/$base"; then
+    if cp "$f" "$tmp" 2>/dev/null \
+       && [ "$(stat -c%s "$tmp" 2>/dev/null || echo 0)" = "$(stat -c%s "$f")" ] \
+       && chmod 755 "$tmp" && mv -f "$tmp" "$BIN_DIR/$base"; then
       installed=$((installed + 1))
     else
       # A single file failing to install is a failed update; put everything back.

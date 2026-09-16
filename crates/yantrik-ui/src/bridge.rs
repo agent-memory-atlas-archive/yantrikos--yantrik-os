@@ -601,7 +601,25 @@ fn worker_loop(
     let config_services = config.enabled_services.clone();
 
     // Build companion on this thread (owns SQLite connection)
-    let mut companion = build_companion(config);
+    //
+    // If it cannot be built, the thread does NOT exit. A dead worker makes every send() fail
+    // with "companion worker is not running", which is true and useless: it says the postman
+    // is missing, not that there is no address. Staying up to answer with the real reason is
+    // the difference between an OS that tells you the embedder is absent and one that looks
+    // broken in sixteen places at once.
+    let mut companion = match build_companion(config) {
+        Ok(c) => c,
+        Err(why) => {
+            tracing::error!(reason = %why, "Companion unavailable — answering every request with this");
+            online.store(false, Ordering::Relaxed);
+            while let Ok(cmd) = cmd_rx.recv() {
+                if let CompanionCommand::SendMessage { token_tx, .. } = cmd {
+                    let _ = token_tx.send(format!("__REPLACE__{why}"));
+                }
+            }
+            return;
+        }
+    };
 
     // Apply Skill Store snapshot — overrides services, filters instincts,
     // extends core tools based on enabled skills.
@@ -2610,8 +2628,35 @@ pub fn format_time_ago(seconds: f64) -> String {
     }
 }
 
+/// The embedder every machine gets when it has not been given one of its own.
+///
+/// MiniLM-L6-v2, fetched once and cached by the hub client. Semantic memory is the OS's own
+/// faculty rather than a harness's -- a harness brings its own LLM, which is a different
+/// thing -- so this is the one model the OS will go and get for itself.
+fn default_embedder() -> Result<CandleEmbedder, String> {
+    tracing::info!("Loading the default MiniLM embedder");
+    CandleEmbedder::from_hub("sentence-transformers/all-MiniLM-L6-v2", None)
+        .map_err(|e| format!("the default embedder could not be fetched: {e}"))
+}
+
 /// Build a CompanionService (same logic as crates/yantrik/src/main.rs).
-fn build_companion(config: CompanionConfig) -> CompanionService {
+///
+/// Returns `Err` instead of panicking, because the two `.expect()`s this used to have were
+/// killing the companion worker thread at boot on any machine without the embedder files --
+/// and taking every agentic feature in the OS down with it, silently.
+///
+/// What that looked like: `companion.sock` listening and accepting connections, the desktop
+/// reporting `companion_online: true`, and every AI action in every app answering
+/// "companion worker is not running". Fifty-five buttons, one root cause, and nothing on
+/// screen said which. The log had it, once, at boot:
+///
+///     panicked at bridge.rs: failed to load embedder from directory:
+///       config.json not found in /opt/yantrik/models/embedder
+///     ERROR Companion worker thread is dead — cannot send message
+///
+/// The OS does not ship models -- a harness brings its own -- so "the embedder is not here"
+/// is a normal state on a fresh machine, not a fault. It has to degrade and say so.
+fn build_companion(config: CompanionConfig) -> Result<CompanionService, String> {
     // Load embedder
     // Identity travels with the embedder so yantrikdb can distinguish a
     // same-model reattach from a different-model-same-dim swap, which would
@@ -2623,12 +2668,22 @@ fn build_companion(config: CompanionConfig) -> CompanionService {
         .map(|d| format!("candle:dir:{d}"));
     let embedder = if let Some(ref dir) = config.yantrikdb.embedder_model_dir {
         tracing::info!(dir, "Loading embedder from directory");
-        CandleEmbedder::from_dir(std::path::Path::new(dir))
-            .expect("failed to load embedder from directory")
+        // A configured directory is a PREFERENCE, not a requirement.
+        //
+        // The default path /opt/yantrik/models/embedder is written into the config on every
+        // machine, and the release does not ship models -- so on a fresh install this branch
+        // was always taken, always failed, and took the whole companion down with it. There
+        // was a perfectly good default two lines below that could never be reached, because
+        // having a directory CONFIGURED is not the same as having one PRESENT.
+        match CandleEmbedder::from_dir(std::path::Path::new(dir)) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(dir, error = %e, "No embedder there — falling back to the default");
+                default_embedder()?
+            }
+        }
     } else {
-        tracing::info!("Downloading MiniLM embedder from HuggingFace Hub");
-        CandleEmbedder::from_hub("sentence-transformers/all-MiniLM-L6-v2", None)
-            .expect("failed to load embedder from hub")
+        default_embedder()?
     };
 
     // Load LLM — select backend based on config
@@ -2647,9 +2702,9 @@ fn build_companion(config: CompanionConfig) -> CompanionService {
     } else if config.llm.is_api_backend() {
         // API backend (Ollama, OpenAI, DeepSeek, vLLM, etc.)
         let base_url = config.llm.resolve_api_base_url()
-            .expect("api_base_url required for API backend (set it or use a named provider like 'ollama')");
+            .ok_or_else(|| "api_base_url required for API backend (set it or use a named provider like 'ollama')".to_string())?;
         let model = config.llm.api_model.as_deref()
-            .expect("api_model required for API backend");
+            .ok_or_else(|| "api_model required for API backend".to_string())?;
         tracing::info!(
             backend = config.llm.backend,
             base_url = %base_url,
@@ -2659,7 +2714,7 @@ fn build_companion(config: CompanionConfig) -> CompanionService {
         std::sync::Arc::new(ApiLLM::new(base_url, config.llm.api_key.clone(), model))
     } else if config.llm.backend == "llamacpp" {
         let gguf = config.llm.gguf_path.as_deref()
-            .expect("gguf_path required for llamacpp backend");
+            .ok_or_else(|| "gguf_path required for llamacpp backend".to_string())?;
         let gpu_layers = config.llm.fallback.as_ref()
             .map(|f| f.n_gpu_layers).unwrap_or(99);
         let ctx_size = config.llm.max_context_tokens as u32;
@@ -2671,19 +2726,19 @@ fn build_companion(config: CompanionConfig) -> CompanionService {
         #[cfg(feature = "llamacpp")]
         { std::sync::Arc::new(LlamaCppLLM::from_gguf(
             std::path::Path::new(gguf), gpu_layers, ctx_size,
-        ).expect("failed to load llama.cpp model")) }
+        ).map_err(|e| format!("failed to load llama.cpp model: {e}"))?) }
         #[cfg(not(feature = "llamacpp"))]
         { panic!("llamacpp feature not enabled at compile time") }
     } else if let Some(ref dir) = config.llm.model_dir {
         tracing::info!(dir, "Loading Candle LLM from directory");
         std::sync::Arc::new(CandleLLM::from_dir(std::path::Path::new(dir))
-            .expect("failed to load LLM from directory"))
+            .map_err(|e| format!("failed to load LLM from directory: {e}"))?)
     } else if let (Some(ref gguf), Some(ref tok)) =
         (&config.llm.gguf_path, &config.llm.tokenizer_path)
     {
         tracing::info!(gguf, tok, "Loading Candle LLM from explicit paths");
         std::sync::Arc::new(CandleLLM::from_gguf(std::path::Path::new(gguf), std::path::Path::new(tok))
-            .expect("failed to load LLM"))
+            .map_err(|e| format!("failed to load LLM: {e}"))?)
     } else {
         tracing::info!(
             repo = config.llm.hub_repo,
@@ -2695,8 +2750,8 @@ fn build_companion(config: CompanionConfig) -> CompanionService {
             &config.llm.hub_gguf,
             &config.llm.hub_tokenizer,
         )
-        .expect("failed to download LLM");
-        std::sync::Arc::new(CandleLLM::from_gguf(&files.gguf, &files.tokenizer).expect("failed to load LLM"))
+        .map_err(|e| format!("failed to download LLM: {e}"))?;
+        std::sync::Arc::new(CandleLLM::from_gguf(&files.gguf, &files.tokenizer).map_err(|e| format!("failed to load LLM: {e}"))?)
     };
 
     // Wrap with fallback if configured
@@ -2704,7 +2759,7 @@ fn build_companion(config: CompanionConfig) -> CompanionService {
         let fallback_cfg = match fb_config.backend.as_str() {
             "llamacpp" => {
                 let path = fb_config.model_path.as_deref()
-                    .expect("model_path required for llamacpp fallback");
+                    .ok_or_else(|| "model_path required for llamacpp fallback".to_string())?;
                 tracing::info!(model = path, gpu_layers = fb_config.n_gpu_layers, "Fallback: llama.cpp");
                 FallbackConfig::LlamaCpp {
                     model_path: std::path::PathBuf::from(path),
@@ -2714,7 +2769,7 @@ fn build_companion(config: CompanionConfig) -> CompanionService {
             }
             _ => {
                 let url = fb_config.api_base_url.as_deref()
-                    .expect("api_base_url required for API fallback");
+                    .ok_or_else(|| "api_base_url required for API fallback".to_string())?;
                 let model = fb_config.api_model.as_deref().unwrap_or("default");
                 tracing::info!(url, model, "Fallback: API");
                 FallbackConfig::Api {
@@ -2729,9 +2784,17 @@ fn build_companion(config: CompanionConfig) -> CompanionService {
     };
 
     // Create YantrikDB
+    //
+    // Its directory is made first. /opt/yantrik/data does not exist on a fresh install and
+    // nothing was creating it, so the open failed with "unable to open database file" and the
+    // worker died — which is the same single point of failure as the embedder, one line down.
+    if let Some(parent) = std::path::Path::new(&config.yantrikdb.db_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
     let mut db =
         yantrikdb_core::YantrikDB::new(&config.yantrikdb.db_path, config.yantrikdb.embedding_dim)
-            .expect("failed to create YantrikDB");
+            .map_err(|e| format!("failed to create YantrikDB: {e}"))?;
     db.set_embedder(match embedder_identity {
         Some(id) => Box::new(yantrik_companion::embedder_bridge::EmbedderBridge::with_identity(embedder, id)),
         None => Box::new(yantrik_companion::embedder_bridge::EmbedderBridge::new(embedder)),
@@ -2743,7 +2806,7 @@ fn build_companion(config: CompanionConfig) -> CompanionService {
         "Companion initialized"
     );
 
-    CompanionService::new(db, llm, config)
+    Ok(CompanionService::new(db, llm, config))
 }
 
 /// V15: Pick a random older memory for serendipity connections.
