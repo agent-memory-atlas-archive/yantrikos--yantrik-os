@@ -52,7 +52,14 @@ export component PersonalityScreen inherits Rectangle {
                 spacing: 20px;
                 alignment: start;
 
-                // Radar chart
+                // Radar chart, on a card like every other panel in this OS. It used to float
+                // directly on the background, which made it read as a stray diagram rather
+                // than a reading of something.
+                Rectangle {
+                    height: 260px;
+                    background: Theme.bg-card;
+                    border-radius: Theme.radius-card;
+
                 HorizontalLayout {
                     alignment: center;
                     RadarChart {
@@ -62,6 +69,7 @@ export component PersonalityScreen inherits Rectangle {
                         question: root.question-ratio;
                         size-px: 200;
                     }
+                }
                 }
 
                 // Opinions section
@@ -119,11 +127,15 @@ export component PersonalityScreen inherits Rectangle {
                 }
 
                 // Empty state for opinions
+                //
+                // Left-aligned, like the heading it belongs to. It was centred, so "Opinions"
+                // sat at x=24 and the line explaining that there are none sat at x=640 -- a
+                // heading and its content with six hundred pixels between them, reading as two
+                // unrelated things.
                 if opinions.length == 0 : Text {
                     text: "No opinions formed yet";
                     color: Theme.text-dim;
                     font-size: Theme.font-body;
-                    horizontal-alignment: center;
                 }
 
                 // Shared references section
@@ -165,7 +177,6 @@ export component PersonalityScreen inherits Rectangle {
                     text: "No shared references yet";
                     color: Theme.text-dim;
                     font-size: Theme.font-body;
-                    horizontal-alignment: center;
                 }
             }
         }

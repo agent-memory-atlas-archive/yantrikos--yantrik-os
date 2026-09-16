@@ -7,6 +7,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { YEmptyState } from "components/y_empty_state.slint";
 import { ListView } from "std-widgets.slint";
 import { YInput } from "components/y_input.slint";
 
@@ -1142,183 +1143,298 @@ export component FileBrowser inherits Rectangle {
             }
 
             // ── Center: file list area ──
-            VerticalLayout {
+            // Wrapped in a Rectangle, which is the whole fix.
+            //
+            // This was a bare `VerticalLayout { horizontal-stretch: 1; }`. A layout's preferred
+            // width is derived from its children, and Slint honours that over the stretch — so
+            // the file list never expanded. It rendered 285 pixels wide inside a 1120 pixel
+            // pane: the column headers stopped a quarter of the way across, and the empty-state
+            // message centred itself at x=302, which is the middle of 160..445 rather than of
+            // the screen. Measuring the pixels is how that was pinned down.
+            //
+            // A Rectangle has no content-derived preferred width, so stretch does what it says.
+            // Settings has always done it this way; the two screens simply disagreed.
+            Rectangle {
                 horizontal-stretch: 1;
-                spacing: 0px;
+                VerticalLayout {
+                    spacing: 0px;
 
-                // ── Column headers (list view only) ──
-                if !root.grid-view : Rectangle {
-                    height: 28px;
-                    background: Theme.bg-surface;
+                    // ── Column headers (list view only) ──
+                    if !root.grid-view : Rectangle {
+                        height: 28px;
+                        background: Theme.bg-surface;
 
-                    // Bottom edge
-                    Rectangle {
-                        y: parent.height - 1px; width: 100%; height: 1px;
-                        background: Theme.separator;
-                    }
-
-                    HorizontalLayout {
-                        padding-left: 50px; // align with file names (icon badge 28px + 12px pad + 10px gap)
-                        padding-right: 8px;
-                        spacing: 10px;
-
-                        // Name header
-                        name-hdr := TouchArea {
-                            horizontal-stretch: 1; height: 28px;
-                            clicked => {
-                                if root.sort-field == "name" { root.sort-ascending = !root.sort-ascending; }
-                                else { root.sort-field = "name"; root.sort-ascending = true; }
-                                root.file-sort-changed(root.sort-field, root.sort-ascending);
-                            }
-                            HorizontalLayout {
-                                spacing: 4px;
-                                Text {
-                                    text: "Name";
-                                    color: root.sort-field == "name" ? Theme.cyan : (name-hdr.has-hover ? Theme.text-secondary : Theme.text-dim);
-                                    font-size: Theme.fs-micro; font-weight: 600;
-                                    vertical-alignment: center;
-                                    animate color { duration: Theme.dur-fast; }
-                                }
-                                if root.sort-field == "name" : Icon {
-                                    commands: root.sort-ascending ? Icons.chevron-up : Icons.chevron-down;
-                                    size: 14px;
-                                    tint: Theme.cyan-dim;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                            }
-                        }
-
-                        // Size header
-                        size-hdr := TouchArea {
-                            width: 80px; height: 28px;
-                            clicked => {
-                                if root.sort-field == "size" { root.sort-ascending = !root.sort-ascending; }
-                                else { root.sort-field = "size"; root.sort-ascending = false; }
-                                root.file-sort-changed(root.sort-field, root.sort-ascending);
-                            }
-                            HorizontalLayout {
-                                spacing: 4px;
-                                Text {
-                                    text: "Size";
-                                    color: root.sort-field == "size" ? Theme.cyan : (size-hdr.has-hover ? Theme.text-secondary : Theme.text-dim);
-                                    font-size: Theme.fs-micro; font-weight: 600;
-                                    vertical-alignment: center;
-                                    animate color { duration: Theme.dur-fast; }
-                                }
-                                if root.sort-field == "size" : Icon {
-                                    commands: root.sort-ascending ? Icons.chevron-up : Icons.chevron-down;
-                                    size: 14px;
-                                    tint: Theme.cyan-dim;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                            }
-                        }
-
-                        // Modified header
-                        mod-hdr := TouchArea {
-                            width: 80px; height: 28px;
-                            clicked => {
-                                if root.sort-field == "modified" { root.sort-ascending = !root.sort-ascending; }
-                                else { root.sort-field = "modified"; root.sort-ascending = true; }
-                                root.file-sort-changed(root.sort-field, root.sort-ascending);
-                            }
-                            HorizontalLayout {
-                                spacing: 4px;
-                                Text {
-                                    text: "Modified";
-                                    color: root.sort-field == "modified" ? Theme.cyan : (mod-hdr.has-hover ? Theme.text-secondary : Theme.text-dim);
-                                    font-size: Theme.fs-micro; font-weight: 600;
-                                    vertical-alignment: center;
-                                    animate color { duration: Theme.dur-fast; }
-                                }
-                                if root.sort-field == "modified" : Icon {
-                                    commands: root.sort-ascending ? Icons.chevron-up : Icons.chevron-down;
-                                    size: 14px;
-                                    tint: Theme.cyan-dim;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ── Grid view ──
-                if root.grid-view : Flickable {
-                    vertical-stretch: 1;
-                    viewport-height: ((root.entries.length + 3) / 4) * 100px;
-
-                    for entry[idx] in root.entries : grid-card := Rectangle {
-                        property <int> col-idx: idx - (idx / 4) * 4;
-                        property <int> row-idx: idx / 4;
-                        x: self.col-idx * (parent.width / 4);
-                        y: self.row-idx * 100px;
-                        width: parent.width / 4;
-                        height: 100px;
-
-                        property <color> grid-badge-color:
-                            entry.is-dir ? #3a9ac8 :
-                            entry.icon-char == "\u{25c7}" ? #3aad6a :
-                            entry.icon-char == "\u{2261}" ? #5a7abd :
-                            entry.icon-char == "\u{25a3}" ? #9a4a9a :
-                            entry.icon-char == "\u{266a}" ? #c89a3a :
-                            entry.icon-char == "\u{25b6}" ? #c84a5a :
-                            entry.icon-char == "\u{25a4}" ? #7a8a6a :
-                            entry.icon-char == "\u{25a7}" ? #bd5a4a :
-                            entry.icon-char == "\u{2699}" ? #4a7abd :
-                            entry.icon-char == "\u{00b7}" ? #6a6a7a :
-                            #5a5a7a;
-
-                        grid-card-touch := TouchArea {
-                            clicked => {
-                                if entry.is-dir {
-                                    root.selected-index = -1;
-                                    root.clear-selection();
-                                    root.navigate-dir(entry.name);
-                                } else {
-                                    root.multi-select-clicked(idx, false, false);
-                                    root.file-selection-changed(entry.name);
-                                }
-                            }
-                            double-clicked => {
-                                if !entry.is-dir {
-                                    root.open-file(entry.name);
-                                }
-                            }
-                        }
-
-                        // Card background
+                        // Bottom edge
                         Rectangle {
-                            border-radius: 10px;
-                            x: 4px;
-                            y: 4px;
-                            width: parent.width - 8px;
-                            height: parent.height - 8px;
+                            y: parent.height - 1px; width: 100%; height: 1px;
+                            background: Theme.separator;
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 50px; // align with file names (icon badge 28px + 12px pad + 10px gap)
+                            padding-right: 8px;
+                            spacing: 10px;
+
+                            // Name header
+                            name-hdr := TouchArea {
+                                horizontal-stretch: 1; height: 28px;
+                                clicked => {
+                                    if root.sort-field == "name" { root.sort-ascending = !root.sort-ascending; }
+                                    else { root.sort-field = "name"; root.sort-ascending = true; }
+                                    root.file-sort-changed(root.sort-field, root.sort-ascending);
+                                }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Text {
+                                        text: "Name";
+                                        color: root.sort-field == "name" ? Theme.cyan : (name-hdr.has-hover ? Theme.text-secondary : Theme.text-dim);
+                                        font-size: Theme.fs-micro; font-weight: 600;
+                                        vertical-alignment: center;
+                                        animate color { duration: Theme.dur-fast; }
+                                    }
+                                    if root.sort-field == "name" : Icon {
+                                        commands: root.sort-ascending ? Icons.chevron-up : Icons.chevron-down;
+                                        size: 14px;
+                                        tint: Theme.cyan-dim;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                            }
+
+                            // Size header
+                            size-hdr := TouchArea {
+                                width: 80px; height: 28px;
+                                clicked => {
+                                    if root.sort-field == "size" { root.sort-ascending = !root.sort-ascending; }
+                                    else { root.sort-field = "size"; root.sort-ascending = false; }
+                                    root.file-sort-changed(root.sort-field, root.sort-ascending);
+                                }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Text {
+                                        text: "Size";
+                                        color: root.sort-field == "size" ? Theme.cyan : (size-hdr.has-hover ? Theme.text-secondary : Theme.text-dim);
+                                        font-size: Theme.fs-micro; font-weight: 600;
+                                        vertical-alignment: center;
+                                        animate color { duration: Theme.dur-fast; }
+                                    }
+                                    if root.sort-field == "size" : Icon {
+                                        commands: root.sort-ascending ? Icons.chevron-up : Icons.chevron-down;
+                                        size: 14px;
+                                        tint: Theme.cyan-dim;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                            }
+
+                            // Modified header
+                            mod-hdr := TouchArea {
+                                width: 80px; height: 28px;
+                                clicked => {
+                                    if root.sort-field == "modified" { root.sort-ascending = !root.sort-ascending; }
+                                    else { root.sort-field = "modified"; root.sort-ascending = true; }
+                                    root.file-sort-changed(root.sort-field, root.sort-ascending);
+                                }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Text {
+                                        text: "Modified";
+                                        color: root.sort-field == "modified" ? Theme.cyan : (mod-hdr.has-hover ? Theme.text-secondary : Theme.text-dim);
+                                        font-size: Theme.fs-micro; font-weight: 600;
+                                        vertical-alignment: center;
+                                        animate color { duration: Theme.dur-fast; }
+                                    }
+                                    if root.sort-field == "modified" : Icon {
+                                        commands: root.sort-ascending ? Icons.chevron-up : Icons.chevron-down;
+                                        size: 14px;
+                                        tint: Theme.cyan-dim;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Grid view ──
+                    if root.grid-view : Flickable {
+                        vertical-stretch: 1;
+                        viewport-height: ((root.entries.length + 3) / 4) * 100px;
+
+                        for entry[idx] in root.entries : grid-card := Rectangle {
+                            property <int> col-idx: idx - (idx / 4) * 4;
+                            property <int> row-idx: idx / 4;
+                            x: self.col-idx * (parent.width / 4);
+                            y: self.row-idx * 100px;
+                            width: parent.width / 4;
+                            height: 100px;
+
+                            property <color> grid-badge-color:
+                                entry.is-dir ? #3a9ac8 :
+                                entry.icon-char == "\u{25c7}" ? #3aad6a :
+                                entry.icon-char == "\u{2261}" ? #5a7abd :
+                                entry.icon-char == "\u{25a3}" ? #9a4a9a :
+                                entry.icon-char == "\u{266a}" ? #c89a3a :
+                                entry.icon-char == "\u{25b6}" ? #c84a5a :
+                                entry.icon-char == "\u{25a4}" ? #7a8a6a :
+                                entry.icon-char == "\u{25a7}" ? #bd5a4a :
+                                entry.icon-char == "\u{2699}" ? #4a7abd :
+                                entry.icon-char == "\u{00b7}" ? #6a6a7a :
+                                #5a5a7a;
+
+                            grid-card-touch := TouchArea {
+                                clicked => {
+                                    if entry.is-dir {
+                                        root.selected-index = -1;
+                                        root.clear-selection();
+                                        root.navigate-dir(entry.name);
+                                    } else {
+                                        root.multi-select-clicked(idx, false, false);
+                                        root.file-selection-changed(entry.name);
+                                    }
+                                }
+                                double-clicked => {
+                                    if !entry.is-dir {
+                                        root.open-file(entry.name);
+                                    }
+                                }
+                            }
+
+                            // Card background
+                            Rectangle {
+                                border-radius: 10px;
+                                x: 4px;
+                                y: 4px;
+                                width: parent.width - 8px;
+                                height: parent.height - 8px;
+                                background: entry.selected
+                                    ? Theme.accent-dim
+                                    : (grid-card-touch.has-hover
+                                        ? Theme.hover-fill
+                                        : transparent);
+                                border-width: entry.selected ? 1px : (grid-card-touch.has-hover ? 1px : 0);
+                                border-color: entry.selected ? Theme.cyan-dim : Theme.border-subtle;
+                                animate background, border-width, border-color { duration: Theme.dur-fast; }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 6px;
+                                    padding: 8px;
+
+                                    // Icon badge
+                                    Rectangle {
+                                        property <color> badge-color: grid-card.grid-badge-color;
+                                        width: 36px;
+                                        height: 36px;
+                                        border-radius: 10px;
+                                        background: badge-color;
+                                        border-width: 1px;
+                                        border-color: badge-color;
+                                        Icon {
+                                            commands: Icons.file-kind(entry.icon-char);
+                                            size: 20px;
+                                            thickness: 1.7px;
+                                            tint: Theme.text-on-accent;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                    }
+
+                                    // File name
+                                    Text {
+                                        text: entry.name;
+                                        color: entry.is-dir ? Theme.cyan-light : Theme.text-primary;
+                                        font-size: Theme.fs-micro;
+                                        font-weight: entry.is-dir ? 600 : 400;
+                                        horizontal-alignment: center;
+                                        overflow: elide;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── File list (list view) ──
+                    if !root.grid-view : ListView {
+                        vertical-stretch: 1;
+
+                        for entry[idx] in entries : Rectangle {
+                            height: 44px;
                             background: entry.selected
                                 ? Theme.accent-dim
-                                : (grid-card-touch.has-hover
+                                : (file-touch.has-hover
                                     ? Theme.hover-fill
                                     : transparent);
-                            border-width: entry.selected ? 1px : (grid-card-touch.has-hover ? 1px : 0);
-                            border-color: entry.selected ? Theme.cyan-dim : Theme.border-subtle;
-                            animate background, border-width, border-color { duration: Theme.dur-fast; }
+                            animate background { duration: Theme.dur-fast; }
 
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 6px;
-                                padding: 8px;
+                            // Left edge glow on selected
+                            if entry.selected : Rectangle {
+                                x: 0; width: 3px; height: parent.height;
+                                background: Theme.cyan;
+                                drop-shadow-blur: 8px;
+                                drop-shadow-color: Theme.cyan-glow;
+                            }
 
-                                // Icon badge
+                            file-touch := TouchArea {
+                                // The menu existed and had no way to be summoned the way anyone
+                                // would try. Right-click is the gesture; the "⋯" button stays for
+                                // touch and for anyone who prefers it.
+                                pointer-event(e) => {
+                                    if (e.button == PointerEventButton.right
+                                        && e.kind == PointerEventKind.down) {
+                                        root.context-menu-index = idx;
+                                        root.context-menu-x = self.absolute-position.x
+                                            - root.absolute-position.x + self.mouse-x;
+                                        root.context-menu-y = self.absolute-position.y
+                                            - root.absolute-position.y + self.mouse-y;
+                                        root.show-context-menu = true;
+                                    }
+                                }
+                                clicked => {
+                                    if entry.is-dir {
+                                        root.selected-index = -1;
+                                        root.clear-selection();
+                                        root.navigate-dir(entry.name);
+                                    } else {
+                                        root.multi-select-clicked(idx, false, false);
+                                        root.file-selection-changed(entry.name);
+                                    }
+                                }
+                                double-clicked => {
+                                    if !entry.is-dir {
+                                        root.open-file(entry.name);
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 8px;
+                                spacing: 10px;
+
+                                // Vivid icon badge
                                 Rectangle {
-                                    property <color> badge-color: grid-card.grid-badge-color;
-                                    width: 36px;
-                                    height: 36px;
-                                    border-radius: 10px;
+                                    property <color> badge-color:
+                                        entry.is-dir ? #3a9ac8 :
+                                        entry.icon-char == "\u{25c7}" ? #3aad6a :
+                                        entry.icon-char == "\u{2261}" ? #5a7abd :
+                                        entry.icon-char == "\u{25a3}" ? #9a4a9a :
+                                        entry.icon-char == "\u{266a}" ? #c89a3a :
+                                        entry.icon-char == "\u{25b6}" ? #c84a5a :
+                                        entry.icon-char == "\u{25a4}" ? #7a8a6a :
+                                        entry.icon-char == "\u{25a7}" ? #bd5a4a :
+                                        entry.icon-char == "\u{2699}" ? #4a7abd :
+                                        entry.icon-char == "\u{00b7}" ? #6a6a7a :
+                                        #5a5a7a;
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 7px;
                                     background: badge-color;
                                     border-width: 1px;
                                     border-color: badge-color;
                                     Icon {
                                         commands: Icons.file-kind(entry.icon-char);
-                                        size: 20px;
+                                        size: 16px;
                                         thickness: 1.7px;
                                         tint: Theme.text-on-accent;
                                         x: (parent.width - self.width) / 2;
@@ -1326,284 +1442,182 @@ export component FileBrowser inherits Rectangle {
                                     }
                                 }
 
-                                // File name
+                                // Name
                                 Text {
                                     text: entry.name;
                                     color: entry.is-dir ? Theme.cyan-light : Theme.text-primary;
-                                    font-size: Theme.fs-micro;
+                                    font-size: Theme.font-body;
                                     font-weight: entry.is-dir ? 600 : 400;
-                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
                                     overflow: elide;
-                                    wrap: word-wrap;
                                 }
-                            }
-                        }
-                    }
-                }
 
-                // ── File list (list view) ──
-                if !root.grid-view : ListView {
-                    vertical-stretch: 1;
-
-                    for entry[idx] in entries : Rectangle {
-                        height: 44px;
-                        background: entry.selected
-                            ? Theme.accent-dim
-                            : (file-touch.has-hover
-                                ? Theme.hover-fill
-                                : transparent);
-                        animate background { duration: Theme.dur-fast; }
-
-                        // Left edge glow on selected
-                        if entry.selected : Rectangle {
-                            x: 0; width: 3px; height: parent.height;
-                            background: Theme.cyan;
-                            drop-shadow-blur: 8px;
-                            drop-shadow-color: Theme.cyan-glow;
-                        }
-
-                        file-touch := TouchArea {
-                            // The menu existed and had no way to be summoned the way anyone
-                            // would try. Right-click is the gesture; the "⋯" button stays for
-                            // touch and for anyone who prefers it.
-                            pointer-event(e) => {
-                                if (e.button == PointerEventButton.right
-                                    && e.kind == PointerEventKind.down) {
-                                    root.context-menu-index = idx;
-                                    root.context-menu-x = self.absolute-position.x
-                                        - root.absolute-position.x + self.mouse-x;
-                                    root.context-menu-y = self.absolute-position.y
-                                        - root.absolute-position.y + self.mouse-y;
-                                    root.show-context-menu = true;
+                                // Size
+                                if !entry.is-dir : Text {
+                                    text: entry.size-text;
+                                    color: Theme.text-dim;
+                                    font-size: Theme.font-small;
+                                    vertical-alignment: center;
                                 }
-                            }
-                            clicked => {
-                                if entry.is-dir {
-                                    root.selected-index = -1;
-                                    root.clear-selection();
-                                    root.navigate-dir(entry.name);
-                                } else {
-                                    root.multi-select-clicked(idx, false, false);
-                                    root.file-selection-changed(entry.name);
+
+                                // Modified
+                                Text {
+                                    text: entry.modified-text;
+                                    color: Theme.text-dim;
+                                    font-size: Theme.font-small;
+                                    vertical-alignment: center;
                                 }
-                            }
-                            double-clicked => {
-                                if !entry.is-dir {
-                                    root.open-file(entry.name);
-                                }
-                            }
-                        }
 
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 8px;
-                            spacing: 10px;
-
-                            // Vivid icon badge
-                            Rectangle {
-                                property <color> badge-color:
-                                    entry.is-dir ? #3a9ac8 :
-                                    entry.icon-char == "\u{25c7}" ? #3aad6a :
-                                    entry.icon-char == "\u{2261}" ? #5a7abd :
-                                    entry.icon-char == "\u{25a3}" ? #9a4a9a :
-                                    entry.icon-char == "\u{266a}" ? #c89a3a :
-                                    entry.icon-char == "\u{25b6}" ? #c84a5a :
-                                    entry.icon-char == "\u{25a4}" ? #7a8a6a :
-                                    entry.icon-char == "\u{25a7}" ? #bd5a4a :
-                                    entry.icon-char == "\u{2699}" ? #4a7abd :
-                                    entry.icon-char == "\u{00b7}" ? #6a6a7a :
-                                    #5a5a7a;
-                                width: 28px;
-                                height: 28px;
-                                border-radius: 7px;
-                                background: badge-color;
-                                border-width: 1px;
-                                border-color: badge-color;
-                                Icon {
-                                    commands: Icons.file-kind(entry.icon-char);
-                                    size: 16px;
-                                    thickness: 1.7px;
-                                    tint: Theme.text-on-accent;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                            }
-
-                            // Name
-                            Text {
-                                text: entry.name;
-                                color: entry.is-dir ? Theme.cyan-light : Theme.text-primary;
-                                font-size: Theme.font-body;
-                                font-weight: entry.is-dir ? 600 : 400;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                                overflow: elide;
-                            }
-
-                            // Size
-                            if !entry.is-dir : Text {
-                                text: entry.size-text;
-                                color: Theme.text-dim;
-                                font-size: Theme.font-small;
-                                vertical-alignment: center;
-                            }
-
-                            // Modified
-                            Text {
-                                text: entry.modified-text;
-                                color: Theme.text-dim;
-                                font-size: Theme.font-small;
-                                vertical-alignment: center;
-                            }
-
-                            // Context menu trigger button (more actions)
-                            ctx-btn := TouchArea {
-                                width: 24px; height: 28px;
-                                clicked => {
-                                    root.context-menu-index = idx;
-                                    // Under the button that opened it. This used to set 0,0 —
-                                    // which the menu then ignored anyway.
-                                    root.context-menu-x = self.absolute-position.x
-                                        - root.absolute-position.x;
-                                    root.context-menu-y = self.absolute-position.y
-                                        - root.absolute-position.y + self.height;
-                                    root.show-context-menu = true;
-                                }
-                                Rectangle {
-                                    border-radius: 4px;
-                                    background: ctx-btn.has-hover ? Theme.border-subtle : transparent;
-                                    animate background { duration: Theme.dur-fast; }
-                                    Icon {
-                                        commands: Icons.more;
-                                        size: 14px;
-                                        tint: ctx-btn.has-hover ? Theme.text-primary : Theme.text-dim;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
+                                // Context menu trigger button (more actions)
+                                ctx-btn := TouchArea {
+                                    width: 24px; height: 28px;
+                                    clicked => {
+                                        root.context-menu-index = idx;
+                                        // Under the button that opened it. This used to set 0,0 —
+                                        // which the menu then ignored anyway.
+                                        root.context-menu-x = self.absolute-position.x
+                                            - root.absolute-position.x;
+                                        root.context-menu-y = self.absolute-position.y
+                                            - root.absolute-position.y + self.height;
+                                        root.show-context-menu = true;
+                                    }
+                                    Rectangle {
+                                        border-radius: 4px;
+                                        background: ctx-btn.has-hover ? Theme.border-subtle : transparent;
+                                        animate background { duration: Theme.dur-fast; }
+                                        Icon {
+                                            commands: Icons.more;
+                                            size: 14px;
+                                            tint: ctx-btn.has-hover ? Theme.text-primary : Theme.text-dim;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        // Row separator
+                            // Row separator
+                            Rectangle {
+                                y: parent.height - 1px;
+                                height: 1px;
+                                background: Theme.separator;
+                            }
+                        }
+                    }
+
+                    // ── Single-select action bar ──
+                    if root.selected-index >= 0 && root.selected-index < root.entries.length && root.selection-count <= 1 : Rectangle {
+                        height: 48px;
+                        background: Theme.bg-surface;
+                        // Top holographic edge
                         Rectangle {
-                            y: parent.height - 1px;
-                            height: 1px;
+                            y: 0; width: 100%; height: 1px;
                             background: Theme.separator;
                         }
-                    }
-                }
 
-                // ── Single-select action bar ──
-                if root.selected-index >= 0 && root.selected-index < root.entries.length && root.selection-count <= 1 : Rectangle {
-                    height: 48px;
-                    background: Theme.bg-surface;
-                    // Top holographic edge
-                    Rectangle {
-                        y: 0; width: 100%; height: 1px;
-                        background: Theme.separator;
-                    }
+                        HorizontalLayout {
+                            padding-left: 16px; padding-right: 16px; spacing: 8px; alignment: center;
 
-                    HorizontalLayout {
-                        padding-left: 16px; padding-right: 16px; spacing: 8px; alignment: center;
-
-                        open-btn := TouchArea {
-                            width: 56px; height: 36px;
-                            clicked => { root.open-file(root.entries[root.selected-index].name); root.selected-index = -1; root.clear-selection(); }
-                            Rectangle {
-                                border-radius: Theme.r-md;
-                                background: open-btn.has-hover ? Theme.hover-fill : transparent;
-                                border-width: open-btn.has-hover ? 1px : 0; border-color: Theme.cyan-dim;
-                                animate background, border-width { duration: Theme.dur-fast; }
-                                Text { text: "Open"; color: open-btn.has-hover ? Theme.cyan : Theme.cyan-dim; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                            open-btn := TouchArea {
+                                width: 56px; height: 36px;
+                                clicked => { root.open-file(root.entries[root.selected-index].name); root.selected-index = -1; root.clear-selection(); }
+                                Rectangle {
+                                    border-radius: Theme.r-md;
+                                    background: open-btn.has-hover ? Theme.hover-fill : transparent;
+                                    border-width: open-btn.has-hover ? 1px : 0; border-color: Theme.cyan-dim;
+                                    animate background, border-width { duration: Theme.dur-fast; }
+                                    Text { text: "Open"; color: open-btn.has-hover ? Theme.cyan : Theme.cyan-dim; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                                }
                             }
-                        }
 
-                        // Quick Look button
-                        if !root.entries[root.selected-index].is-dir : ql-btn := TouchArea {
-                            width: 72px; height: 36px;
-                            clicked => { root.file-quick-look(root.selected-index); }
-                            Rectangle {
-                                border-radius: Theme.r-md;
-                                background: ql-btn.has-hover ? Theme.hover-fill : transparent;
-                                border-width: ql-btn.has-hover ? 1px : 0; border-color: Theme.amber-dim;
-                                animate background, border-width { duration: Theme.dur-fast; }
-                                Text { text: "Preview"; color: ql-btn.has-hover ? Theme.amber : Theme.amber-dim; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                            // Quick Look button
+                            if !root.entries[root.selected-index].is-dir : ql-btn := TouchArea {
+                                width: 72px; height: 36px;
+                                clicked => { root.file-quick-look(root.selected-index); }
+                                Rectangle {
+                                    border-radius: Theme.r-md;
+                                    background: ql-btn.has-hover ? Theme.hover-fill : transparent;
+                                    border-width: ql-btn.has-hover ? 1px : 0; border-color: Theme.amber-dim;
+                                    animate background, border-width { duration: Theme.dur-fast; }
+                                    Text { text: "Preview"; color: ql-btn.has-hover ? Theme.amber : Theme.amber-dim; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                                }
                             }
-                        }
 
-                        copy-btn := TouchArea {
-                            width: 56px; height: 36px;
-                            clicked => { root.file-copy(root.entries[root.selected-index].name); root.selected-index = -1; root.clear-selection(); }
-                            Rectangle {
-                                border-radius: Theme.r-md;
-                                background: copy-btn.has-hover ? Theme.hover-fill : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                Text { text: "Copy"; color: copy-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                            copy-btn := TouchArea {
+                                width: 56px; height: 36px;
+                                clicked => { root.file-copy(root.entries[root.selected-index].name); root.selected-index = -1; root.clear-selection(); }
+                                Rectangle {
+                                    border-radius: Theme.r-md;
+                                    background: copy-btn.has-hover ? Theme.hover-fill : transparent;
+                                    animate background { duration: Theme.dur-fast; }
+                                    Text { text: "Copy"; color: copy-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                                }
                             }
-                        }
 
-                        cut-btn := TouchArea {
-                            width: 56px; height: 36px;
-                            clicked => { root.file-cut(root.entries[root.selected-index].name); root.selected-index = -1; root.clear-selection(); }
-                            Rectangle {
-                                border-radius: Theme.r-md;
-                                background: cut-btn.has-hover ? Theme.hover-fill : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                Text { text: "Cut"; color: cut-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                            cut-btn := TouchArea {
+                                width: 56px; height: 36px;
+                                clicked => { root.file-cut(root.entries[root.selected-index].name); root.selected-index = -1; root.clear-selection(); }
+                                Rectangle {
+                                    border-radius: Theme.r-md;
+                                    background: cut-btn.has-hover ? Theme.hover-fill : transparent;
+                                    animate background { duration: Theme.dur-fast; }
+                                    Text { text: "Cut"; color: cut-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                                }
                             }
-                        }
 
-                        rename-btn := TouchArea {
-                            width: 64px; height: 36px;
-                            clicked => { root.rename-old-name = root.entries[root.selected-index].name; root.rename-new-name = root.entries[root.selected-index].name; root.show-rename-dialog = true; }
-                            Rectangle {
-                                border-radius: Theme.r-md;
-                                background: rename-btn.has-hover ? Theme.hover-fill : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                Text { text: "Rename"; color: rename-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                            rename-btn := TouchArea {
+                                width: 64px; height: 36px;
+                                clicked => { root.rename-old-name = root.entries[root.selected-index].name; root.rename-new-name = root.entries[root.selected-index].name; root.show-rename-dialog = true; }
+                                Rectangle {
+                                    border-radius: Theme.r-md;
+                                    background: rename-btn.has-hover ? Theme.hover-fill : transparent;
+                                    animate background { duration: Theme.dur-fast; }
+                                    Text { text: "Rename"; color: rename-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                                }
                             }
-                        }
 
-                        del-btn := TouchArea {
-                            width: 64px; height: 36px;
-                            clicked => { root.delete-target-name = root.entries[root.selected-index].name; root.show-delete-dialog = true; }
-                            Rectangle {
-                                border-radius: Theme.r-md;
-                                background: del-btn.has-hover ? Theme.color-danger-dim : transparent;
-                                border-width: del-btn.has-hover ? 1px : 0; border-color: Theme.color-danger-dim;
-                                animate background, border-width { duration: Theme.dur-fast; }
-                                Text { text: "Delete"; color: del-btn.has-hover ? Theme.color-danger : Theme.color-danger; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                            del-btn := TouchArea {
+                                width: 64px; height: 36px;
+                                clicked => { root.delete-target-name = root.entries[root.selected-index].name; root.show-delete-dialog = true; }
+                                Rectangle {
+                                    border-radius: Theme.r-md;
+                                    background: del-btn.has-hover ? Theme.color-danger-dim : transparent;
+                                    border-width: del-btn.has-hover ? 1px : 0; border-color: Theme.color-danger-dim;
+                                    animate background, border-width { duration: Theme.dur-fast; }
+                                    Text { text: "Delete"; color: del-btn.has-hover ? Theme.color-danger : Theme.color-danger; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
+                                }
                             }
                         }
                     }
-                }
 
-                // ── Empty state ──
-                if entries.length == 0 && !is-loading : VerticalLayout {
-                    vertical-stretch: 1;
-                    alignment: center;
-                    padding: 40px;
-                    Rectangle {
-                        width: 48px; height: 48px; x: (parent.width - 48px) / 2;
-                        border-radius: 24px; border-width: 1px; border-color: Theme.cyan-dim;
-                        background: Theme.accent-dim;
-                        drop-shadow-blur: 8px; drop-shadow-color: Theme.cyan-glow;
-                        Icon {
-                            commands: Icons.minus;
-                            size: 14px;
-                            tint: Theme.text-secondary;
-                            y: (parent.height - self.height) / 2;
-                        }
+                    // ── Empty state ──
+                    //
+                    // Three things were wrong here and the photograph showed all of them at once:
+                    // a solid teal disc sitting left of centre with a dash inside it, and the words
+                    // "Empty directory" somewhere else again.
+                    //
+                    //   `x: (parent.width - 48px) / 2` inside a VerticalLayout does nothing --
+                    //     a layout positions its own children and ignores x. So the circle never
+                    //     centred, and the label, which centred itself, landed somewhere else.
+                    //   The Icon had `y:` centring but no `x:`, so the dash sat against the
+                    //     circle's left edge rather than in it.
+                    //   `background: Theme.accent-dim` is a solid accent fill. The house style for
+                    //     this circle is Theme.tint-accent, which is why it read as a teal blob.
+                    //
+                    // YEmptyState does all three correctly and is what the other views use.
+                    if entries.length == 0 && !is-loading : YEmptyState {
+                        vertical-stretch: 1;
+                        icon-path: Icons.folder;
+                        title: "Empty directory";
+                        description: "Nothing here yet.";
                     }
-                    Rectangle { height: 12px; }
-                    Text { text: "Empty directory"; color: Theme.text-dim; font-size: Theme.font-body; horizontal-alignment: center; }
-                }
 
-                // Loading
-                if is-loading : VerticalLayout {
-                    vertical-stretch: 1;
-                    alignment: center;
-                    Text { text: "Loading..."; color: Theme.text-dim; font-size: Theme.font-body; horizontal-alignment: center; }
+                    // Loading
+                    if is-loading : VerticalLayout {
+                        vertical-stretch: 1;
+                        alignment: center;
+                        Text { text: "Loading..."; color: Theme.text-dim; font-size: Theme.font-body; horizontal-alignment: center; }
+                    }
                 }
             }
 
