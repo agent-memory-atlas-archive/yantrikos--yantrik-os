@@ -195,7 +195,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         horizontal-stretch: 1;
                         height: 36px;
                         background: Theme.bg-input;
-                        border-radius: Theme.r-pill;
+                        border-radius: self.height / 2;
                         border-width: 1px;
                         border-color: url-input-ta.has-focus ? AppIdentity.accent : Theme.border-subtle;
                         clip: true;
@@ -262,7 +262,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         horizontal-stretch: 1;
                         height: 32px;
                         background: Theme.bg-input;
-                        border-radius: Theme.r-pill;
+                        border-radius: self.height / 2;
                         border-width: 1px;
                         border-color: checksum-input.has-focus ? AppIdentity.accent : Theme.border-subtle;
                         clip: true;
@@ -303,7 +303,7 @@ export component DownloadManagerScreen inherits Rectangle {
                         horizontal-stretch: 1;
                         height: 32px;
                         background: Theme.bg-input;
-                        border-radius: Theme.r-pill;
+                        border-radius: self.height / 2;
                         border-width: 1px;
                         border-color: savedir-input.has-focus ? AppIdentity.accent : Theme.border-subtle;
                         clip: true;
@@ -395,7 +395,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     horizontal-stretch: 1;
                     height: 32px;
                     background: Theme.bg-input;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     border-width: 1px;
                     border-color: search-input.has-focus ? AppIdentity.accent : Theme.border-subtle;
                     clip: true;
@@ -468,7 +468,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     width: sort-label.preferred-width + 24px;
                     height: 30px;
                     background: sort-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     border-width: 1px;
                     border-color: Theme.border-subtle;
 
@@ -1097,7 +1097,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     width: 64px;
                     height: 30px;
                     background: root.active-filter == 0 ? Theme.accent-glow : transparent;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     border-width: root.active-filter == 0 ? 1px : 0;
                     border-color: root.active-filter == 0 ? Theme.accent-dim : transparent;
 
@@ -1123,7 +1123,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     width: 76px;
                     height: 30px;
                     background: root.active-filter == 1 ? Theme.accent-glow : transparent;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     border-width: root.active-filter == 1 ? 1px : 0;
                     border-color: root.active-filter == 1 ? Theme.accent-dim : transparent;
 
@@ -1149,7 +1149,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     width: 92px;
                     height: 30px;
                     background: root.active-filter == 2 ? Theme.accent-glow : transparent;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     border-width: root.active-filter == 2 ? 1px : 0;
                     border-color: root.active-filter == 2 ? Theme.accent-dim : transparent;
 
@@ -1175,7 +1175,7 @@ export component DownloadManagerScreen inherits Rectangle {
                     width: 72px;
                     height: 30px;
                     background: root.active-filter == 3 ? Theme.accent-glow : transparent;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     border-width: root.active-filter == 3 ? 1px : 0;
                     border-color: root.active-filter == 3 ? Theme.accent-dim : transparent;
 

@@ -286,7 +286,14 @@ export global Theme {
     out property <length> r-md: 8px;       // Buttons, inputs, cards
     out property <length> r-lg: 12px;      // Panels, dialogs
     out property <length> r-xl: 16px;      // Modals, command palette
-    out property <length> r-pill: 999px;   // Pills, full-round
+    // A stadium is `self.height / 2`, written at the element. Do NOT use a constant for it.
+    //
+    // This was 999px, on the CSS assumption that an over-large radius clamps to half the
+    // height. Slint's software renderer does not clamp: it draws the corner arcs at the radius
+    // given, and on a wide, short element they overshoot and cross, which turns a search field
+    // into a pointed lens. That is what the Downloads search box looked like, and the same
+    // token was on thirty-five other controls waiting to do it.
+    out property <length> r-pill: 999px;
 
     // ─── Motion tokens ────────────────────────────────────────────
     // fast = hover/focus, base = panel/state, slow = modal/large

@@ -113,7 +113,7 @@ export component StatusBar inherits Rectangle {
                 width: proj-text.preferred-width + Theme.sp-3;
                 height: 20px;
                 y: (Theme.status-bar-height - self.height) / 2;
-                border-radius: Theme.r-pill;
+                border-radius: self.height / 2;
                 background: Theme.tint-accent;
                 border-width: 1px;
                 border-color: Theme.border-subtle;
@@ -287,7 +287,7 @@ export component StatusBar inherits Rectangle {
                     width: max(20px, whisper-text.preferred-width + 10px);
                     height: 20px;
                     y: (parent.height - 20px) / 2;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     background: Theme.accent-dim;
 
                     whisper-text := Text {
@@ -350,7 +350,7 @@ export component StatusBar inherits Rectangle {
                     width: max(20px, queue-text.preferred-width + 10px);
                     height: 20px;
                     y: (parent.height - 20px) / 2;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     background: Theme.amber-dim;
 
                     queue-text := Text {

@@ -418,7 +418,7 @@ export component TerminalScreen inherits Rectangle {
                 if root.search-query != "" : Rectangle {
                     width: smatch-text.preferred-width + Theme.sp-4;
                     height: 24px;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     background: root.search-match-count > 0 ? Theme.tint-cyan : Theme.color-danger-dim;
 
                     smatch-text := Text {

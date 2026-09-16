@@ -345,8 +345,14 @@ export component CalendarScreen inherits Rectangle {
                                 border-radius: Theme.r-sm;
                                 // Days of this month sit on a faint surface so the month reads as
                                 // a grid; days spilling in from the neighbouring months do not.
+                                // bg-surface, not bg-surface at 55% opacity.
+                                //
+                                // #161622 over #0c0c14 at 55% lands on #111119 -- five values
+                                // from the background, which is to say invisible. The month
+                                // read as thirty numbers floating on a black field with no
+                                // grid at all, which is the one thing a month view has to be.
                                 background: cell-day.is-selected ? AppIdentity.tint
-                                    : cell-day.is-current-month ? Theme.bg-surface.transparentize(45%)
+                                    : cell-day.is-current-month ? Theme.bg-surface
                                     : transparent;
                                 border-width: cell-day.is-selected ? 1px : 0;
                                 border-color: cell-day.is-selected ? Theme.accent-dim : transparent;
@@ -1100,7 +1106,7 @@ export component CalendarScreen inherits Rectangle {
                             Icon {
                                 commands: Icons.calendar;
                                 size: 26px;
-                                tint: Theme.text-dim.transparentize(35%);
+                                tint: AppIdentity.accent.transparentize(55%);
                             }
                         }
                         Text {

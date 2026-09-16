@@ -964,7 +964,7 @@ export component DeviceDashboardScreen inherits Rectangle {
                     }
                     ai-dev-btn := Rectangle {
                         height: 32px;
-                        border-radius: Theme.r-pill;
+                        border-radius: self.height / 2;
                         background: root.ai-is-working ? AppIdentity.accent
                             : (parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated);
                         border-width: 1px;

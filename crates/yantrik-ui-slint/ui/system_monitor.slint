@@ -234,11 +234,16 @@ export component SystemMonitor inherits Rectangle {
                     }
                 }
 
-                // Center: score percentage + thin progress bar
+                // Score percentage + the bar it belongs to.
+                //
+                // `alignment: center` and `horizontal-stretch: 1` on the child contradict each
+                // other, and centre wins: the layout gives every child its preferred width and
+                // centres the group, so the bar -- which has no preferred width, only a stretch
+                // -- collapsed to nothing. On screen that was a bare "100%" floating in the
+                // middle of the row with no indication of what it measured.
                 HorizontalLayout {
                     horizontal-stretch: 1;
                     spacing: 10px;
-                    alignment: center;
 
                     Text {
                         text: Math.round(root.health-score) + "%";
@@ -251,8 +256,13 @@ export component SystemMonitor inherits Rectangle {
                         animate color { duration: 150ms; easing: ease-in-out; }
                     }
 
-                    Rectangle {
+                    // Wrapped so the 4px bar sits on the text's centre line. A fixed-height
+                    // child of a HorizontalLayout is placed at the top of the row, which put
+                    // the bar a clear 20px above the "100%" it belongs to.
+                    VerticalLayout {
                         horizontal-stretch: 1;
+                        alignment: center;
+                    Rectangle {
                         height: 4px;
                         border-radius: 2px;
                         background: Theme.bg-deep;
@@ -266,6 +276,7 @@ export component SystemMonitor inherits Rectangle {
                             animate width { duration: 150ms; easing: ease-in-out; }
                             animate background { duration: 150ms; easing: ease-in-out; }
                         }
+                    }
                     }
                 }
 

@@ -848,7 +848,7 @@ export component EmailClient inherits Rectangle {
                                 property <bool> hovered: triage-ta.has-hover;
 
                                 height: Theme.h-compact;
-                                border-radius: Theme.r-pill;
+                                border-radius: self.height / 2;
                                 background: is-active ? AppIdentity.tint
                                           : hovered ? Theme.hover-fill
                                           : transparent;

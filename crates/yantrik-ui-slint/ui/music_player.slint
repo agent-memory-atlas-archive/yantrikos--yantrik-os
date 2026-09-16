@@ -1399,7 +1399,7 @@ export component MusicPlayerScreen inherits Rectangle {
                     width: eq-txt.preferred-width + 22px;
                     height: 24px;
                     y: (parent.height - 24px) / 2;
-                    border-radius: Theme.r-pill;
+                    border-radius: self.height / 2;
                     background: active ? AppIdentity.tint : eq-ta.has-hover ? Theme.hover-fill : transparent;
                     border-width: 1px;
                     border-color: active ? Theme.accent-dim : Theme.border-subtle;
