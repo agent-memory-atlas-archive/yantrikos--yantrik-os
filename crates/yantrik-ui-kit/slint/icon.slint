@@ -185,6 +185,37 @@ export global Icons {
     // The weather service sends a vector icon KIND (sun/moon/partly/cloud/rain/
     // snow/fog/storm) rather than an emoji, so the dashboard draws the same
     // stroke set as the rest of the OS. Unknown kinds fall back to cloud.
+    // A character that arrived as DATA, mapped to a real icon.
+    //
+    // file-kind() below already does this for the file browser; this is the same idea for
+    // everything else that carries its icon in a struct field set from Rust. Those fields hold
+    // emoji -- a clipboard, a star, a sun -- and emoji only draw if the installed font has
+    // them. On this OS it does not: the Snippets sidebar showed two tofu boxes where the
+    // "All Snippets" and "Favorites" icons should be, and a photograph is the only reason
+    // anyone knew. A path from this set always draws.
+    //
+    // Unknown characters map to "", which the Icon component renders as nothing. That is the
+    // right failure: an absent icon reads as a design choice, a tofu box reads as breakage.
+    public pure function glyph(c: string) -> string {
+        return c == "\u{1F4CB}" ? root.clipboard     // clipboard
+             : c == "\u{2B50}"  ? root.star          // star
+             : c == "\u{2600}"  ? root.sun           // sun
+             : c == "\u{1F324}" ? root.partly        // sun behind cloud
+             : c == "\u{1F4C5}" ? root.calendar      // calendar
+             : c == "\u{1F4AC}" ? root.chat          // speech balloon
+             : c == "\u{1F4B0}" ? root.chart         // money bag
+             : c == "\u{2728}"  ? root.spark         // sparkles
+             : c == "\u{1FAC0}" ? root.bond          // anatomical heart
+             : c == "\u{1F4F0}" ? root.doc           // newspaper
+             : c == "\u{26A0}"  ? root.warning       // warning sign
+             : c == "\u{26A0}\u{FE0F}" ? root.warning
+             : c == "\u{25B6}"  ? root.play
+             : c == "\u{25CE}"  ? root.companion
+             : c == "\u{2713}"  ? root.check
+             : c == "\u{2705}"  ? root.check
+             : "";
+    }
+
     public pure function weather-kind(kind: string) -> string {
         kind == "sun"      ? root.sun
         : kind == "moon"   ? root.moon

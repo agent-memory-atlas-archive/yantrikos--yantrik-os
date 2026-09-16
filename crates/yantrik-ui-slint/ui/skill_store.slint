@@ -2,6 +2,7 @@
 // Skills are loaded from SkillRegistry manifests via Rust backend.
 
 import { Theme } from "theme.slint";
+import { Icon, Icons } from "components/icon.slint";
 
 export struct SkillData {
     id: string,
@@ -178,12 +179,12 @@ export component SkillStore inherits Rectangle {
                                 border-radius: 10px;
                                 background: skill.enabled ? Theme.color-success-dim : Theme.hover-fill;
 
-                                Text {
-                                    text: skill.icon;
-                                    font-size: 18px;
-                                    color: skill.enabled ? Theme.color-success : Theme.text-dim;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                Icon {
+                                    commands: Icons.glyph(skill.icon);
+                                    size: 18px;
+                                    tint: skill.enabled ? Theme.color-success : Theme.text-dim;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
                                 }
                             }
 

@@ -122,15 +122,14 @@ export component SnippetManagerScreen inherits Rectangle {
         width: parent.width;
         icon: Icons.code;
         title: "Snippets";
-        show-search: true;
-        search-placeholder: "Search snippets";
+        // No show-search here: this app already has a search field at the top of its snippet
+        // list, which is where it belongs -- it filters that list. Turning on the frame's as
+        // well gave the window two identical "Search snippets" boxes side by side.
         actions: [
             { id: "ai",  icon: Icons.spark, label: root.ai-is-working ? "Working" : "AI",
               emphasis: 1, loading: root.ai-is-working },
             { id: "new", icon: Icons.plus,  label: "New Snippet", emphasis: 2 },
         ];
-        search-text <=> root.search-query;
-        search-edited(t) => { root.snip-search(t); }
         action(id) => {
             if (id == "new") { root.snip-new(); }
             else if (id == "ai") { root.ai-explain-pressed(); }
@@ -207,11 +206,11 @@ export component SnippetManagerScreen inherits Rectangle {
                             spacing: 8px;
                             alignment: center;
 
-                            Text {
-                                text: coll.icon;
-                                font-size: 13px;
-                                vertical-alignment: center;
-                                width: 20px;
+                            Icon {
+                                commands: Icons.glyph(coll.icon);
+                                size: 14px;
+                                tint: coll.is-selected ? Theme.accent : Theme.text-secondary;
+                                y: (parent.height - self.height) / 2;
                             }
 
                             if root.rename-mode && coll.is-selected && !coll.is-builtin : LineEdit {

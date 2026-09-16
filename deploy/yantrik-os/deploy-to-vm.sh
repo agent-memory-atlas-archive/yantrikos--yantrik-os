@@ -35,7 +35,13 @@
 set -euo pipefail
 
 TARGET_HOST="${1:?usage: deploy-to-vm.sh user@host}"
-TARGET_DIR="${CARGO_TARGET_DIR:-/home/yantrik/target-yantrik}/release"
+# Asked of cargo, not assumed. The same line in build-release.sh shipped a release whose app
+# binaries were five hours old: with CARGO_TARGET_DIR unset, cargo writes to ./target while
+# this default points at a directory left over from when the repo lived on /mnt/c. Anything
+# that copies binaries somewhere has to read the directory cargo actually writes to.
+TARGET_DIR="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')}"
+TARGET_DIR="${TARGET_DIR:-/home/yantrik/target-yantrik}/release"
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_deploy}"

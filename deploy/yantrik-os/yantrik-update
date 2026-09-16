@@ -240,20 +240,52 @@ EOF
 
 # Restart the shell in the current session, then confirm it answers its control socket. If it
 # does not come up, roll back and restart the old one — the machine must never be left dark.
-# Start the shell, detached, with the session's wayland environment so it outlives this script.
+# Remember the environment the RUNNING shell has, before killing it.
 #
-# `mkdir -p` on the log directory is the whole point of this existing. Without it the append
-# redirect below fails, the shell never launches at all, and the update rolls back with a
-# perfectly healthy build and a message about a timeout. Worse: the rollback ran the same
-# redirect, so it could not restart the OLD shell either — one absent directory took the
-# machine dark and reported it as "the previous build is running again".
+# An update restarts the shell, and the restarted shell must be the same program in the same
+# session -- not a similar one started by hand with three variables someone thought of.
+#
+# The version of this that listed variables explicitly passed XDG_RUNTIME_DIR, WAYLAND_DISPLAY
+# and SLINT_BACKEND. It did not pass SLINT_FULLSCREEN, which the session sets (cloud-init
+# exports it before launching labwc). So after every update the OS came back as an 800-pixel
+# DECORATED WINDOW floating on a black root, with a title bar and a close button. An operating
+# system. The binaries were right and the desktop looked broken.
+#
+# Copying the live process's environment is the only version of this that stays correct when
+# someone adds a variable to the session and does not think about the updater.
+SHELL_ENV=()
+capture_shell_env() {
+  local pid
+  pid="$(pgrep -x yantrik-ui 2>/dev/null | head -1)"
+  [ -n "$pid" ] || return 1
+  [ -r "/proc/$pid/environ" ] || return 1
+  mapfile -d '' -t SHELL_ENV < "/proc/$pid/environ" || return 1
+  [ "${#SHELL_ENV[@]}" -gt 0 ]
+}
+
+# Start the shell, detached, so it outlives this script.
+#
+# `mkdir -p` on the log directory is the other half of why this function exists. Without it the
+# append redirect fails, the shell never launches at all, and the update rolls back a perfectly
+# healthy build with a message about a timeout. Worse: the rollback ran the same redirect, so
+# it could not restart the OLD shell either -- one absent directory took a machine dark and
+# reported it as "the previous build is running again".
 start_shell() {
   local runtime="$1"
   mkdir -p "$PREFIX/logs" 2>/dev/null || true
-  setsid env \
-    XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-    SLINT_BACKEND="${SLINT_BACKEND:-winit}" \
-    "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$LOG_FILE" 2>&1 &
+
+  if [ "${#SHELL_ENV[@]}" -gt 0 ]; then
+    # The session's own environment, verbatim.
+    setsid env "${SHELL_ENV[@]}" \
+      "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$LOG_FILE" 2>&1 &
+  else
+    # Nothing was running to copy from. SLINT_FULLSCREEN is named here on purpose: a shell
+    # without it is a window, and a window is the one thing this is not.
+    setsid env \
+      XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+      SLINT_BACKEND="${SLINT_BACKEND:-winit}" SLINT_FULLSCREEN="${SLINT_FULLSCREEN:-1}" \
+      "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$LOG_FILE" 2>&1 &
+  fi
 }
 
 restart_and_verify() {
@@ -265,6 +297,9 @@ restart_and_verify() {
     info "the new build will take effect the next time the desktop session starts."
     return 0
   fi
+
+  # Before the kill, or there is nothing left to read it from.
+  capture_shell_env || warn "no running shell to copy the session environment from"
 
   pkill -x yantrik-ui 2>/dev/null
   sleep 3

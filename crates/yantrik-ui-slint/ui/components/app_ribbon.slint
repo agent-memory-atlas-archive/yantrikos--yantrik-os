@@ -249,11 +249,11 @@ export component RibbonAccentButton inherits Rectangle {
         spacing: 5px;
         alignment: center;
 
-        if icon != "" : Text {
-            text: root.icon;
-            color: Theme.text-on-accent;
-            font-size: 11px;
-            vertical-alignment: center;
+        if root.icon != "" : Icon {
+            commands: Icons.glyph(root.icon);
+            tint: Theme.text-on-accent;
+            size: 12px;
+            y: (parent.height - self.height) / 2;
         }
 
         Text {

@@ -410,10 +410,12 @@ export component WeatherDashboard inherits Rectangle {
                 padding-right: 16px;
                 spacing: 10px;
 
-                Text {
-                    text: alert.icon;
-                    font-size: 18px;
-                    vertical-alignment: center;
+                Icon {
+                    commands: Icons.glyph(alert.icon);
+                    size: 18px;
+                    tint: alert.severity >= 2 ? Theme.color-emotional
+                          : alert.severity == 1 ? Theme.amber : Theme.text-secondary;
+                    y: (parent.height - self.height) / 2;
                 }
 
                 Text {
