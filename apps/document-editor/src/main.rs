@@ -2,10 +2,86 @@
 //!
 //! Rich document editing with comments, track changes, version history, AI assist.
 
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
 
 slint::include_modules!();
+
+/// Fill the agent rail from the document on screen.
+///
+/// Its own headings are the context: they are what the document IS, the app already computes
+/// them for the outline panel, and a heading list is the one thing here that is true without
+/// asking anybody. Memory is added when the companion is reachable, filtered by the shared
+/// relevance floor -- see companion::recall_relevant for why that floor exists.
+fn refresh_agent_rail(ui: &DocumentEditorApp) {
+    let mut context: Vec<AgentContextItem> = Vec::new();
+    for h in ui.get_doc_headings().iter().take(6) {
+        context.push(AgentContextItem {
+            id: format!("heading:{}", h.block_index).into(),
+            label: h.title.clone(),
+            detail: format!("H{}", h.level).into(),
+            source: "outline".into(),
+        });
+    }
+    ui.set_agent_context(ModelRc::new(VecModel::from(context.clone())));
+
+    let has_text = ui.get_doc_word_count() > 0;
+    let online = companion::is_online();
+    let mut next: Vec<AgentSuggestion> = Vec::new();
+    if has_text && online {
+        next.push(AgentSuggestion {
+            id: "summarize".into(),
+            label: "Summarise it".into(),
+            detail: "five bullets, from what it says".into(),
+            icon: "template".into(),
+            running: ui.get_proposal_working(),
+            proposes: true,
+        });
+        next.push(AgentSuggestion {
+            id: "tighten".into(),
+            label: "Make it shorter".into(),
+            detail: "clearer, keeping every fact".into(),
+            icon: "spark".into(),
+            running: ui.get_proposal_working(),
+            proposes: true,
+        });
+    }
+    ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
+
+    ui.set_agent_unavailable(if online || !has_text {
+        SharedString::new()
+    } else {
+        companion::OFFLINE_HINT.into()
+    });
+
+    if online && has_text {
+        let query = ui.get_doc_title().to_string();
+        if query.trim().is_empty() {
+            return;
+        }
+        let back = ui.as_weak();
+        std::thread::spawn(move || {
+            let found =
+                companion::recall_relevant(&query, companion::RELEVANCE_FLOOR, 3);
+            if found.is_empty() {
+                return;
+            }
+            let _ = back.upgrade_in_event_loop(move |ui| {
+                let mut rows = context;
+                for m in found {
+                    let line = m.text.lines().next().unwrap_or("").trim().to_string();
+                    rows.push(AgentContextItem {
+                        id: format!("memory:{}", m.rid).into(),
+                        label: line.into(),
+                        detail: format!("{}% match", (m.score * 100.0).round() as i64).into(),
+                        source: "memory".into(),
+                    });
+                }
+                ui.set_agent_context(ModelRc::new(VecModel::from(rows)));
+            });
+        });
+    }
+}
 
 fn main() {
     init_tracing("yantrik-document-editor");
@@ -34,6 +110,7 @@ fn wire(app: &DocumentEditorApp) {
             ui.set_doc_content("".into());
             ui.set_doc_is_modified(false);
             ui.set_doc_word_count(0);
+            refresh_agent_rail(&ui);
             ui.set_doc_char_count(0);
         });
     }
@@ -71,6 +148,7 @@ fn wire(app: &DocumentEditorApp) {
             ui.set_doc_is_modified(true);
             let text = content.to_string();
             ui.set_doc_word_count(text.split_whitespace().count() as i32);
+            refresh_agent_rail(&ui);
             ui.set_doc_char_count(text.len() as i32);
         });
     }
@@ -144,7 +222,120 @@ fn wire(app: &DocumentEditorApp) {
     app.on_doc_print_preview(|| { tracing::info!("Print preview"); });
 
     // ── AI assist ──
-    app.on_doc_ai_submit(|prompt| { tracing::info!("AI submit: {prompt} (standalone mode)"); });
+    // ── The agent layer ──
+    //
+    // The rewritten document waits here between the answer arriving and the person pressing
+    // Replace. It is not a UI property because nothing draws it: the card shows the text, and
+    // this is what gets written if the card is accepted.
+    let pending: std::sync::Arc<std::sync::Mutex<String>> = Default::default();
+
+    // doc_ai_submit logged the prompt and returned. It asks the companion now, and the answer
+    // comes back as a proposal that says what applying it would do -- which here is "replace
+    // the document", so it says that before the button is pressed.
+    {
+        let weak = app.as_weak();
+        let pending_w = pending.clone();
+        app.on_doc_ai_submit(move |prompt| {
+            let Some(ui) = weak.upgrade() else { return };
+            let body = ui.get_doc_content().to_string();
+            if body.trim().is_empty() {
+                ui.set_proposal(AgentProposal {
+                    title: "Nothing to work on".into(),
+                    body: "This document is empty.".into(),
+                    verb: "Close".into(),
+                    ..Default::default()
+                });
+                return;
+            }
+
+            ui.set_proposal_working(true);
+            ui.set_proposal(AgentProposal {
+                title: "Rewriting".into(),
+                source: "from this document".into(),
+                ..Default::default()
+            });
+
+            let ask = format!(
+                "{prompt}\n\nHere is the document. Use only what it says; invent nothing. \
+                 Reply with the rewritten document only.\n\n{body}"
+            );
+            let back = ui.as_weak();
+            let pending_w = pending_w.clone();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&ask);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_proposal_working(false);
+                    match outcome {
+                        Ok(text) => {
+                            let words = text.split_whitespace().count();
+                            ui.set_proposal(AgentProposal {
+                                title: "Rewritten document".into(),
+                                body: text.clone().into(),
+                                source: "from this document".into(),
+                                // This one really does replace what is on screen, so it says so
+                                // and says how big the replacement is.
+                                impact: format!("Replaces the document with {words} words, unsaved")
+                                    .into(),
+                                destructive: false,
+                                verb: "Replace".into(),
+                            });
+                            if let Ok(mut p) = pending_w.lock() { *p = text; }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Companion call failed");
+                            ui.set_proposal(AgentProposal {
+                                title: "The companion did not answer".into(),
+                                body: format!("{e}\n\nIs the Yantrik shell running?").into(),
+                                verb: "Close".into(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = app.as_weak();
+        let pending_r = pending.clone();
+        app.on_proposal_applied(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let text = pending_r.lock().map(|p| p.clone()).unwrap_or_default();
+            if text.is_empty() {
+                return;
+            }
+            ui.set_doc_content(text.into());
+            // Left unsaved on purpose, the same as Notes: generated text is looked at before
+            // it is kept.
+            ui.set_doc_is_modified(true);
+            ui.set_proposal(AgentProposal::default());
+            refresh_agent_rail(&ui);
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_proposal_dismissed(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_proposal(AgentProposal::default());
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_agent_suggestion_activated(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            match id.as_str() {
+                "summarize" => ui.invoke_doc_ai_submit(
+                    "Summarise this document in at most five bullet points.".into(),
+                ),
+                "tighten" => ui.invoke_doc_ai_submit(
+                    "Rewrite this document to be shorter and clearer, keeping every fact.".into(),
+                ),
+                other => tracing::warn!(id = other, "unknown rail suggestion"),
+            }
+        });
+    }
+    app.on_agent_context_activated(|_| {});
     app.on_doc_ai_apply(|| { tracing::info!("AI apply"); });
     app.on_doc_ai_dismiss(|| { tracing::info!("AI dismiss"); });
     app.on_doc_ai_draft(|topic| { tracing::info!("AI draft: {topic}"); });

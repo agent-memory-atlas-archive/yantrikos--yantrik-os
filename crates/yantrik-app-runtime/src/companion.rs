@@ -61,6 +61,35 @@ pub fn recall(query: &str, limit: usize) -> Result<Vec<Recalled>, String> {
         .collect())
 }
 
+/// Recall, filtered to what is actually relevant.
+///
+/// `recall` returns its best `limit` results, and "best" is not "relevant": on a fresh machine
+/// the best match for a note about quarterly planning was the companion's own telemetry --
+/// "App opened: yantrik-notes", scoring 9%. An agent rail that shows that is not surfacing
+/// context, it is surfacing noise with a number on it, and one junk row costs more trust than
+/// three good rows earn.
+///
+/// So every caller that puts recall results in front of a person goes through here. Over-fetch,
+/// filter, then take: asking for `want` directly and filtering afterwards leaves you with two
+/// rows when three were available.
+pub fn recall_relevant(query: &str, floor: f64, want: usize) -> Vec<Recalled> {
+    recall(query, (want * 3).max(6))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.score >= floor)
+        .take(want)
+        .collect()
+}
+
+/// The floor every app uses, so "relevant" means the same thing in all of them.
+pub const RELEVANCE_FLOOR: f64 = 0.35;
+
+/// What to tell someone when the shell is not there.
+///
+/// One sentence, said once at the top of the rail rather than by every row failing separately.
+/// Running an app on its own is a supported thing to do, not an error.
+pub const OFFLINE_HINT: &str = "Not connected. Start the Yantrik shell for memory and suggestions.";
+
 /// Run one of the companion's tools by name, without a model in the loop.
 ///
 /// The companion carries ~178 of them — files, windows, browser, containers, packages — behind

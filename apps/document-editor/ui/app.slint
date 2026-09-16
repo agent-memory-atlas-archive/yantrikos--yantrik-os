@@ -2,12 +2,26 @@
 // Wraps the shared DocumentEditorScreen component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
 import { DocumentEditorScreen, DocHeadingEntry, DocCommentEntry, DocChangeEntry, DocVersionEntry } from "document_editor.slint";
 
 export { DocHeadingEntry, DocCommentEntry, DocChangeEntry, DocVersionEntry, ThemeMode, AccentPreset }
+export { AgentContextItem, AgentSuggestion, AgentProposal }
 
 export component DocumentEditorApp inherits Window {
+    // ── The agent layer ──
+    in property <[AgentContextItem]> agent-context <=> editor.agent-context;
+    in property <[AgentSuggestion]> agent-suggestions <=> editor.agent-suggestions;
+    in property <string> agent-unavailable <=> editor.agent-unavailable;
+    callback agent-context-activated <=> editor.agent-context-activated;
+    callback agent-suggestion-activated <=> editor.agent-suggestion-activated;
+    in property <AgentProposal> proposal <=> editor.proposal;
+    in property <bool> proposal-working <=> editor.proposal-working;
+    callback proposal-applied <=> editor.proposal-applied;
+    callback proposal-dismissed <=> editor.proposal-dismissed;
+    
     // What app this window is.
     //
     // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
