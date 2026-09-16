@@ -115,8 +115,24 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "apps" ]; then
         image-viewer music-player network-manager text-editor document-editor spreadsheet
         presentation snippet-manager"
   for app in $APPS; do
-    on_vm "yos act shell open_app name=$app" >/dev/null
+    # Verify it was ACCEPTED before photographing. open_app refuses an id it cannot launch, and
+    # a survey that ignores that photographs whatever was already on screen and files it under
+    # the app's name — which is how a picture of the desktop ended up labelled "text-editor".
+    reply="$(on_vm "yos act shell open_app name=$app" 2>&1)"
+    case "$reply" in
+      *refused*)
+        echo "   app-$app — NOT LAUNCHABLE: ${reply#*refused: }"
+        continue
+        ;;
+    esac
     settle 7
+    # And that something actually appeared. `open_app` defers, so acceptance is not arrival.
+    if ! on_vm "yos describe shell" | grep -qi "$app\|$(echo "$app" | tr '-' ' ')"; then
+      # Do not photograph. Whatever is on screen belongs to the previous app, and filing it
+      # under this one is worse than having no picture — it is a picture that lies.
+      echo "   app-$app — accepted but no window appeared, not photographed"
+      continue
+    fi
     shot "app-$app"
     ssh $SSH_OPTS "$VM_HOST" "pkill -f '[b]in/yantrik-$app'" >/dev/null 2>&1
     settle 2

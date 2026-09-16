@@ -25,7 +25,7 @@ pub const BUILTIN_APP_IDS: &[&str] = &[
     "sysmonitor", "system_monitor", "music", "music_player", "downloads", "download_manager",
     "snippets", "snippet_manager", "containers", "container_manager", "devices",
     "device_dashboard", "permissions", "permission_dashboard", "documents", "document_editor",
-    "presentation", "slides",
+    "presentation", "slides", "text_editor", "image_viewer", "images", "network_manager",
 ];
 
 /// One spelling of an app id, from whatever a caller had to hand.
@@ -138,7 +138,12 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 spawn_app("notes", "yantrik-notes");
                 return;
             }
-            "editor" => {
+            // `text_editor` is the name the binary carries and the name a person would try;
+            // `editor` is what the arm has always been called. Both land on screen 12, which is
+            // the real implementation — the one `control_editor.rs` drives and the one that can
+            // actually open and save a file. The standalone yantrik-text-editor binary ships
+            // beside it and had no way to be launched at all.
+            "editor" | "text_editor" => {
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_editor_file_name("untitled".into());
                     ui.set_editor_file_content("".into());
@@ -146,6 +151,17 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                     ui.set_editor_is_readonly(false);
                     ui.set_current_screen(12);
                     ui.invoke_navigate(12);
+                }
+                return;
+            }
+            // The image viewer had no arm whatsoever, so neither `image-viewer` nor anything
+            // else reached it, while yantrik-image-viewer sat in /opt/yantrik/bin unreachable.
+            // Screen 11 is the shell's viewer, which is the one wired to the file browser's
+            // "open" and therefore the one that actually receives a picture.
+            "image_viewer" | "images" => {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_current_screen(11);
+                    ui.invoke_navigate(11);
                 }
                 return;
             }
@@ -206,7 +222,12 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 }
                 return;
             }
-            "network" => {
+            // `network_manager` is what the binary is called and therefore what a person or an
+            // agent types. It was accepted by the guard — a .desktop entry matched — and then
+            // reached no arm at all, so open_app answered "launching" and nothing happened. The
+            // same shape of bug as download-manager, found the same way: by photographing the
+            // result and seeing a different app.
+            "network" | "network_manager" => {
                 spawn_app("network", "yantrik-network-manager");
                 return;
             }
@@ -392,6 +413,29 @@ mod tests {
         }
     }
 
+    /// The apps in apps/, by the name each binary carries.
+    ///
+    /// `yantrik-network-manager` is launched by typing `network-manager` long before anyone
+    /// learns the arm is called `network`, and that is the name `open_app` gets. Three of these
+    /// had no arm at all — network-manager, text-editor and image-viewer — and the first two
+    /// were ACCEPTED by the guard because a .desktop entry matched, so the call reported success
+    /// and did nothing.
+    const SHIPPED_APPS: &[&str] = &[
+        "calendar", "container-manager", "document-editor", "download-manager", "email",
+        "image-viewer", "music-player", "network-manager", "notes", "presentation",
+        "snippet-manager", "spreadsheet", "system-monitor", "terminal", "text-editor", "weather",
+    ];
+
+    #[test]
+    fn every_app_we_ship_opens_by_the_name_of_its_binary() {
+        for app in SHIPPED_APPS {
+            assert!(
+                BUILTIN_APP_IDS.contains(&canonical_id(app).as_str()),
+                "apps/{app} ships a binary that `open_app name={app}` cannot launch"
+            );
+        }
+    }
+
     #[test]
     fn punctuation_does_not_decide_whether_an_app_opens() {
         assert_eq!(canonical_id("download-manager"), "download_manager");
@@ -408,7 +452,7 @@ mod tests {
         // which is the failure mode this list's own comment claimed to prevent.
         for id in [
             "containers", "downloads", "music", "snippets", "documents", "presentation",
-            "sysmonitor", "devices", "permissions", "slides",
+            "sysmonitor", "devices", "permissions", "slides", "text_editor", "image_viewer",
         ] {
             assert!(is_known_app(id, &[]), "the dispatch launches `{id}` but the guard refuses it");
         }
