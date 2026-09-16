@@ -6,6 +6,8 @@ import { ScrollView } from "std-widgets.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 
 // ── Data Structures ──
@@ -57,6 +59,19 @@ export component CalendarScreen inherits Rectangle {
 
     // State
     in property <string> month-title: "March 2026";
+    // ── The agent layer ──
+    //
+    // Same rule as everywhere: every row is something this app or the companion actually
+    // holds, and says where it came from. See agent_rail.slint.
+    in property <[AgentContextItem]> agent-context: [];
+    in property <[AgentSuggestion]> agent-suggestions: [];
+    in property <string> agent-unavailable: "";
+    callback agent-context-activated(string);
+    callback agent-suggestion-activated(string);
+    in property <AgentProposal> proposal;
+    in property <bool> proposal-working: false;
+    callback proposal-dismissed();
+
     in property <[CalendarDay]> days: [];
     in property <[CalendarEvent]> events-today: [];
     in property <int> selected-day: 0;
@@ -170,6 +185,16 @@ export component CalendarScreen inherits Rectangle {
             min-width: 480px;
 
             VerticalLayout {
+                // ── What the companion is proposing ──
+                //
+                // Over the calendar, which is what it is about.
+                if root.proposal.title != "" : AgentProposalCard {
+                    data: root.proposal;
+                    working: root.proposal-working;
+                    apply => { root.proposal-dismissed(); }
+                    dismiss => { root.proposal-dismissed(); }
+                }
+
                 padding: Theme.sp-5;
                 spacing: Theme.sp-4;
 
@@ -1191,6 +1216,15 @@ export component CalendarScreen inherits Rectangle {
                     }
                 }
             }
+        }
+
+        // ── What Yantrik knows about this day ──
+        AgentRail {
+            context-items: root.agent-context;
+            suggestions: root.agent-suggestions;
+            unavailable: root.agent-unavailable;
+            context-activated(id) => { root.agent-context-activated(id); }
+            suggestion-activated(id) => { root.agent-suggestion-activated(id); }
         }
     }
     }

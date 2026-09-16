@@ -154,17 +154,22 @@ export component AgentProposalCard inherits Rectangle {
         }
 
         // ── The decision ──
+        //
+        // An empty impact means nothing changes: this is an answer to read, not a thing to
+        // agree to, and it gets ONE button. Offering "Dismiss" and "Apply" for a summary that
+        // applies nothing asks a question with no second answer — and Notes' own failure card
+        // was doing exactly that, offering to apply an error message.
         HorizontalLayout {
             spacing: Theme.sp-2;
             alignment: end;
 
-            YButton {
+            if root.data.impact != "" : YButton {
                 label: "Dismiss";
                 size: 0;
                 variant: 2;
                 clicked => { root.dismiss(); }
             }
-            YButton {
+            if root.data.impact != "" : YButton {
                 // The verb is the change. See the header.
                 label: root.data.verb != "" ? root.data.verb : "Apply";
                 size: 0;
@@ -172,6 +177,12 @@ export component AgentProposalCard inherits Rectangle {
                 disabled: root.working;
                 loading: root.working;
                 clicked => { root.apply(); }
+            }
+            if root.data.impact == "" : YButton {
+                label: root.data.verb != "" ? root.data.verb : "Close";
+                size: 0;
+                variant: 2;
+                clicked => { root.dismiss(); }
             }
         }
     }

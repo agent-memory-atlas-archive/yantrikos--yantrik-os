@@ -12,6 +12,55 @@ use yantrik_ipc_transport::SyncRpcClient;
 
 slint::include_modules!();
 
+/// Fill the agent rail from the day on screen.
+///
+/// Events come off the model the app already renders; memory comes from the companion when it
+/// is reachable. Nothing is added to fill the column -- a day with nothing on it and no shell
+/// behind it gets an empty rail, and the calendar is wider for it.
+fn refresh_agent_rail(ui: &CalendarApp) {
+    let mut context: Vec<AgentContextItem> = Vec::new();
+    for e in ui.get_events_today().iter() {
+        context.push(AgentContextItem {
+            id: format!("event:{}", e.id).into(),
+            label: e.title.clone(),
+            detail: e.time_text.clone(),
+            source: "calendar".into(),
+        });
+    }
+    ui.set_agent_context(ModelRc::new(VecModel::from(context)));
+
+    let online = companion::is_online();
+    let mut next: Vec<AgentSuggestion> = Vec::new();
+    if online {
+        next.push(AgentSuggestion {
+            id: "explain".into(),
+            label: "What does this day look like?".into(),
+            detail: "shape of the day, and what to prepare".into(),
+            icon: "spark".into(),
+            running: ui.get_ai_is_working(),
+            // An answer to read; nothing is moved, so nothing is proposed.
+            proposes: false,
+        });
+    }
+    if ui.get_selected_day() > 0 {
+        next.push(AgentSuggestion {
+            id: "today".into(),
+            label: "Back to today".into(),
+            detail: SharedString::new(),
+            icon: "search".into(),
+            running: false,
+            proposes: false,
+        });
+    }
+    ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
+
+    ui.set_agent_unavailable(if online {
+        SharedString::new()
+    } else {
+        "Not connected. Start the Yantrik shell for suggestions.".into()
+    });
+}
+
 fn main() {
     init_tracing("yantrik-calendar");
 
@@ -390,6 +439,7 @@ fn wire(app: &CalendarApp) {
         app.set_month_title(format!("{} {}", month_name(tm), ty).into());
         app.set_days(ModelRc::new(VecModel::from(grid)));
         app.set_events_today(ModelRc::new(VecModel::from(day_events)));
+        refresh_agent_rail(&app);
         app.set_selected_day(td as i32);
     }
 
@@ -417,6 +467,7 @@ fn wire(app: &CalendarApp) {
             ui.set_days(ModelRc::new(VecModel::from(grid)));
             ui.set_selected_day(0);
             ui.set_events_today(ModelRc::new(VecModel::from(Vec::<CalendarEvent>::new())));
+            refresh_agent_rail(&ui);
         });
     }
 
@@ -441,6 +492,7 @@ fn wire(app: &CalendarApp) {
             ui.set_days(ModelRc::new(VecModel::from(grid)));
             ui.set_selected_day(0);
             ui.set_events_today(ModelRc::new(VecModel::from(Vec::<CalendarEvent>::new())));
+            refresh_agent_rail(&ui);
         });
     }
 
@@ -454,6 +506,7 @@ fn wire(app: &CalendarApp) {
             ui.set_selected_day(day);
             let day_events = events_for_day(&s.events, s.year, s.month, day);
             ui.set_events_today(ModelRc::new(VecModel::from(day_events)));
+            refresh_agent_rail(&ui);
         });
     }
 
@@ -497,6 +550,7 @@ fn wire(app: &CalendarApp) {
                 let day_events = events_for_day(&s.events, s.year, s.month, day);
                 ui.set_days(ModelRc::new(VecModel::from(grid)));
                 ui.set_events_today(ModelRc::new(VecModel::from(day_events)));
+                refresh_agent_rail(&ui);
             }
             ui.set_show_event_form(false);
         });
@@ -527,6 +581,7 @@ fn wire(app: &CalendarApp) {
                 let day_events = events_for_day(&s.events, s.year, s.month, day);
                 ui.set_days(ModelRc::new(VecModel::from(grid)));
                 ui.set_events_today(ModelRc::new(VecModel::from(day_events)));
+                refresh_agent_rail(&ui);
             }
         });
     }
@@ -558,6 +613,7 @@ fn wire(app: &CalendarApp) {
             ui.set_days(ModelRc::new(VecModel::from(grid)));
             ui.set_selected_day(nd as i32);
             ui.set_events_today(ModelRc::new(VecModel::from(day_events)));
+            refresh_agent_rail(&ui);
         });
     }
 
@@ -571,8 +627,104 @@ fn wire(app: &CalendarApp) {
         });
     }
 
-    // ── Stubs for AI / enterprise features ──
-    app.on_ai_explain_pressed(|| { tracing::info!("AI explain (standalone mode)"); });
+    // ── The agent layer ──
+    //
+    // Calendar had no companion connection at all: its AI button logged a line and returned,
+    // which is the state fifteen of the sixteen apps were in. The rail and the card follow the
+    // same rule Notes does -- every row is something this app or the companion actually holds,
+    // and says where it came from.
+    {
+        let weak = app.as_weak();
+        app.on_ai_explain_pressed(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let day = if ui.get_selected_day() > 0 {
+                format!("{} {}", ui.get_month_title(), ui.get_selected_day())
+            } else {
+                ui.get_month_title().to_string()
+            };
+
+            // What the day actually holds, read off the model rather than described to the
+            // model second-hand.
+            let events: Vec<String> = ui
+                .get_events_today()
+                .iter()
+                .map(|e| format!("- {} ({})", e.title, e.time_text))
+                .collect();
+
+            ui.set_ai_is_working(true);
+            ui.set_proposal_working(true);
+            ui.set_proposal(AgentProposal {
+                title: "Your day".into(),
+                source: format!("from {day}").into(),
+                ..Default::default()
+            });
+
+            let prompt = if events.is_empty() {
+                format!(
+                    "My calendar for {day} is empty. In two sentences, say so plainly and \
+                     suggest one useful thing to do with an open day. Do not invent \
+                     appointments."
+                )
+            } else {
+                format!(
+                    "Here is my calendar for {day}:\n{}\n\nIn at most four short lines, tell \
+                     me what the shape of this day is and what to prepare. Use only what is \
+                     listed; invent nothing.",
+                    events.join("\n")
+                )
+            };
+
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&prompt);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_ai_is_working(false);
+                    ui.set_proposal_working(false);
+                    match outcome {
+                        Ok(text) => ui.set_proposal(AgentProposal {
+                            title: "Your day".into(),
+                            body: text.into(),
+                            source: format!("from {day}").into(),
+                            // Reading, not changing. The card gives this one button.
+                            impact: SharedString::new(),
+                            destructive: false,
+                            verb: "Close".into(),
+                        }),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Companion call failed");
+                            ui.set_proposal(AgentProposal {
+                                title: "The companion did not answer".into(),
+                                body: format!("{e}\n\nIs the Yantrik shell running?").into(),
+                                verb: "Close".into(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_proposal_dismissed(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_proposal(AgentProposal::default());
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_agent_suggestion_activated(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            match id.as_str() {
+                // One code path: the rail presses the same button the toolbar does.
+                "explain" => ui.invoke_ai_explain_pressed(),
+                "today" => ui.invoke_today_pressed(),
+                other => tracing::warn!(id = other, "unknown rail suggestion"),
+            }
+        });
+    }
+    app.on_agent_context_activated(|_| {});
     app.on_ai_dismiss(|| {});
     app.on_cal_add_attendee(|_, _| { tracing::info!("Add attendee (standalone mode)"); });
     app.on_cal_remove_attendee(|_| { tracing::info!("Remove attendee (standalone mode)"); });

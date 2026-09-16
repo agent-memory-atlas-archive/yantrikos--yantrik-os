@@ -3,12 +3,25 @@
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
 import { AppIdentity } from "app_color.slint";
+import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposal } from "components/agent_proposal.slint";
 import { CalendarScreen, CalendarEvent, CalendarDay, CalendarTimeEvent,
          CalendarAttendee, CalendarTemplate } from "calendar.slint";
 
 export { CalendarEvent, CalendarDay, CalendarTimeEvent, CalendarAttendee, CalendarTemplate, ThemeMode, AccentPreset }
+export { AgentContextItem, AgentSuggestion, AgentProposal }
 
 export component CalendarApp inherits Window {
+    // ── The agent layer ──
+    in property <[AgentContextItem]> agent-context <=> cal.agent-context;
+    in property <[AgentSuggestion]> agent-suggestions <=> cal.agent-suggestions;
+    in property <string> agent-unavailable <=> cal.agent-unavailable;
+    callback agent-context-activated <=> cal.agent-context-activated;
+    callback agent-suggestion-activated <=> cal.agent-suggestion-activated;
+    in property <AgentProposal> proposal <=> cal.proposal;
+    in property <bool> proposal-working <=> cal.proposal-working;
+    callback proposal-dismissed <=> cal.proposal-dismissed;
+
     // What app this window is.
     //
     // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
