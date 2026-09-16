@@ -50,7 +50,9 @@ impl Default for UserSettings {
             tool_permission: "sensitive".into(),
             auto_lock_secs: 300,
             dnd_mode: false,
-            wallpaper: String::new(),
+            // Named rather than empty: an empty wallpaper draws the flat fallback gradient,
+            // which is the one backdrop that makes the translucent surfaces above it pointless.
+            wallpaper: "serenity".to_string(),
             user_name: String::new(),
             companion_name: String::new(),
             agent_mode: false,

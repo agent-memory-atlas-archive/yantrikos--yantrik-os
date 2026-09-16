@@ -257,7 +257,10 @@ write_files:
               echo "tool_permission: sensitive"
               echo "auto_lock_secs: 300"
               echo "dnd_mode: false"
-              echo "wallpaper: aurora"
+              # A scene, not a gradient. The abstract washes are still shipped and still
+              # selectable; they are flat, and a flat backdrop is what made every translucent
+              # surface drawn on it look like paint on the same plane.
+              echo "wallpaper: serenity"
               echo "agent_mode: false"
             } > /home/yantrik/.config/yantrik/settings.yaml
           fi

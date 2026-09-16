@@ -28,8 +28,15 @@ memory.db.bak
 .mcp.json
 .mcp.json.template
 
-# Scripts (local-only)
-scripts/
+# Scripts (local-only by default)
+#
+# Most of scripts/ is probes and one-off deploy helpers that mean nothing outside this machine.
+# The exceptions are the two renderers that PRODUCE things the OS ships: the wallpapers are
+# generated art, and a generated asset whose generator is not in the repo is a binary somebody
+# exported once and nobody can ever change.
+scripts/*
+!scripts/render-wallpapers.py
+!scripts/render-scene-wallpapers.py
 
 # Python
 __pycache__/
@@ -52,6 +59,11 @@ lib.long-type-*.txt
 *.iso
 *.gguf
 *.png
+# ...except the ones the desktop is made of. These are the shell's wallpapers and its icon
+# theme: without them a fresh clone builds an OS whose desktop has no picture on it, which is
+# not a smaller version of this project, it is a broken one. They are 60-270 KB each and they
+# are reproducible from the scripts above, so they belong in the tree next to them.
+!crates/yantrik-ui-slint/ui/wallpapers/*.png
 
 # Secrets
 google_client_*

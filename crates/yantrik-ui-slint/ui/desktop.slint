@@ -25,6 +25,7 @@ import { ParticleField } from "components/particle_field.slint";
 import { StatusBar } from "components/status_bar.slint";
 import { DockItem } from "components/app_dock.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppColor } from "components/app_color.slint";
 import { IntentLens, LensResult } from "components/intent_lens.slint";
 import { MessageData } from "components/message_bubble.slint";
 import { UrgeCardData, GlanceCard } from "components/glance_card.slint";
@@ -194,6 +195,10 @@ export component DesktopScreen inherits Rectangle {
     // Every entry dispatches through `launch-app`, the same callback the desktop icons and the
     // dock already use, so the menu cannot drift away from what clicking an icon does and needs
     // no wiring of its own on the Rust side.
+    // How much room the hero takes at the top of the centre column. One number, because the
+    // ask bar and the column below it both have to start under it.
+    property <length> hero-h: 84px;
+
     property <bool> desktop-menu-open: false;
     property <length> desktop-menu-x: 0;
     property <length> desktop-menu-y: 0;
@@ -465,7 +470,7 @@ export component DesktopScreen inherits Rectangle {
                             commands: Icons.app-or-window(item.app-id);
                             size: 34px;
                             thickness: 1.5px;
-                            tint: Theme.text-primary;
+                            tint: AppColor.for-app(item.app-id);
                         }
                     }
 
@@ -495,14 +500,28 @@ export component DesktopScreen inherits Rectangle {
         // files and the memory count is a desktop that shows work; one that says "Good
         // evening" shows nothing. Every line here is data the shell already had.
         if root.agent-mode && !root.focus-mode : Rectangle {
-            x: 0; y: 0;
-            width: 296px;
-            height: parent.height - 40px;
-            background: Theme.bg-deep.transparentize(28%);
+            x: Theme.sp-4;
+            y: Theme.sp-4;
+            width: 296px - Theme.sp-4;
+            // As tall as what it holds, and no taller.
+            //
+            // Running the full height, this card was 550px of empty panel between "Nothing yet
+            // -- open something." and the counters pinned to its foot. Nothing was in that
+            // space and nothing was going to be; it was a dark rectangle asserting that
+            // something lived there. A card that ends where its content ends says the same
+            // thing honestly, and hands the rest back to the wallpaper.
+            //
+            // The clamp is what keeps a machine with forty recent files from growing a rail
+            // taller than the screen.
+            height: Math.min(work-body.preferred-height,
+                             parent.height - 40px - Theme.sp-4 * 3 - 96px);
+            border-radius: Theme.r-lg;
+            background: Theme.glass-rail;
+            border-width: 1px;
+            border-color: Theme.glass-border;
+            clip: true;
 
-            Rectangle { x: parent.width - 1px; width: 1px; height: 100%; background: Theme.separator; }
-
-            VerticalLayout {
+            work-body := VerticalLayout {
                 padding: Theme.sp-4;
                 spacing: 0;
 
@@ -564,23 +583,74 @@ export component DesktopScreen inherits Rectangle {
                     }
                 }
 
-                Rectangle { vertical-stretch: 1; }
+            }
+        }
 
-                Rectangle { height: 1px; background: Theme.separator; }
-                HorizontalLayout {
-                    padding-top: Theme.sp-3;
-                    spacing: Theme.sp-3;
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        Text { text: "MEMORIES"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: Theme.fw-micro; letter-spacing: 1px; }
-                        Text { text: root.memory-count; color: Theme.text-primary; font-size: 17px; font-weight: 500; }
-                    }
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        Text { text: "PENDING"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: Theme.fw-micro; letter-spacing: 1px; }
-                        Text { text: root.pending-count; color: root.pending-count > 0 ? Theme.accent : Theme.text-primary; font-size: 17px; font-weight: 500; }
-                    }
+        // -- Vitals (foot of the left column) --
+        //
+        // Its own card, because it is its own thing: two counts about the companion, which have
+        // nothing to do with the project and the recent files above them. Joined to that panel
+        // by a separator they read as the bottom of a list; separated, they read as a widget,
+        // and the gap between the two is wallpaper rather than filler.
+        if root.agent-mode && !root.focus-mode : Rectangle {
+            x: Theme.sp-4;
+            y: parent.height - 40px - Theme.sp-4 - vitals-body.preferred-height;
+            width: 296px - Theme.sp-4;
+            height: vitals-body.preferred-height;
+            border-radius: Theme.r-lg;
+            background: Theme.glass-rail;
+            border-width: 1px;
+            border-color: Theme.glass-border;
+            clip: true;
+
+            vitals-body := HorizontalLayout {
+                padding: Theme.sp-4;
+                spacing: Theme.sp-3;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text { text: "MEMORIES"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: Theme.fw-micro; letter-spacing: 1px; }
+                    Text { text: root.memory-count; color: Theme.text-primary; font-size: 17px; font-weight: 500; }
                 }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text { text: "PENDING"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: Theme.fw-micro; letter-spacing: 1px; }
+                    Text { text: root.pending-count; color: root.pending-count > 0 ? Theme.accent : Theme.text-primary; font-size: 17px; font-weight: 500; }
+                }
+            }
+        }
+
+        // -- The hero --
+        //
+        // The largest text on this desktop used to be 16px, which is a section heading, so the
+        // screen had no focal point at all: an ask bar, three labelled groups and a wallpaper,
+        // every one of them competing at the same weight. Mac and Windows both give the first
+        // surface you see one thing said large with nothing near it, and that is most of why
+        // their desktops read as calm rather than as a form.
+        //
+        // It says the greeting and the date, which is all it is allowed to say: those are the
+        // two facts that are true on a machine which has never been used, so this cannot become
+        // another panel that is empty on day one.
+        if root.agent-mode && !root.focus-mode : VerticalLayout {
+            x: 296px + Theme.sp-5;
+            y: Theme.sp-4 + 4px;
+            width: parent.width - 296px - 318px - Theme.sp-5 * 2;
+            height: root.hero-h - 8px;
+            spacing: 2px;
+            alignment: start;
+
+            Text {
+                text: root.greeting-text;
+                color: Theme.text-primary;
+                font-size: Theme.fs-hero;
+                font-weight: Theme.fw-hero;
+                overflow: elide;
+            }
+            Text {
+                text: root.date-text;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-hero-sub;
+                font-weight: Theme.fw-hero-sub;
+                overflow: elide;
             }
         }
 
@@ -589,7 +659,7 @@ export component DesktopScreen inherits Rectangle {
         // to be discovered. Clicking opens the same overlay the orb used to.
         if root.agent-mode && !root.focus-mode : TouchArea {
             x: 296px + Theme.sp-5;
-            y: Theme.sp-4;
+            y: Theme.sp-4 + root.hero-h;
             width: parent.width - 296px - 318px - Theme.sp-5 * 2;
             height: 38px;
             mouse-cursor: pointer;
@@ -643,9 +713,9 @@ export component DesktopScreen inherits Rectangle {
         // instead is the one card at the bottom, which is true on day one and gone by day two.
         if root.agent-mode && !root.focus-mode : Flickable {
             x: 296px + Theme.sp-5;
-            y: Theme.sp-4 + 38px + Theme.sp-4;
+            y: Theme.sp-4 + root.hero-h + 38px + Theme.sp-4;
             width: parent.width - 296px - 318px - Theme.sp-5 * 2;
-            height: parent.height - 40px - (Theme.sp-4 + 38px + Theme.sp-4) - Theme.sp-4;
+            height: parent.height - 40px - (Theme.sp-4 + root.hero-h + 38px + Theme.sp-4) - Theme.sp-4;
             // Both, or the column lays itself out at its own preferred width and the cards sit
             // in a narrow ribbon down the middle of the space they were supposed to fill.
             viewport-width: self.width;
@@ -725,27 +795,42 @@ export component DesktopScreen inherits Rectangle {
                         font-weight: Theme.fw-micro;
                         letter-spacing: 1px;
                     }
-                    Rectangle {
+                    start-card := Rectangle {
                         height: 84px;
                         border-radius: Theme.r-lg;
                         background: Theme.glass-card;
                         border-width: 1px;
                         border-color: Theme.border-subtle;
                         clip: true;
-                        // Scrolls, because the number of pinned apps is not something this row
-                        // gets to decide. Clipping the last one in half — which it did — makes
-                        // the desktop look broken rather than full.
+
+                        // Tiles divide the row rather than each claiming a fixed 64px.
+                        //
+                        // A fixed width and a variable number of pinned apps is a guarantee
+                        // that some count slices the last tile down the middle at the card
+                        // edge, which is how it looked: nine apps in a row 626px wide. The
+                        // floor is what keeps a machine with thirty pins from producing
+                        // twenty-pixel icons; past that the row scrolls, which is the honest
+                        // answer, and it scrolls a whole tile at a time.
+                        // No gap between tiles: each already carries its own padding and its
+                        // own hover fill, so the spacing was 72px of nothing spent on a row
+                        // that had none to spare -- with ten pinned apps it was the difference
+                        // between fitting and slicing the tenth in half.
+                        property <int> tiles: Math.max(root.dock-items.length, 1);
+                        property <length> tile-w:
+                            Math.max(52px, (self.width - Theme.sp-3 * 2) / self.tiles);
+
                         Flickable {
                             width: 100%;
                             height: 100%;
-                            viewport-width: root.dock-items.length * 72px + Theme.sp-3 * 2;
+                            viewport-width: start-card.tiles * start-card.tile-w
+                                          + Theme.sp-3 * 2;
                             viewport-height: self.height;
                         HorizontalLayout {
                             padding: Theme.sp-3;
-                            spacing: Theme.sp-2;
+                            spacing: 0px;
                             alignment: start;
                             for item[i] in root.dock-items : Rectangle {
-                                width: 64px;
+                                width: start-card.tile-w;
                                 border-radius: Theme.r-md;
                                 background: app-ta.has-hover ? Theme.hover-fill : transparent;
                                 app-ta := TouchArea {
@@ -760,8 +845,12 @@ export component DesktopScreen inherits Rectangle {
                                         commands: Icons.app-or-window(item.app-id);
                                         size: 24px;
                                         // The dimmest tint in the palette is for metadata, not
-                                        // for the only way to start a program.
-                                        tint: app-ta.has-hover ? Theme.accent : Theme.text-primary;
+                                        // for the only way to start a program -- and one tint
+                                        // across all of them means the row can only be read by
+                                        // its labels, which is a row of words with decoration.
+                                        tint: app-ta.has-hover
+                                            ? AppColor.for-app(item.app-id).brighter(30%)
+                                            : AppColor.for-app(item.app-id);
                                         thickness: 1.6px;
                                         x: (parent.width - self.width) / 2;
                                     }
@@ -866,9 +955,9 @@ export component DesktopScreen inherits Rectangle {
         // ── Machine rail (right, hidden in focus mode) ──
         if root.agent-mode && !root.focus-mode : MachineRail {
             mind-name: root.active-harness-name;
-            x: parent.width - self.width;
-            y: 0;
-            height: parent.height - 40px;
+            x: parent.width - self.width - Theme.sp-4;
+            y: Theme.sp-4;
+            height-ceiling: parent.height - 40px - Theme.sp-4 * 2;
             cpu-percent: root.bar-cpu-percent;
             mem-percent: root.bar-mem-percent;
             mem-text: root.bar-mem-text;

@@ -124,6 +124,11 @@ export global Theme {
     out property <color> glass-raised:  ThemeMode.dark ? #262638d0 : #fffffff5;
     // The hairline that gives a glass edge its shape. Slightly lighter than the fill, because
     // a border darker than what it contains reads as a hole rather than a pane.
+    // The two full-height rails. More transparent than a card, because they are the only
+    // surfaces large enough for the wallpaper behind them to read as a scene rather than as a
+    // sliver -- and because what they hold is labels and numbers, which stay legible over a
+    // pre-blurred photograph in a way a paragraph would not.
+    out property <color> glass-rail:    ThemeMode.dark ? #12121ca0 : #f4f4f8ef;
     out property <color> glass-border:  ThemeMode.dark ? #ffffff1a : #00000014;
     out property <color> glass-border-strong: ThemeMode.dark ? #ffffff2e : #00000022;
 

@@ -17,6 +17,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
+import { AppColor } from "app_color.slint";
 import { DockItem } from "app_dock.slint";
 import { WindowItem } from "window_switcher.slint";
 
@@ -114,7 +115,11 @@ export component Taskbar inherits Rectangle {
                         Icon {
                             commands: Icons.app-or-window(w.app-id);
                             size: 14px;
-                            tint: win.is-active ? Theme.text-primary : Theme.text-secondary;
+                            // Colour says which app; brightness still says which one has focus,
+                            // so the active state survives them no longer all being grey.
+                            tint: win.is-active
+                                ? AppColor.for-app(w.app-id)
+                                : AppColor.for-app(w.app-id).transparentize(40%);
                             y: (parent.height - self.height) / 2;
                         }
                         Text {
@@ -153,7 +158,9 @@ export component Taskbar inherits Rectangle {
                     Icon {
                         commands: Icons.app-or-window(p.app-id);
                         size: 17px;
-                        tint: pin.has-hover ? Theme.text-primary : Theme.text-secondary;
+                        tint: pin.has-hover
+                            ? AppColor.for-app(p.app-id).brighter(30%)
+                            : AppColor.for-app(p.app-id);
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
                     }

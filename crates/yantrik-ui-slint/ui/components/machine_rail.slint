@@ -109,12 +109,24 @@ export component MachineRail inherits Rectangle {
     // different harness had taken over the conversation.
     in property <string> mind-name: "";
 
-    width: 318px;
-    background: Theme.bg-deep.transparentize(28%);
+    // 302, not 318: the rail is inset from the screen edge now, and the 16px it gives up is
+    // the gap the wallpaper shows through. The desktop still reserves 318 for the column, so
+    // nothing else has to know that this moved.
+    width: 302px;
+    // The same rule as the left column: the card is as tall as what it holds. It ran to the
+    // taskbar, so a machine with six services showed a hundred pixels of empty panel under
+    // "Suggestions 0" -- and the wallpaper it was covering was better than it was.
+    // Not `max-height`: that is a built-in Slint property and means something else -- a
+    // constraint a layout may honour, which this rail is not inside.
+    in property <length> height-ceiling: 100000px;
+    height: Math.min(rail-body.preferred-height, root.height-ceiling);
+    border-radius: Theme.r-lg;
+    background: Theme.glass-rail;
+    border-width: 1px;
+    border-color: Theme.glass-border;
+    clip: true;
 
-    Rectangle { x: 0; width: 1px; height: 100%; background: Theme.separator; }
-
-    VerticalLayout {
+    rail-body := VerticalLayout {
         padding: Theme.sp-4;
         spacing: 0;
 
@@ -197,6 +209,5 @@ export component MachineRail inherits Rectangle {
                        value-color: root.whisper-count > 0 ? Theme.accent : Theme.text-primary; }
         }
 
-        Rectangle { vertical-stretch: 1; }
     }
 }
