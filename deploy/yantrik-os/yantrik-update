@@ -33,6 +33,8 @@ BUILD_FILE="$PREFIX/BUILD"
 UPDATES_DIR="$PREFIX/updates"
 BACKUP_DIR="$PREFIX/backups"
 CONF="$PREFIX/update.conf"
+# The systemd unit that owns the desktop session.
+SESSION_UNIT="${YANTRIK_SESSION_UNIT:-yantrik-session.service}"
 LOG_DIR="$PREFIX/logs"
 LOG_FILE="$LOG_DIR/yantrik-os.log"
 
@@ -288,6 +290,22 @@ start_shell() {
   fi
 }
 
+# Wait for the shell to answer its control socket. The socket existing is not enough: it is
+# created before the shell is ready to be asked anything.
+wait_for_shell() {
+  local runtime="$1"
+  local sock="$runtime/yantrik/app-shell.sock"
+  say "Waiting for the shell to answer"
+  for _ in $(seq 1 30); do
+    if [ -S "$sock" ] && "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
+      printf '%shealthy — update complete%s\n' "$c_grn" "$c_off"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 restart_and_verify() {
   local backup="$1"
   say "Restarting the shell"
@@ -298,7 +316,44 @@ restart_and_verify() {
     return 0
   fi
 
-  # Before the kill, or there is nothing left to read it from.
+  # Ask the session manager to restart the session, rather than respawning the shell by hand.
+  #
+  # This is the correction to a whole class of damage. Hand-spawning looked fine and was not:
+  # the replacement shell is a child of whatever ran the updater — an ssh login, in practice —
+  # so it inherits that environment instead of the session's, and it is no longer a startup
+  # child of the compositor. It came back with XDG_SESSION_TYPE=tty, no DISPLAY, and
+  # SSH_CONNECTION set, running outside labwc's supervision.
+  #
+  # The visible result was a desktop that tore and flickered whenever a second client was on
+  # screen, and an OS that had to be told SLINT_FULLSCREEN or it drew itself as a window. Both
+  # were blamed on the compositor and on rendering. Neither was: a clean boot of the same build
+  # renders Chromium perfectly, with two successive frames byte-identical.
+  #
+  # Every desktop does this with its session manager. So do we now: systemd started this
+  # session and knows exactly how to start it again — the unit carries XDG_SESSION_TYPE,
+  # the seat, the tty and the renderer settings, and labwc re-exports DISPLAY,
+  # XDG_CURRENT_DESKTOP and the rest to its children. Restarting it reproduces the boot path
+  # exactly, which is the only restart worth trusting.
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl cat "$SESSION_UNIT" >/dev/null 2>&1; then
+    info "restarting $SESSION_UNIT"
+    if sudo -n systemctl restart "$SESSION_UNIT" 2>/dev/null; then
+      wait_for_shell "$runtime" && return 0
+      warn "the session restarted but the shell did not answer"
+      restore_backup "$backup"
+      sudo -n systemctl restart "$SESSION_UNIT" 2>/dev/null
+      wait_for_shell "$runtime" \
+        && fail "update rolled back — the previous build is running again"
+      fail "update rolled back, but the session did not come back. Start it with: \
+sudo systemctl restart $SESSION_UNIT"
+    fi
+    warn "could not restart $SESSION_UNIT without a password; starting the shell directly"
+  fi
+
+  # No session unit, or no privilege to restart it: a development machine where somebody
+  # started the shell by hand. Do the same thing they did.
+  #
+  # Before the kill, or there is nothing left to read the environment from.
   capture_shell_env || warn "no running shell to copy the session environment from"
 
   pkill -x yantrik-ui 2>/dev/null

@@ -1,0 +1,83 @@
+#!/bin/sh
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# yantrik-session — the desktop session
+# ═══════════════════════════════════════════════════════════════════════════════════════
+#
+# Started by yantrik-session.service on tty1. labwc supervises the shell; the shell is the
+# thing the user sees and the thing an agent acts on, and they are two views of one state
+# rather than two programs that happen to agree.
+#
+# This file used to exist only inside cloud-init's write_files, which meant it could be
+# written once at provision time and never corrected again: a machine deployed with a bad
+# session script stayed that way for life, because nothing in the update path could replace
+# it. It ships in the release payload now, so `yantrik-update` refreshes it like anything
+# else, and cloud-init no longer carries a copy to drift from.
+set -eu
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR"
+
+# ── The shell ───────────────────────────────────────────────────────────────────────────
+# Without this the shell opens as an ordinary labwc window, title bar and all, sitting in the
+# middle of the screen. An OS is not a window on something else.
+export SLINT_FULLSCREEN=1
+
+# ── What every program in this session inherits ─────────────────────────────────────────
+#
+# labwc already exports the identity of the session to its children — WAYLAND_DISPLAY, and
+# once Xwayland starts, DISPLAY, XDG_CURRENT_DESKTOP and _JAVA_AWT_WM_NONREPARENTING. The
+# systemd unit adds XDG_SESSION_TYPE and the seat. What neither sets is which BACKEND a
+# toolkit should prefer, and that omission has a visible cost: with DISPLAY set and no hint,
+# a Wayland-capable GTK or Qt application quietly picks X11 and runs through Xwayland, where
+# it is scaled by a translation layer instead of drawing natively.
+#
+# Every desktop session sets these. The values are preference LISTS, not commands: a program
+# that cannot do Wayland falls back to X11 by itself, so nothing is forced and nothing that
+# used to work stops working.
+export GDK_BACKEND="${GDK_BACKEND:-wayland,x11}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland;xcb}"
+export CLUTTER_BACKEND="${CLUTTER_BACKEND:-wayland}"
+export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
+# Electron reads this and picks Wayland when the session offers it.
+export ELECTRON_OZONE_PLATFORM_HINT="${ELECTRON_OZONE_PLATFORM_HINT:-auto}"
+# labwc draws the window frames, and this OS themes them. Without this Qt draws a second set
+# of its own inside ours.
+export QT_WAYLAND_DISABLE_WINDOWDECORATION="${QT_WAYLAND_DISABLE_WINDOWDECORATION:-1}"
+
+# Which desktop this is, by name. xdg-desktop-portal reads it to choose a backend, and
+# applications read it to decide how to behave. labwc sets XDG_CURRENT_DESKTOP to
+# "labwc:wlroots"; this says whose desktop it is as well as what it is built on.
+export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-yantrik}"
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-yantrik:labwc:wlroots}"
+
+# Where .desktop files and icon themes are found. Spelled out rather than left to the
+# default, because the default does not include the flatpak export directories, and an app
+# installed there being invisible to the launcher is a bug nobody would think to look for.
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/var/lib/flatpak/exports/share:$HOME/.local/share/flatpak/exports/share"
+export XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}"
+
+# The OS's own binaries. `yos` is the agent surface and scripts call it by name; without this
+# it is only reachable by absolute path, which is the sort of thing that works everywhere it
+# was tested and nowhere else.
+case ":$PATH:" in
+  *":/opt/yantrik/bin:"*) ;;
+  *) export PATH="/opt/yantrik/bin:$PATH" ;;
+esac
+
+# ── The desktop's own chrome ────────────────────────────────────────────────────────────
+# For apps the answer is a themed frame rather than no frame. labwc reads its config from the
+# user's home, so this needs no root and re-applies on every start; a machine deployed before
+# the theme existed picks it up by rebooting. Both sources ride in the release payload.
+CHROME=/opt/yantrik/share
+if [ -d "$CHROME/labwc" ]; then
+  mkdir -p "$HOME/.config/labwc" "$HOME/.local/share/themes/Yantrik/labwc"
+  cp -f "$CHROME/labwc/rc.xml" "$HOME/.config/labwc/rc.xml"
+  cp -f "$CHROME/labwc/themerc" "$HOME/.local/share/themes/Yantrik/labwc/themerc"
+fi
+if [ -d "$CHROME/fonts" ]; then
+  mkdir -p "$HOME/.local/share/fonts"
+  cp -f "$CHROME/fonts/"*.ttf "$HOME/.local/share/fonts/" 2>/dev/null || true
+  fc-cache -f "$HOME/.local/share/fonts" >/dev/null 2>&1 || true
+fi
+
+exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml'

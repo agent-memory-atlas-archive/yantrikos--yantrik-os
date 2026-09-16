@@ -14,6 +14,7 @@
 const SHELL_WINDOW_TITLE: &str = "Yantrik OS";
 
 /// A running window on the desktop.
+#[derive(Clone, Debug, PartialEq)]
 pub struct WindowEntry {
     pub title: String,
     pub app_id: String,
@@ -33,6 +34,47 @@ pub fn list_windows() -> Vec<WindowEntry> {
         return ours;
     }
     wlrctl_windows()
+}
+
+/// The window list for the taskbar's periodic refresh.
+///
+/// Same answer as [`list_windows`], with one difference that matters on an idle machine: the
+/// `wlrctl` fallback is only consulted every few seconds, and the result is remembered in
+/// between.
+///
+/// That fallback only runs when the launch registry is EMPTY — which is the common case, since
+/// a desktop with nothing open is most of the time. The taskbar refreshes every three seconds
+/// and is now drawn on every screen rather than only the desktop, so without this the shell
+/// would spawn twenty subprocesses a minute, forever, to be told nothing is open. Idle cost on
+/// this machine has already been fought down once, from 9.7% of a core to 2.1%, and it is not
+/// worth giving back to re-ask a question whose answer has not changed.
+pub fn list_windows_throttled() -> Vec<WindowEntry> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    const FALLBACK_EVERY: Duration = Duration::from_secs(9);
+    static CACHE: Mutex<Option<(Instant, Vec<WindowEntry>)>> = Mutex::new(None);
+
+    // Anything the shell launched is known without asking anyone.
+    let ours = shell_windows();
+    if !ours.is_empty() {
+        if let Ok(mut c) = CACHE.lock() {
+            *c = None; // the fallback's answer is stale the moment we have our own
+        }
+        return ours;
+    }
+
+    let Ok(mut cache) = CACHE.lock() else {
+        return wlrctl_windows();
+    };
+    if let Some((at, cached)) = cache.as_ref() {
+        if at.elapsed() < FALLBACK_EVERY {
+            return cached.clone();
+        }
+    }
+    let fresh = wlrctl_windows();
+    *cache = Some((Instant::now(), fresh.clone()));
+    fresh
 }
 
 /// The windows the shell itself has open, from the launch registry only — never a subprocess.

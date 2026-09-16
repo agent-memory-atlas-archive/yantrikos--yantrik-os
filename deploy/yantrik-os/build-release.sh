@@ -132,6 +132,17 @@ else
   echo "   (no yantrik-update script found — image will not self-update)"
 fi
 
+# The session script. It decides what environment every program on this desktop inherits,
+# and it used to live only inside cloud-init's write_files -- written once at provision
+# time and unfixable thereafter. Shipping it here is what makes the session updatable.
+if [ -f "$SCRIPT_DIR/yantrik-session" ]; then
+  cp "$SCRIPT_DIR/yantrik-session" "$ROOT/bin/yantrik-session"
+  chmod +x "$ROOT/bin/yantrik-session"
+  echo "   + yantrik-session"
+else
+  fail "missing $SCRIPT_DIR/yantrik-session -- a release without a session does not boot"
+fi
+
 cp "$PROJECT_ROOT/config/yantrik-ollama.yaml" "$ROOT/config.yaml" 2>/dev/null \
   || echo "   (no config shipped — the machine will need one)"
 

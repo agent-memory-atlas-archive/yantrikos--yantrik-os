@@ -279,34 +279,13 @@ write_files:
       [Install]
       WantedBy=graphical.target
 
-  - path: /opt/yantrik/bin/yantrik-session
-    permissions: "0755"
-    content: |
-      #!/bin/sh
-      # The desktop. labwc supervises the shell; the shell is the thing the user sees and
-      # the thing an agent acts on, and they are two views of one state rather than two
-      # programs that happen to agree.
-      export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-      mkdir -p "$XDG_RUNTIME_DIR"
-      # Without this the shell opens as an ordinary labwc window, title bar and all,
-      # sitting in the middle of the screen. An OS is not a window on something else.
-      export SLINT_FULLSCREEN=1
-      # The same is true of every app, and for them the answer is a themed frame rather than
-      # no frame. labwc reads its config from the user's home, so this needs no root and
-      # re-applies on every start; a machine deployed before the theme existed picks it up by
-      # rebooting. Both sources ride in the release payload.
-      CHROME=/opt/yantrik/share
-      if [ -d "$CHROME/labwc" ]; then
-        mkdir -p "$HOME/.config/labwc" "$HOME/.local/share/themes/Yantrik/labwc"
-        cp -f "$CHROME/labwc/rc.xml" "$HOME/.config/labwc/rc.xml"
-        cp -f "$CHROME/labwc/themerc" "$HOME/.local/share/themes/Yantrik/labwc/themerc"
-      fi
-      if [ -d "$CHROME/fonts" ]; then
-        mkdir -p "$HOME/.local/share/fonts"
-        cp -f "$CHROME/fonts/"*.ttf "$HOME/.local/share/fonts/" 2>/dev/null
-        fc-cache -f "$HOME/.local/share/fonts" >/dev/null 2>&1
-      fi
-      exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml'
+  # /opt/yantrik/bin/yantrik-session is NOT written here any more.
+  #
+  # It arrives in the release payload, which yantrik-firstboot unpacks in runcmd -- before
+  # graphical.target is set, so it exists by the time the session unit can start. Keeping a
+  # second copy here meant the session script could be corrected in the repository and on
+  # new machines while every deployed machine kept the one it was born with, because
+  # nothing in the update path replaced it. One copy, and updates reach it.
 
 runcmd:
   - [ systemctl, enable, --now, qemu-guest-agent ]

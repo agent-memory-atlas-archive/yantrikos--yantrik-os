@@ -320,9 +320,19 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         }
 
         // 4c. Update dock running indicators + window list
+        //
+        // On EVERY screen, not just the desktop.
+        //
+        // This used to be guarded by `current_screen == 1`, from when the taskbar lived inside
+        // DesktopScreen and there was nothing to update anywhere else. The taskbar was moved up
+        // to the shell so it is the same bar above every screen — and its data source stayed
+        // behind. So the list froze the moment you left the desktop: a window closed while you
+        // were in Files stayed in the taskbar indefinitely. Photographed with the taskbar
+        // offering "New Tab - Chromium" while `describe` said 0 windows open and the compositor
+        // listed none.
         if let Some(ui) = ui_weak.upgrade() {
-            if ui.get_current_screen() == 1 {
-                let wins = windows::list_windows();
+            {
+                let wins = windows::list_windows_throttled();
 
                 // Update dock items with running state (labels from Tr global for i18n)
                 let tr = ui.global::<Tr>();
