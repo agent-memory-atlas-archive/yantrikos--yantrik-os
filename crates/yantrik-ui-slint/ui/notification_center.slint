@@ -4,6 +4,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { YEmptyState } from "components/y_empty_state.slint";
 import { AppHeader } from "components/app_header.slint";
 
 export struct NotificationData {
@@ -68,23 +69,15 @@ export component NotificationCenter inherits Rectangle {
                 alignment: start;
 
                 // Empty state
-                if root.notifications.length == 0 : VerticalLayout {
-                    alignment: center;
-                    padding-top: 120px;
-                    spacing: Theme.sp-2;
-
-                    // Was a bell EMOJI at 48px. On a machine with no emoji font that is a
-                    // tofu box in the middle of an otherwise empty screen -- the survey
-                    // photograph showed a question mark in a rectangle where the illustration
-                    // was meant to be.
-                    Icon {
-                        commands: Icons.alerts;
-                        size: 44px;
-                        tint: Theme.text-dim;
-                        x: (parent.width - self.width) / 2;
-                    }
-                    Text { text: "All caught up"; color: Theme.text-secondary; font-size: Theme.fs-title-2; font-weight: Theme.fw-title-2; horizontal-alignment: center; }
-                    Text { text: "System notifications will appear here"; color: Theme.text-dim; font-size: Theme.fs-caption; horizontal-alignment: center; }
+                //
+                // Was a bell EMOJI at 48px with two loose lines of text under it. The emoji
+                // drew as a tofu box on a machine with no emoji font -- a question mark in a
+                // rectangle, in the middle of an otherwise empty screen. YEmptyState is what
+                // every other view uses to say it has nothing, and it has no emoji in it.
+                if root.notifications.length == 0 : YEmptyState {
+                    icon-path: Icons.alerts;
+                    title: "All caught up";
+                    description: "System notifications will appear here.";
                 }
 
                 for notif[idx] in root.notifications : VerticalLayout {

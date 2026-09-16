@@ -3,6 +3,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { YEmptyState } from "components/y_empty_state.slint";
 
 export struct SkillData {
     id: string,
@@ -276,25 +277,17 @@ export component SkillStore inherits Rectangle {
                 }
 
                 // Empty state
-                if root.skills.length == 0 : Rectangle {
-                    height: 120px;
-
-                    VerticalLayout {
-                        spacing: 8px;
-
-                        Text {
-                            text: "No skills found";
-                            color: Theme.text-dim;
-                            font-size: 14px;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: root.search-query != "" ? "Try a different search term" : "Skills will appear here once loaded";
-                            color: Theme.text-dim;
-                            font-size: 11px;
-                            horizontal-alignment: center;
-                        }
-                    }
+                //
+                // Two lines of 14px and 11px dim text, 8px apart, inside a fixed 120px box --
+                // which photographed as a heading and a caption drifting apart in the middle
+                // of the pane with nothing tying them together.
+                if root.skills.length == 0 : YEmptyState {
+                    height: 200px;
+                    icon-path: Icons.skill;
+                    title: "No skills found";
+                    description: root.search-query != ""
+                        ? "Try a different search term."
+                        : "Skills will appear here once loaded.";
                 }
 
                 // Bottom spacer
