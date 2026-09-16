@@ -2140,8 +2140,17 @@ export component App inherits Window {
             whisper-hint-clicked => { root.whisper-hint-clicked(); }
             settings-tapped => { root.quick-settings-open = !root.quick-settings-open; }
             power-pressed => { root.power-menu-open = !root.power-menu-open; }
-            ai-privacy-clicked => { root.ai-privacy-clicked(); }
-            active-mind-clicked => { root.active-mind-clicked(); }
+            // Handled here, the same way the desktop's own instance handles them. They are not
+            // callbacks on this component -- `ai-privacy-clicked` and `active-mind-clicked` are
+            // declared on DesktopScreen, and forwarding to a root callback of the same name was
+            // inventing two that do not exist.
+            ai-privacy-clicked => { root.ai-quick-switcher-open = !root.ai-quick-switcher-open; }
+            // Straight to the section, not to the front door of Settings.
+            active-mind-clicked => {
+                root.settings-category = 8;
+                root.current-screen = 7;
+                root.navigate(7);
+            }
         }
 
         if current-screen == 1 || (current-screen >= 4 && current-screen <= 31) : Rectangle {
