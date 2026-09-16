@@ -110,6 +110,13 @@ packages:
   # Bluetooth, and the mixer fallback for when wpctl is not the right answer.
   - bluez
   - alsa-utils
+  # nmcli, called from nine places in this codebase and absent from every machine until now.
+  #
+  # A desktop uses NetworkManager; systemd-networkd is the server answer and this image shipped
+  # with it. Both can be installed at once, and on a machine already configured by networkd, NM
+  # leaves the interface alone until told otherwise — which is what makes adding it safe here
+  # rather than a change that takes the network down on first boot.
+  - network-manager
 
 write_files:
   - path: /etc/yantrik/install.env

@@ -23,6 +23,26 @@ fn main() {
     app.global::<AccentPreset>().set_index(theme.accent_index);
 
     wire(&app);
+
+    // What is true now, before the window is shown.
+    refresh(&app);
+
+    // And every few seconds after. A cable pulled out while the window is open should show,
+    // and three seconds is the same cadence the shell polls the rest of the system at.
+    let timer = slint::Timer::default();
+    {
+        let weak = app.as_weak();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(3),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    refresh(&ui);
+                }
+            },
+        );
+    }
+
     app.run().unwrap();
 }
 
@@ -31,6 +51,86 @@ fn main() {
 fn call_network(method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
     let client = SyncRpcClient::for_service("network");
     client.call(method, params).map_err(|e| e.message)
+}
+
+
+// ── Reading the network, which this app never did ────────────────────────────────────
+//
+// The app opened, wired its buttons, and stopped. Nothing ever asked the service what the
+// network was doing, so every property kept its Slint default and the window said "Not
+// connected" and "Ethernet — No interface" on a machine with a routable address and eth0 up.
+// It was not reporting a failure; it had never looked.
+//
+// It also asked for methods that do not exist. The app called network.wifi_toggle,
+// wifi_scan, wifi_connect, wifi_disconnect and wifi_forget; the service answers
+// network.status, network.interfaces and network.dns. Not one name in common, so every
+// button returned "Unknown method" into a `let _ =` and looked like it had worked.
+
+/// Pull the current state out of the network service and put it on screen.
+fn refresh(ui: &NetworkManagerApp) {
+    // Interfaces first: the ethernet list and, with it, whether there is an interface at all.
+    if let Ok(v) = call_network("network.interfaces", serde_json::json!({})) {
+        let rows: Vec<serde_json::Value> = serde_json::from_value(v).unwrap_or_default();
+
+        let eth: Vec<EthernetInterface> = rows
+            .iter()
+            .filter(|i| {
+                // ConnectionType serialises as a string for the simple variants and as
+                // {"Other": "..."} for the rest, so match on the text either way.
+                let t = i.get("conn_type").map(|c| c.to_string()).unwrap_or_default();
+                t.to_lowercase().contains("ethernet")
+            })
+            .map(|i| {
+                let ip = i.get("ip_address").and_then(|v| v.as_str()).unwrap_or("");
+                EthernetInterface {
+                    name: i.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    status: i.get("state").and_then(|v| v.as_str()).unwrap_or("").to_uppercase().into(),
+                    ip_address: ip.into(),
+                    mac_address: i.get("mac_address").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    // The service does not report link speed or DHCP/gateway/DNS per interface
+                    // yet. Left empty rather than invented: an empty field reads as "not known",
+                    // a made-up one reads as fact.
+                    speed: "".into(),
+                    is_dhcp: true,
+                    subnet: "".into(),
+                    gateway: "".into(),
+                    dns: "".into(),
+                }
+            })
+            .collect();
+
+        ui.set_ethernet_interfaces(ModelRc::new(VecModel::from(eth)));
+    }
+
+    // Then the summary line the header shows.
+    if let Ok(v) = call_network("network.status", serde_json::json!({})) {
+        let connected = v.get("connected").and_then(|x| x.as_bool()).unwrap_or(false);
+        let conn_type = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        let ip = v.get("ip_address").and_then(|x| x.as_str()).unwrap_or("");
+        let ssid = v.get("ssid").and_then(|x| x.as_str()).unwrap_or("");
+
+        ui.set_status_state(if connected { "connected" } else { "disconnected" }.into());
+        ui.set_status_connection_type(match conn_type {
+            "wifi" => "WiFi",
+            "ethernet" => "Ethernet",
+            other => other,
+        }.into());
+        ui.set_status_ip_address(ip.into());
+        if !ssid.is_empty() {
+            ui.set_wifi_current_ssid(ssid.into());
+        }
+    }
+
+    // And the resolvers. The property is called wifi-dns because that pane was built
+    // first; the resolvers are the machine's, not the radio's.
+    if let Ok(v) = call_network("network.dns", serde_json::json!({})) {
+        let servers: Vec<String> = v
+            .get("nameservers")
+            .and_then(|n| n.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        ui.set_wifi_dns(servers.join(", ").into());
+    }
 }
 
 fn wire(app: &NetworkManagerApp) {
