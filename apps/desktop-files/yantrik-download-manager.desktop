@@ -2,7 +2,7 @@
 Type=Application
 Name=Download Manager
 Comment=File download manager with queue
-Exec=yantrik-download-manager
-Icon=emblem-downloads
+Exec=/opt/yantrik/bin/yantrik-download-manager
+Icon=yantrik-download-manager
 Categories=Network;FileTransfer;
 Keywords=download;transfer;

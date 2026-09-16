@@ -53,7 +53,9 @@ export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-yantrik:labwc:wlroots}"
 # Where .desktop files and icon themes are found. Spelled out rather than left to the
 # default, because the default does not include the flatpak export directories, and an app
 # installed there being invisible to the launcher is a bug nobody would think to look for.
-export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/var/lib/flatpak/exports/share:$HOME/.local/share/flatpak/exports/share"
+# /opt/yantrik/share is where this OS keeps its own .desktop entries and icons, so the
+# ordinary freedesktop scan finds the apps it ships without writing into /usr.
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/opt/yantrik/share:/var/lib/flatpak/exports/share:$HOME/.local/share/flatpak/exports/share"
 export XDG_CONFIG_DIRS="${XDG_CONFIG_DIRS:-/etc/xdg}"
 
 # The OS's own binaries. `yos` is the agent surface and scripts call it by name; without this

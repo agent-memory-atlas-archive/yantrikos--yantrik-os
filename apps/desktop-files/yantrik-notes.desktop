@@ -2,7 +2,7 @@
 Type=Application
 Name=Notes
 Comment=AI-native markdown notes with semantic search
-Exec=yantrik-notes
-Icon=accessories-text-editor
+Exec=/opt/yantrik/bin/yantrik-notes
+Icon=yantrik-notes
 Categories=Office;TextEditor;
 Keywords=notes;markdown;write;

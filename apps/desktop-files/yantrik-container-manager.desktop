@@ -2,7 +2,7 @@
 Type=Application
 Name=Container Manager
 Comment=Docker/Podman container management
-Exec=yantrik-container-manager
-Icon=application-x-executable
+Exec=/opt/yantrik/bin/yantrik-container-manager
+Icon=yantrik-container-manager
 Categories=Development;System;
 Keywords=docker;podman;container;

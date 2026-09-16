@@ -2,7 +2,7 @@
 Type=Application
 Name=Music Player
 Comment=Music player with library management
-Exec=yantrik-music-player
-Icon=applications-multimedia
+Exec=/opt/yantrik/bin/yantrik-music-player
+Icon=yantrik-music-player
 Categories=AudioVideo;Audio;Player;
 Keywords=music;audio;player;

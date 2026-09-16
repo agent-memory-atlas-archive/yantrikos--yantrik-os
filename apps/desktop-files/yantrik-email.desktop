@@ -2,7 +2,7 @@
 Type=Application
 Name=Email
 Comment=Full-featured email client with AI assist
-Exec=yantrik-email
-Icon=internet-mail
+Exec=/opt/yantrik/bin/yantrik-email
+Icon=yantrik-email
 Categories=Network;Email;
 Keywords=email;mail;imap;smtp;

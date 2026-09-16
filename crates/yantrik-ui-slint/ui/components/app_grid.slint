@@ -12,6 +12,11 @@ export struct AppGridItem {
     app-id: string,
     name: string,
     icon-char: string,   // legacy single-char badge; kept so older call sites still compile
+    // The id to draw an icon FOR, which is not always the id to launch BY. A .desktop file is
+    // named yantrik-notes, because a freedesktop entry needs a name unique on the whole
+    // machine; the icon set is keyed by "notes", because that is what the rest of this shell
+    // calls it. Carrying both is cheaper than making either lie.
+    icon-id: string,
     icon: image,         // resolved from the icon theme, when it could be
     has-icon: bool,
     category: string,    // development | office | network | audiovideo | graphics | game | system | settings | utility
@@ -250,7 +255,7 @@ export component AppGrid inherits Rectangle {
                                                 image-fit: contain;
                                             }
                                             if !app.has-icon : Icon {
-                                                commands: Icons.app-or-category(app.app-id, app.category);
+                                                commands: Icons.app-or-category(app.icon-id, app.category);
                                                 size: 22px;
                                                 tint: cell.has-hover ? Theme.text-primary : Theme.text-secondary;
                                                 x: (parent.width - self.width) / 2;

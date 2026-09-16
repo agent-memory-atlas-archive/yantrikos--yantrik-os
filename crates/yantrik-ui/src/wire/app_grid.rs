@@ -125,6 +125,83 @@ fn categories_for(installed: &Arc<Vec<DesktopEntry>>) -> Vec<CategoryItem> {
     out
 }
 
+/// The id the icon set is keyed by, for one of the apps this OS ships.
+///
+/// Two naming schemes meet here and neither is wrong. A freedesktop entry needs a name unique
+/// across everything installed on the machine, so ours are `yantrik-download-manager`. The
+/// icon set is keyed by what the rest of the shell calls the same app, which is `downloads`.
+/// Stripping the prefix gets six of the sixteen; the other ten need saying out loud.
+///
+/// Anything not listed keeps its own id, so a third-party app is unaffected and a new app that
+/// happens to match an icon name works without an entry.
+fn icon_id_for(app_id: &str) -> String {
+    let bare = app_id.strip_prefix("yantrik-").unwrap_or(app_id);
+    let mapped = match bare {
+        "container-manager" => "containers",
+        "document-editor" => "documents",
+        "download-manager" => "downloads",
+        "image-viewer" => "image",
+        "music-player" => "music",
+        "network-manager" => "network",
+        "snippet-manager" => "snippets",
+        "system-monitor" => "sysmonitor",
+        "text-editor" => "editor",
+        other => other,
+    };
+    mapped.to_string()
+}
+
+#[cfg(test)]
+mod icon_id_tests {
+    use super::icon_id_for;
+
+    /// Every app this OS ships resolves to an id the icon set actually knows.
+    ///
+    /// The list on the right is `Icons.app` in crates/yantrik-ui-kit/slint/icon.slint. Without
+    /// this mapping ten of the sixteen fell through to their category glyph, so Mail,
+    /// Downloads and Network Manager all drew the same picture — which is what the launcher
+    /// was photographed doing.
+    #[test]
+    fn every_shipped_app_maps_to_an_icon_the_set_knows() {
+        const KNOWN: &[&str] = &[
+            "terminal", "browser", "files", "editor", "email", "notes", "system", "network",
+            "packages", "memory", "media", "music", "weather", "settings", "calendar", "bond",
+            "notifications", "spreadsheet", "documents", "presentation", "launchpad", "yantrik",
+            "about", "containers", "devices", "downloads", "permissions", "personality",
+            "skills", "snippets", "sysmonitor", "image",
+        ];
+        const SHIPPED: &[&str] = &[
+            "yantrik-calendar", "yantrik-container-manager", "yantrik-document-editor",
+            "yantrik-download-manager", "yantrik-email", "yantrik-image-viewer",
+            "yantrik-music-player", "yantrik-network-manager", "yantrik-notes",
+            "yantrik-presentation", "yantrik-snippet-manager", "yantrik-spreadsheet",
+            "yantrik-system-monitor", "yantrik-terminal", "yantrik-text-editor",
+            "yantrik-weather",
+        ];
+
+        let missing: Vec<String> = SHIPPED
+            .iter()
+            .map(|app| (app, icon_id_for(app)))
+            .filter(|(_, id)| !KNOWN.contains(&id.as_str()))
+            .map(|(app, id)| format!("{app} -> {id}"))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "these apps resolve to an icon id the set does not have, so they will draw their \
+             category glyph instead of their own icon:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    /// A foreign app keeps its own id; this table is only for ours.
+    #[test]
+    fn a_third_party_app_is_left_alone() {
+        assert_eq!(icon_id_for("chromium"), "chromium");
+        assert_eq!(icon_id_for("org.gnome.Nautilus"), "org.gnome.Nautilus");
+    }
+}
+
 fn populate_grid(ui: &App, installed: &Arc<Vec<DesktopEntry>>, query: &str, category: &str) {
     let query_lower = query.to_lowercase();
     let apps: Vec<AppGridItem> = installed
@@ -145,6 +222,7 @@ fn populate_grid(ui: &App, installed: &Arc<Vec<DesktopEntry>>, query: &str, cate
                 app_id: entry.app_id.clone().into(),
                 name: entry.name.clone().into(),
                 icon_char: entry.icon_char.clone().into(),
+                icon_id: icon_id_for(&entry.app_id).into(),
                 has_icon: icon.is_some(),
                 icon: icon.unwrap_or_default(),
                 category: SharedString::from(icons::category_id(&entry.categories)),

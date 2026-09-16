@@ -159,6 +159,21 @@ cp "$PROJECT_ROOT/config/labwc/autostart" "$ROOT/share/labwc/autostart"
 # Barlow is embedded in each app binary, which the compositor cannot read a font out of, so the
 # same files also ship loose for fontconfig.
 cp "$PROJECT_ROOT/crates/yantrik-design-tokens/slint/fonts/"*.ttf "$ROOT/share/fonts/"
+# The applications this OS ships, as .desktop entries.
+#
+# They existed in the repository and were installed nowhere, so the launcher -- the "all
+# applications" view -- listed fourteen shell screens, Chromium, Vim and Print Settings, and
+# not one of the sixteen apps this OS is made of. Photographed saying "Search 17 applications"
+# with no Notes, no Mail, no Terminal in it.
+#
+# They go under $ROOT/share so the session can add /opt/yantrik/share to XDG_DATA_DIRS and the
+# ordinary freedesktop scan finds them. No root, no writing into /usr, and the same mechanism
+# every other application on the machine uses.
+mkdir -p "$ROOT/share/applications"
+cp "$PROJECT_ROOT"/apps/desktop-files/*.desktop "$ROOT/share/applications/" 2>/dev/null \
+  || fail "no .desktop files to ship — the launcher would not list this OS's own apps"
+echo "   + $(ls "$ROOT/share/applications" | wc -l) application entries"
+
 echo "   + labwc theme and $(ls "$ROOT/share/fonts" | wc -l) fonts"
 
 if [ "$WITH_MODELS" = 1 ]; then

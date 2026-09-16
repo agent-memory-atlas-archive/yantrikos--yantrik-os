@@ -261,6 +261,9 @@ export global Icons {
              : id == "skills"        ? self.skill
              : id == "snippets"      ? self.doc
              : id == "sysmonitor"    ? self.monitor
+             // The image viewer. The glyph existed and this function did not offer it, so the
+             // one app whose whole subject is pictures fell through to a category glyph.
+             : id == "image"         ? self.image
              : "";
     }
 

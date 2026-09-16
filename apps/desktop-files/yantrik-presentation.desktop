@@ -2,7 +2,7 @@
 Type=Application
 Name=Presentation
 Comment=Slide presentation editor
-Exec=yantrik-presentation
-Icon=x-office-presentation
+Exec=/opt/yantrik/bin/yantrik-presentation
+Icon=yantrik-presentation
 Categories=Office;Presentation;
 Keywords=slides;presentation;powerpoint;

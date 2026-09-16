@@ -2,7 +2,7 @@
 Type=Application
 Name=Terminal
 Comment=Terminal emulator
-Exec=yantrik-terminal
-Icon=utilities-terminal
+Exec=/opt/yantrik/bin/yantrik-terminal
+Icon=yantrik-terminal
 Categories=System;TerminalEmulator;
 Keywords=terminal;shell;command;

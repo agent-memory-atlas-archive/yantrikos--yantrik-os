@@ -2,7 +2,7 @@
 Type=Application
 Name=System Monitor
 Comment=CPU, memory, disk, network monitoring
-Exec=yantrik-system-monitor
-Icon=utilities-system-monitor
+Exec=/opt/yantrik/bin/yantrik-system-monitor
+Icon=yantrik-system-monitor
 Categories=System;Monitor;
 Keywords=cpu;memory;disk;processes;

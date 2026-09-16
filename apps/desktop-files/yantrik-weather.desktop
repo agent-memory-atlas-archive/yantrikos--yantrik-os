@@ -2,7 +2,7 @@
 Type=Application
 Name=Weather
 Comment=Weather forecasts, air quality, and alerts
-Exec=yantrik-weather
-Icon=weather-clear
+Exec=/opt/yantrik/bin/yantrik-weather
+Icon=yantrik-weather
 Categories=Utility;
 Keywords=weather;forecast;temperature;

@@ -2,7 +2,7 @@
 Type=Application
 Name=Spreadsheet
 Comment=Spreadsheet editor with formulas and charts
-Exec=yantrik-spreadsheet
-Icon=x-office-spreadsheet
+Exec=/opt/yantrik/bin/yantrik-spreadsheet
+Icon=yantrik-spreadsheet
 Categories=Office;Spreadsheet;
 Keywords=spreadsheet;excel;csv;

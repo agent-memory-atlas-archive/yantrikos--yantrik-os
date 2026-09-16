@@ -2,7 +2,7 @@
 Type=Application
 Name=Snippet Manager
 Comment=Code snippet manager with search
-Exec=yantrik-snippet-manager
-Icon=accessories-text-editor
+Exec=/opt/yantrik/bin/yantrik-snippet-manager
+Icon=yantrik-snippet-manager
 Categories=Development;Utility;
 Keywords=snippet;code;clipboard;

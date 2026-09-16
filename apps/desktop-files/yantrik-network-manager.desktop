@@ -2,7 +2,7 @@
 Type=Application
 Name=Network Manager
 Comment=WiFi, Bluetooth, VPN network management
-Exec=yantrik-network-manager
-Icon=network-wired
+Exec=/opt/yantrik/bin/yantrik-network-manager
+Icon=yantrik-network-manager
 Categories=System;Network;
 Keywords=wifi;bluetooth;vpn;network;
