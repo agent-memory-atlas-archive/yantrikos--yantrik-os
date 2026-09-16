@@ -257,6 +257,11 @@ export global Theme {
     out property <length> h-regular: 32px;
     out property <length> h-prominent: 36px;
 
+    // The app header. One number, because every app wears the same frame: AppFrame in the UI
+    // kit reads it, and nothing else is allowed to decide how tall an app's top edge is. It was
+    // 28, 32, 36, 44, 48, 56 and 64 across sixteen apps when each of them drew its own.
+    out property <length> h-app-header: 48px;
+
     // ─── Desktop layout sizes ─────────────────────────────────────
     out property <length> status-bar-height: 32px;
     out property <length> dock-height: 64px;

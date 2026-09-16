@@ -5,6 +5,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader, AppAction } from "components/app_header.slint";
 
 export struct TerminalTabData {
     title: string,
@@ -104,275 +105,33 @@ export component TerminalScreen inherits Rectangle {
     VerticalLayout {
         spacing: 0px;
 
-        // ── Toolbar ──
-        Rectangle {
-            height: Theme.h-prominent;
-            background: Theme.bg-surface;
-
-            HorizontalLayout {
-                padding-left: Theme.sp-4;
-                padding-right: Theme.sp-4;
-                alignment: space-between;
-
-                // Left: title + status + CWD
-                HorizontalLayout {
-                    spacing: Theme.sp-2;
-                    alignment: start;
-
-                    Text {
-                        text: ">_";
-                        color: Theme.accent;
-                        font-size: Theme.fs-title-2;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-
-                    Text {
-                        text: "Terminal";
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-headline;
-                        font-weight: Theme.fw-headline;
-                        vertical-alignment: center;
-                    }
-
-                    // Process alive indicator
-                    Rectangle {
-                        width: 8px;
-                        height: 8px;
-                        y: (parent.height - 8px) / 2;
-                        border-radius: 4px;
-                        background: root.is-alive ? Theme.color-success : Theme.color-danger;
-                        animate background { duration: Theme.dur-normal; }
-                    }
-
-                    // CWD breadcrumbs
-                    if root.current-directory != "" : Rectangle {
-                        width: cwd-text.preferred-width + Theme.sp-4;
-                        height: 22px;
-                        border-radius: Theme.r-sm;
-                        background: Theme.hover-fill;
-                        border-width: 1px;
-                        border-color: Theme.border-subtle;
-
-                        cwd-text := Text {
-                            text: root.current-directory;
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Command duration badge
-                    if root.last-command-duration != "" : Rectangle {
-                        width: dur-text.preferred-width + Theme.sp-3;
-                        height: 20px;
-                        border-radius: Theme.r-pill;
-                        background: Theme.tint-amber;
-
-                        dur-text := Text {
-                            text: root.last-command-duration;
-                            color: Theme.amber;
-                            font-size: Theme.fs-micro;
-                            font-weight: 500;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                // Right: toolbar buttons
-                HorizontalLayout {
-                    spacing: 4px;
-                    alignment: end;
-
-                    // AI command bar toggle
-                    ai-btn-ta := TouchArea {
-                        width: 40px;
-                        height: 28px;
-                        clicked => { root.show-ai-bar = !root.show-ai-bar; }
-                        mouse-cursor: pointer;
-
-                        Rectangle {
-                            width: 40px;
-                            height: 28px;
-                            border-radius: Theme.r-sm;
-                            background: root.show-ai-bar
-                                ? Theme.amber-glow
-                                : (ai-btn-ta.has-hover ? Theme.hover-fill : transparent);
-                            border-width: 1px;
-                            border-color: root.show-ai-bar ? Theme.amber-dim : Theme.border-subtle;
-                            animate background { duration: Theme.dur-fast; }
-
-                            Text {
-                                text: "AI";
-                                color: root.show-ai-bar ? Theme.amber : Theme.text-secondary;
-                                font-size: 11px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    // Profile selector
-                    Rectangle {
-                        width: prof-name-text.preferred-width + 20px;
-                        height: 28px;
-
-                        prof-ta := TouchArea {
-                            width: parent.width;
-                            height: parent.height;
-                            clicked => { root.terminal-show-profiles = !root.terminal-show-profiles; }
-                            mouse-cursor: pointer;
-
-                            Rectangle {
-                                width: parent.width;
-                                height: 28px;
-                                border-radius: Theme.r-sm;
-                                background: root.terminal-show-profiles
-                                    ? Theme.hover-fill-strong
-                                    : (prof-ta.has-hover ? Theme.hover-fill : transparent);
-                                border-width: 1px;
-                                border-color: root.terminal-show-profiles ? Theme.accent-dim : Theme.border-subtle;
-
-                                prof-name-text := Text {
-                                    text: root.terminal-profile-name;
-                                    color: root.terminal-show-profiles ? Theme.accent : Theme.text-secondary;
-                                    font-size: 11px;
-                                    font-weight: root.terminal-show-profiles ? 600 : 400;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        // Profile dropdown
-                        if root.terminal-show-profiles : Rectangle {
-                            x: 0px;
-                            y: parent.height + 4px;
-                            width: 120px;
-                            height: 96px;
-                            border-radius: Theme.r-md;
-                            background: Theme.bg-elevated;
-                            border-width: 1px;
-                            border-color: Theme.accent-dim;
-
-                            VerticalLayout {
-                                padding: 4px;
-                                spacing: 2px;
-
-                                for profile-name in ["Default", "Root", "Dev"] : TouchArea {
-                                    height: 28px;
-                                    property <bool> hov: self.has-hover;
-                                    clicked => {
-                                        root.terminal-set-profile(profile-name);
-                                        root.terminal-show-profiles = false;
-                                    }
-                                    mouse-cursor: pointer;
-                                    Rectangle {
-                                        height: 28px;
-                                        border-radius: Theme.r-sm;
-                                        background: root.terminal-profile-name == profile-name
-                                            ? Theme.tint-cyan
-                                            : (parent.hov ? Theme.hover-fill : transparent);
-                                        HorizontalLayout {
-                                            padding-left: 10px;
-                                            Text {
-                                                text: profile-name;
-                                                color: root.terminal-profile-name == profile-name ? Theme.accent : Theme.text-secondary;
-                                                font-size: Theme.fs-caption;
-                                                font-weight: root.terminal-profile-name == profile-name ? 600 : 400;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Split pane toggle
-                    split-ta := TouchArea {
-                        width: 52px;
-                        height: 28px;
-                        clicked => { root.terminal-split-toggle(); }
-                        mouse-cursor: pointer;
-
-                        Rectangle {
-                            width: 52px;
-                            height: 28px;
-                            border-radius: Theme.r-sm;
-                            background: root.terminal-split-active
-                                ? Theme.hover-fill-strong
-                                : (split-ta.has-hover ? Theme.hover-fill : transparent);
-                            border-width: 1px;
-                            border-color: root.terminal-split-active ? Theme.accent-dim : Theme.border-subtle;
-
-                            Text {
-                                text: "Split";
-                                color: root.terminal-split-active ? Theme.accent : Theme.text-secondary;
-                                font-size: 11px;
-                                font-weight: root.terminal-split-active ? 600 : 400;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    // Search button
-                    srch-ta := TouchArea {
-                        width: 28px;
-                        height: 28px;
-                        clicked => { root.show-search = !root.show-search; }
-                        mouse-cursor: pointer;
-
-                        Rectangle {
-                            width: 28px;
-                            height: 28px;
-                            border-radius: Theme.r-sm;
-                            background: root.show-search
-                                ? Theme.hover-fill-strong
-                                : (srch-ta.has-hover ? Theme.hover-fill : transparent);
-                            border-width: 1px;
-                            border-color: root.show-search ? Theme.accent-dim : Theme.border-subtle;
-
-                            Icon {
-                                commands: Icons.search;
-                                size: 12px;
-                                tint: root.show-search ? Theme.accent : Theme.text-secondary;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-
-                    // Restart button (when dead)
-                    if !root.is-alive : TouchArea {
-                        width: 72px;
-                        height: 28px;
-                        clicked => { root.restart-terminal(); }
-                        mouse-cursor: pointer;
-
-                        Rectangle {
-                            width: 72px;
-                            height: 28px;
-                            border-radius: Theme.r-sm;
-                            background: parent.has-hover ? Theme.color-success-dim : Theme.hover-fill;
-                            border-width: 1px;
-                            border-color: Theme.color-success;
-
-                            Text {
-                                text: "Restart";
-                                color: Theme.color-success;
-                                font-size: 12px;
-                                font-weight: 600;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
+        // -- Header --
+        //
+        // The working directory and the last command's duration were badges in a bespoke bar.
+        // They are the subtitle now: still the second thing you read, no longer the app's own
+        // private idea of what a badge looks like.
+        AppHeader {
+            icon: Icons.terminal;
+            title: "Terminal";
+            subtitle: root.last-command-duration != ""
+                        ? root.current-directory + "  -  " + root.last-command-duration
+                        : root.current-directory;
+            status: root.is-alive ? "" : "not running";
+            actions: [
+                { id: "ai",      icon: Icons.spark,        label: "AI",    active: root.show-ai-bar },
+                { id: "profile", icon: Icons.chevron-down, label: root.terminal-profile-name,
+                  active: root.terminal-show-profiles },
+                { id: "split",   icon: Icons.sidebar,      label: "Split", active: root.terminal-split-active },
+                { id: "search",  icon: Icons.search,       active: root.show-search },
+                { id: "restart", icon: Icons.refresh,      label: "Restart", emphasis: 3,
+                  disabled: root.is-alive },
+            ];
+            action(id) => {
+                if (id == "ai") { root.show-ai-bar = !root.show-ai-bar; }
+                else if (id == "profile") { root.terminal-show-profiles = !root.terminal-show-profiles; }
+                else if (id == "split") { root.terminal-split-toggle(); }
+                else if (id == "search") { root.show-search = !root.show-search; }
+                else if (id == "restart") { root.restart-terminal(); }
             }
         }
 
@@ -1051,6 +810,54 @@ export component TerminalScreen inherits Rectangle {
                         color: Theme.text-secondary;
                         font-size: Theme.fs-mono;
                         wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+
+    // -- Profile menu --
+    //
+    // It used to be nested inside the toolbar button that opens it. At root level it can
+    // overlap the terminal instead of taking a row in the layout and shoving it down, which
+    // is what a menu is supposed to do.
+    if root.terminal-show-profiles : Rectangle {
+        x: root.width - 232px;
+        y: Theme.h-app-header + 4px;
+        width: 120px;
+        height: 96px;
+        border-radius: Theme.r-md;
+        background: Theme.bg-elevated;
+        border-width: 1px;
+        border-color: Theme.accent-dim;
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            for profile-name in ["Default", "Root", "Dev"] : TouchArea {
+                height: 28px;
+                property <bool> hov: self.has-hover;
+                mouse-cursor: pointer;
+                clicked => {
+                    root.terminal-set-profile(profile-name);
+                    root.terminal-show-profiles = false;
+                }
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.r-sm;
+                    background: root.terminal-profile-name == profile-name
+                        ? Theme.tint-cyan
+                        : (parent.hov ? Theme.hover-fill : transparent);
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        Text {
+                            text: profile-name;
+                            color: root.terminal-profile-name == profile-name ? Theme.accent : Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            font-weight: root.terminal-profile-name == profile-name ? 600 : 400;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }

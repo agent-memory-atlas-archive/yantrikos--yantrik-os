@@ -10,6 +10,7 @@ import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButto
          RibbonQuickAction, RibbonGroupLabel, RibbonColorButton, RibbonDropdown,
          RibbonAccentButton } from "components/app_ribbon.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader, AppAction } from "components/app_header.slint";
 
 export struct SpreadsheetCell {
     text: string,
@@ -297,6 +298,28 @@ export component SpreadsheetScreen inherits Rectangle {
     property <int> ribbon-tab: 0;
 
     VerticalLayout {
+        // -- Header --
+        AppHeader {
+            icon: Icons.sheets;
+            title: "Spreadsheet";
+            subtitle: root.status-text;
+            leading-actions: [
+                { id: "save", icon: Icons.save, label: "Save", emphasis: 2 },
+                { id: "undo", icon: Icons.rotate-ccw },
+                { id: "redo", icon: Icons.rotate-cw },
+            ];
+            actions: [
+                { id: "find", icon: Icons.search, label: "Find", active: root.show-find },
+                { id: "ai",   icon: Icons.spark,  label: "AI", emphasis: 1, active: root.show-ai-panel },
+            ];
+            action(id) => {
+                if (id == "save") { root.save-sheet(); }
+                else if (id == "undo") { root.undo(); }
+                else if (id == "redo") { root.redo(); }
+                else if (id == "find") { root.show-find = !root.show-find; }
+                else if (id == "ai") { root.show-ai-panel = !root.show-ai-panel; }
+            }
+        }
         // ═══ Row 1: Tab strip + Quick Actions (36px) ═══
         Rectangle {
             height: 36px;

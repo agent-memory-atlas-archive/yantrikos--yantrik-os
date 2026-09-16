@@ -8,6 +8,7 @@ import { YTabs, YTabItem } from "components/y_tabs.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { YListItem } from "components/y_list_item.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader, AppAction } from "components/app_header.slint";
 
 // ── Data structs ──
 
@@ -358,106 +359,39 @@ export component NetworkManager inherits Rectangle {
     callback ai-explain-pressed();
     callback ai-dismiss();
 
+    // Built in steps rather than as one expression, and not for taste: Slint's generated Rust
+    // MOVES a string property's value into the first branch that reads it, so an expression
+    // naming `status-connection-type` three times fails to compile with "borrow of moved
+    // value". Each of these reads any one string exactly once.
+    property <bool> conn-is-wifi: root.status-connection-type == "WiFi";
+    property <string> conn-name: root.conn-is-wifi && root.wifi-current-ssid != ""
+                                 ? root.wifi-current-ssid : root.status-connection-type;
+    property <string> conn-detail: root.status-ip-address != "" ? root.status-ip-address : "";
+    property <string> conn-summary: root.status-state == "connecting" ? "Connecting"
+                                  : root.status-state != "connected" ? "Not connected"
+                                  : root.conn-detail != "" ? root.conn-name + "  -  " + root.conn-detail
+                                  : root.conn-name;
+
     VerticalLayout {
         spacing: 0px;
-
-        // ══════════════ The answer, before anything else ══════════════
+        // -- Header --
         //
-        // Whatever section you are in, the top line says what the machine is actually using
-        // right now. That used to be a 32px strip at the bottom edge of the window.
-        Rectangle {
-            height: 56px;
-            background: Theme.bg-surface;
-
-            Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Theme.separator; }
-
-            HorizontalLayout {
-                padding-left: Theme.sp-4;
-                padding-right: Theme.sp-3;
-                spacing: Theme.sp-3;
-
-                Rectangle {
-                    width: 32px;
-                    height: 32px;
-                    y: (parent.height - 32px) / 2;
-                    border-radius: Theme.r-sm;
-                    background: root.status-state == "connected" ? Theme.color-success-dim
-                              : root.status-state == "connecting" ? Theme.amber-dim
-                              : Theme.hover-fill;
-                    Icon {
-                        commands: root.status-connection-type == "WiFi" ? Icons.wifi
-                                : root.status-connection-type == "Ethernet" ? Icons.network
-                                : Icons.globe;
-                        size: 17px;
-                        thickness: 1.7px;
-                        tint: root.status-state == "connected" ? Theme.color-success
-                            : root.status-state == "connecting" ? Theme.amber
-                            : Theme.text-dim;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                }
-
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 2px;
-
-                    Text {
-                        text: root.status-state == "connected"
-                                ? (root.status-connection-type == "WiFi" && root.wifi-current-ssid != ""
-                                    ? root.wifi-current-ssid
-                                    : root.status-connection-type != "" ? root.status-connection-type : "Connected")
-                            : root.status-state == "connecting" ? "Connecting\{"\u{2026}"}"
-                            : "Not connected";
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-title-2;
-                        font-weight: Theme.fw-title-2;
-                        letter-spacing: -0.2px;
-                        overflow: elide;
-                    }
-
-                    HorizontalLayout {
-                        spacing: Theme.sp-2;
-                        alignment: start;
-
-                        if root.status-ip-address != "" : Text {
-                            text: root.status-ip-address;
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                            font-family: Theme.font-mono;
-                        }
-                        if root.status-connection-type == "WiFi" && root.wifi-speed != "" : Text {
-                            text: root.wifi-speed;
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                            font-family: Theme.font-mono;
-                        }
-                        if root.status-ip-address == "" : Text {
-                            text: "No address";
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                        }
-                    }
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-
-                if root.status-connection-type == "WiFi" && root.status-state == "connected" : SignalBars {
-                    strength: root.status-signal-strength;
-                    y: (parent.height - self.height) / 2;
-                }
-
-                YButton {
-                    label: root.ai-is-working ? "Working" : "Explain";
-                    icon-path: Icons.spark;
-                    variant: 1;
-                    size: 0;
-                    loading: root.ai-is-working;
-                    y: (parent.height - self.height) / 2;
-                    clicked => {
-                        root.ai-explain-pressed();
-                        root.ai-panel-open = true;
-                    }
+        // The bar that stood here existed to answer one question on every section: what is this
+        // machine actually using right now. That answer keeps its place -- it is the subtitle,
+        // the line directly under the app name -- and the app gets the same top edge as the
+        // other fifteen instead of a 56px status panel unique to itself.
+        AppHeader {
+            icon: root.status-connection-type == "Ethernet" ? Icons.network : Icons.wifi;
+            title: "Network";
+            subtitle: root.conn-summary;
+            actions: [
+                { id: "ai", icon: Icons.spark, label: root.ai-is-working ? "Working" : "Explain",
+                  emphasis: 1, loading: root.ai-is-working, active: root.ai-panel-open },
+            ];
+            action(id) => {
+                if (id == "ai") {
+                    if (root.ai-panel-open) { root.ai-dismiss(); root.ai-panel-open = false; }
+                    else { root.ai-explain-pressed(); root.ai-panel-open = true; }
                 }
             }
         }

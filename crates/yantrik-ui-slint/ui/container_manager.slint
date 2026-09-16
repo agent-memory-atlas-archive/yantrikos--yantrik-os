@@ -2,6 +2,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader, AppAction } from "components/app_header.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 
 // ── Data structs ──
@@ -437,124 +438,33 @@ export component ContainerManagerScreen inherits Rectangle {
     VerticalLayout {
         spacing: 0px;
 
-        // ── Tab bar ──
-        Rectangle {
-            height: 44px;
-            background: Theme.bg-surface;
-            border-width: 0px;
-
-            HorizontalLayout {
-                alignment: start;
-
-                TabButton {
-                    label: "Containers";
-                    icon-path: Icons.packages;
-                    active: active-tab == 0;
-                    width: 140px;
-                    clicked => {
-                        active-tab = 0;
-                        ct-tab(0);
-                    }
+        // -- Header --
+        //
+        // The three tabs are leading-actions: they sit beside the title because they change
+        // what you are looking at, rather than doing something to it. Verbs go on the right.
+        AppHeader {
+            icon: Icons.packages;
+            title: "Containers";
+            subtitle: root.runtime-name;
+            leading-actions: [
+                { id: "tab-containers", icon: Icons.packages, label: "Containers", active: root.active-tab == 0 },
+                { id: "tab-images",     icon: Icons.image,    label: "Images",     active: root.active-tab == 1 },
+                { id: "tab-volumes",    icon: Icons.save,     label: "Volumes",    active: root.active-tab == 2 },
+            ];
+            actions: [
+                { id: "ai",      icon: Icons.spark,   label: root.ai-is-working ? "Analyzing" : "AI Logs",
+                  loading: root.ai-is-working, active: root.ai-panel-open, disabled: root.log-text == "" },
+                { id: "refresh", icon: Icons.refresh, label: "Refresh", emphasis: 1 },
+            ];
+            action(id) => {
+                if (id == "tab-containers") { root.active-tab = 0; root.ct-tab(0); }
+                else if (id == "tab-images") { root.active-tab = 1; root.ct-tab(1); }
+                else if (id == "tab-volumes") { root.active-tab = 2; root.ct-tab(2); }
+                else if (id == "ai") {
+                    if (root.ai-panel-open) { root.ai-dismiss(); root.ai-panel-open = false; }
+                    else if (root.log-text != "") { root.ai-summarize-logs(); root.ai-panel-open = true; }
                 }
-
-                TabButton {
-                    label: "Images";
-                    icon-path: Icons.image;
-                    active: active-tab == 1;
-                    width: 120px;
-                    clicked => {
-                        active-tab = 1;
-                        ct-tab(1);
-                    }
-                }
-
-                TabButton {
-                    label: "Volumes";
-                    icon-path: Icons.save;
-                    active: active-tab == 2;
-                    width: 120px;
-                    clicked => {
-                        active-tab = 2;
-                        ct-tab(2);
-                    }
-                }
-
-                // Spacer
-                Rectangle { horizontal-stretch: 1; }
-
-                // Runtime label + refresh
-                HorizontalLayout {
-                    spacing: Theme.sp-2;
-                    padding-right: Theme.sp-4;
-                    padding-top: 7px;
-                    padding-bottom: 7px;
-                    alignment: center;
-
-                    Text {
-                        text: runtime-name;
-                        color: Theme.accent;
-                        font-size: Theme.font-small;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
-
-                    // AI Summarize button (only when logs are showing)
-                    TouchArea {
-                        width: ai-ct-btn.preferred-width + 16px;
-                        height: 32px;
-                        clicked => {
-                            if root.ai-panel-open {
-                                root.ai-dismiss();
-                                root.ai-panel-open = false;
-                            } else if root.log-text != "" {
-                                root.ai-summarize-logs();
-                                root.ai-panel-open = true;
-                            }
-                        }
-                        ai-ct-btn := Rectangle {
-                            height: 32px;
-                            border-radius: Theme.radius-card;
-                            background: root.ai-is-working ? Theme.accent
-                                : (root.log-text != "" ? Theme.bg-elevated : Theme.hover-fill);
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-                                spacing: 4px;
-                                alignment: center;
-                                Icon {
-                                    commands: root.ai-is-working ? Icons.spark : Icons.spark;
-                                    size: 12px;
-                                    tint: Theme.text-secondary;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                                Text {
-                                    text: root.ai-is-working ? "Analyzing..." : "AI Logs";
-                                    color: root.ai-is-working ? Theme.text-on-accent
-                                        : (root.log-text != "" ? Theme.text-secondary : Theme.text-dim);
-                                    font-size: Theme.fs-micro;
-                                    font-weight: 500;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-
-                    ActionButton {
-                        label: "Refresh";
-                        width: 68px;
-                        clicked => { ct-refresh(); }
-                    }
-                }
-            }
-
-            // Bottom border
-            Rectangle {
-                y: parent.height - 1px;
-                width: 100%;
-                height: 1px;
-                background: Theme.border-subtle;
+                else if (id == "refresh") { root.ct-refresh(); }
             }
         }
 

@@ -9,6 +9,7 @@ import { YInput } from "components/y_input.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { YTabs, YTabItem } from "components/y_tabs.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader, AppAction } from "components/app_header.slint";
 
 export struct DownloadItem {
     id: int,
@@ -90,152 +91,36 @@ export component DownloadManagerScreen inherits Rectangle {
     callback ai-dismiss();
 
     VerticalLayout {
-        // ── Top Stats Bar ──
-        Rectangle {
-            height: 56px;
-            background: Theme.bg-card;
-
-            HorizontalLayout {
-                padding-left: Theme.sp-5;
-                padding-right: Theme.sp-5;
-                spacing: Theme.sp-6;
-                alignment: center;
-
-                // Active downloads stat
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: center;
-
-                    Rectangle {
-                        width: 8px;
-                        height: 8px;
-                        border-radius: 4px;
-                        background: root.active-count > 0 ? Theme.accent : Theme.text-dim;
-                        y: (parent.height - self.height) / 2;
-                    }
-
-                    Text {
-                        text: root.active-count;
-                        font-size: 18px;
-                        font-weight: 700;
-                        color: Theme.text-primary;
-                        vertical-alignment: center;
-                    }
-
-                    Text {
-                        text: "active";
-                        font-size: Theme.fs-caption;
-                        color: Theme.text-secondary;
-                        vertical-alignment: center;
-                    }
+        // -- Header --
+        //
+        // This app had no header at all. Where every other window says its name, Downloads put
+        // a 56px row of statistics -- a dot, a count, a speed, a tick, another count -- so the
+        // one app whose whole job is a list of things had nothing at the top to say so.
+        //
+        // The numbers were worth keeping, just not at the size of a title. They are the
+        // subtitle now, on the line the frame reserves for exactly this: what the app is
+        // currently doing, said quietly, under what the app is.
+        AppHeader {
+            icon: Icons.download;
+            title: "Downloads";
+            subtitle: "\{root.active-count} active  -  \{root.total-speed}  -  \{root.completed-today} done today";
+            actions: [
+                { id: "pause-all",  icon: Icons.pause, label: "Pause All" },
+                { id: "resume-all", icon: Icons.play,  label: "Resume All" },
+                { id: "clear",      icon: Icons.trash, label: "Clear Completed" },
+                { id: "ai",         icon: Icons.spark, label: root.ai-is-working ? "Analyzing" : "AI",
+                  emphasis: 1, loading: root.ai-is-working, active: root.ai-panel-open },
+                { id: "add",        icon: Icons.plus,  label: "Add URL", emphasis: 2 },
+            ];
+            action(id) => {
+                if (id == "pause-all") { root.dl-pause-all(); }
+                else if (id == "resume-all") { root.dl-resume-all(); }
+                else if (id == "clear") { root.dl-clear-completed(); }
+                else if (id == "ai") {
+                    if (root.ai-panel-open) { root.ai-dismiss(); root.ai-panel-open = false; }
+                    else { root.ai-explain-pressed(); root.ai-panel-open = true; }
                 }
-
-                // Speed stat
-                HorizontalLayout {
-                    spacing: 6px;
-                    alignment: center;
-
-                    Icon {
-                        commands: Icons.arrow-down;
-                        size: 16px;
-                        tint: Theme.accent;
-                        y: (parent.height - self.height) / 2;
-                    }
-
-                    Text {
-                        text: root.total-speed;
-                        font-size: 15px;
-                        font-weight: 600;
-                        color: Theme.accent;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Completed today stat
-                HorizontalLayout {
-                    spacing: 6px;
-                    alignment: center;
-
-                    Icon {
-                        commands: Icons.check;
-                        size: 16px;
-                        tint: Theme.color-success;
-                        y: (parent.height - self.height) / 2;
-                    }
-
-                    Text {
-                        text: root.completed-today;
-                        font-size: 15px;
-                        font-weight: 600;
-                        color: Theme.text-primary;
-                        vertical-alignment: center;
-                    }
-
-                    Text {
-                        text: "today";
-                        font-size: Theme.fs-caption;
-                        color: Theme.text-secondary;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Spacer
-                Rectangle { horizontal-stretch: 1; }
-
-                // Pause All button
-                YButton {
-                    label: "Pause All";
-                    icon-path: Icons.pause;
-                    variant: 1;
-                    size: 0;
-                    clicked => { root.dl-pause-all(); }
-                }
-
-                // Resume All button
-                YButton {
-                    label: "Resume All";
-                    icon-path: Icons.play;
-                    variant: 1;
-                    size: 0;
-                    clicked => { root.dl-resume-all(); }
-                }
-
-                // Clear Completed button
-                YButton {
-                    label: "Clear Completed";
-                    variant: 2;
-                    size: 0;
-                    clicked => { root.dl-clear-completed(); }
-                }
-
-                // AI button
-                YButton {
-                    label: root.ai-is-working ? "Analyzing..." : "AI";
-                    icon-path: Icons.spark;
-                    variant: root.ai-is-working ? 0 : 1;
-                    size: 0;
-                    loading: root.ai-is-working;
-                    clicked => {
-                        if root.ai-panel-open {
-                            root.ai-dismiss();
-                            root.ai-panel-open = false;
-                        } else {
-                            root.ai-explain-pressed();
-                            root.ai-panel-open = true;
-                        }
-                    }
-                }
-
-                // + Add URL button
-                YButton {
-                    label: "Add URL";
-                icon-path: Icons.plus;
-                    variant: 0;
-                    size: 1;
-                    clicked => {
-                        root.add-url-open = !root.add-url-open;
-                    }
-                }
+                else if (id == "add") { root.add-url-open = !root.add-url-open; }
             }
         }
 

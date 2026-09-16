@@ -6,6 +6,7 @@ import { Theme } from "theme.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { YTabs, YTabItem } from "components/y_tabs.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader, AppAction } from "components/app_header.slint";
 
 // ── Data structs ──
 
@@ -114,73 +115,21 @@ export component SystemMonitor inherits Rectangle {
     VerticalLayout {
         spacing: 0px;
 
-        // Header
-        Rectangle {
-            height: Theme.sp-9;
-            background: Theme.bg-surface;
-
-            // Bottom divider
-            Rectangle {
-                y: parent.height - 1px;
-                width: 100%;
-                height: 1px;
-                background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                padding-left: Theme.sp-3;
-                padding-right: Theme.sp-4;
-                alignment: start;
-                spacing: Theme.sp-3;
-
-                YIconButton {
-                    icon-path: Icons.arrow-left;
-                    variant: 2;
-                    clicked => { root.back-pressed(); }
-                }
-
-                Text {
-                    text: "System Monitor";
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-title-2;
-                    font-weight: Theme.fw-title-2;
-                    vertical-alignment: center;
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-
-                // AI Explain button
-                YButton {
-                    label: root.ai-is-working ? "Analyzing..." : "AI Explain";
-                    icon-path: root.ai-is-working ? Icons.spark : Icons.spark;
-                    variant: root.ai-is-working ? 0 : 1;
-                    size: 0;
-                    loading: root.ai-is-working;
-                    clicked => {
-                        if root.ai-panel-open {
-                            root.ai-dismiss();
-                            root.ai-panel-open = false;
-                        } else {
-                            root.ai-explain-pressed();
-                            root.ai-panel-open = true;
-                        }
-                    }
-                }
-
-                // Uptime badge
-                if root.uptime-text != "" : Rectangle {
-                    height: 24px;
-                    width: uptime-label.preferred-width + 16px;
-                    border-radius: 12px;
-                    background: Theme.bg-card;
-
-                    uptime-label := Text {
-                        text: "Up " + root.uptime-text;
-                        color: Theme.text-dim;
-                        font-size: 11px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+        // -- Header --
+        AppHeader {
+            show-back: true;
+            icon: Icons.monitor;
+            title: "System Monitor";
+            subtitle: root.uptime-text != "" ? "Up " + root.uptime-text : "";
+            actions: [
+                { id: "ai", icon: Icons.spark, label: root.ai-is-working ? "Analyzing" : "AI Explain",
+                  emphasis: 1, loading: root.ai-is-working, active: root.ai-panel-open },
+            ];
+            back => { root.back-pressed(); }
+            action(id) => {
+                if (id == "ai") {
+                    if (root.ai-panel-open) { root.ai-dismiss(); root.ai-panel-open = false; }
+                    else { root.ai-explain-pressed(); root.ai-panel-open = true; }
                 }
             }
         }

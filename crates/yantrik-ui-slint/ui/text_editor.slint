@@ -7,6 +7,7 @@ import { Theme } from "theme.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { YInput } from "components/y_input.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader, AppAction } from "components/app_header.slint";
 
 export struct EditorTabData {
     title: string,
@@ -95,6 +96,27 @@ export component TextEditorScreen inherits Rectangle {
 
     VerticalLayout {
         spacing: 0px;
+        // -- Header --
+        AppHeader {
+            icon: Icons.editor;
+            title: root.file-name;
+            subtitle: root.is-readonly ? "read-only  -  " + root.file-type : root.file-type;
+            modified: root.is-modified;
+            actions: [
+                { id: "goto", icon: Icons.sort,   label: "\{root.cursor-line}:\{root.cursor-col}",
+                  active: root.show-goto-line },
+                { id: "find", icon: Icons.search, label: "Find", active: root.show-find-bar },
+                { id: "ai",   icon: Icons.spark,  label: root.ai-is-working ? "Working" : "AI",
+                  emphasis: 1, loading: root.ai-is-working, active: root.show-ai-panel },
+                { id: "save", icon: Icons.save,   label: "Save", emphasis: 2, active: root.is-modified },
+            ];
+            action(id) => {
+                if (id == "goto") { root.show-goto-line = !root.show-goto-line; }
+                else if (id == "find") { root.show-find-bar = !root.show-find-bar; }
+                else if (id == "ai") { root.show-ai-panel = !root.show-ai-panel; }
+                else if (id == "save") { root.save-file(); }
+            }
+        }
 
         // ── Tab Bar ──
         if root.tab-count > 0 : Rectangle {
@@ -213,156 +235,6 @@ export component TextEditorScreen inherits Rectangle {
         // Tab bar separator
         if root.tab-count > 0 : Rectangle { height: 1px; background: Theme.separator; }
 
-        // ── Toolbar ──
-        Rectangle {
-            height: 48px;
-            background: Theme.bg-surface;
-
-            HorizontalLayout {
-                padding-left: Theme.sp-4;
-                padding-right: Theme.sp-3;
-                alignment: space-between;
-
-                // Left: app glyph, filename, state
-                HorizontalLayout {
-                    spacing: Theme.sp-3;
-                    alignment: start;
-                    horizontal-stretch: 1;
-
-                    Rectangle {
-                        width: 28px;
-                        height: 28px;
-                        y: (parent.height - 28px) / 2;
-                        border-radius: Theme.r-sm;
-                        background: Theme.tint-accent;
-                        Icon {
-                            commands: Icons.editor;
-                            size: 16px;
-                            tint: Theme.accent;
-                            thickness: 1.7px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                        }
-                    }
-
-                    Text {
-                        text: root.file-name;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-title-2;
-                        font-weight: Theme.fw-title-2;
-                        letter-spacing: -0.2px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-
-                    if root.is-modified : Rectangle {
-                        width: 7px;
-                        height: 7px;
-                        y: (parent.height - 7px) / 2;
-                        border-radius: 3.5px;
-                        background: Theme.amber;
-                    }
-
-                    if root.is-readonly : Text {
-                        text: "[read-only]";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-caption;
-                        vertical-alignment: center;
-                    }
-
-                    // File type badge
-                    if root.file-type != "" : Rectangle {
-                        width: ft-text.preferred-width + 14px;
-                        height: 20px;
-                        y: (parent.height - 20px) / 2;
-                        border-radius: Theme.r-sm;
-                        background: Theme.hover-fill;
-
-                        ft-text := Text {
-                            text: root.file-type;
-                            color: Theme.text-dim;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                // Right: toolbar buttons
-                HorizontalLayout {
-                    spacing: 6px;
-                    alignment: end;
-
-                    // Go-to-line button (Ctrl+G)
-                    goto-btn-ta := TouchArea {
-                        width: 62px;
-                        height: 28px;
-                        y: (parent.height - 28px) / 2;
-                        clicked => {
-                            root.show-goto-line = !root.show-goto-line;
-                            root.goto-line-input = "";
-                        }
-
-                        Rectangle {
-                            width: 62px;
-                            height: 28px;
-                            border-radius: Theme.r-sm;
-                            background: root.show-goto-line
-                                ? Theme.hover-fill-strong
-                                : (goto-btn-ta.has-hover ? Theme.hover-fill : transparent);
-                            border-width: 1px;
-                            border-color: root.show-goto-line ? Theme.accent-dim : Theme.border-subtle;
-
-                            Text {
-                                // The button jumps to a line, so it shows where you are.
-                                text: "\{root.cursor-line}:\{root.cursor-col}";
-                                color: root.show-goto-line ? Theme.accent : Theme.text-dim;
-                                font-family: Theme.font-mono;
-                                font-size: Theme.fs-micro;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    // Find button
-                    YButton {
-                        label: "Find";
-                        variant: root.show-find-bar ? 0 : 1;
-                        size: 0;
-                        clicked => {
-                            root.show-find-bar = !root.show-find-bar;
-                            if !root.show-find-bar {
-                                root.find-query = "";
-                                root.replace-text = "";
-                                root.show-replace-row = false;
-                                root.find-query-changed("");
-                            }
-                        }
-                    }
-
-                    // AI assist button
-                    YButton {
-                        label: "AI";
-                        icon-path: Icons.spark;
-                        variant: root.show-ai-panel ? 0 : 1;
-                        size: 0;
-                        clicked => {
-                            root.show-ai-panel = !root.show-ai-panel;
-                            root.show-save-dialog = false;
-                        }
-                    }
-
-                    // Save button
-                    if !root.is-readonly : YButton {
-                        label: "Save";
-                        variant: root.is-modified ? 0 : 1;
-                        size: 0;
-                        clicked => { root.save-file(); }
-                    }
-                }
-            }
-        }
 
         Rectangle { height: 1px; background: Theme.separator; }
 

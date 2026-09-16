@@ -9,6 +9,7 @@ import { YInput } from "components/y_input.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { YListItem } from "components/y_list_item.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader, AppAction } from "components/app_header.slint";
 
 export struct NoteEntry {
     title: string,
@@ -141,178 +142,50 @@ export component NotesEditor inherits Rectangle {
     VerticalLayout {
         spacing: 0px;
 
-        // ── Toolbar ──
-        Rectangle {
-            height: 48px;
-            background: Theme.bg-surface;
-
-            // Bottom divider
-            Rectangle {
-                y: parent.height - 1px;
-                width: 100%;
-                height: 1px;
-                background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                padding-left: Theme.sp-4;
-                padding-right: Theme.sp-3;
-                alignment: space-between;
-
-                // Left: app glyph + title + modified indicator
-                HorizontalLayout {
-                    spacing: Theme.sp-3;
-                    alignment: start;
-
-                    Rectangle {
-                        width: 28px; height: 28px;
-                        y: (parent.height - 28px) / 2;
-                        border-radius: Theme.r-sm;
-                        background: Theme.tint-accent;
-                        Icon {
-                            commands: Icons.notes;
-                            size: 16px; tint: Theme.accent; thickness: 1.7px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                        }
-                    }
-
-                    Text {
-                        text: root.current-title != "" ? root.current-title : "Notes";
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-title-2;
-                        font-weight: Theme.fw-title-2;
-                        letter-spacing: -0.2px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        max-width: 420px;
-                    }
-
-                    if root.is-modified : Rectangle {
-                        width: 7px; height: 7px;
-                        y: (parent.height - 7px) / 2;
-                        border-radius: 3.5px;
-                        background: Theme.amber;
-                    }
-
-                    if root.export-status != "" : Text {
-                        text: root.export-status;
-                        color: Theme.accent;
-                        font-size: Theme.fs-caption;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Right: buttons (28px compact buttons, centred in the 48px bar)
-                HorizontalLayout {
-                    spacing: Theme.sp-1;
-                    alignment: end;
-                    padding-top: 10px;
-                    padding-bottom: 10px;
-
-                    // Meeting mode toggle
-                    if root.selected-index >= 0 : YIconButton {
-                        icon-path: Icons.people;
-                        variant: root.meeting-mode ? 0 : 1;
-                        clicked => { root.toggle-meeting-mode(); }
-                    }
-
-                    // Export MD button
-                    if root.selected-index >= 0 : YButton {
-                        label: "Export";
-                        icon-path: Icons.export;
-                        variant: 2;
-                        size: 0;
-                        clicked => { root.export-md(); }
-                    }
-
-                    // Import MD button
-                    if root.selected-index >= 0 : YButton {
-                        label: "Import";
-                        icon-path: Icons.import;
-                        variant: 2;
-                        size: 0;
-                        clicked => { root.import-md(); }
-                    }
-
-                    // Version history toggle
-                    if root.selected-index >= 0 : YIconButton {
-                        icon-path: Icons.history;
-                        variant: root.version-panel-open ? 0 : 1;
-                        clicked => { root.version-panel-open = !root.version-panel-open; }
-                    }
-
-                    // AI Structure button
-                    if root.selected-index >= 0 : YButton {
-                        label: root.ai-is-working ? "Working" : "Structure";
-                        icon-path: Icons.spark;
-                        variant: root.ai-is-working ? 0 : 1;
-                        size: 0;
-                        loading: root.ai-is-working;
-                        clicked => {
-                            root.ai-structure();
-                            root.ai-panel-open = true;
-                        }
-                    }
-
-                    // AI Summarize button
-                    if root.selected-index >= 0 : YButton {
-                        label: "Summarize";
-                        icon-path: Icons.template;
-                        variant: 1;
-                        size: 0;
-                        clicked => {
-                            root.ai-summarize();
-                            root.ai-panel-open = true;
-                        }
-                    }
-
-                    // New note button
-                    YButton {
-                        label: "New";
-                        icon-path: Icons.plus;
-                        variant: 0;
-                        size: 0;
-                        clicked => { root.new-note(); }
-                    }
-
-                    // New from Template button
-                    YButton {
-                        label: "Template";
-                        icon-path: Icons.chevron-down;
-                        variant: root.template-menu-open ? 1 : 2;
-                        size: 0;
-                        clicked => { root.template-menu-open = !root.template-menu-open; }
-                    }
-
-                    // Save button
-                    YButton {
-                        label: "Save";
-                        icon-path: Icons.save;
-                        variant: root.is-modified ? 0 : 1;
-                        size: 0;
-                        clicked => { root.save-note(); }
-                    }
-
-                    // Delete note
-                    if root.selected-index >= 0 : YIconButton {
-                        icon-path: Icons.trash;
-                        variant: 2;
-                        clicked => { root.delete-note(); }
-                    }
-
-                    // Close note (deselect)
-                    if root.selected-index >= 0 : YIconButton {
-                        icon-path: Icons.close;
-                        variant: 2;
-                        clicked => { root.close-note(); }
-                    }
-                }
+        // ── Header ──
+        //
+        // Drawn by the SDK, not by Notes. What stood here was 170 lines of hand-rolled bar: a
+        // 48px Rectangle, its own divider, its own glyph tile, its own title typography and a
+        // right-hand row of eleven buttons with their own padding. Fifteen other apps had the
+        // same block, at seven different heights, which is why nothing lined up.
+        //
+        // The buttons are data now. AppHeader decides how tall they are, how far apart, and how
+        // far from the edge; Notes only says which ones exist and what they mean. Actions that
+        // need a note now grey out instead of vanishing — a toolbar that reflows as you click
+        // around it is the jumpiest thing a window can do.
+        AppHeader {
+            icon: Icons.notes;
+            title: root.current-title != "" ? root.current-title : "Notes";
+            modified: root.is-modified;
+            status: root.export-status;
+            actions: [
+                { id: "meeting",   icon: Icons.people,       active: root.meeting-mode,      disabled: root.selected-index < 0 },
+                { id: "export",    icon: Icons.export,       label: "Export",                disabled: root.selected-index < 0 },
+                { id: "import",    icon: Icons.import,       label: "Import",                disabled: root.selected-index < 0 },
+                { id: "history",   icon: Icons.history,      active: root.version-panel-open, disabled: root.selected-index < 0 },
+                { id: "structure", icon: Icons.spark,        label: root.ai-is-working ? "Working" : "Structure",
+                  emphasis: 1, loading: root.ai-is-working,  disabled: root.selected-index < 0 },
+                { id: "summarize", icon: Icons.template,     label: "Summarize", emphasis: 1, disabled: root.selected-index < 0 },
+                { id: "new",       icon: Icons.plus,         label: "New",       emphasis: 2 },
+                { id: "template",  icon: Icons.chevron-down, label: "Template",  active: root.template-menu-open },
+                { id: "save",      icon: Icons.save,         label: "Save",      emphasis: 1, active: root.is-modified },
+                { id: "delete",    icon: Icons.trash,        disabled: root.selected-index < 0 },
+                { id: "close",     icon: Icons.close,        disabled: root.selected-index < 0 },
+            ];
+            action(id) => {
+                if (id == "meeting") { root.toggle-meeting-mode(); }
+                else if (id == "export") { root.export-md(); }
+                else if (id == "import") { root.import-md(); }
+                else if (id == "history") { root.version-panel-open = !root.version-panel-open; }
+                else if (id == "structure") { root.ai-structure(); root.ai-panel-open = true; }
+                else if (id == "summarize") { root.ai-summarize(); root.ai-panel-open = true; }
+                else if (id == "new") { root.new-note(); }
+                else if (id == "template") { root.template-menu-open = !root.template-menu-open; }
+                else if (id == "save") { root.save-note(); }
+                else if (id == "delete") { root.delete-note(); }
+                else if (id == "close") { root.close-note(); }
             }
         }
-
-        // Separator
-        Rectangle { height: 1px; background: Theme.separator; }
 
         // ── Template dropdown menu (overlay) ──
         if root.template-menu-open : Rectangle {
