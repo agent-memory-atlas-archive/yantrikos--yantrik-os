@@ -1,171 +1,186 @@
 # Yantrik OS
 
-An AI-native desktop operating system where the AI **is** the shell. Built entirely in Rust with a local-first philosophy — your data stays on your machine, your AI runs on your hardware.
+An AI-native desktop operating system where the AI **is** the shell. Built in Rust, local-first
+— your data stays on your machine, your model runs on your hardware.
 
-Yantrik OS replaces the traditional desktop metaphor with an intelligent companion that watches your system, learns your patterns, and proactively helps — while giving you a full suite of built-in productivity apps.
+Yantrik OS replaces the traditional desktop metaphor with an agent that watches the system,
+learns your patterns and helps without being asked, alongside a full suite of built-in apps.
 
-## What Makes It Different
+## What makes it different
 
-- **AI is the shell, not an add-on.** The companion isn't a chatbot bolted onto a desktop — it's woven into every layer: file management, email triage, presentation generation, spreadsheet formulas, system monitoring.
-- **Local-first AI.** Runs on-device using quantized open models (Qwen 3.5). No cloud dependency. Works offline. Your conversations and memories never leave your machine.
-- **Proactive, not reactive.** A 4-stage pipeline (Detect → Generate → Score → Deliver) decides *when* to speak, *what* to say, and *how* to say it — so the companion helps without nagging.
-- **Single binary.** One Rust binary: Slint UI + AI agent + memory database + system observer. No Electron, no Python, no Docker.
-- **Runs on modest hardware.** 4GB RAM minimum. Ships with an offline 4B LLM for full offline capability. GPU recommended for interactive AI responses (~70 TPS with GPU vs ~1 TPS on CPU-only). Works in VirtualBox, QEMU/KVM, Proxmox, or bare metal.
+- **The AI is the shell, not an add-on.** The companion is woven through file management, email
+  triage, presentations, spreadsheet formulas and system monitoring rather than sitting in a
+  chat window beside them.
+- **Every screen is drivable by an agent.** The shell and every app publish their state and
+  accept actions over a unix socket — `yos describe shell`, `yos act shell open_app name=notes`.
+  Anything a person can do from the keyboard, an agent can do through the same path. See
+  [docs/app-control.md](docs/app-control.md).
+- **Local-first.** Runs on-device with quantized open models. No cloud dependency, works
+  offline, and conversations and memories never leave the machine.
+- **Proactive, not reactive.** A four-stage pipeline (Detect → Generate → Score → Deliver)
+  decides *when* to speak and *what* to say, so it helps without nagging.
+- **Rust throughout.** Slint UI, agent, memory database and system observer. No Electron, no
+  Python runtime, no Docker.
 
-## Built-in Apps
+## Built-in apps
 
-| App | Description |
-|-----|-------------|
-| **ySheets** | Spreadsheet with formula engine, AI data generation, formatting, multi-sheet tabs |
-| **yPresent** | Presentation editor with AI deck generation, templates, speaker notes, slideshow mode |
-| **yDocs** | Document editor with rich text, AI writing assistance, word count |
-| **Email** | IMAP email client with AI-powered triage and smart notifications |
-| **Calendar** | Event management with schedule awareness |
-| **Weather** | Local weather with forecasts |
-| **Music Player** | Audio playback with playlist management |
-| **Files** | File browser with AI-assisted organization |
-| **Terminal** | Built-in terminal emulator |
-| **Notes** | Quick notes with search |
-| **System Monitor** | CPU, RAM, disk, network, process management |
-| **Network Manager** | WiFi and ethernet configuration |
-| **Package Manager** | System package management |
-| **Settings** | System and companion configuration, themes, privacy controls |
+Sixteen application binaries, each its own window, each drivable by the agent.
 
-All apps have AI integration — ask the companion to generate spreadsheet data, write presentation slides, draft emails, or explain system processes.
+| App | What it is |
+|-----|-----------|
+| **Notes** | Markdown notes with semantic search, backlinks, versions |
+| **Email** | IMAP client with AI triage and smart notifications |
+| **Calendar** | Events, week and day views, reminders |
+| **Weather** | Current conditions, hourly and daily forecast, alerts |
+| **Terminal** | Terminal emulator with AI command assist and split panes |
+| **Editor** | Text editor with tabs, find and replace, go-to-line |
+| **yDoc** | Document editor — rich text, comments, change tracking |
+| **ySheets** | Spreadsheet — formula engine, charts, multi-sheet |
+| **yPresent** | Presentations — AI deck generation, templates, speaker notes |
+| **Music** | Library, playlists, equalizer, folder watch |
+| **Images** | Viewer with zoom, rotate, crop, slideshow, batch operations |
+| **Downloads** | Resumable transfers with checksum verification |
+| **Snippets** | Code snippets by language and collection |
+| **Containers** | Docker/Podman containers, images and volumes |
+| **Network** | WiFi, ethernet and bluetooth |
+| **System Monitor** | CPU, memory, disk, network, processes |
 
-## The Companion
+The shell itself provides Files, Settings, Memories, Notifications, Bond, Personality,
+Permissions, Devices, Packages, Skills and About as screens rather than separate windows.
 
-The AI companion is not a chatbot. It's a proactive agent with:
+Every one of them wears the same frame. See [docs/app-sdk.md](docs/app-sdk.md) for why that is
+structural rather than a convention anyone has to remember.
 
-- **9+ instincts** — Email watch, open loops guardian, routine learning, commitment tracking, security monitoring, and more
-- **Bond system** — Relationship evolves from Stranger → Acquaintance → Companion → Confidant → Partner based on interaction quality
-- **Memory** — Persistent vector-indexed memory that grows over time. The companion remembers your preferences, past conversations, and solutions to problems you've encountered
-- **Model-adaptive intelligence** — Automatically detects model capabilities and adjusts tool usage, prompt complexity, and agent behavior to match
-- **Proactive pipeline** — 4-stage system (Detect → Generate → Score → Deliver) with silence policy to avoid notification fatigue
-- **116+ tools** — File operations, git, browser automation, email, calendar, system commands, memory search, web browsing, and more
-- **YAML plugins** — Extend tool capabilities without writing Rust
+## The companion
+
+Not a chatbot. A proactive agent with:
+
+- **Instincts** — email watch, open loops, routine learning, commitment tracking, security
+- **Bond** — a relationship that moves from Stranger through Acquaintance, Companion and
+  Confidant to Partner, based on the quality of the interaction
+- **Memory** — persistent vector-indexed recall that grows over time
+- **Model-adaptive behaviour** — detects what the model can do and adjusts tool use and prompt
+  complexity to match
+- **Pluggable minds** — the built-in companion is one harness among several. Anything that
+  speaks the attach protocol can answer instead, managing its own endpoint and credentials.
+  See [docs/harness.md](docs/harness.md).
+- **YAML plugins** — add tools without writing Rust
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Yantrik OS                      │
-│                                                  │
-│  ┌──────────┐  ┌──────────────┐  ┌───────────┐  │
-│  │ yantrik  │  │   yantrik    │  │ yantrik   │  │
-│  │   -ui    │←→│  -companion  │←→│   -ml     │  │
-│  │  (Shell) │  │   (Agent)    │  │  (AI/LLM) │  │
-│  └────┬─────┘  └──────┬───────┘  └───────────┘  │
-│       │               │                          │
-│  ┌────┴─────┐  ┌──────┴───────┐                  │
-│  │ yantrik  │  │  yantrikdb   │                  │
-│  │   -os    │  │   -core      │                  │
-│  │ (System) │  │  (Memory DB) │                  │
-│  └──────────┘  └──────────────┘                  │
-│                                                  │
-│  Alpine Linux → labwc (Wayland) → Slint UI       │
-└─────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                        Yantrik OS                          │
+│                                                            │
+│   yantrik-ui ──────── yantrik-companion ──── yantrik-ml    │
+│    (shell)              (agent)               (inference)  │
+│        │                    │                              │
+│   yantrik-os          yantrikdb                            │
+│    (system)            (memory)                            │
+│                                                            │
+│   16 app binaries · 10 services · one control surface      │
+│                                                            │
+│   Debian 13 → labwc (Wayland) → Slint                      │
+└────────────────────────────────────────────────────────────┘
 ```
 
-**5 crates, 3 threads:**
+23 crates, 16 apps and 10 services. The ones worth knowing:
 
 | Crate | Purpose |
 |-------|---------|
-| `yantrik-ui` | Desktop shell — Slint UI, app wiring, main binary |
-| `yantrik-companion` | AI agent — tools, instincts, bond, personality, proactive pipeline |
-| `yantrik-ml` | AI inference — LLM backends (Ollama, OpenAI API, llama.cpp), embeddings, TTS |
-| `yantrikdb-core` | Memory database — SQLite + HNSW vector search, knowledge graph, vault |
-| `yantrik-os` | System integration — D-Bus, inotify, sysinfo, battery, network, process monitoring |
+| `yantrik-ui` | The shell — Slint UI, app wiring, the control surface |
+| `yantrik-companion` | The agent — tools, instincts, bond, personality, proactive pipeline |
+| `yantrik-ml` | Inference — LLM backends (Ollama, OpenAI-compatible, llama.cpp, Claude CLI), embeddings, STT/TTS |
+| `yantrik-os` | System integration — D-Bus, inotify, sysinfo, battery, network, processes |
+| `yantrik-harness` | The attach protocol a third-party mind implements to answer for the shell |
+| `yantrik-ui-kit` | The UI kit every app draws from, including the mandatory `AppHeader` |
+| `yantrik-app-runtime` | What an app binary is built on — instance guard, theme, IPC, control surface |
+| `yantrik-design-tokens` | Colour, type, spacing and size tokens, shared by the shell and every app |
 
-**Threads:**
-1. **Main** — Slint UI event loop, app rendering
-2. **System Observer** — D-Bus listeners, file watchers, process polling
-3. **Companion Worker** — LLM inference, memory queries, tool execution
+**Threads:** the Slint event loop, a system observer (D-Bus, file watches, polling) and a
+companion worker (inference, memory, tools).
 
-## Quick Start
+## Quick start
 
-### One-line Install (Alpine Linux)
+### Install
 
-```bash
-curl -fsSL https://get.yantrikos.com/install.sh | sh
-```
-
-Or download and run manually:
+Yantrik OS is built on **Debian 13 (trixie)**. The usual path is a cloud-init provisioned VM:
 
 ```bash
-wget https://releases.yantrikos.com/stable/install.sh
-chmod +x install.sh
-./install.sh
+# Proxmox, libvirt, or anything that takes a cloud-init user-data file
+deploy/yantrik-os/cloud-init/user-data.yaml
 ```
 
-The installer will:
-1. Detect your hardware (CPU, RAM, GPU, hypervisor)
-2. Install system dependencies (labwc, mesa, fonts, audio)
-3. Download Yantrik binaries
-4. Download AI models (embedder, small fallback LLM)
-5. Walk you through configuration (your name, companion name, LLM backend)
-6. Configure the Wayland compositor and auto-login
-7. Set up automatic updates
+It fetches the release payload, installs the session and boots straight to the desktop.
 
-### Hardware Requirements
+### Hardware
 
 | | Minimum | Recommended |
 |--|---------|-------------|
 | **CPU** | x86_64, 2 cores | 4+ cores |
 | **RAM** | 4 GB | 8+ GB |
-| **Disk** | 4 GB free | 10+ GB free |
-| **GPU** | Not required (UI works without) | **NVIDIA/AMD recommended** for interactive AI |
-| **OS** | Alpine Linux 3.18+ | Alpine Linux 3.23 |
-| **Platform** | VirtualBox, QEMU, Proxmox | Bare metal |
+| **Disk** | 6 GB free | 24+ GB |
+| **GPU** | Not required — the UI renders in software | Any, for interactive inference |
+| **OS** | Debian 13 | Debian 13 |
+| **Platform** | QEMU/KVM, Proxmox, VirtualBox | Bare metal |
 
-### LLM Backend Options
+Without a GPU the desktop is fully usable and inference is slow. That trade is deliberate: the
+shell renders through Slint's software rasteriser and idles at around 2% of a core.
 
-| Backend | Setup | Quality | Speed |
-|---------|-------|---------|-------|
-| **Ollama** | Point to local/remote Ollama server | Best (use any model) | Depends on hardware |
-| **Claude CLI** | Install Claude Code CLI | Excellent | Cloud latency |
-| **OpenAI API** | Any OpenAI-compatible endpoint | Varies | Cloud latency |
-| **Built-in offline** | Included — Qwen 3.5 4B GGUF | Strong (reasoning, structured output) | ~70 TPS with GPU, very slow on CPU-only |
+### LLM backends
 
-## Updates
+| Backend | Setup | Notes |
+|---------|-------|-------|
+| **Ollama** | Point at a local or remote Ollama server | Any model it serves |
+| **OpenAI-compatible** | Any endpoint speaking the API | Cloud latency |
+| **Claude CLI** | Install the Claude Code CLI | Cloud latency |
+| **llama.cpp** | Built in, GGUF on disk | Fully offline |
 
-Yantrik OS updates automatically via the built-in upgrade mechanism:
+## Updating
 
 ```bash
-# Check for updates
-yantrik-upgrade check
-
-# Update to latest stable
-yantrik-upgrade stable
-
-# Switch to nightly builds
-yantrik-upgrade nightly
+yantrik-update check        # what is installed vs what the channel has
+yantrik-update apply        # download, verify, install, restart the session
+yantrik-update rollback     # restore the previous build
+yantrik-update status       # current build and available backups
 ```
 
-Updates include SHA256 verification and automatic rollback if the new version fails to start.
+The bundle is verified against the manifest's sha256 before a file is touched, the current
+binaries are backed up first, and if the new shell does not answer its control socket the
+update rolls back on its own. Restarting is done through the session unit rather than by
+respawning the shell, so it comes back exactly as it does on boot.
 
-### Release Channels
+| Channel | What it is |
+|---------|-----------|
+| `stable` | Tested releases |
+| `beta` | Promoted from nightly |
+| `nightly` | Latest builds |
 
-| Channel | Description |
-|---------|-------------|
-| `stable` | Tested releases, recommended for daily use |
-| `beta` | Preview releases, promoted from nightly |
-| `nightly` | Latest builds, may have rough edges |
+## Driving it from a terminal or an agent
+
+```bash
+yos describe shell                          # where you are, what is open, what is wrong
+yos act shell open_app name=notes           # launch or focus an app
+yos act shell show_screen screen=settings section=ai
+yos describe notes                          # any running app answers for itself
+yantrik ask "what is using the most disk?"  # ask the companion
+```
+
+Actions are graded safe, standard, sensitive or dangerous, and the sensitive ones need
+approval. `yos-mcp` exposes the same surface over MCP.
 
 ## Configuration
 
-Yantrik OS uses a single YAML config file at `/opt/yantrik/config.yaml`:
+One YAML file at `/opt/yantrik/config.yaml`:
 
 ```yaml
 user_name: "Your Name"
 companion_name: "Yantrik"
 
-# LLM backend
-backend: "api"              # "api", "claude-cli", or "llamacpp"
+backend: "api"                      # api, claude-cli, or llamacpp
 api_url: "http://localhost:11434"
 api_model: "qwen3:8b"
 
-# Proactive features
 features:
   resource_guardian:
     enabled: true
@@ -173,144 +188,95 @@ features:
   email_watch:
     enabled: true
     check_interval_minutes: 5
-  focus_flow:
-    enabled: true
-    deep_work_threshold_mins: 20
 ```
 
-### Themes
-
-Create `~/.config/yantrik/theme-override.yaml` to customize colors:
-
-```yaml
-name: "Nord"
-enabled: true
-bg_deep: "#2e3440"
-bg_surface: "#3b4252"
-accent: "#81a1c1"
-text_primary: "#eceff4"
-```
-
-See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for the full list of theme tokens.
-
-### YAML Plugins
-
-Extend the companion with custom tools — no Rust required:
-
-```yaml
-# ~/.config/yantrik/plugins/my-tools.yaml
-name: "my-tools"
-version: "1.0"
-tools:
-  - name: "check_vpn"
-    description: "Check if VPN is connected"
-    permission: "safe"
-    command: "mullvad status"
-
-  - name: "deploy_staging"
-    description: "Deploy branch to staging"
-    permission: "sensitive"
-    parameters:
-      branch:
-        type: "string"
-        required: true
-    command: "cd ~/projects && ./deploy.sh {branch}"
-```
+Themes live at `~/.config/yantrik/theme-override.yaml`; the token list is in
+[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
 
 ## Development
 
 ### Prerequisites
 
-- Windows 11 with WSL2 (Ubuntu) or native Linux
-- Rust 1.93+
-- VirtualBox or QEMU for testing
+- Linux, or Windows with WSL2 — the workspace builds on Debian/Ubuntu
+- Rust 1.92+ (Slint 1.17 requires it)
 
-### Build
-
-```bash
-# From WSL2 or Linux
-cd /path/to/yantrik-os
-CARGO_TARGET_DIR=/home/$USER/target-yantrik cargo build --release -p yantrik-ui -p yantrik
-```
-
-### Deploy to Test VM
+### Build and test
 
 ```bash
-# Build + deploy to VirtualBox VM
-bash deploy.sh
-
-# Skip rebuild, deploy existing binaries
-bash deploy.sh --skip-build
+cargo build --workspace
+cargo test --workspace
 ```
 
-### Project Structure
+The tests are worth running for their own sake: a good number of them exist to stop a specific
+mistake returning — that every shipped app draws its header with the shared component, that the
+screen a caller asks for is the screen the shell draws, that an application answers to one name
+on every surface, that the release script packages the directory it built into.
+
+### Release
+
+```bash
+deploy/yantrik-os/build-release.sh --publish nightly
+```
+
+Discovers what the OS is made of rather than reading a list, packages it, uploads it, verifies
+what is actually being served matches what was built, and prunes the channel.
+
+### Looking at it
+
+```bash
+scripts/screen-survey.sh                 # photograph every screen, section and app
+scripts/screen-survey.sh --only apps
+```
+
+Design review needs the actual pixels. Nearly every defect worth finding in this project was
+found by looking at a running machine, and almost none of them were visible in the source.
+
+### Project structure
 
 ```
 yantrik-os/
-├── crates/
-│   ├── yantrik-ui/          # Desktop shell (main binary)
-│   │   ├── src/
-│   │   │   ├── main.rs      # Entry point
-│   │   │   ├── wire/        # App backends (one .rs per app)
-│   │   │   ├── features/    # Proactive features
-│   │   │   └── apps.rs      # App registry
-│   │   └── ui/              # Slint UI files
-│   │       ├── desktop.slint
-│   │       ├── spreadsheet.slint
-│   │       ├── presentation.slint
-│   │       └── ...
-│   ├── yantrik-companion/   # AI agent
-│   │   └── src/
-│   │       ├── companion.rs # Agent loop
-│   │       ├── instincts/   # Proactive instincts
-│   │       ├── tools/       # Tool implementations
-│   │       ├── cortex/      # Pattern recognition, playbooks
-│   │       └── bond.rs      # Relationship system
-│   ├── yantrik-ml/          # AI inference
-│   │   └── src/
-│   │       ├── llm/         # LLM backends (api, claude_cli, llamacpp, fallback)
-│   │       ├── capability.rs # Model-adaptive intelligence
-│   │       └── embeddings.rs
-│   ├── yantrikdb-core/      # Memory database
-│   └── yantrik-os/          # System observer
-├── install.sh               # Universal installer
-├── deploy.sh                # Dev deploy to VM
-├── deploy-release.sh        # Release publisher
-├── build.sh                 # Component build system
+├── crates/                    23 crates
+│   ├── yantrik-ui/            the shell
+│   │   ├── src/wire/          one module per screen, wiring UI to system
+│   │   ├── src/features/      proactive features
+│   │   └── src/control*.rs    the agent-facing control surface
+│   ├── yantrik-ui-slint/ui/   the shell's Slint markup, one file per screen
+│   ├── yantrik-ui-kit/slint/  the shared components every app draws from
+│   ├── yantrik-companion/     the agent
+│   ├── yantrik-ml/            inference
+│   ├── yantrik-os/            system observer
+│   └── yantrik-harness/       the pluggable-mind protocol
+├── apps/                      16 application binaries
+│   └── desktop-files/         their freedesktop entries
+├── services/                  10 background services
+├── config/labwc/              compositor config, theme and autostart
+├── deploy/yantrik-os/         cloud-init, session, release and update scripts
+├── scripts/                   probes and the screen survey
 └── docs/
-    ├── architecture.md      # System design
-    ├── app-control.md       # How apps publish state to the companion
-    ├── footprint.md         # What it costs to run, and where that goes
-    ├── CONTRIBUTING.md      # Contributor guide
-    └── getting-started.md   # Installation walkthrough
+    ├── architecture.md        system design
+    ├── app-sdk.md             how to write an app, and why the frame is not yours
+    ├── app-control.md         how apps publish state and accept actions
+    ├── harness.md             attaching a different mind
+    ├── footprint.md           what it costs to run, and where that goes
+    └── CONTRIBUTING.md        contributor guide
 ```
 
-## CLI
+## Privacy and security
 
-Yantrik also ships a CLI for headless/SSH usage:
-
-```bash
-# Ask the companion a question
-yantrik ask "What's using the most disk space?"
-
-# With JSON output
-yantrik ask --json "Summarize my recent emails"
-
-# With custom config
-yantrik ask --config /opt/yantrik/config.yaml "Check system health"
-```
-
-## Privacy & Security
-
-- **Local-first**: All AI inference runs on your machine. No telemetry, no cloud calls (unless you choose a cloud LLM backend).
-- **Memory is yours**: The companion's memory database lives at `/opt/yantrik/data/` — plain SQLite files you can inspect, export, or delete.
-- **Permission system**: Tools are categorized as Safe → Standard → Sensitive → Dangerous. Sensitive and dangerous operations require explicit user approval.
-- **Path sandboxing**: File tools block access to `.ssh`, `.gnupg`, and other sensitive directories.
-- **No tracking**: Zero analytics, zero telemetry, zero phone-home.
+- **Local-first.** Inference runs on your machine. No telemetry, no phone-home, no cloud calls
+  unless you choose a cloud backend.
+- **The memory is yours.** It lives at `/opt/yantrik/data/` as plain SQLite you can read,
+  export or delete.
+- **Graded permissions.** Tools are safe, standard, sensitive or dangerous; the last two need
+  explicit approval.
+- **Path sandboxing.** File tools refuse `.ssh`, `.gnupg` and similar.
+- **Applications are not sandboxed.** Software installed through the package manager runs with
+  your own access, as on any ordinary Debian desktop. Said plainly here rather than left to be
+  discovered.
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE) for details.
+GPL-3.0. See [LICENSE](LICENSE).
 
 ## Links
 

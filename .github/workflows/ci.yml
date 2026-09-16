@@ -1,0 +1,108 @@
+name: CI
+
+# What this exists for.
+#
+# This repository has a growing set of tests whose whole job is to catch a class of mistake
+# from coming back — that every shipped app draws its header with the shared component, that
+# the screen a caller asks for is the screen the shell draws, that an application answers to
+# one name on every surface, that the release script packages the directory it built into.
+# Each was written after the thing it guards had already gone wrong once.
+#
+# None of them ran anywhere except on a laptop, when someone remembered. A guard nobody runs
+# is a comment.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A CI machine has no reason to build with debug info it will throw away.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The native libraries the workspace links against, found by looking for the -sys crates
+      # in Cargo.lock rather than by guessing: alsa-sys, libudev-sys, openssl-sys,
+      # speech-dispatcher-sys, wayland-sys. Slint's winit backend adds xkbcommon and fontconfig.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev \
+            libudev-dev \
+            libssl-dev \
+            libspeechd-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libinput-dev \
+            libgbm-dev \
+            libegl1-mesa-dev
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Slint's macro expansion is the expensive part of this build, so a cache is the
+      # difference between a check that runs on every push and one that gets turned off.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-v1
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  shell-scripts:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # These scripts build and publish the OS and update installed machines. A syntax error in
+      # one of them is found at the worst possible moment otherwise — mid-release, or mid-update
+      # on a machine that then has half a build on it.
+      - name: Parse every script
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            head -c2 "$f" | grep -q '#!' || continue
+            if ! bash -n "$f" 2>/tmp/err; then
+              echo "::error file=$f::$(cat /tmp/err)"
+              fail=1
+            fi
+          done < <(git ls-files '*.sh' 'deploy/yantrik-os/yantrik-*' 'scripts/*')
+          exit $fail
+
+      # Every tracked script must be executable. A fresh clone could not run this repository's
+      # own build, deploy, probe or survey scripts because 42 of 45 were recorded as mode 644.
+      - name: Scripts are executable
+        run: |
+          bad=$(git ls-files -s | awk '$1=="100644"{print $4}' | while read -r f; do
+            [ -f "$f" ] && head -c2 "$f" | grep -q '#!' && echo "$f"
+          done)
+          if [ -n "$bad" ]; then
+            echo "::error::these start with #! but are not executable in git:"
+            echo "$bad"
+            echo "fix with: git update-index --chmod=+x <file>"
+            exit 1
+          fi
+
+      - name: cloud-init parses
+        run: python3 -c "import yaml,sys; yaml.safe_load(open('deploy/yantrik-os/cloud-init/user-data.yaml')); print('user-data.yaml OK')"
