@@ -68,27 +68,27 @@ GITREV="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unkn
 NAME="yantrik-os-${VERSION}-${STAMP}-${GITREV}-linux-amd64"
 
 if [ "$DO_BUILD" = 1 ]; then
+  # Package the directory the build writes to. Not "a directory that usually is it".
+  #
+  # A first version of this check compared file timestamps against a marker made before the
+  # build, and failed when nothing was newer. That is wrong: an up-to-date incremental build
+  # legitimately rewrites nothing, and the check turned a correct no-op build into an error.
+  # The invariant worth enforcing is not "files changed", it is "the directory being packaged
+  # is the directory cargo writes to".
+  CARGO_DIR="$(cd "$PROJECT_ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null \
+               | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release"
+  if [ -n "$CARGO_DIR" ] && [ "$CARGO_DIR" != "/release" ] && [ "$CARGO_DIR" != "$TARGET_DIR" ]; then
+    fail "this build writes to $CARGO_DIR but the packaging step reads $TARGET_DIR.
+   Those must be the same directory or the release ships binaries the build never touched —
+   which is exactly how a green publish came to contain app binaries five hours old.
+   Use --no-build if you mean to package binaries that were built elsewhere."
+  fi
+
   say "Building the workspace"
-  # A marker to compare the output against. The check below is the only thing standing between
-  # a mis-resolved target directory and a release that looks fine and contains nothing new.
-  BUILD_MARKER="$(mktemp)"
   # One rustc in this workspace peaks near 14 GB of RSS (Slint macro expansion), so this
   # is the step that decides what machine can build a release at all.
   ( cd "$PROJECT_ROOT" && RUSTFLAGS="-A warnings" cargo build --release --workspace ) \
     || fail "cargo build failed"
-
-  # Did the build we just ran actually land in the directory we are about to package? If the
-  # newest binary there predates the build, the answer is no, and shipping it would put stale
-  # code on every machine that follows this channel while reporting success.
-  NEWEST="$(find "$TARGET_DIR" -maxdepth 1 -type f -perm -u+x -newer "$BUILD_MARKER" 2>/dev/null | head -1)"
-  if [ -z "$NEWEST" ]; then
-    rm -f "$BUILD_MARKER"
-    fail "nothing in $TARGET_DIR was written by the build that just ran.
-   cargo builds into the directory it reports in \`cargo metadata\`; this script packages
-   \$TARGET_DIR. If those differ you get a green publish full of old binaries.
-   Set TARGET_DIR explicitly if you are packaging binaries built elsewhere on purpose."
-  fi
-  rm -f "$BUILD_MARKER"
 fi
 
 [ -d "$TARGET_DIR" ] || fail "no release directory at $TARGET_DIR (set CARGO_TARGET_DIR)"
