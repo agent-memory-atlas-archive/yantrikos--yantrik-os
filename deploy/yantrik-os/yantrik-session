@@ -73,6 +73,12 @@ if [ -d "$CHROME/labwc" ]; then
   mkdir -p "$HOME/.config/labwc" "$HOME/.local/share/themes/Yantrik/labwc"
   cp -f "$CHROME/labwc/rc.xml" "$HOME/.config/labwc/rc.xml"
   cp -f "$CHROME/labwc/themerc" "$HOME/.local/share/themes/Yantrik/labwc/themerc"
+  # What starts with the desktop: the notification daemon and the polkit agent. Without this
+  # file labwc starts neither, and both are things a desktop is simply assumed to have.
+  if [ -f "$CHROME/labwc/autostart" ]; then
+    cp -f "$CHROME/labwc/autostart" "$HOME/.config/labwc/autostart"
+    chmod +x "$HOME/.config/labwc/autostart"
+  fi
 fi
 if [ -d "$CHROME/fonts" ]; then
   mkdir -p "$HOME/.local/share/fonts"

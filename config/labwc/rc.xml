@@ -65,4 +65,135 @@
   <focus>
     <followMouse>no</followMouse>
   </focus>
+
+  <!--
+    ══ Keyboard ══════════════════════════════════════════════════════════════════════════
+
+    There were none. Not "a short list" — the compositor had zero keybindings, so this desktop
+    had no Alt+Tab, no way to close a window from the keyboard, no snapping, no lock, no
+    screenshot key and no volume keys. Every one of those is something a person reaches for
+    without thinking on Windows, macOS and Ubuntu alike, and finding nothing happens is the
+    moment a desktop stops feeling like one.
+
+    The bindings below are the ones those three agree on, using each platform's spelling where
+    they differ and preferring the Windows/GNOME one where this OS has a Super key to spend:
+
+      Alt+Tab            cycle windows            (all three)
+      Alt+F4             close                    (Windows, GNOME)
+      Super+Left/Right   snap to half             (Windows Aero Snap, GNOME)
+      Super+Up/Down      maximize / restore       (Windows, GNOME)
+      Super+E            files                    (Windows Explorer)
+      Super+L            lock                     (Windows, GNOME)
+      Ctrl+Alt+T         terminal                 (Ubuntu)
+      Print              whole screen             (all three)
+      Super+Shift+S      region                   (Windows Snip)
+
+    Where labwc has no action of its own — opening the launcher, the lens, locking — the
+    binding calls `yos`, the OS's own control surface. That is the same path an agent uses, so
+    a key and an instruction reach the shell the same way rather than through two mechanisms
+    that have to be kept in step.
+  -->
+  <keyboard>
+    <!-- ── Windows ────────────────────────────────────────────────────────────────────── -->
+    <keybind key="A-Tab">
+      <action name="NextWindow" />
+    </keybind>
+    <keybind key="A-S-Tab">
+      <action name="PreviousWindow" />
+    </keybind>
+    <keybind key="A-F4">
+      <action name="Close" />
+    </keybind>
+    <keybind key="W-Up">
+      <action name="ToggleMaximize" />
+    </keybind>
+    <keybind key="W-Down">
+      <action name="Iconify" />
+    </keybind>
+    <keybind key="W-Left">
+      <action name="SnapToEdge" direction="left" />
+    </keybind>
+    <keybind key="W-Right">
+      <action name="SnapToEdge" direction="right" />
+    </keybind>
+    <keybind key="F11">
+      <action name="ToggleFullscreen" />
+    </keybind>
+
+    <!-- ── The shell, through its own control surface ──────────────────────────────────── -->
+    <keybind key="W-l">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell lock</command>
+      </action>
+    </keybind>
+    <keybind key="W-e">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell show_screen screen=files</command>
+      </action>
+    </keybind>
+    <keybind key="W-i">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell show_screen screen=settings</command>
+      </action>
+    </keybind>
+    <keybind key="W-d">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell show_screen screen=desktop</command>
+      </action>
+    </keybind>
+    <keybind key="C-A-t">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell open_app name=terminal</command>
+      </action>
+    </keybind>
+
+    <!-- ── Screenshots ────────────────────────────────────────────────────────────────── -->
+    <!--
+      Into ~/Pictures with a sortable name, which is what every desktop does. `slurp` draws the
+      region selector; without it the second binding does nothing, so it ships in the package
+      set beside grim rather than being assumed.
+    -->
+    <keybind key="Print">
+      <action name="Execute">
+        <command>sh -c 'mkdir -p ~/Pictures &amp;&amp; grim ~/Pictures/Screenshot-$(date +%Y%m%d-%H%M%S).png'</command>
+      </action>
+    </keybind>
+    <keybind key="W-S-s">
+      <action name="Execute">
+        <command>sh -c 'mkdir -p ~/Pictures &amp;&amp; grim -g "$(slurp)" ~/Pictures/Screenshot-$(date +%Y%m%d-%H%M%S).png'</command>
+      </action>
+    </keybind>
+
+    <!-- ── Media and hardware keys ────────────────────────────────────────────────────── -->
+    <keybind key="XF86AudioRaiseVolume">
+      <action name="Execute">
+        <command>wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+</command>
+      </action>
+    </keybind>
+    <keybind key="XF86AudioLowerVolume">
+      <action name="Execute">
+        <command>wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-</command>
+      </action>
+    </keybind>
+    <keybind key="XF86AudioMute">
+      <action name="Execute">
+        <command>wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle</command>
+      </action>
+    </keybind>
+    <keybind key="XF86AudioMicMute">
+      <action name="Execute">
+        <command>wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle</command>
+      </action>
+    </keybind>
+    <keybind key="XF86MonBrightnessUp">
+      <action name="Execute">
+        <command>brightnessctl set 5%+</command>
+      </action>
+    </keybind>
+    <keybind key="XF86MonBrightnessDown">
+      <action name="Execute">
+        <command>brightnessctl set 5%-</command>
+      </action>
+    </keybind>
+  </keyboard>
 </labwc_config>

@@ -75,6 +75,42 @@ packages:
   # difference between `qm guest cmd <id> network-get-interfaces` answering and not.
   - qemu-guest-agent
 
+  # ── The parts of a desktop this OS calls and did not have ─────────────────────────────
+  #
+  # Not a wish list. Every package here backs a command the shipped code already shells out
+  # to, or a service a desktop is expected to provide. An audit of every `Command::new` in
+  # the tree against the running machine found 75 external tools, and these were the ones
+  # that mattered and were absent — so the feature above them could not work and failed
+  # quietly, which is the worst way for it to fail.
+
+  # wl-copy and wl-paste, called from ten places. Without them nothing on this desktop can
+  # copy or paste between applications, which is not a missing feature so much as a missing
+  # desktop.
+  - wl-clipboard
+  # The region selector. `grim` alone captures a whole output; every screenshot-a-region
+  # binding on every desktop is grim plus slurp.
+  - slurp
+  # Notifications. The shell has a notification centre and a D-Bus notification path, and
+  # with no daemon holding org.freedesktop.Notifications an application that posts one is
+  # talking to nobody. notify-send is how scripts and our own services raise them.
+  - mako-notifier
+  - libnotify-bin
+  # Portals: the file picker, the screenshot and the screen-share a sandboxed or foreign
+  # application asks the desktop for. Chromium's "Upload file" dialog goes through this.
+  # The wlr backend is the one that speaks to a wlroots compositor such as labwc.
+  - xdg-desktop-portal
+  - xdg-desktop-portal-wlr
+  # Something to answer polkit. The daemon is already running and had no agent, so every
+  # action needing authorisation failed with no prompt and no explanation.
+  - lxpolkit
+  # Removable media. The file browser cannot offer to mount a USB stick without it.
+  - udisks2
+  # Screen brightness, bound to the brightness keys in rc.xml.
+  - brightnessctl
+  # Bluetooth, and the mixer fallback for when wpctl is not the right answer.
+  - bluez
+  - alsa-utils
+
 write_files:
   - path: /etc/yantrik/install.env
     permissions: "0644"

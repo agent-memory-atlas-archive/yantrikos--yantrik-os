@@ -1,0 +1,26 @@
+# Yantrik — what starts with the desktop.
+#
+# labwc runs this once, after the compositor is up. Everything here is a service the desktop
+# is expected to provide and did not: with none of it running, an application that posted a
+# notification was talking to nobody, and an action needing authorisation failed with no
+# prompt and no explanation.
+#
+# Each line is guarded by `command -v` so a machine missing one of these still gets the rest,
+# rather than the file dying at the first absence and silently skipping what follows.
+
+# ── Notifications ───────────────────────────────────────────────────────────────────────
+# Holds org.freedesktop.Notifications on the session bus. The shell has a notification centre
+# and a D-Bus path into it; without a daemon owning that name, `notify-send` and every
+# application's notification simply went nowhere.
+command -v mako >/dev/null && mako &
+
+# ── Authorisation ───────────────────────────────────────────────────────────────────────
+# The polkit daemon was already running with no agent to show a prompt, so anything asking to
+# be authorised was refused by default with nothing on screen to say so.
+command -v lxpolkit >/dev/null && lxpolkit &
+
+# ── Portals ─────────────────────────────────────────────────────────────────────────────
+# xdg-desktop-portal and its wlroots backend are D-Bus activated, so they do not need starting
+# here — but they do need to know which session they are in, and that is read from the
+# environment at activation time. yantrik-session exports XDG_CURRENT_DESKTOP before labwc
+# starts for exactly this reason.

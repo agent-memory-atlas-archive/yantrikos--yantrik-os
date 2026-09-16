@@ -154,6 +154,8 @@ cp "$PROJECT_ROOT/config/yantrik-ollama.yaml" "$ROOT/config.yaml" 2>/dev/null \
 mkdir -p "$ROOT/share/labwc" "$ROOT/share/fonts"
 cp "$PROJECT_ROOT/config/labwc/rc.xml" "$ROOT/share/labwc/rc.xml"
 cp "$PROJECT_ROOT/config/labwc/themerc" "$ROOT/share/labwc/themerc"
+# What starts with the desktop: the notification daemon and the polkit agent.
+cp "$PROJECT_ROOT/config/labwc/autostart" "$ROOT/share/labwc/autostart"
 # Barlow is embedded in each app binary, which the compositor cannot read a font out of, so the
 # same files also ship loose for fontconfig.
 cp "$PROJECT_ROOT/crates/yantrik-design-tokens/slint/fonts/"*.ttf "$ROOT/share/fonts/"
