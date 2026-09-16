@@ -4,6 +4,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { ListView, LineEdit, TextEdit } from "std-widgets.slint";
 
@@ -110,10 +111,37 @@ export component SnippetManagerScreen inherits Rectangle {
     callback ai-explain-pressed();
     callback ai-dismiss();
 
+    // -- Header --
+    //
+    // Placed rather than laid out, because this component positions its panes by hand around
+    // a status bar it draws over the bottom 28px. The panes below now start at the header's
+    // height instead of at zero.
+    AppHeader {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        icon: Icons.code;
+        title: "Snippets";
+        show-search: true;
+        search-placeholder: "Search snippets";
+        actions: [
+            { id: "ai",  icon: Icons.spark, label: root.ai-is-working ? "Working" : "AI",
+              emphasis: 1, loading: root.ai-is-working },
+            { id: "new", icon: Icons.plus,  label: "New Snippet", emphasis: 2 },
+        ];
+        search-text <=> root.search-query;
+        search-edited(t) => { root.snip-search(t); }
+        action(id) => {
+            if (id == "new") { root.snip-new(); }
+            else if (id == "ai") { root.ai-explain-pressed(); }
+        }
+    }
     HorizontalLayout {
-        // The status bar is drawn over the bottom 28px; keep the panels above it.
-        x: 0; y: 0;
-        height: parent.height - 28px;
+        // Between the header at the top and the status bar drawn over the bottom 28px.
+        x: 0;
+        y: Theme.h-app-header;
+        width: parent.width;
+        height: parent.height - 28px - Theme.h-app-header;
         // ── Collections Sidebar ──
         Rectangle {
             width: 180px;

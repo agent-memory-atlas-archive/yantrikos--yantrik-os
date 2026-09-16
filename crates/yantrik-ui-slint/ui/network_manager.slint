@@ -2,13 +2,8 @@
 // Screen 22. Six tabs: WiFi, Ethernet, Bluetooth, VPN, Firewall, Diagnostics.
 
 import { Theme } from "theme.slint";
-import { YButton, YIconButton } from "components/y_button.slint";
-import { YInput } from "components/y_input.slint";
-import { YTabs, YTabItem } from "components/y_tabs.slint";
-import { YEmptyState } from "components/y_empty_state.slint";
-import { YListItem } from "components/y_list_item.slint";
 import { Icon, Icons } from "components/icon.slint";
-import { AppHeader, AppAction } from "components/app_header.slint";
+import { AppHeader } from "components/app_header.slint";
 
 // ── Data structs ──
 
@@ -163,56 +158,6 @@ component ToggleSwitch inherits TouchArea {
         }
     }
 }
-
-// ── Tab button component ──
-
-component TabButton inherits TouchArea {
-    in property <string> label;
-    in property <bool> active;
-    in property <string> icon;
-    in property <string> icon-path;
-    height: 44px;
-
-    Rectangle {
-        background: active ? Theme.bg-elevated : (parent.has-hover ? Theme.hover-fill : transparent);
-
-        HorizontalLayout {
-            spacing: Theme.sp-2;
-            padding-left: Theme.sp-4;
-            padding-right: Theme.sp-4;
-            alignment: center;
-
-            if root.icon-path != "" : Icon {
-                commands: root.icon-path;
-                size: 14px;
-                tint: root.active ? Theme.accent : Theme.text-secondary;
-                y: (parent.height - self.height) / 2;
-            }
-            if root.icon-path == "" : Text {
-                text: icon;
-                color: active ? Theme.accent : Theme.text-secondary;
-                font-size: Theme.fs-headline;
-                vertical-alignment: center;
-            }
-            Text {
-                text: label;
-                color: active ? Theme.accent : Theme.text-secondary;
-                font-size: Theme.fs-body;
-                font-weight: active ? 600 : 400;
-                vertical-alignment: center;
-            }
-        }
-
-        // Bottom accent line
-        if active : Rectangle {
-            y: parent.height - 2px;
-            width: 100%;
-            height: 2px;
-            background: Theme.accent;
-        }
-    }
-}
-
 // ── Action button component ──
 
 component ActionButton inherits TouchArea {

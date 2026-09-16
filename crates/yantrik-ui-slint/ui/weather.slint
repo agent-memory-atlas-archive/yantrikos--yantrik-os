@@ -3,10 +3,9 @@
 // Saved locations, unit toggle, severe weather alerts, last updated, AQI.
 
 import { Theme } from "theme.slint";
-import { YButton, YIconButton } from "components/y_button.slint";
-import { YInput } from "components/y_input.slint";
-import { YEmptyState } from "components/y_empty_state.slint";
+import { YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 
 // ── Data structs ──
 
@@ -211,248 +210,38 @@ export component WeatherDashboard inherits Rectangle {
         width: 100%;
         height: 100%;
 
-        // ── Header bar ──
-        Rectangle {
-            height: Theme.sp-9;
-            background: Theme.bg-surface;
-
-            // Bottom divider
-            Rectangle {
-                y: parent.height - 1px;
-                width: 100%;
-                height: 1px;
-                background: Theme.separator;
-            }
-
-            // Every control here sits in its own centring column. A fixed-height
-            // child of a HorizontalLayout does not centre itself, and `y:` on a
-            // layout child is ignored — between them the chips sat high while the
-            // title, timestamp and refresh sat low.
-            HorizontalLayout {
-                padding-left: Theme.sp-3;
-                padding-right: Theme.sp-4;
-                spacing: Theme.sp-3;
-
-                VerticalLayout {
-                    alignment: center;
-                    YIconButton {
-                        icon-path: Icons.arrow-left;
-                        variant: 2;
-                        clicked => { root.back-pressed(); }
-                    }
+        // -- Header --
+        //
+        // The place you are looking at and when it was last read were a pill and a floating
+        // timestamp in a 64px bar. They are the subtitle now. The Celsius/Fahrenheit switch
+        // is an action that reads as pressed, which is the same thing the sliding pill said
+        // with thirty lines of its own geometry.
+        AppHeader {
+            show-back: true;
+            icon: Icons.weather;
+            title: "Weather";
+            subtitle: root.weather-last-updated != ""
+                        ? root.current.location + "  -  " + root.weather-last-updated
+                        : root.current.location;
+            actions: [
+                { id: "place", icon: Icons.pin, label: "Change", active: root.weather-location-panel-open },
+                { id: "units", label: root.weather-use-fahrenheit ? "F" : "C", active: true },
+                { id: "ai", icon: Icons.spark, label: root.ai-is-working ? "Analyzing" : "AI Insights",
+                  emphasis: 1, loading: root.ai-is-working, active: root.ai-panel-open },
+                { id: "refresh", icon: Icons.refresh },
+            ];
+            back => { root.back-pressed(); }
+            action(id) => {
+                if (id == "place") { root.weather-location-panel-open = !root.weather-location-panel-open; }
+                else if (id == "units") {
+                    root.weather-use-fahrenheit = !root.weather-use-fahrenheit;
+                    root.weather-toggle-units();
                 }
-
-                VerticalLayout {
-                    alignment: center;
-                    Text {
-                        text: "Weather";
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-title-2;
-                        font-weight: Theme.fw-title-2;
-                    }
+                else if (id == "ai") {
+                    if (root.ai-panel-open) { root.ai-dismiss(); root.ai-panel-open = false; }
+                    else { root.ai-explain-pressed(); root.ai-panel-open = true; }
                 }
-
-                // The place and when it was last read belong together; the
-                // timestamp was floating on its own in the middle of the bar.
-                VerticalLayout {
-                    alignment: center;
-
-                    HorizontalLayout {
-                        alignment: start;
-                        spacing: 10px;
-
-                        TouchArea {
-                            width: loc-btn-row.preferred-width + 20px;
-                            height: root.CHIP-H;
-                            clicked => {
-                                root.weather-location-panel-open = !root.weather-location-panel-open;
-                            }
-                            Rectangle {
-                                height: root.CHIP-H;
-                                border-radius: Theme.r-pill;
-                                background: root.weather-location-panel-open ? Theme.tint-accent
-                                    : (parent.has-hover ? Theme.hover-fill-strong : Theme.bg-card);
-                                border-width: 1px;
-                                border-color: root.weather-location-panel-open ? Theme.accent-dim
-                                    : Theme.border-subtle;
-
-                                loc-btn-row := HorizontalLayout {
-                                    padding-left: 12px;
-                                    padding-right: 12px;
-                                    spacing: 6px;
-                                    alignment: center;
-
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Icon {
-                                            commands: Icons.pin;
-                                            size: 12px;
-                                            tint: Theme.text-secondary;
-                                        }
-                                    }
-
-                                    Text {
-                                        text: root.current.location;
-                                        color: Theme.text-primary;
-                                        font-size: 12px;
-                                        font-weight: 500;
-                                        vertical-alignment: center;
-                                    }
-
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Icon {
-                                            commands: Icons.chevron-down;
-                                            size: 12px;
-                                            tint: Theme.text-dim;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if root.weather-last-updated != "" : VerticalLayout {
-                            alignment: center;
-                            Text {
-                                text: root.weather-last-updated;
-                                color: Theme.text-dim;
-                                font-size: 11px;
-                            }
-                        }
-                    }
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-
-                // Units toggle — same height as the chips beside it.
-                VerticalLayout {
-                    alignment: center;
-                    TouchArea {
-                        width: 62px;
-                        height: root.CHIP-H;
-                        clicked => {
-                            root.weather-use-fahrenheit = !root.weather-use-fahrenheit;
-                            root.weather-toggle-units();
-                        }
-                        Rectangle {
-                            width: 62px;
-                            height: root.CHIP-H;
-                            border-radius: root.CHIP-H / 2;
-                            background: Theme.bg-card;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-
-                            Rectangle {
-                                width: 29px;
-                                height: root.CHIP-H - 6px;
-                                x: root.weather-use-fahrenheit ? 30px : 3px;
-                                y: 3px;
-                                border-radius: (root.CHIP-H - 6px) / 2;
-                                background: Theme.accent;
-                                animate x { duration: 150ms; easing: ease-out; }
-                            }
-
-                            Text {
-                                text: "\u{00B0}C";
-                                x: 3px;
-                                width: 29px;
-                                height: 100%;
-                                color: root.weather-use-fahrenheit ? Theme.text-dim : Theme.text-on-accent;
-                                font-size: 11px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                                horizontal-alignment: center;
-                            }
-
-                            Text {
-                                text: "\u{00B0}F";
-                                x: 30px;
-                                width: 29px;
-                                height: 100%;
-                                color: root.weather-use-fahrenheit ? Theme.text-on-accent : Theme.text-dim;
-                                font-size: 11px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                                horizontal-alignment: center;
-                            }
-                        }
-                    }
-                }
-
-                VerticalLayout {
-                    alignment: center;
-                    TouchArea {
-                        width: ai-wx-btn.preferred-width + 20px;
-                        height: root.CHIP-H;
-                        clicked => {
-                            if root.ai-panel-open {
-                                root.ai-dismiss();
-                                root.ai-panel-open = false;
-                            } else {
-                                root.ai-explain-pressed();
-                                root.ai-panel-open = true;
-                            }
-                        }
-                        ai-wx-btn := Rectangle {
-                            height: root.CHIP-H;
-                            border-radius: Theme.r-pill;
-                            background: root.ai-is-working ? Theme.accent
-                                : (parent.has-hover ? Theme.hover-fill-strong : Theme.bg-card);
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                spacing: 6px;
-                                alignment: center;
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    Icon {
-                                        commands: Icons.spark;
-                                        size: 12px;
-                                        tint: root.ai-is-working ? Theme.text-on-accent : Theme.text-secondary;
-                                    }
-                                }
-
-                                Text {
-                                    text: root.ai-is-working ? "Analyzing..." : "AI Insights";
-                                    color: root.ai-is-working ? Theme.text-on-accent : Theme.text-secondary;
-                                    font-size: 11px;
-                                    font-weight: 500;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        width: root.CHIP-H;
-                        height: root.CHIP-H;
-                        border-radius: root.CHIP-H / 2;
-                        background: ta-refresh.has-hover ? Theme.hover-fill-strong : transparent;
-
-                        ta-refresh := TouchArea {
-                            clicked => { root.refresh-pressed(); }
-                        }
-
-                        HorizontalLayout {
-                            alignment: center;
-                            VerticalLayout {
-                                alignment: center;
-                                Icon {
-                                    commands: Icons.refresh;
-                                    size: 17px;
-                                    tint: Theme.accent;
-                                }
-                            }
-                        }
-                    }
-                }
+                else if (id == "refresh") { root.refresh-pressed(); }
             }
         }
 

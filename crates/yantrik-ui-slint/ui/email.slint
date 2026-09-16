@@ -3,13 +3,11 @@
 // folder sidebar with icons & badges, rich email list, status bar.
 
 import { Theme } from "theme.slint";
-import { ScrollView, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
-import { YInput } from "components/y_input.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
-import { YSidebar, YSidebarItem, YSidebarSection } from "components/y_sidebar.slint";
-import { YListItem } from "components/y_list_item.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 
 // ── Data Structures ──
 
@@ -514,6 +512,29 @@ export component EmailClient inherits Rectangle {
 
     // ── Main Email View (shown when account is configured) ──
     if root.has-account : VerticalLayout {
+        // -- Header --
+        AppHeader {
+            icon: Icons.mail;
+            title: "Mail";
+            subtitle: root.account-name != ""
+                        ? root.account-name + "  -  " + root.email-sync-status
+                        : root.email-sync-status;
+            show-search: true;
+            search-placeholder: "Search mail";
+            actions: [
+                { id: "refresh", icon: Icons.refresh },
+                { id: "ai",      icon: Icons.spark, label: root.ai-is-working ? "Working" : "Summarize",
+                  emphasis: 1, loading: root.ai-is-working },
+                { id: "compose", icon: Icons.pencil, label: "Compose", emphasis: 2, active: root.is-composing },
+            ];
+            search-text <=> root.email-search-query;
+            search-accepted(t) => { root.search-emails(t); }
+            action(id) => {
+                if (id == "refresh") { root.sync-emails(); }
+                else if (id == "ai") { root.summarize-email(); }
+                else if (id == "compose") { root.compose-new(); }
+            }
+        }
         spacing: 0px;
 
         HorizontalLayout {

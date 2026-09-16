@@ -4,8 +4,8 @@
 // Screen 11. Opens from file browser when clicking image files.
 
 import { Theme } from "theme.slint";
-import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 
 component ToolbarButton inherits TouchArea {
@@ -157,253 +157,167 @@ export component ImageViewer inherits Rectangle {
         spacing: 0px;
 
         // Toolbar (filename + counter + zoom controls + rotate + info + slideshow + fit toggle)
+        // -- Header --
+        //
+        // Sixteen controls stood in one 40px bar with hand-drawn separators between them, and
+        // the filename shared the row with all of them. They are not one kind of control: some
+        // act on the FILE (describe it, crop it, run a slideshow) and some change only how you
+        // are LOOKING at it (zoom, rotate, flip).
+        //
+        // So they are two rows now. The file lives in the frame every app wears; the view
+        // transforms get their own strip underneath, which is where every image viewer worth
+        // using puts them.
+        AppHeader {
+            icon: Icons.image;
+            title: root.file-name != "" ? root.file-name : "No image open";
+            subtitle: root.counter-text;
+            actions: [
+                { id: "slideshow", icon: Icons.play, label: root.viewer-slideshow-active
+                    ? (root.viewer-slideshow-paused ? "Resume" : "Pause") : "Slideshow",
+                  active: root.viewer-slideshow-active },
+                { id: "slideshow-stop", icon: Icons.stop, disabled: !root.viewer-slideshow-active },
+                { id: "ai",    icon: Icons.spark, label: root.ai-is-working ? "Working" : "Describe",
+                  emphasis: 1, loading: root.ai-is-working, active: root.ai-panel-open },
+                { id: "info",  icon: Icons.eye,   label: "Info",  active: root.viewer-info-open },
+                { id: "crop",  icon: Icons.scissors, label: "Crop", active: root.viewer-crop-mode },
+                { id: "batch", icon: Icons.grid,  label: "Batch", active: root.viewer-batch-panel-open },
+            ];
+            action(id) => {
+                if (id == "slideshow") {
+                    if (root.viewer-slideshow-active) {
+                        root.viewer-slideshow-paused = !root.viewer-slideshow-paused;
+                    } else {
+                        root.viewer-slideshow-active = true;
+                        root.viewer-slideshow-paused = false;
+                        root.viewer-slideshow-progress = 0.0;
+                        root.reset-zoom();
+                    }
+                    root.viewer-slideshow-toggle();
+                } else if (id == "slideshow-stop") {
+                    root.viewer-slideshow-active = false;
+                    root.viewer-slideshow-paused = false;
+                    root.viewer-slideshow-progress = 0.0;
+                    root.viewer-slideshow-stop();
+                } else if (id == "ai") {
+                    root.ai-describe-pressed();
+                    root.ai-panel-open = true;
+                } else if (id == "info") {
+                    root.viewer-info-open = !root.viewer-info-open;
+                    root.viewer-toggle-info();
+                } else if (id == "crop") {
+                    if (!root.viewer-crop-mode) { root.viewer-start-crop(); }
+                    else { root.viewer-cancel-crop(); }
+                } else if (id == "batch") {
+                    root.viewer-batch-panel-open = !root.viewer-batch-panel-open;
+                }
+            }
+        }
+
+        // -- View controls --
+        //
+        // How you are looking at the picture, not what you are doing to it.
         Rectangle {
-            height: 40px;
-            background: Theme.bg-surface;
+            height: Theme.h-prominent;
+            background: Theme.bg-deep;
+
+            Rectangle {
+                y: parent.height - 1px;
+                width: 100%;
+                height: 1px;
+                background: Theme.separator;
+            }
 
             HorizontalLayout {
-                padding-left: 16px;
-                padding-right: 12px;
-                alignment: space-between;
+                alignment: center;
+                spacing: 6px;
+                padding-top: 4px;
+                padding-bottom: 4px;
 
-                // Left: filename, or the fact that there isn't one
-                Text {
-                    text: root.file-name != "" ? root.file-name : "No image open";
-                    color: root.file-name != "" ? Theme.text-primary : Theme.text-dim;
-                    font-size: Theme.fs-body;
-                    font-weight: 500;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    horizontal-stretch: 1;
+                ToolbarButton {
+                    label: ""; icon-only: true; icon-path: Icons.minus;
+                    clicked => {
+                        root.zoom-level = root.clamp-zoom(root.zoom-level / 1.25);
+                        root.is-custom-zoom = true;
+                    }
                 }
 
-                // Right: all toolbar controls
-                HorizontalLayout {
-                    spacing: 6px;
-                    alignment: end;
-
-                    // Zoom out button
-                    ToolbarButton {
-                        label: ""; icon-only: true; icon-path: Icons.minus;
-                        clicked => {
-                            root.zoom-level = root.clamp-zoom(root.zoom-level / 1.25);
-                            root.is-custom-zoom = true;
-                        }
-                    }
-
-                    // Zoom percentage display
+                VerticalLayout {
+                    alignment: center;
                     Text {
                         text: root.zoom-text;
                         color: root.is-custom-zoom ? Theme.accent-light : Theme.text-dim;
                         font-size: Theme.fs-caption;
                         font-weight: root.is-custom-zoom ? 600 : 400;
-                        vertical-alignment: center;
-                        min-width: 40px;
+                        min-width: 52px;
                         horizontal-alignment: center;
                     }
+                }
 
-                    // Zoom in button
-                    ToolbarButton {
-                        label: "+";
-                        clicked => {
-                            root.zoom-level = root.clamp-zoom(root.zoom-level * 1.25);
-                            root.is-custom-zoom = true;
-                        }
+                ToolbarButton {
+                    label: ""; icon-only: true; icon-path: Icons.plus;
+                    clicked => {
+                        root.zoom-level = root.clamp-zoom(root.zoom-level * 1.25);
+                        root.is-custom-zoom = true;
                     }
+                }
 
-                    // Separator
-                    Rectangle {
-                        width: 1px;
-                        height: 20px;
-                        background: Theme.separator;
+                ToolbarButton {
+                    label: "Fit";
+                    active: !root.is-custom-zoom;
+                    clicked => { root.reset-zoom(); }
+                }
+
+                ToolbarButton {
+                    label: "1:1";
+                    clicked => {
+                        root.zoom-level = 1.0;
+                        root.pan-x = 0.0;
+                        root.pan-y = 0.0;
+                        root.is-custom-zoom = true;
+                        root.fit-contain = false;
                     }
+                }
 
-                    // Fit to window button
-                    ToolbarButton {
-                        label: "Fit";
-                        active: !root.is-custom-zoom && root.fit-contain;
-                        clicked => {
-                            root.reset-zoom();
-                        }
+                ToolbarButton {
+                    label: ""; icon-only: true; icon-path: Icons.rotate-ccw;
+                    clicked => {
+                        root.viewer-rotation = mod(root.viewer-rotation + 270, 360);
+                        root.viewer-rotate-left();
                     }
+                }
 
-                    // 1:1 actual size button
-                    ToolbarButton {
-                        label: "1:1";
-                        active: root.is-custom-zoom && Math.round(root.zoom-level * 100) == 100;
-                        clicked => {
-                            root.zoom-level = 1.0;
-                            root.pan-x = 0.0;
-                            root.pan-y = 0.0;
-                            root.is-custom-zoom = true;
-                            root.fit-contain = false;
-                        }
+                ToolbarButton {
+                    label: ""; icon-only: true; icon-path: Icons.rotate-cw;
+                    clicked => {
+                        root.viewer-rotation = mod(root.viewer-rotation + 90, 360);
+                        root.viewer-rotate-right();
                     }
+                }
 
-                    // Separator
-                    Rectangle {
-                        width: 1px;
-                        height: 20px;
-                        background: Theme.separator;
+                ToolbarButton {
+                    label: ""; icon-only: true; icon-path: Icons.flip-h;
+                    active: root.viewer-flip-h;
+                    clicked => {
+                        root.viewer-flip-h = !root.viewer-flip-h;
+                        root.viewer-flip-horizontal();
                     }
+                }
 
-                    // ── Rotate / Flip buttons ──
-                    ToolbarButton {
-                        label: ""; icon-only: true; icon-path: Icons.rotate-ccw;  // CCW arrow
-                        clicked => {
-                            root.viewer-rotation = mod(root.viewer-rotation + 270, 360);
-                            root.viewer-rotate-left();
-                        }
+                ToolbarButton {
+                    label: ""; icon-only: true; icon-path: Icons.sort;
+                    active: root.viewer-flip-v;
+                    clicked => {
+                        root.viewer-flip-v = !root.viewer-flip-v;
+                        root.viewer-flip-vertical();
                     }
+                }
 
-                    ToolbarButton {
-                        label: ""; icon-only: true; icon-path: Icons.rotate-cw;  // CW arrow
-                        clicked => {
-                            root.viewer-rotation = mod(root.viewer-rotation + 90, 360);
-                            root.viewer-rotate-right();
-                        }
-                    }
-
-                    ToolbarButton {
-                        label: ""; icon-only: true; icon-path: Icons.flip-h;  // Flip H
-                        active: root.viewer-flip-h;
-                        clicked => {
-                            root.viewer-flip-h = !root.viewer-flip-h;
-                            root.viewer-flip-horizontal();
-                        }
-                    }
-
-                    ToolbarButton {
-                        label: ""; icon-only: true; icon-path: Icons.sort;  // Flip V
-                        active: root.viewer-flip-v;
-                        clicked => {
-                            root.viewer-flip-v = !root.viewer-flip-v;
-                            root.viewer-flip-vertical();
-                        }
-                    }
-
-                    // Separator
-                    Rectangle {
-                        width: 1px;
-                        height: 20px;
-                        background: Theme.separator;
-                    }
-
-                    // Counter text
-                    Text {
-                        text: root.counter-text;
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-caption;
-                        vertical-alignment: center;
-                    }
-
-                    // ── Slideshow button ──
-                    ToolbarButton {
-                        label: root.viewer-slideshow-active
-                            ? (root.viewer-slideshow-paused ? "Resume" : "Pause")
-                            : "Slideshow";
-                        active: root.viewer-slideshow-active;
-                        clicked => {
-                            if (root.viewer-slideshow-active) {
-                                root.viewer-slideshow-paused = !root.viewer-slideshow-paused;
-                            } else {
-                                root.viewer-slideshow-active = true;
-                                root.viewer-slideshow-paused = false;
-                                root.viewer-slideshow-progress = 0.0;
-                                root.reset-zoom();
-                            }
-                            root.viewer-slideshow-toggle();
-                        }
-                    }
-
-                    // Slideshow stop button (only when active)
-                    if root.viewer-slideshow-active : ToolbarButton {
-                        label: ""; icon-only: true; icon-path: Icons.stop;
-                        clicked => {
-                            root.viewer-slideshow-active = false;
-                            root.viewer-slideshow-paused = false;
-                            root.viewer-slideshow-progress = 0.0;
-                            root.viewer-slideshow-stop();
-                        }
-                    }
-
-                    // Separator
-                    Rectangle {
-                        width: 1px;
-                        height: 20px;
-                        background: Theme.separator;
-                    }
-
-                    // AI Describe button
-                    ToolbarButton {
-                        label: root.ai-is-working ? "..." : "AI Describe";
-                        active: root.ai-panel-open;
-                        clicked => {
-                            root.ai-describe-pressed();
-                            root.ai-panel-open = true;
-                        }
-                    }
-
-                    // Info panel toggle
-                    ToolbarButton {
-                        label: "Info";
-                        active: root.viewer-info-open;
-                        clicked => {
-                            root.viewer-info-open = !root.viewer-info-open;
-                            root.viewer-toggle-info();
-                        }
-                    }
-
-                    // Crop mode toggle
-                    ToolbarButton {
-                        label: "Crop";
-                        active: root.viewer-crop-mode;
-                        clicked => {
-                            if (!root.viewer-crop-mode) {
-                                root.viewer-start-crop();
-                            } else {
-                                root.viewer-cancel-crop();
-                            }
-                        }
-                    }
-
-                    // Batch operations toggle
-                    ToolbarButton {
-                        label: "Batch";
-                        active: root.viewer-batch-panel-open;
-                        clicked => {
-                            root.viewer-batch-panel-open = !root.viewer-batch-panel-open;
-                        }
-                    }
-
-                    // Separator
-                    Rectangle {
-                        width: 1px;
-                        height: 20px;
-                        background: Theme.separator;
-                    }
-
-                    // Fit/cover toggle (legacy)
-                    TouchArea {
-                        width: 32px;
-                        height: 32px;
-                        clicked => {
-                            root.toggle-fit();
-                            if (!root.is-custom-zoom) {
-                                root.fit-contain = !root.fit-contain;
-                            }
-                        }
-                        Rectangle {
-                            border-radius: 6px;
-                            background: parent.has-hover ? Theme.hover-fill-strong : transparent;
-                            Icon {
-                                commands: root.fit-contain ? Icons.maximize : Icons.minimize;
-                                size: 18px;
-                                tint: Theme.text-secondary;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
+                ToolbarButton {
+                    label: ""; icon-only: true;
+                    icon-path: root.fit-contain ? Icons.maximize : Icons.minimize;
+                    clicked => {
+                        root.toggle-fit();
+                        if (!root.is-custom-zoom) { root.fit-contain = !root.fit-contain; }
                     }
                 }
             }

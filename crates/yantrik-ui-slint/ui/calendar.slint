@@ -2,11 +2,10 @@
 // AI-integrated: natural language event creation, smart scheduling suggestions.
 
 import { Theme } from "theme.slint";
-import { ScrollView, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
-import { YEmptyState } from "components/y_empty_state.slint";
-import { YTabs, YTabItem } from "components/y_tabs.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 
 // ── Data Structures ──
 
@@ -118,6 +117,45 @@ export component CalendarScreen inherits Rectangle {
     callback cal-set-reminder(int);
     callback cal-use-template(int);
     callback cal-toggle-template-panel();
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // -- Header --
+        //
+        // The month and the three view modes used to live inside the left pane, which meant
+        // the thing telling you where you are scrolled with the thing you were looking at.
+        AppHeader {
+            icon: Icons.calendar;
+            title: "Calendar";
+            subtitle: root.month-title;
+            leading-actions: [
+                { id: "view-0", label: "Month", active: root.view-mode == 0 },
+                { id: "view-1", label: "Week",  active: root.view-mode == 1 },
+                { id: "view-2", label: "Day",   active: root.view-mode == 2 },
+            ];
+            actions: [
+                { id: "prev",  icon: Icons.chevron-left },
+                { id: "today", label: "Today" },
+                { id: "next",  icon: Icons.chevron-right },
+                { id: "ai",    icon: Icons.spark, label: root.ai-is-working ? "Working" : "AI",
+                  emphasis: 1, loading: root.ai-is-working, active: root.ai-panel-open },
+                { id: "new",   icon: Icons.plus, label: "New Event", emphasis: 2 },
+            ];
+            action(id) => {
+                if (id == "view-0") { root.view-mode = 0; root.switch-view(0); }
+                else if (id == "view-1") { root.view-mode = 1; root.switch-view(1); }
+                else if (id == "view-2") { root.view-mode = 2; root.switch-view(2); }
+                else if (id == "prev") { root.prev-month(); }
+                else if (id == "today") { root.today-pressed(); }
+                else if (id == "next") { root.next-month(); }
+                else if (id == "ai") {
+                    if (root.ai-panel-open) { root.ai-dismiss(); root.ai-panel-open = false; }
+                    else { root.ai-explain-pressed(); root.ai-panel-open = true; }
+                }
+                else if (id == "new") { root.add-event(); }
+            }
+        }
 
     HorizontalLayout {
         spacing: 0px;
@@ -1254,5 +1292,6 @@ export component CalendarScreen inherits Rectangle {
                 }
             }
         }
+    }
     }
 }

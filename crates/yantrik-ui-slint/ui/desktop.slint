@@ -22,10 +22,8 @@
 
 import { Theme, ThemeMode } from "theme.slint";
 import { ParticleField } from "components/particle_field.slint";
-import { Orb } from "components/orb.slint";
 import { StatusBar } from "components/status_bar.slint";
-import { AppDock, DockItem } from "components/app_dock.slint";
-import { Taskbar } from "components/taskbar.slint";
+import { DockItem } from "components/app_dock.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { IntentLens, LensResult } from "components/intent_lens.slint";
 import { MessageData } from "components/message_bubble.slint";
@@ -39,9 +37,8 @@ import { MachineRail, ServiceItem } from "components/machine_rail.slint";
 import { WindowSwitcher, WindowItem } from "components/window_switcher.slint";
 import { CommandPalette, CommandItem } from "components/command_palette.slint";
 import { MorningBriefCard, BriefSection } from "components/morning_brief.slint";
-import { Tr } from "translations.slint";
 
-import { YContextMenu, YMenuAction } from "components/y_context_menu.slint";
+import { YContextMenu } from "components/y_context_menu.slint";
 
 export component DesktopScreen inherits Rectangle {
     // Status bar state

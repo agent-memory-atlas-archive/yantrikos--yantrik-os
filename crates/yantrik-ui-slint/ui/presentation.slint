@@ -6,12 +6,11 @@
 
 import { Theme } from "theme.slint";
 import { ListView, ScrollView, LineEdit } from "std-widgets.slint";
-import { YButton, YIconButton } from "components/y_button.slint";
-import { YEmptyState } from "components/y_empty_state.slint";
 import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButton,
          RibbonQuickAction, RibbonGroupLabel, RibbonDropdown,
          RibbonAccentButton } from "components/app_ribbon.slint";
 import { Icon, Icons } from "components/icon.slint";
+import { AppHeader } from "components/app_header.slint";
 
 export struct SlideData {
     title: string,
@@ -422,6 +421,34 @@ export component PresentationScreen inherits Rectangle {
         property <int> ribbon-tab: 0;
 
         VerticalLayout {
+            // -- Header --
+            //
+            // Above the ribbon, not instead of it: Slides/Design/Insert/Export are a ribbon and
+            // belong in one. The deck's name, whether it is saved, and the verbs that apply to
+            // the whole file belong in the frame every app wears.
+            AppHeader {
+                icon: Icons.present;
+                title: root.presentation-title != "" ? root.presentation-title : "Presentation";
+                subtitle: root.slide-progress;
+                modified: root.is-modified;
+                status: root.save-status;
+                leading-actions: [
+                    { id: "save", icon: Icons.save, label: "Save", emphasis: 2, active: root.is-modified },
+                    { id: "undo", icon: Icons.rotate-ccw },
+                    { id: "redo", icon: Icons.rotate-cw },
+                ];
+                actions: [
+                    { id: "find",    icon: Icons.search, label: "Find", active: root.show-search },
+                    { id: "present", icon: Icons.play,   label: "Present", emphasis: 1 },
+                ];
+                action(id) => {
+                    if (id == "save") { root.save-presentation(); }
+                    else if (id == "undo") { root.undo(); }
+                    else if (id == "redo") { root.redo(); }
+                    else if (id == "find") { root.show-search = !root.show-search; }
+                    else if (id == "present") { root.toggle-present(); }
+                }
+            }
             // ═══ Row 1: Tab strip + Quick Actions (36px) ═══
             Rectangle {
                 height: 36px;
