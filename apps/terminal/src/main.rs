@@ -6,10 +6,58 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
 
 slint::include_modules!();
+
+/// Fill the agent rail from the terminal's own state.
+///
+/// A shell knows exactly two things worth offering: where it is, and what just happened in it.
+/// Both are already on screen and neither needs a model to establish. The one suggestion that
+/// DOES need a model is offered only when the companion is reachable.
+fn refresh_agent_rail(ui: &TerminalApp) {
+    let cwd = ui.get_current_directory().to_string();
+    let mut context: Vec<AgentContextItem> = Vec::new();
+    if !cwd.is_empty() {
+        context.push(AgentContextItem {
+            id: "cwd".into(),
+            label: cwd.clone().into(),
+            detail: "working directory".into(),
+            source: "file".into(),
+        });
+    }
+    let took = ui.get_last_command_duration().to_string();
+    if !took.is_empty() {
+        context.push(AgentContextItem {
+            id: "last".into(),
+            label: format!("Last command took {took}").into(),
+            detail: SharedString::new(),
+            source: "linked".into(),
+        });
+    }
+    ui.set_agent_context(ModelRc::new(VecModel::from(context)));
+
+    let online = companion::is_online();
+    let has_output = !ui.get_terminal_output().to_string().trim().is_empty();
+    let mut next: Vec<AgentSuggestion> = Vec::new();
+    if online && has_output {
+        next.push(AgentSuggestion {
+            id: "explain".into(),
+            label: "Explain what just happened".into(),
+            detail: "reads the last of the output".into(),
+            icon: "spark".into(),
+            running: ui.get_proposal_working(),
+            proposes: false,
+        });
+    }
+    ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
+    ui.set_agent_unavailable(if online || !has_output {
+        SharedString::new()
+    } else {
+        companion::OFFLINE_HINT.into()
+    });
+}
 
 fn main() {
     init_tracing("yantrik-terminal");
@@ -25,6 +73,76 @@ fn main() {
     app.global::<AccentPreset>().set_index(theme.accent_index);
 
     wire(&app);
+    // ── The agent layer ──
+    //
+    // The answer changes nothing -- it explains output that has already happened -- so the card
+    // gets one button. What the model is given is the TAIL of the output, not the scrollback: a
+    // shell session can run to megabytes and the question is about what just happened.
+    {
+        let weak = app.as_weak();
+        app.on_agent_suggestion_activated(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            if id != "explain" {
+                return;
+            }
+            let out = ui.get_terminal_output().to_string();
+            let tail = out
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let cwd = ui.get_current_directory().to_string();
+            ui.set_proposal_working(true);
+            ui.set_proposal(AgentProposal {
+                title: "What just happened".into(),
+                source: format!("from the last 40 lines in {cwd}").into(),
+                ..Default::default()
+            });
+            let prompt = format!(
+                "This is the tail of my shell session in {cwd}. In at most four short lines, say \
+                 what happened and what to do next. If there is an error, name its cause. Use only \
+                 what is shown.\n\n{tail}"
+            );
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&prompt);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_proposal_working(false);
+                    match outcome {
+                        Ok(text) => ui.set_proposal(AgentProposal {
+                            title: "What just happened".into(),
+                            body: text.into(),
+                            source: "from your shell output".into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                        Err(e) => ui.set_proposal(AgentProposal {
+                            title: "The companion did not answer".into(),
+                            body: format!("{e}").into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_proposal_dismissed(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_proposal(AgentProposal::default());
+            }
+        });
+    }
+    app.on_proposal_applied(|| {});
+    app.on_agent_context_activated(|_| {});
+    refresh_agent_rail(&app);
+
     app.run().unwrap();
 }
 

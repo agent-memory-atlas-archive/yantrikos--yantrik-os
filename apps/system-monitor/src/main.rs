@@ -3,7 +3,7 @@
 //! Polls `system-monitor` service via JSON-RPC IPC every 2 seconds.
 //! Falls back to local `sysinfo` crate if the service is unavailable.
 
-use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use yantrik_app_runtime::prelude::*;
 use yantrik_ipc_contracts::system_monitor::{
     CpuInfo, DiskInfo, MemoryInfo, NetworkInterface, ProcessInfo, SystemSnapshot,
@@ -11,6 +11,53 @@ use yantrik_ipc_contracts::system_monitor::{
 use yantrik_ipc_transport::SyncRpcClient;
 
 slint::include_modules!();
+
+/// Fill the agent rail from the numbers already on screen.
+///
+/// This app's whole content is measurements, so its context is the readings themselves. None
+/// of it is asked of a model: the machine knows what it is doing. The one thing a model adds
+/// is what the numbers MEAN, and that is the only suggestion.
+fn refresh_agent_rail(ui: &SystemMonitorApp) {
+    let context = vec![
+        AgentContextItem {
+            id: "cpu".into(),
+            label: format!("CPU {:.0}%", ui.get_cpu_usage()).into(),
+            detail: "processor".into(),
+            source: "file".into(),
+        },
+        AgentContextItem {
+            id: "mem".into(),
+            label: format!(
+                "Memory {} of {}",
+                ui.get_memory_used_text(),
+                ui.get_memory_total_text()
+            )
+            .into(),
+            detail: format!("{:.0}% in use", ui.get_memory_usage()).into(),
+            source: "file".into(),
+        },
+    ];
+    ui.set_agent_context(ModelRc::new(VecModel::from(context)));
+
+    let online = companion::is_online();
+    let mut next: Vec<AgentSuggestion> = Vec::new();
+    if online {
+        next.push(AgentSuggestion {
+            id: "explain".into(),
+            label: "Is anything wrong?".into(),
+            detail: "reads the current numbers".into(),
+            icon: "spark".into(),
+            running: ui.get_proposal_working(),
+            proposes: false,
+        });
+    }
+    ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
+    ui.set_agent_unavailable(if online {
+        SharedString::new()
+    } else {
+        companion::OFFLINE_HINT.into()
+    });
+}
 
 fn main() {
     init_tracing("yantrik-system-monitor");
@@ -26,6 +73,71 @@ fn main() {
     app.global::<AccentPreset>().set_index(theme.accent_index);
 
     wire(&app);
+    // ── The agent layer ──
+    {
+        let weak = app.as_weak();
+        app.on_agent_suggestion_activated(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            if id != "explain" {
+                return;
+            }
+            // The readings, handed over as readings. Describing them in prose first and asking the
+            // model to re-derive them is how a monitor starts reporting numbers nobody measured.
+            let facts = format!(
+                "CPU {:.0}%, memory {} of {}, health {} ({})",
+                ui.get_cpu_usage(),
+                ui.get_memory_used_text(),
+                ui.get_memory_total_text(),
+                ui.get_health_status(),
+                ui.get_health_summary()
+            );
+            ui.set_proposal_working(true);
+            ui.set_proposal(AgentProposal {
+                title: "The machine right now".into(),
+                source: "from the current readings".into(),
+                ..Default::default()
+            });
+            let prompt = format!(
+                "Here are my machine's readings: {facts}. In at most three short lines say whether \
+                 anything needs attention and why. Use only these numbers; do not guess at causes \
+                 you cannot see."
+            );
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&prompt);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_proposal_working(false);
+                    match outcome {
+                        Ok(text) => ui.set_proposal(AgentProposal {
+                            title: "The machine right now".into(),
+                            body: text.into(),
+                            source: "from the current readings".into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                        Err(e) => ui.set_proposal(AgentProposal {
+                            title: "The companion did not answer".into(),
+                            body: format!("{e}").into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_proposal_dismissed(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_proposal(AgentProposal::default());
+            }
+        });
+    }
+    app.on_proposal_applied(|| {});
+    app.on_agent_context_activated(|_| {});
+    refresh_agent_rail(&app);
+
     app.run().unwrap();
 }
 

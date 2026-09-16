@@ -2,12 +2,26 @@
 // Wraps the shared SystemMonitor component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
 import { SystemMonitor, CpuCoreData, DiskData, NetworkInterfaceData, MonitorProcessData } from "system_monitor.slint";
 
 export { CpuCoreData, DiskData, NetworkInterfaceData, MonitorProcessData, ThemeMode, AccentPreset }
+export { AgentContextItem, AgentSuggestion, AgentProposal }
 
 export component SystemMonitorApp inherits Window {
+    // ── The agent layer ──
+    in property <[AgentContextItem]> agent-context <=> inner.agent-context;
+    in property <[AgentSuggestion]> agent-suggestions <=> inner.agent-suggestions;
+    in property <string> agent-unavailable <=> inner.agent-unavailable;
+    callback agent-context-activated <=> inner.agent-context-activated;
+    callback agent-suggestion-activated <=> inner.agent-suggestion-activated;
+    in property <AgentProposal> proposal <=> inner.proposal;
+    in property <bool> proposal-working <=> inner.proposal-working;
+    callback proposal-applied <=> inner.proposal-applied;
+    callback proposal-dismissed <=> inner.proposal-dismissed;
+    
     // What app this window is.
     //
     // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
