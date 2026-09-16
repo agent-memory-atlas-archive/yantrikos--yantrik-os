@@ -12,7 +12,29 @@ use crate::icons;
 use crate::{App, AppGridItem, CategoryItem};
 
 pub fn wire(ui: &App, ctx: &AppContext) {
-    let installed = ctx.installed_apps.clone();
+    let catalogue = ctx.installed_apps.clone();
+    let installed = catalogue.get();
+
+    // Rescan every time the launcher opens.
+    //
+    // The catalogue used to be scanned once at startup, so an app installed while the shell was
+    // running simply did not exist: not in the launcher, not in the Lens, not to `open_app`.
+    // The launcher opening is exactly the moment someone who has just installed something goes
+    // looking for it, and a scan is a few directories of small ini files -- cheap enough to do
+    // on a keystroke and far cheaper than being wrong.
+    {
+        let catalogue = catalogue.clone();
+        let weak = ui.as_weak();
+        ui.on_app_grid_opened(move || {
+            let count = catalogue.refresh();
+            tracing::debug!(apps = count, "rescanned installed apps for the launcher");
+            if let Some(ui) = weak.upgrade() {
+                let apps = catalogue.get();
+                ui.set_grid_categories(ModelRc::new(VecModel::from(categories_for(&apps))));
+                populate_grid(&ui, &apps, "", "all");
+            }
+        });
+    }
 
     // The two filters compose: whichever one changes, the other is re-applied from here.
     let query = Rc::new(RefCell::new(String::new()));
@@ -22,19 +44,19 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     populate_grid(ui, &installed, "", "all");
 
     {
-        let installed = installed.clone();
+        let catalogue = catalogue.clone();
         let query = query.clone();
         let category = category.clone();
         let ui_weak = ui.as_weak();
         ui.on_grid_search_apps(move |q| {
             *query.borrow_mut() = q.to_string();
             if let Some(ui) = ui_weak.upgrade() {
-                populate_grid(&ui, &installed, &query.borrow(), &category.borrow());
+                populate_grid(&ui, &catalogue.get(), &query.borrow(), &category.borrow());
             }
         });
     }
     {
-        let installed = installed.clone();
+        let catalogue = catalogue.clone();
         let query = query.clone();
         let category = category.clone();
         let ui_weak = ui.as_weak();
@@ -42,7 +64,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             *category.borrow_mut() = id.to_string();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_grid_active_category(id.clone());
-                populate_grid(&ui, &installed, &query.borrow(), &category.borrow());
+                populate_grid(&ui, &catalogue.get(), &query.borrow(), &category.borrow());
             }
         });
     }
@@ -58,6 +80,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         }
 
         // Built-in Yantrik apps → navigate to screen via launch-app callback
+        let installed = catalogue.get();
         if let Some(entry) = installed.iter().find(|e| e.app_id == app_id_str) {
             if entry.exec == "__builtin__" {
                 if let Some(ui) = ui_weak.upgrade() {

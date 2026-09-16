@@ -39,7 +39,7 @@ fn wire_send_message(ui: &App, ctx: &AppContext) {
 fn wire_lens_submit(ui: &App, ctx: &AppContext) {
     let bridge = ctx.bridge.clone();
     let ui_weak = ui.as_weak();
-    let apps = ctx.installed_apps.clone();
+    let catalogue = ctx.installed_apps.clone();
     let timer_slot: Rc<RefCell<Option<Timer>>> = Rc::new(RefCell::new(None));
     let slot = timer_slot.clone();
 
@@ -54,7 +54,10 @@ fn wire_lens_submit(ui: &App, ctx: &AppContext) {
         let lower = query.to_lowercase();
 
         // Check installed .desktop apps first
-        let app_matches = apps::search(&lower, &apps);
+        // Bound, not inlined: `get()` hands back an Arc snapshot, and the search borrows
+        // from it, so it has to outlive the call.
+        let installed = catalogue.get();
+        let app_matches = apps::search(&lower, &installed);
         if let Some(entry) = app_matches.first() {
             let parts: Vec<&str> = entry.exec.split_whitespace().collect();
             if let Some((bin, args)) = parts.split_first() {

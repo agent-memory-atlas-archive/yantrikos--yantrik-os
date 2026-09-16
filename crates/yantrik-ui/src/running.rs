@@ -32,6 +32,67 @@ pub struct RunningApp {
     pub since_unix: u64,
 }
 
+/// A launch that started and then died before it could show a window.
+#[derive(Clone, Debug)]
+pub struct LaunchFailure {
+    pub app_id: String,
+    /// The binary that was spawned.
+    pub binary: String,
+    /// How the process ended, as the OS reported it.
+    pub status: String,
+    /// How long it survived, in milliseconds.
+    pub lived_ms: u64,
+    pub at_unix: u64,
+}
+
+fn failures() -> &'static Mutex<HashMap<String, LaunchFailure>> {
+    static FAILED: OnceLock<Mutex<HashMap<String, LaunchFailure>>> = OnceLock::new();
+    FAILED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// How long a process must survive before we stop calling it a failed launch.
+///
+/// An app that exits inside this window never showed the user anything. Chromium, launched
+/// without DISPLAY on a Wayland-only session, printed "Missing X server" and was gone in under
+/// a second — while `open_app` had already answered `accepted: true`. Acceptance is not arrival.
+pub const LAUNCH_GRACE_MS: u64 = 3_000;
+
+/// Record that a launch died before it could become a window.
+pub fn mark_launch_failed(app_id: &str, binary: &str, status: &str, lived_ms: u64) {
+    if let Ok(mut map) = failures().lock() {
+        map.insert(
+            app_id.to_string(),
+            LaunchFailure {
+                app_id: app_id.to_string(),
+                binary: binary.to_string(),
+                status: status.to_string(),
+                lived_ms,
+                at_unix: now_unix(),
+            },
+        );
+    }
+}
+
+/// Clear any past failure for an id, because it has just been launched again.
+pub fn clear_launch_failure(app_id: &str) {
+    if let Ok(mut map) = failures().lock() {
+        map.remove(app_id);
+    }
+}
+
+/// The last failed launch for `app_id`, if it failed rather than opened.
+pub fn last_launch_failure(app_id: &str) -> Option<LaunchFailure> {
+    failures().lock().ok().and_then(|m| m.get(app_id).cloned())
+}
+
+/// Every launch that has failed and not since succeeded, newest first.
+pub fn launch_failures() -> Vec<LaunchFailure> {
+    let mut out: Vec<LaunchFailure> =
+        failures().lock().map(|m| m.values().cloned().collect()).unwrap_or_default();
+    out.sort_by(|a, b| b.at_unix.cmp(&a.at_unix));
+    out
+}
+
 fn registry() -> &'static Mutex<HashMap<String, RunningApp>> {
     static RUNNING: OnceLock<Mutex<HashMap<String, RunningApp>>> = OnceLock::new();
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))

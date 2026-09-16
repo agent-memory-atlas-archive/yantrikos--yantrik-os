@@ -41,7 +41,9 @@ pub enum FileClipOp {
 pub struct AppContext {
     pub bridge: Arc<CompanionBridge>,
     pub event_bus: yantrik_os::EventBus,
-    pub installed_apps: Arc<Vec<crate::apps::DesktopEntry>>,
+    /// The installed apps, live. Not a snapshot: something installed while the shell is
+    /// running has to become launchable without restarting it.
+    pub installed_apps: crate::apps::Catalogue,
     pub clip_history: clipboard::SharedHistory,
     pub browser_path: Rc<RefCell<String>>,
     pub browser_show_hidden: Rc<RefCell<bool>>,
@@ -204,7 +206,7 @@ impl AppContext {
         yantrik_os::keybinds::ensure_labwc_config();
 
         // Scan installed apps
-        let installed_apps = Arc::new(crate::apps::scan());
+        let installed_apps = crate::apps::Catalogue::shared();
 
         // Start clipboard watcher
         let clip_history = clipboard::start_watcher();

@@ -159,6 +159,13 @@ export component App inherits Window {
 
     // App grid state
     in-out property <bool> app-grid-open: false;
+    // Fired when the launcher opens, so the shell can rescan the installed apps. The launcher
+    // is opened from three places -- the taskbar, the dock and a keyboard shortcut -- and two
+    // of them are pure Slint, so watching the property is the only hook that catches all three.
+    callback app-grid-opened();
+    changed app-grid-open => {
+        if (self.app-grid-open) { self.app-grid-opened(); }
+    }
     in property <[AppGridItem]> grid-apps: [];
     callback grid-launch-app(string);
     callback grid-search-apps(string);

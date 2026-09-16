@@ -40,7 +40,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 /// Integrates instant answers (Phase 4) at position 0 when applicable.
 fn wire_query(ui: &App, ctx: &AppContext) {
     let ui_weak = ui.as_weak();
-    let apps = ctx.installed_apps.clone();
+    let catalogue = ctx.installed_apps.clone();
     let clip = ctx.clip_history.clone();
     let snapshot = ctx.system_snapshot.clone();
     let frecency = ctx.frecency.clone();
@@ -99,7 +99,8 @@ fn wire_query(ui: &App, ctx: &AppContext) {
             }
 
             // Standard results
-            results.extend(lens::build_results(&query, onboarding, &apps, &clip_entries, companion_online));
+            let installed = catalogue.get();
+            results.extend(lens::build_results(&query, onboarding, &installed, &clip_entries, companion_online));
 
             // Smart ranking: apply frecency + context scoring
             let frecency_ref = frecency.borrow();
@@ -215,7 +216,7 @@ fn extract_file_path(text: &str) -> Option<String> {
 /// Handle a result selection: resolve action, execute, advance onboarding.
 fn wire_result_selected(ui: &App, ctx: &AppContext) {
     let ui_weak = ui.as_weak();
-    let apps = ctx.installed_apps.clone();
+    let catalogue = ctx.installed_apps.clone();
     let clip = ctx.clip_history.clone();
     let frecency = ctx.frecency.clone();
 
@@ -230,7 +231,8 @@ fn wire_result_selected(ui: &App, ctx: &AppContext) {
             }
         }
 
-        match lens::resolve_action(&action, &apps) {
+        let installed = catalogue.get();
+        match lens::resolve_action(&action, &installed) {
             lens::LensAction::Launch(cmd) => {
                 let parts: Vec<&str> = cmd.split_whitespace().collect();
                 let (bin, args) = match parts.split_first() {

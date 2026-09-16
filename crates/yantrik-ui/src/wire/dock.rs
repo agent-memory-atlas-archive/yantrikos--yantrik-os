@@ -52,7 +52,7 @@ pub fn is_known_app(app: &str, installed: &[crate::apps::DesktopEntry]) -> bool 
 
 /// Wire on_launch_app callback.
 pub fn wire(ui: &App, ctx: &AppContext) {
-    let apps = ctx.installed_apps.clone();
+    let catalogue = ctx.installed_apps.clone();
     let ui_weak = ui.as_weak();
 
     ui.on_launch_app(move |app_id| {
@@ -60,7 +60,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         tracing::info!(app = %app, "Launching app");
 
         // Check installed .desktop apps first (skip built-in Yantrik apps)
-        for entry in apps.iter() {
+        let installed = catalogue.get();
+        for entry in installed.iter() {
             if entry.app_id == app || entry.name.to_lowercase() == app {
                 if entry.exec == "__builtin__" {
                     break; // Fall through to built-in screen routing below
@@ -343,14 +344,65 @@ pub fn spawn_app_with_args(app_id: &str, bin: &str, args: &[&str]) {
 /// For "open a terminal here", where the directory IS the request. Goes through one body with
 /// `spawn_app_with_args` so the registry, the environment scrubbing and the reaper cannot end up
 /// applying to one launch path and not the other — which is how the dock grew two of them before.
+/// The display environment a launched app needs, which the shell itself does not have.
+///
+/// This is the whole of why third-party software did not run.
+///
+/// labwc starts Xwayland and the socket is there — /tmp/.X11-unix/X0 exists — but nothing in
+/// the session exports DISPLAY, and a child inherits only what the shell has. So Chromium,
+/// whose .desktop file says `Exec=/usr/bin/chromium %U`, started, failed to find an X server,
+/// printed "Missing X server or $DISPLAY", and exited. `open_app` had already answered
+/// `accepted: true`. Setting DISPLAY is the entire fix: with it, the same command opens a
+/// window.
+///
+/// The toolkit hints are the other half of the same thought. GTK and Qt both take a
+/// preference LIST, so a Wayland-native app uses Wayland and one that cannot falls back to
+/// Xwayland on its own. Neither is forced, and an app that already sets them keeps its choice.
+fn session_env() -> Vec<(&'static str, String)> {
+    let mut env = Vec::new();
+
+    if std::env::var_os("DISPLAY").is_none() {
+        if let Some(display) = x_display() {
+            env.push(("DISPLAY", display));
+        }
+    }
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        env.push(("GDK_BACKEND", "wayland,x11".to_string()));
+    }
+    if std::env::var_os("QT_QPA_PLATFORM").is_none() {
+        env.push(("QT_QPA_PLATFORM", "wayland;xcb".to_string()));
+    }
+    env
+}
+
+/// Which X display Xwayland is serving, read from its socket rather than assumed.
+///
+/// `:0` is the usual answer and hardcoding it would work today, but the number is chosen by
+/// whoever started Xwayland, and a session that already had one running gets `:1`.
+fn x_display() -> Option<String> {
+    let dir = std::fs::read_dir("/tmp/.X11-unix").ok()?;
+    let mut numbers: Vec<u32> = dir
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.strip_prefix('X')?.parse::<u32>().ok()
+        })
+        .collect();
+    numbers.sort_unstable();
+    numbers.first().map(|n| format!(":{n}"))
+}
+
 pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::path::Path>) {
     let path = resolve_app_binary(bin);
     let mut command = std::process::Command::new(&path);
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
+    command.args(args);
+    for (key, value) in session_env() {
+        command.env(key, value);
+    }
     match command
-        .args(args)
         // The shell is often started with SLINT_FULLSCREEN=1 (dev runs, kiosk sessions). A child
         // inherits the environment, and an app that inherits that variable opens fullscreen too.
         // The renderer choice (SLINT_BACKEND, GALLIUM_DRIVER) is deliberately left inherited so
@@ -372,9 +424,30 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
             // is where the registry learns the window has closed.
             let id = app_id.to_string();
             let name = bin.to_string();
+            // A launch is not a window. Spawning succeeds for anything executable, so the only
+            // evidence that an app actually came up is that it is still there a moment later —
+            // and the only evidence it did not is the exit this thread is already waiting for.
+            // It used to be logged at info and discarded, which is how "accepted: true" and an
+            // empty screen could both be true at once.
+            crate::running::clear_launch_failure(&id);
+            let started = std::time::Instant::now();
             std::thread::spawn(move || {
                 match child.wait() {
-                    Ok(status) => tracing::info!(app = %name, %status, "App exited"),
+                    Ok(status) => {
+                        let lived = started.elapsed();
+                        let lived_ms = lived.as_millis() as u64;
+                        if lived_ms < crate::running::LAUNCH_GRACE_MS {
+                            tracing::warn!(
+                                app = %name, %status, lived_ms,
+                                "App exited immediately — it never showed a window"
+                            );
+                            crate::running::mark_launch_failed(
+                                &id, &name, &status.to_string(), lived_ms,
+                            );
+                        } else {
+                            tracing::info!(app = %name, %status, "App exited");
+                        }
+                    }
                     Err(e) => tracing::warn!(app = %name, error = %e, "Could not wait for app"),
                 }
                 crate::running::mark_exited(&id, pid);

@@ -107,9 +107,11 @@ const FILE_LISTING_CAP: usize = 40;
 
 /// Publish the desktop on the service bus. Call from the UI thread before `run()`.
 pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
-    // Cloned once, not scanned per call: the shell itself snapshots the installed apps at
-    // startup, and the control surface should answer from the same picture the launcher uses.
+    // The catalogue, not a copy of it. The control surface answers from the same live list
+    // the launcher shows, so an app installed a moment ago is launchable by name without
+    // restarting the shell — which is what `accepted: true` ought to mean.
     let installed = ctx.installed_apps.clone();
+    let refresh_catalogue = ctx.installed_apps.clone();
     let describe = {
         let weak = ui.as_weak();
         move || {
@@ -243,10 +245,28 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 )
             };
 
+            // Launches that died before they became a window. `open_app` defers, so it answers
+            // "accepted" long before anything is on screen -- and when the app then exits, the
+            // only account of it was a log line nobody reads. An agent that launched something
+            // and sees nothing needs to be told why here, in the same place it reads everything
+            // else.
+            let failed: Vec<serde_json::Value> = crate::running::launch_failures()
+                .into_iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "app": f.app_id,
+                        "binary": f.binary,
+                        "status": f.status,
+                        "lived_ms": f.lived_ms,
+                    })
+                })
+                .collect();
+
             View::new(summary)
                 .with("screen", screen_name(screen))
                 .with("screen_id", screen)
                 .with("windows", serde_json::Value::Array(open))
+                .with("failed_launches", serde_json::Value::Array(failed))
                 // Which mind is answering, and what else could. An agent that can switch this
                 // has to be able to see it first, and without the list it would be guessing at
                 // ids for `use_harness`.
@@ -338,7 +358,8 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 }
                 // Checked before answering. The dispatch discovers an unknown id too, but only
                 // after this function has already reported the launch as under way.
-                if !crate::wire::dock::is_known_app(&name, &installed) {
+                let catalogue = installed.get();
+                if !crate::wire::dock::is_known_app(&name, &catalogue) {
                     return Err(format!(
                         "no app `{name}` on this machine; it can launch: {}",
                         crate::wire::dock::BUILTIN_APP_IDS.join(", ")
@@ -348,6 +369,19 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 // and focuses the running one instead of starting a second.
                 ui.invoke_launch_app(name.clone().into());
                 Ok(serde_json::json!({ "launching": name }))
+            },
+        )
+        .action(
+            // The launcher rescans when it opens; this is the same thing without a person
+            // having to open it. An agent that installs a package and then wants to run it
+            // needs a way to say "look again" that is not "press the Apps button".
+            Action::new("refresh_apps", "Rescan the installed applications"),
+            {
+                let catalogue = refresh_catalogue.clone();
+                move |_args| {
+                    let count = catalogue.refresh();
+                    Ok(serde_json::json!({ "apps": count }))
+                }
             },
         )
         .action(

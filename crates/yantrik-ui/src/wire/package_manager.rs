@@ -1,6 +1,12 @@
-//! Package Manager wire module — apk list, search, info, install, remove, upgrade.
+//! Package Manager wire module — list, search, info, install, remove, upgrade.
 //!
-//! All heavy operations (apk commands) run in background threads.
+//! The commands and their parsers live in `wire::apt`; this module is the screen's plumbing.
+//! It used to shell out to `apk` directly, which is Alpine's package manager. This OS is
+//! Debian — `apk` is not installed — so the one screen whose purpose is installing software
+//! could not install software, and the failure was invisible because every call site treated
+//! "could not run apk" as a non-fatal empty result.
+//!
+//! All heavy operations run in background threads.
 //! UI is updated via Slint Timers polling oneshot channels.
 
 use std::cell::RefCell;
@@ -13,7 +19,7 @@ use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
 use crate::app_context::AppContext;
 use crate::{App, PackageData};
 
-/// Parsed package entry from apk output.
+/// One row of the package list, as the screen models it.
 #[derive(Clone, Debug)]
 struct PkgEntry {
     name: String,
@@ -25,7 +31,7 @@ struct PkgEntry {
     repo: String,
 }
 
-/// Parsed package detail from `apk info -a`.
+/// Everything the detail pane shows about one package.
 #[derive(Clone, Debug, Default)]
 struct PkgDetail {
     name: String,
@@ -136,64 +142,39 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
             let (tx, rx) = mpsc::channel::<Result<Vec<PkgEntry>, String>>();
 
-            // Background thread: apk update + list installed + list upgradable
+            // Background thread: refresh the index, then list installed and upgradable.
             std::thread::spawn(move || {
-                // Run apk update first
-                let _ = std::process::Command::new("sudo")
-                    .args(["apk", "update"])
-                    .output();
+                // Refreshing the index is best-effort: it needs the network, and a machine that
+                // is offline should still be able to see and remove what it already has.
+                let update = crate::wire::apt::update_command();
+                if let Some((bin, args)) = update.split_first() {
+                    let _ = std::process::Command::new(bin).args(args).output();
+                }
 
-                let mut packages: Vec<PkgEntry> = Vec::new();
-
-                // List installed packages
-                match std::process::Command::new("apk")
-                    .args(["list", "--installed"])
-                    .output()
-                {
-                    Ok(output) if output.status.success() => {
-                        let text = String::from_utf8_lossy(&output.stdout);
-                        for line in text.lines() {
-                            if let Some(pkg) = parse_apk_list_line(line, true) {
-                                packages.push(pkg);
-                            }
-                        }
-                    }
-                    Ok(output) => {
-                        let err = String::from_utf8_lossy(&output.stderr);
-                        let _ = tx.send(Err(format!("apk list failed: {}", err)));
-                        return;
-                    }
+                let installed = match crate::wire::apt::list_installed() {
+                    Ok(list) => list,
                     Err(e) => {
-                        let _ = tx.send(Err(format!("Failed to run apk: {}", e)));
+                        let _ = tx.send(Err(e));
                         return;
                     }
-                }
+                };
 
-                // List upgradable packages
-                match std::process::Command::new("apk")
-                    .args(["list", "--upgradable"])
-                    .output()
-                {
-                    Ok(output) if output.status.success() => {
-                        let text = String::from_utf8_lossy(&output.stdout);
-                        for line in text.lines() {
-                            let line = line.trim();
-                            if line.is_empty() {
-                                continue;
-                            }
-                            // Extract package name from upgradable line
-                            if let Some(name) = extract_pkg_name(line) {
-                                // Mark matching package as upgradable
-                                for pkg in &mut packages {
-                                    if pkg.name == name {
-                                        pkg.upgradable = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {} // Non-fatal
-                }
+                // Which of them have something newer waiting. Not fatal if it fails: a machine
+                // that has never refreshed its index simply has nothing to report.
+                let upgradable = crate::wire::apt::list_upgradable();
+
+                let mut packages: Vec<PkgEntry> = installed
+                    .into_iter()
+                    .map(|p| PkgEntry {
+                        upgradable: upgradable.iter().any(|u| *u == p.name),
+                        name: p.name,
+                        version: p.version,
+                        description: p.description,
+                        installed: p.installed,
+                        size_text: p.size_text,
+                        repo: p.repo,
+                    })
+                    .collect();
 
                 packages.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                 let _ = tx.send(Ok(packages));
@@ -316,7 +297,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 &timer_ref,
                 pkg_name.clone(),
                 "install",
-                &["sudo", "apk", "add", "--no-cache", &pkg_name],
+                &crate::wire::apt::install_command(&pkg_name),
             );
         });
     }
@@ -332,7 +313,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 &timer_ref,
                 pkg_name.clone(),
                 "remove",
-                &["sudo", "apk", "del", &pkg_name],
+                &crate::wire::apt::remove_command(&pkg_name),
             );
         });
     }
@@ -348,7 +329,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 &timer_ref,
                 pkg_name.clone(),
                 "upgrade",
-                &["sudo", "apk", "add", "--upgrade", &pkg_name],
+                &crate::wire::apt::upgrade_one_command(&pkg_name),
             );
         });
     }
@@ -363,7 +344,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 &timer_ref,
                 "all packages".to_string(),
                 "upgrade",
-                &["sudo", "apk", "upgrade"],
+                &crate::wire::apt::upgrade_all_command(),
             );
         });
     }
@@ -456,7 +437,9 @@ fn run_pkg_action(
     timer_ref: &Rc<RefCell<Option<Timer>>>,
     pkg_name: String,
     action: &str,
-    args: &[&str],
+    // Owned, because the commands are now built rather than written as literals: `wire::apt`
+    // composes them so the sudo prefix and DEBIAN_FRONTEND live in one place with tests.
+    args: &[String],
 ) {
     if let Some(ui) = ui_weak.upgrade() {
         ui.set_pkg_is_applying(true);
@@ -528,179 +511,26 @@ fn run_pkg_action(
     *timer_ref.borrow_mut() = Some(timer);
 }
 
-/// Parse a line from `apk list --installed` or `apk list --upgradable`.
+/// Detail for one package, from `apt-cache show`.
 ///
-/// Format: `name-version arch {origin} (license) [installed]`
-/// Example: `busybox-1.36.1-r2 x86_64 {busybox} (GPL-2.0-only) [installed]`
-fn parse_apk_list_line(line: &str, mark_installed: bool) -> Option<PkgEntry> {
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-
-    // Split on first space to get name-version
-    let mut parts = line.splitn(2, ' ');
-    let name_version = parts.next()?;
-    let rest = parts.next().unwrap_or("");
-
-    // Split name-version: last hyphen before a digit starts the version
-    let (name, version) = split_name_version(name_version);
-    if name.is_empty() {
-        return None;
-    }
-
-    // Extract description: we don't have it in list output, use name as placeholder
-    // The description will be fetched when selected via `apk info`
-    let description = extract_description_from_rest(rest);
-
-    // Extract repo from origin: {origin}
-    let repo = if let Some(start) = rest.find('{') {
-        if let Some(end) = rest.find('}') {
-            rest[start + 1..end].to_string()
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
-
-    Some(PkgEntry {
-        name,
-        version,
-        description,
-        installed: mark_installed,
-        upgradable: false,
-        size_text: String::new(),
-        repo,
-    })
-}
-
-/// Split "package-1.2.3-r0" into ("package", "1.2.3-r0").
-fn split_name_version(s: &str) -> (String, String) {
-    // Walk backwards from the end, find the last '-' followed by a digit
-    let bytes = s.as_bytes();
-    for i in (1..bytes.len()).rev() {
-        if bytes[i - 1] == b'-' && bytes[i].is_ascii_digit() {
-            return (s[..i - 1].to_string(), s[i..].to_string());
-        }
-    }
-    (s.to_string(), String::new())
-}
-
-/// Extract package name from an apk list line.
-fn extract_pkg_name(line: &str) -> Option<String> {
-    let name_ver = line.split_whitespace().next()?;
-    let (name, _) = split_name_version(name_ver);
-    if name.is_empty() { None } else { Some(name) }
-}
-
-/// Extract a brief description from the rest of the apk list line.
-fn extract_description_from_rest(rest: &str) -> String {
-    // The rest after name-version arch is like: `{origin} (license) [status] - description`
-    // Or it might just be architecture info. Use empty for now.
-    if let Some(idx) = rest.find(" - ") {
-        rest[idx + 3..].trim().to_string()
-    } else {
-        String::new()
-    }
-}
-
-/// Fetch detailed info for a package via `apk info -a`.
+/// The apk version of this walked a bespoke sectioned format looking for lines ending in
+/// "description:" and "depends:". Debian's is RFC822, which `wire::apt::parse_detail` handles
+/// and has tests for — including the lone `.` that means a blank line inside a description,
+/// and the fact that `apt-cache show` prints every available version and only the first is the
+/// one being described.
 fn fetch_pkg_detail(name: &str, installed: bool, upgradable: bool) -> PkgDetail {
-    let mut detail = PkgDetail {
-        name: name.to_string(),
-        installed,
-        upgradable,
-        ..Default::default()
-    };
-
-    let output = match std::process::Command::new("apk")
-        .args(["info", "-a", name])
-        .output()
-    {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return detail,
-    };
-
-    let mut section = "";
-    let mut desc_lines: Vec<String> = Vec::new();
-    let mut dep_lines: Vec<String> = Vec::new();
-
-    for line in output.lines() {
-        let trimmed = line.trim();
-
-        // Section headers like "nano-7.2-r0 description:" or "nano-7.2-r0 depends:"
-        if trimmed.ends_with("description:") {
-            section = "description";
-            continue;
-        }
-        if trimmed.ends_with("depends:") {
-            section = "depends";
-            continue;
-        }
-        if trimmed.ends_with("provides:") || trimmed.ends_with("required by:")
-            || trimmed.ends_with("contains:") || trimmed.ends_with("triggers:")
-        {
-            section = "other";
-            continue;
-        }
-        if trimmed.ends_with("installed size:") {
-            section = "size";
-            continue;
-        }
-        if trimmed.ends_with("webpage:") {
-            section = "webpage";
-            continue;
-        }
-
-        // Parse maintainer from "name-ver license:" or a specific line
-        if trimmed.contains("maintainer:") {
-            if let Some(idx) = trimmed.find("maintainer:") {
-                detail.maintainer = trimmed[idx + 11..].trim().to_string();
-            }
-            section = "";
-            continue;
-        }
-
-        // Parse specific sections
-        match section {
-            "description" => {
-                if !trimmed.is_empty() {
-                    desc_lines.push(trimmed.to_string());
-                }
-            }
-            "depends" => {
-                if !trimmed.is_empty() {
-                    dep_lines.push(trimmed.to_string());
-                }
-            }
-            "size" => {
-                if !trimmed.is_empty() {
-                    detail.size = trimmed.to_string();
-                    section = "";
-                }
-            }
-            _ => {}
-        }
-
-        // Try to extract version from "name-version description:" header
-        if detail.version.is_empty() && trimmed.contains(' ') {
-            let first = trimmed.split_whitespace().next().unwrap_or("");
-            let (n, v) = split_name_version(first);
-            if n == name && !v.is_empty() {
-                detail.version = v;
-            }
-        }
+    let d = crate::wire::apt::detail(name, installed, upgradable);
+    PkgDetail {
+        name: d.name,
+        version: d.version,
+        description: d.description,
+        maintainer: d.maintainer,
+        dependencies: d.dependencies,
+        size: d.size,
+        repo: d.repo,
+        installed: d.installed,
+        upgradable: d.upgradable,
     }
-
-    if !desc_lines.is_empty() {
-        detail.description = desc_lines.join(" ");
-    }
-    if !dep_lines.is_empty() {
-        detail.dependencies = dep_lines.join(", ");
-    }
-
-    detail
 }
 
 /// Convert cached packages to Slint model items.
