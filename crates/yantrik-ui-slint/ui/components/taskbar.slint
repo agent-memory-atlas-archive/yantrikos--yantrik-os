@@ -22,6 +22,17 @@ import { DockItem } from "app_dock.slint";
 import { WindowItem } from "window_switcher.slint";
 
 export component Taskbar inherits Rectangle {
+    // ── The minimised shell screen ──
+    //
+    // Settings, Files and the rest are not real toplevels -- they are screens inside this
+    // process -- so wlrctl never sees them and `windows` above cannot contain them. Without
+    // this the shell's own minimise button was a trapdoor: the screen went away and the only
+    // route back was the launcher, which is not what minimise means anywhere.
+    in property <int> minimized-screen: 0;
+    in property <string> minimized-title: "";
+    in property <string> minimized-app-id: "";
+    callback restore-screen();
+
     in property <[WindowItem]> windows: [];
     in property <[DockItem]> pins: [];
     /// How many of `pins` to show. The dock list carries every built-in app; a taskbar wants a few.
@@ -86,6 +97,40 @@ export component Taskbar inherits Rectangle {
             horizontal-stretch: 1;
             alignment: start;
             spacing: 3px;
+
+            // Drawn first, because it was the first thing put away.
+            if root.minimized-screen != 0 : mini := TouchArea {
+                width: min(220px, mini-row.preferred-width + 22px);
+                mouse-cursor: pointer;
+                clicked => { root.restore-screen(); }
+
+                Rectangle {
+                    width: 100%; height: 100%;
+                    border-radius: Theme.r-sm;
+                    background: mini.has-hover ? Theme.hover-fill : transparent;
+                    clip: true;
+
+                    mini-row := HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Icon {
+                            commands: Icons.app-or-window(root.minimized-app-id);
+                            size: 14px;
+                            tint: AppColor.for-app(root.minimized-app-id).transparentize(40%);
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            text: root.minimized-title;
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            max-width: 170px;
+                        }
+                    }
+                }
+            }
 
             for w[i] in root.windows : win := TouchArea {
                 property <bool> is-active: i == 0;

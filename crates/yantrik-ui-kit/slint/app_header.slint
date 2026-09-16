@@ -28,6 +28,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 import { YButton } from "y_button.slint";
+import { WindowControls } from "window_controls.slint";
 import { AppColor, AppIdentity } from "app_color.slint";
 
 // ── One action in an app's header ───────────────────────────────────────────────────────
@@ -88,6 +89,18 @@ export component AppHeader inherits Rectangle {
     // that must never move, so it is the frame's job rather than an action the app can place.
     in property <bool> show-back: false;
 
+    // ── Window controls ──
+    //
+    // Off by default. On for a shell screen filling the display, where this header is the only
+    // chrome the surface has; off for a standalone app window, where the compositor draws the
+    // titlebar and these would be the second pair of every button.
+    in property <bool> show-window-controls: false;
+    in property <bool> maximized: true;
+    in property <bool> can-minimize: true;
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
+
     callback back();
     callback action(string);
     callback search-edited(string);
@@ -107,7 +120,7 @@ export component AppHeader inherits Rectangle {
 
     HorizontalLayout {
         padding-left: root.show-back ? Theme.sp-2 : Theme.sp-4;
-        padding-right: Theme.sp-3;
+        padding-right: root.show-window-controls ? 0px : Theme.sp-3;
         spacing: Theme.sp-3;
 
         // ── Back ──
@@ -282,6 +295,25 @@ export component AppHeader inherits Rectangle {
                        : a.emphasis == 1 ? 1
                        : 2;
                 clicked => { root.action(a.id); }
+            }
+        }
+
+        // -- Window controls --
+        //
+        // Last, and hard against the corner: no padding, no gap, because the top-right corner
+        // of a screen is an infinitely large target and giving it away to an 8px margin is the
+        // one mistake a titlebar cannot afford. The layout's own padding-right is dropped for
+        // the same reason when these are shown.
+        if root.show-window-controls : VerticalLayout {
+            alignment: start;
+            horizontal-stretch: 0;
+            WindowControls {
+                bar-height: Theme.h-app-header;
+                maximized: root.maximized;
+                show-minimize: root.can-minimize;
+                minimize => { root.minimize(); }
+                toggle-maximize => { root.toggle-maximize(); }
+                close => { root.close-window(); }
             }
         }
     }

@@ -170,6 +170,13 @@ export global Theme {
     out property <color> color-success-dim:  ThemeMode.dark ? #26a69a28 : #2e7d3220;
     out property <color> color-danger:       ThemeMode.dark ? #ef9a9a : #c62828;
     out property <color> color-danger-dim:   ThemeMode.dark ? #ef9a9a28 : #c6282820;
+    // The close button's hover fill, with white on it. Deliberately the same in both themes:
+    // it is not a surface that adapts, it is the one colour in the OS that means "this
+    // discards what is on screen", and every desktop agrees on it.
+    //
+    // config/labwc/themerc carries this same value for the compositor's own titlebars. If it
+    // changes here it changes there; there is no import between Slint and a themerc.
+    out property <color> color-close-hover:  #e05263;
     out property <color> color-warning:      ThemeMode.dark ? #ffb74d : #e65100;
     out property <color> color-warning-dim:  ThemeMode.dark ? #ffb74d28 : #e6510020;
     out property <color> color-purple:       ThemeMode.dark ? #b084e0 : #7840b0;

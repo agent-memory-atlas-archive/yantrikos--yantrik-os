@@ -42,6 +42,19 @@ component ToolbarButton inherits TouchArea {
 }
 
 export component ImageViewer inherits Rectangle {
+    // ── Window chrome ──
+    //
+    // Passed down from the shell's WindowFrame rather than decided here, because this same
+    // component is drawn in two places: inside the shell, where its header is the only chrome
+    // the surface has, and inside a standalone binary, where the compositor draws a titlebar
+    // and a second set of buttons would be a second set of buttons. Default off, so the
+    // standalone case needs to say nothing.
+    in property <bool> show-window-controls: false;
+    in property <bool> maximized: true;
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
+
     background: Theme.bg-deep;
 
     in property <image> current-image;
@@ -169,6 +182,11 @@ export component ImageViewer inherits Rectangle {
         // transforms get their own strip underneath, which is where every image viewer worth
         // using puts them.
         AppHeader {
+            show-window-controls: root.show-window-controls;
+            maximized: root.maximized;
+            minimize => { root.minimize(); }
+            toggle-maximize => { root.toggle-maximize(); }
+            close-window => { root.close-window(); }
             app-id: "image";
             icon: Icons.image;
             title: root.file-name != "" ? root.file-name : "No image open";

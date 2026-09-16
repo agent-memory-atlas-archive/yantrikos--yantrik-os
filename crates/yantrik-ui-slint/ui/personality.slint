@@ -18,6 +18,19 @@ export struct SharedRefData {
 }
 
 export component PersonalityScreen inherits Rectangle {
+    // ── Window chrome ──
+    //
+    // Passed down from the shell's WindowFrame rather than decided here, because this same
+    // component is drawn in two places: inside the shell, where its header is the only chrome
+    // the surface has, and inside a standalone binary, where the compositor draws a titlebar
+    // and a second set of buttons would be a second set of buttons. Default off, so the
+    // standalone case needs to say nothing.
+    in property <bool> show-window-controls: false;
+    in property <bool> maximized: true;
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
+
     in property <float> formality: 0.5;
     in property <float> humor-ratio: 0.5;
     in property <float> opinion-strength: 0.5;
@@ -38,6 +51,11 @@ export component PersonalityScreen inherits Rectangle {
         // browser's search field, where it drew as nothing and made the whole field look blank.
         // AppHeader's back button is a stroke path from the Icons set.
         AppHeader {
+            show-window-controls: root.show-window-controls;
+            maximized: root.maximized;
+            minimize => { root.minimize(); }
+            toggle-maximize => { root.toggle-maximize(); }
+            close-window => { root.close-window(); }
             app-id: "personality";
             show-back: true;
             icon: Icons.companion;

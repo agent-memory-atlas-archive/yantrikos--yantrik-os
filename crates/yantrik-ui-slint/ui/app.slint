@@ -182,6 +182,19 @@ export component App inherits Window {
     // Panel readouts — load from the observer poll, date from the clock timer
     in property <int> bar-cpu-percent: 0;
     in property <string> bar-mem-text: "";
+    // ── The minimised shell screen ──
+    //
+    // Minimise has to leave a way back or it is a trapdoor, and these screens are not real
+    // toplevels so the compositor's taskbar cannot hold them -- wlrctl only knows about real
+    // windows. The shell holds this one itself and the taskbar draws it alongside the real
+    // ones, which is the whole difference between "minimise" and "close".
+    //
+    // One slot, not a list: only one shell screen is ever on screen at a time, so a second
+    // minimise can only be of the screen that replaced the first.
+    property <int> minimized-screen: 0;
+    property <string> minimized-title: "";
+    property <string> minimized-app-id: "";
+
     in property <string> date-text: "";
     in property <int> bar-mem-percent: 0;
     in property <int> bar-swap-percent: 0;
@@ -1257,6 +1270,7 @@ export component App inherits Window {
 
         // Bond screen
         if current-screen == 4 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
@@ -1269,11 +1283,32 @@ export component App inherits Window {
             icon-path: Icons.bond;
             icon-color: Theme.color-emotional;
             title: Tr.title-bond;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 4) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 4;
+                root.minimized-title = Tr.title-bond;
+                root.minimized-app-id = "bond";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             BondScreen {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 4;
+                    root.minimized-title = Tr.title-bond;
+                    root.minimized-app-id = "bond";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 4) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 data: root.bond-data;
                 back-pressed => {
@@ -1285,6 +1320,7 @@ export component App inherits Window {
 
         // Personality screen
         if current-screen == 5 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
@@ -1297,11 +1333,32 @@ export component App inherits Window {
             icon-path: Icons.spark;
             icon-color: Theme.color-pattern;
             title: Tr.title-personality;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 5) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 5;
+                root.minimized-title = Tr.title-personality;
+                root.minimized-app-id = "personality";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             PersonalityScreen {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 5;
+                    root.minimized-title = Tr.title-personality;
+                    root.minimized-app-id = "personality";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 5) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 formality: root.formality;
                 humor-ratio: root.humor-ratio;
@@ -1318,6 +1375,7 @@ export component App inherits Window {
 
         // Memory browser
         if current-screen == 6 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
@@ -1330,11 +1388,32 @@ export component App inherits Window {
             icon-path: Icons.chip;
             icon-color: Theme.amber;
             title: Tr.title-memory;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 6) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 6;
+                root.minimized-title = Tr.title-memory;
+                root.minimized-app-id = "memory";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             MemoryBrowser {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 6;
+                    root.minimized-title = Tr.title-memory;
+                    root.minimized-app-id = "memory";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 6) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 results: root.memory-results;
                 is-searching: root.is-searching-memories;
@@ -1361,8 +1440,16 @@ export component App inherits Window {
             icon-path: Icons.settings;
             icon-color: Theme.text-secondary;
             title: Tr.title-settings;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 7) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 7;
+                root.minimized-title = Tr.title-settings;
+                root.minimized-app-id = "settings";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             SettingsScreen {
@@ -1487,8 +1574,16 @@ export component App inherits Window {
             icon-path: Icons.files;
             icon-color: Theme.cyan;
             title: Tr.title-files;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 8) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 8;
+                root.minimized-title = Tr.title-files;
+                root.minimized-app-id = "files";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             FileBrowser {
@@ -1566,6 +1661,7 @@ export component App inherits Window {
 
         // Notification Center
         if current-screen == 9 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
@@ -1578,11 +1674,32 @@ export component App inherits Window {
             icon-path: Icons.alerts;
             icon-color: Theme.color-follow-up;
             title: Tr.title-notifications;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 9) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 9;
+                root.minimized-title = Tr.title-notifications;
+                root.minimized-app-id = "notifications";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             NotificationCenter {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 9;
+                    root.minimized-title = Tr.title-notifications;
+                    root.minimized-app-id = "notifications";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 9) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 notifications: root.notification-list;
                 unread-count: root.notification-unread-count;
@@ -1599,6 +1716,7 @@ export component App inherits Window {
 
         // System Dashboard
         if current-screen == 10 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
@@ -1611,11 +1729,32 @@ export component App inherits Window {
             icon-path: Icons.monitor;
             icon-color: Theme.color-reminder;
             title: Tr.title-system;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 10) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 10;
+                root.minimized-title = Tr.title-system;
+                root.minimized-app-id = "system";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             SystemDashboard {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 10;
+                    root.minimized-title = Tr.title-system;
+                    root.minimized-app-id = "system";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 10) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 cpu-usage: root.sys-cpu-usage;
                 memory-usage: root.sys-memory-usage;
@@ -1646,6 +1785,7 @@ export component App inherits Window {
 
         // Image Viewer
         if current-screen == 11 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
@@ -1658,11 +1798,32 @@ export component App inherits Window {
             icon-path: Icons.media;
             icon-color: Theme.color-purple-dim;
             title: Tr.title-image-viewer;
-            close => { root.current-screen = 8; root.navigate(8); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 11) { root.minimized-screen = 0; }
+                root.current-screen = 8; root.navigate(8);
+            }
+            minimize => {
+                root.minimized-screen = 11;
+                root.minimized-title = Tr.title-image-viewer;
+                root.minimized-app-id = "images";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             ImageViewer {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 11;
+                    root.minimized-title = Tr.title-image-viewer;
+                    root.minimized-app-id = "images";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 11) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 current-image: root.viewer-image;
                 file-name: root.viewer-file-name;
@@ -1717,6 +1878,7 @@ export component App inherits Window {
 
         // Text Editor
         if current-screen == 12 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
@@ -1729,11 +1891,32 @@ export component App inherits Window {
             icon-path: Icons.editor;
             icon-color: Theme.holo-blue-dim;
             title: Tr.title-editor;
-            close => { root.current-screen = 8; root.navigate(8); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 12) { root.minimized-screen = 0; }
+                root.current-screen = 8; root.navigate(8);
+            }
+            minimize => {
+                root.minimized-screen = 12;
+                root.minimized-title = Tr.title-editor;
+                root.minimized-app-id = "editor";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             TextEditorScreen {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 12;
+                    root.minimized-title = Tr.title-editor;
+                    root.minimized-app-id = "editor";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 12) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 file-name: root.editor-file-name;
                 file-content <=> root.editor-file-content;
@@ -1813,8 +1996,16 @@ export component App inherits Window {
             icon-path: Icons.music;
             icon-color: Theme.amber-dim;
             title: Tr.title-now-playing;
-            close => { root.current-screen = 8; root.navigate(8); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 13) { root.minimized-screen = 0; }
+                root.current-screen = 8; root.navigate(8);
+            }
+            minimize => {
+                root.minimized-screen = 13;
+                root.minimized-title = Tr.title-now-playing;
+                root.minimized-app-id = "media";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             MediaPlayer {
@@ -1868,6 +2059,7 @@ export component App inherits Window {
         // Terminal
         // Notes Editor screen
         if current-screen == 16 : WindowFrame {
+            content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
@@ -1880,11 +2072,32 @@ export component App inherits Window {
             icon-path: Icons.doc;
             icon-color: Theme.cyan;
             title: Tr.title-about;
-            close => { root.current-screen = 7; root.navigate(7); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 16) { root.minimized-screen = 0; }
+                root.current-screen = 7; root.navigate(7);
+            }
+            minimize => {
+                root.minimized-screen = 16;
+                root.minimized-title = Tr.title-about;
+                root.minimized-app-id = "about";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             AboutScreen {
+                show-window-controls: root.window-maximized;
+                maximized: root.window-maximized;
+                minimize => {
+                    root.minimized-screen = 16;
+                    root.minimized-title = Tr.title-about;
+                    root.minimized-app-id = "about";
+                    root.current-screen = 1; root.navigate(1);
+                }
+                toggle-maximize => { root.window-maximized = !root.window-maximized; }
+                close-window => {
+                    if (root.minimized-screen == 16) { root.minimized-screen = 0; }
+                    root.current-screen = 1; root.navigate(1);
+                }
                 width: 100%; height: 100%;
                 hostname: root.about-hostname;
                 kernel: root.about-kernel;
@@ -1927,8 +2140,16 @@ export component App inherits Window {
             icon-path: Icons.packages;
             icon-color: Theme.cyan;
             title: Tr.title-packages;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 21) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 21;
+                root.minimized-title = Tr.title-packages;
+                root.minimized-app-id = "packages";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             PackageManager {
@@ -1993,8 +2214,16 @@ export component App inherits Window {
             icon-path: Icons.hybrid;
             icon-color: Theme.cyan;
             title: Tr.title-devices;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 27) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 27;
+                root.minimized-title = Tr.title-devices;
+                root.minimized-app-id = "devices";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             DeviceDashboardScreen {
@@ -2047,8 +2276,16 @@ export component App inherits Window {
             icon-path: Icons.lock;
             icon-color: Theme.color-emotional;
             title: Tr.title-permissions;
-            close => { root.current-screen = 1; root.navigate(1); }
-            minimize => { root.current-screen = 1; root.navigate(1); }
+            close => {
+                if (root.minimized-screen == 28) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 28;
+                root.minimized-title = Tr.title-permissions;
+                root.minimized-app-id = "permissions";
+                root.current-screen = 1; root.navigate(1);
+            }
             animate x, y, width, height { duration: 200ms; easing: ease-out; }
 
             PermissionDashboardScreen {
@@ -2179,6 +2416,14 @@ export component App inherits Window {
                 y: parent.height - self.height;
                 width: 100%;
                 windows: root.window-list;
+                minimized-screen: root.minimized-screen;
+                minimized-title: root.minimized-title;
+                minimized-app-id: root.minimized-app-id;
+                restore-screen => {
+                    root.current-screen = root.minimized-screen;
+                    root.navigate(root.minimized-screen);
+                    root.minimized-screen = 0;
+                }
                 pins: root.dock-items;
                 launcher-label: Tr.dock-apps;
                 companion-count: root.whisper-hint-count;

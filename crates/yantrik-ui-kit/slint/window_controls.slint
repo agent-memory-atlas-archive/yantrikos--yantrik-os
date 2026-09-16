@@ -1,0 +1,119 @@
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// window_controls.slint — minimise, maximise, close
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//
+// The three buttons every windowing system has had for thirty years, drawn once here so the
+// OS has one answer rather than three.
+//
+// It had three. labwc drew them on the standalone app windows from its own theme; WindowFrame
+// drew a second, different set on the shell's floating windows; and a shell screen filling the
+// display drew none at all -- so Settings, Files and Memory could be entered and then only
+// left by a back arrow, with no way to set them aside, no way to un-maximise them, and nothing
+// that looked like a window at all. Those are not three styles of the same control, they are
+// one control implemented twice and forgotten once.
+//
+// # The shape
+//
+// 46 x 32, flush, no gaps -- Windows 11's geometry, and close enough to GNOME's that neither
+// looks foreign. The wide button matters more than the glyph inside it: a titlebar button is
+// the thing people throw the pointer at without aiming, and the previous 26px square with 2px
+// gaps was a target you had to hit deliberately.
+//
+// # Close is red
+//
+// On hover, not at rest -- Windows, KDE and GNOME all agree, and it is the one place in this
+// OS where a hover colour carries meaning rather than feedback. This is also the reason these
+// exist in Slint at all rather than being left to the compositor: labwc 0.8.3 has exactly one
+// hover background for all three buttons (`window.button.hover.bg.color`) and no per-button
+// override, so under its decorations close CANNOT be made red. Checked against the strings in
+// the binary, not assumed from the documentation.
+
+import { Theme } from "theme.slint";
+import { Icon, Icons } from "icon.slint";
+
+component ControlButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> danger: false;
+    in property <string> tip;
+    in property <length> bar-height: 32px;
+    callback clicked();
+
+    width: 46px;
+    // The button is as tall as the bar it is in, so the hover fill runs edge to edge and the
+    // top-right corner of the surface really is the close button. A 32px button floating in a
+    // 48px header leaves 16px of dead strip above it that looks like part of the target and
+    // is not.
+    height: root.bar-height;
+    // The hover fill reaches the full button, which is what makes a 46px target look like a
+    // 46px target. Rest state is bare: chrome that is always lit competes with the app.
+    // Theme.hover-fill is 3% white -- right for a list row you are scanning, invisible on a
+    // 46px button you are aiming at. 12% is what Windows uses and what makes the target read
+    // as a target.
+    background: ta.has-hover
+        ? (root.danger ? Theme.color-close-hover : Theme.text-primary.transparentize(0.88))
+        : transparent;
+    animate background { duration: 90ms; }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    Icon {
+        commands: root.glyph;
+        // 20px of BOX, which draws a 10-12px glyph: these paths are laid out in a 20-unit
+        // viewBox and none of them fills it -- Icons.close runs 5..15, so `size: 10px` was
+        // drawing a five-pixel cross. At that size the software rasteriser turns a 1.4px
+        // stroke into grey mush, which is exactly how it looked.
+        size: 20px;
+        thickness: 1.6px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        // White on the red, because #e8eaef on #e05263 is the wrong way round.
+        tint: ta.has-hover
+            ? (root.danger ? Theme.text-on-accent : Theme.text-primary)
+            : Theme.text-secondary;
+    }
+}
+
+export component WindowControls inherits HorizontalLayout {
+    // Whether this surface can be set aside at all. A shell screen can, because the taskbar
+    // holds it; a modal cannot, and showing it a minimise button it will not honour is worse
+    // than showing two buttons.
+    in property <bool> show-minimize: true;
+    in property <bool> maximized: false;
+    // The height of the bar these sit in: 48 in an app header, 36 in a floating frame.
+    in property <length> bar-height: 32px;
+
+    callback minimize();
+    callback toggle-maximize();
+    callback close();
+
+    spacing: 0px;
+    alignment: end;
+
+    if root.show-minimize : ControlButton {
+        glyph: Icons.minus;
+        bar-height: root.bar-height;
+        tip: "Minimize";
+        clicked => { root.minimize(); }
+    }
+
+    ControlButton {
+        // Restore and maximise are different pictures because they are different actions, and
+        // a button that does two things while looking like one is how people learn not to
+        // trust a titlebar.
+        glyph: root.maximized ? Icons.win-restore : Icons.win-maximize;
+        bar-height: root.bar-height;
+        tip: root.maximized ? "Restore" : "Maximize";
+        clicked => { root.toggle-maximize(); }
+    }
+
+    ControlButton {
+        glyph: Icons.close;
+        bar-height: root.bar-height;
+        danger: true;
+        tip: "Close";
+        clicked => { root.close(); }
+    }
+}

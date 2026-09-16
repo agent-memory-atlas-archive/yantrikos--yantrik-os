@@ -18,6 +18,19 @@ export struct MemoryItem {
 }
 
 export component MemoryBrowser inherits Rectangle {
+    // ── Window chrome ──
+    //
+    // Passed down from the shell's WindowFrame rather than decided here, because this same
+    // component is drawn in two places: inside the shell, where its header is the only chrome
+    // the surface has, and inside a standalone binary, where the compositor draws a titlebar
+    // and a second set of buttons would be a second set of buttons. Default off, so the
+    // standalone case needs to say nothing.
+    in property <bool> show-window-controls: false;
+    in property <bool> maximized: true;
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
+
     in property <[MemoryItem]> results: [];
     in property <bool> is-searching: false;
     in property <int> total-memories: 0;
@@ -43,6 +56,11 @@ export component MemoryBrowser inherits Rectangle {
         // AppHeader draws both as stroke paths from the Icons set, at the size everything else
         // uses, and gives the field a placeholder.
         AppHeader {
+            show-window-controls: root.show-window-controls;
+            maximized: root.maximized;
+            minimize => { root.minimize(); }
+            toggle-maximize => { root.toggle-maximize(); }
+            close-window => { root.close-window(); }
             app-id: "memory";
             show-back: true;
             icon: Icons.chip;
