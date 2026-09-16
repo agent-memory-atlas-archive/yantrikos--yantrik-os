@@ -36,7 +36,9 @@ export component Taskbar inherits Rectangle {
     callback open-companion();
 
     height: 40px;
-    background: Theme.bg-surface;
+    // Glass, for the same reason the status bar is: the wallpaper should carry on
+    // underneath rather than stopping at the bar.
+    background: Theme.glass-panel;
 
     // Top edge
     Rectangle { y: 0; width: 100%; height: 1px; background: Theme.separator; }

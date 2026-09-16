@@ -12,7 +12,14 @@ use crate::{App, AccentPreset, ThemeMode, AIStatusData, AIProviderData, AIModelD
 const ACCENT_PRESETS: &[&str] = &["cyan", "amber", "purple", "green", "pink"];
 
 /// Known wallpaper preset names.
-const WALLPAPER_PRESETS: &[&str] = &["aurora", "sunset", "ocean", "nebula"];
+/// The wallpapers this OS ships, scenes first.
+///
+/// The scenes are rendered by scripts/render-scene-wallpapers.py and the gradients by
+/// scripts/render-wallpapers.py; both write into crates/yantrik-ui-slint/ui/wallpapers and both
+/// are committed beside their output, so the desktop stays editable and reproducible rather
+/// than being four PNGs somebody exported once.
+const WALLPAPER_PRESETS: &[&str] =
+    &["serenity", "first-light", "nightfall", "aurora", "sunset", "ocean", "nebula"];
 
 /// All user-facing settings that persist across reboots.
 #[derive(Debug, Clone, Serialize, Deserialize)]

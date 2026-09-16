@@ -208,39 +208,15 @@ export component DesktopScreen inherits Rectangle {
     clip: true;
 
     // ── Layer 1: Status bar (always on top, dims in focus mode) ──
-    StatusBar {
-        x: 0; y: 0;
-        width: 100%;
-        opacity: root.focus-mode ? 0.5 : 1.0;
-        animate opacity { duration: 300ms; }
-        clock-text: root.clock-text;
-        companion-status: root.companion-status;
-        companion-online: root.companion-online;
-        battery-available: root.battery-available;
-        battery-level: root.battery-level;
-        battery-charging: root.battery-charging;
-        wifi-connected: root.wifi-connected;
-        pending-count: root.pending-count;
-        whisper-hint-count: root.whisper-hint-count;
-        incognito-enabled: root.settings-incognito-mode;
-        dnd-enabled: root.dnd-mode;
-        active-project: root.active-project;
-        ai-privacy-mode: root.ai-privacy-mode;
-        ai-provider-label: root.ai-provider-label;
-        ai-fallback-banner: root.ai-fallback-banner;
-        cpu-percent: root.bar-cpu-percent;
-        mem-text: root.bar-mem-text;
-        date-text: root.date-text;
-        anchor-clicked => { root.lens-open = !root.lens-open; root.open-lens(); }
-        queue-clicked => { root.lens-open = true; root.open-lens(); }
-        whisper-hint-clicked => { root.whisper-hint-clicked(); }
-        settings-tapped => { root.quick-settings-open = !root.quick-settings-open; }
-        power-pressed => { root.power-menu-open = !root.power-menu-open; }
-        ai-privacy-clicked => { root.ai-privacy-clicked(); }
-        active-harness-id: root.active-harness-id;
-        active-harness-name: root.active-harness-name;
-        active-mind-clicked => { root.active-mind-clicked(); }
-    }
+    // The status bar is the shell's now, not the desktop's.
+    //
+    // It was declared here, so the clock, the CPU and memory meters, the battery, the network
+    // and the chip naming which mind is answering all existed on exactly ONE screen. Open
+    // anything and they were gone — while the compositor went on reserving 32px at the top of
+    // every screen for a bar that was not being drawn there. The same mistake the taskbar had,
+    // found the same way: by asking why a reserved strip was empty.
+    //
+    // The desktop still starts below it; that is what the offset on the layer below is for.
 
     // ── Layer 2: Desktop content area ──
     Rectangle {
@@ -267,6 +243,31 @@ export component DesktopScreen inherits Rectangle {
         // Mac and Windows ship bitmaps for exactly this reason. The pixels are identical — they
         // are generated from these same definitions by scripts/render-wallpapers.py, which is
         // committed beside them so the design stays editable and the PNGs stay reproducible.
+        // ── Scenes ──
+        //
+        // Rendered by scripts/render-scene-wallpapers.py: a horizon, ridges hazing back into
+        // the sky, and a lake that mirrors it. The four gradients below are still here and are
+        // still fine; they are also FLAT, and a flat backdrop is what made every card drawn on
+        // it read as paint on the same plane rather than glass in front of something.
+        //
+        // These are blurred slightly at render time, which is the whole reason the surfaces on
+        // top can be translucent without the compositor blurring anything per frame.
+        if root.wallpaper-path == "serenity" : Image {
+            width: 100%; height: 100%;
+            source: @image-url("wallpapers/serenity.png");
+            image-fit: fill;
+        }
+        if root.wallpaper-path == "first-light" : Image {
+            width: 100%; height: 100%;
+            source: @image-url("wallpapers/first-light.png");
+            image-fit: fill;
+        }
+        if root.wallpaper-path == "nightfall" : Image {
+            width: 100%; height: 100%;
+            source: @image-url("wallpapers/nightfall.png");
+            image-fit: fill;
+        }
+
         if root.wallpaper-path == "aurora" : Image {
             width: 100%; height: 100%;
             source: @image-url("wallpapers/aurora.png");
@@ -288,7 +289,7 @@ export component DesktopScreen inherits Rectangle {
             image-fit: fill;
         }
 
-        if root.wallpaper-path != "" && root.wallpaper-path != "aurora" && root.wallpaper-path != "sunset" && root.wallpaper-path != "ocean" && root.wallpaper-path != "nebula" : Image {
+        if root.wallpaper-path != "" && root.wallpaper-path != "aurora" && root.wallpaper-path != "sunset" && root.wallpaper-path != "ocean" && root.wallpaper-path != "nebula" && root.wallpaper-path != "serenity" && root.wallpaper-path != "first-light" && root.wallpaper-path != "nightfall" : Image {
             width: 100%; height: 100%;
             source: root.wallpaper-image;
             image-fit: cover;
@@ -689,7 +690,7 @@ export component DesktopScreen inherits Rectangle {
                     for w in root.window-list : Rectangle {
                         height: 40px;
                         border-radius: Theme.r-md;
-                        background: win-ta.has-hover ? Theme.hover-fill : Theme.bg-card;
+                        background: win-ta.has-hover ? Theme.hover-fill : Theme.glass-card;
                         border-width: 1px;
                         border-color: Theme.border-subtle;
                         win-ta := TouchArea {
@@ -727,7 +728,7 @@ export component DesktopScreen inherits Rectangle {
                     Rectangle {
                         height: 84px;
                         border-radius: Theme.r-lg;
-                        background: Theme.bg-card;
+                        background: Theme.glass-card;
                         border-width: 1px;
                         border-color: Theme.border-subtle;
                         clip: true;
@@ -783,7 +784,7 @@ export component DesktopScreen inherits Rectangle {
                 if root.urges.length == 0 && root.window-list.length == 0 : Rectangle {
                     height: day-one.preferred-height;
                     border-radius: Theme.r-lg;
-                    background: Theme.bg-card;
+                    background: Theme.glass-card;
                     border-width: 1px;
                     border-color: Theme.border-subtle;
                     day-one := VerticalLayout {

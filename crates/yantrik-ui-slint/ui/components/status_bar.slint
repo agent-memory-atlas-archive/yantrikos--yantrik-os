@@ -53,7 +53,9 @@ export component StatusBar inherits Rectangle {
     callback active-mind-clicked();
 
     height: Theme.status-bar-height;
-    background: Theme.bg-surface;
+    // Glass, not paint. This bar is drawn over the wallpaper on every screen, and an
+    // opaque fill turned the top 32px of the desktop into a lid.
+    background: Theme.glass-panel;
 
     // Bottom border — single subtle line
     Rectangle {

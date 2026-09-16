@@ -102,11 +102,19 @@ impl AppContext {
         ui.set_settings_accent_color(user_settings.accent_color.into());
 
         // Wallpaper (persisted)
+        //
+        // A machine that has never been told otherwise gets a scene rather than a flat wash.
+        // That is a look decision and also a structural one: the translucent surfaces this OS
+        // draws need something with depth behind them, and a smooth gradient gives them
+        // nothing to be in front of.
+        if user_settings.wallpaper.is_empty() {
+            ui.set_wallpaper_path("serenity".into());
+        }
         if !user_settings.wallpaper.is_empty() {
             let wp = &user_settings.wallpaper;
             ui.set_wallpaper_path(wp.as_str().into());
             // For custom file paths (not presets), load the image
-            let presets = ["aurora", "sunset", "ocean", "nebula"];
+            let presets = ["serenity", "first-light", "nightfall", "aurora", "sunset", "ocean", "nebula"];
             if !presets.contains(&wp.as_str()) {
                 let path = std::path::Path::new(wp.as_str());
                 if path.exists() && path.is_file() {
@@ -172,6 +180,45 @@ impl AppContext {
         }
         if let Some(ref model) = config.llm.api_model {
             ui.set_settings_llm_api_model(model.clone().into());
+        }
+
+        // ── What is answering, in the status bar ──
+        //
+        // The chip up there has always been able to show the model and never had one to show:
+        // ai-provider-label was declared, read by status_bar.slint, and set by nothing, so it
+        // fell through to the word "Local" on every machine. Which is true, and is also the
+        // least interesting true thing available — "Local" is a property of the arrangement,
+        // and the arrangement is the whole point of this OS, so it deserves to say WHICH mind
+        // is answering and where it runs.
+        //
+        // Read from the configuration rather than from whatever answered last: this is set
+        // before the first question is asked, and a chip that is blank until you talk to the
+        // machine is a chip that is blank when you most want to check.
+        let backend = config.llm.backend.to_ascii_lowercase();
+        let model_label = config
+            .llm
+            .api_model
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| {
+                // llama.cpp and the built-in path name a repository rather than a model id;
+                // the last path segment is the part a person would recognise.
+                let repo = config.llm.hub_repo.trim();
+                (!repo.is_empty()).then(|| {
+                    repo.rsplit('/').next().unwrap_or(repo).to_string()
+                })
+            });
+
+        if let Some(model) = model_label {
+            // Cloud backends are named, because "which cloud" is the question you are actually
+            // asking when you look. Local ones are not, because the lock icon beside this
+            // already says where it runs and repeating it costs width the bar does not have.
+            let label = match backend.as_str() {
+                "claude-cli" | "claude_cli" => format!("Claude · {model}"),
+                "api" => model,
+                _ => model,
+            };
+            ui.set_ai_active_provider_label(label.into());
         }
 
         // Display resolution (best effort via wlr-randr)

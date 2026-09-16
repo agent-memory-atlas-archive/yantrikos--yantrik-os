@@ -9,6 +9,7 @@
 
 import { Theme, ThemeMode, ThemeOverrides, AccentPreset } from "theme.slint";
 import { Taskbar } from "components/taskbar.slint";
+import { StatusBar } from "components/status_bar.slint";
 import { BootScreen } from "boot.slint";
 import { OnboardingScreen } from "onboarding.slint";
 import { DesktopScreen } from "desktop.slint";
@@ -1257,9 +1258,9 @@ export component App inherits Window {
         // Bond screen
         if current-screen == 4 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1285,9 +1286,9 @@ export component App inherits Window {
         // Personality screen
         if current-screen == 5 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1318,9 +1319,9 @@ export component App inherits Window {
         // Memory browser
         if current-screen == 6 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1349,9 +1350,9 @@ export component App inherits Window {
         // Settings screen
         if current-screen == 7 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1475,9 +1476,9 @@ export component App inherits Window {
         // File browser
         if current-screen == 8 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1566,9 +1567,9 @@ export component App inherits Window {
         // Notification Center
         if current-screen == 9 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1599,9 +1600,9 @@ export component App inherits Window {
         // System Dashboard
         if current-screen == 10 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1646,9 +1647,9 @@ export component App inherits Window {
         // Image Viewer
         if current-screen == 11 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1717,9 +1718,9 @@ export component App inherits Window {
         // Text Editor
         if current-screen == 12 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1801,9 +1802,9 @@ export component App inherits Window {
         // Media Player
         if current-screen == 13 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1868,9 +1869,9 @@ export component App inherits Window {
         // Notes Editor screen
         if current-screen == 16 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1915,9 +1916,9 @@ export component App inherits Window {
         // Package Manager
         if current-screen == 21 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -1981,9 +1982,9 @@ export component App inherits Window {
         // Device Dashboard
         if current-screen == 27 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -2035,9 +2036,9 @@ export component App inherits Window {
         // Permission Dashboard
         if current-screen == 28 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
-            y: root.window-maximized ? 0px : root.window-y;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
             width: root.window-maximized ? parent.width : root.window-w;
-            height: root.window-maximized ? parent.height - 40px : root.window-h;
+            height: root.window-maximized ? parent.height - 40px - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
             win-y <=> root.window-y;
@@ -2102,6 +2103,47 @@ export component App inherits Window {
         // One bar now, drawn here for the desktop AND the app screens. Boot (0), onboarding (2),
         // lock (3) and login (32) are deliberately excluded: they are states where there is
         // nothing to switch to and nothing should invite you to try.
+        // ── The one bar at the top of this OS ──
+        //
+        // Above every screen, because the time, the load, the battery and which mind is
+        // answering are facts about the machine rather than about the desktop. Declared after
+        // the screens so it draws over them, and every screen below leaves 32px for it.
+        //
+        // Boot, onboarding, lock and login deliberately do not: those are states where the
+        // machine is not yet yours to read.
+        if current-screen != 0 && current-screen != 2 && current-screen != 3 && current-screen != 32 : StatusBar {
+            x: 0;
+            y: 0;
+            width: 100%;
+            clock-text: root.clock-text;
+            companion-status: root.companion-status;
+            companion-online: root.companion-online;
+            battery-available: root.battery-available;
+            battery-level: root.battery-level;
+            battery-charging: root.battery-charging;
+            wifi-connected: root.wifi-connected;
+            pending-count: root.pending-count;
+            whisper-hint-count: root.whisper-hint-count;
+            incognito-enabled: root.settings-incognito-mode;
+            dnd-enabled: root.dnd-mode;
+            active-project: root.active-project;
+            ai-privacy-mode: root.ai-privacy-mode;
+            ai-provider-label: root.ai-active-provider-label;
+            ai-fallback-banner: root.ai-fallback-banner;
+            cpu-percent: root.bar-cpu-percent;
+            mem-text: root.bar-mem-text;
+            date-text: root.date-text;
+            active-harness-id: root.active-harness-id;
+            active-harness-name: root.active-harness-name;
+            anchor-clicked => { root.lens-open = !root.lens-open; root.open-lens(); }
+            queue-clicked => { root.lens-open = true; root.open-lens(); }
+            whisper-hint-clicked => { root.whisper-hint-clicked(); }
+            settings-tapped => { root.quick-settings-open = !root.quick-settings-open; }
+            power-pressed => { root.power-menu-open = !root.power-menu-open; }
+            ai-privacy-clicked => { root.ai-privacy-clicked(); }
+            active-mind-clicked => { root.active-mind-clicked(); }
+        }
+
         if current-screen == 1 || (current-screen >= 4 && current-screen <= 31) : Rectangle {
             width: 100%;
             height: parent.height;

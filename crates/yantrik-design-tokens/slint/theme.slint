@@ -106,6 +106,27 @@ export global Theme {
     out property <color> bg-input:    ThemeMode.dark ? #12121e : #f0f0f4;
     out property <color> bg-selected: ThemeMode.dark ? #1a1a2a : #e4e4ee;
 
+    // ─── Glass ────────────────────────────────────────────────────
+    //
+    // Surfaces that sit OVER the wallpaper rather than replacing it.
+    //
+    // Every panel on this desktop used an opaque fill, so the desktop was a flat plane with
+    // rectangles painted on it and the wallpaper was scenery you could only see between them.
+    // These are the same colours with alpha, which on a software rasteriser costs one blend —
+    // real backdrop blur would cost a full-screen filter per frame, and this OS already fought
+    // its idle cost from 9.7% of a core down to 2.1%. The softness lives in the wallpaper PNG
+    // instead, blurred once at render time.
+    //
+    // Light mode stays nearly opaque on purpose: white glass over a photograph is haze, not
+    // depth, and the text on it has to stay readable.
+    out property <color> glass-card:    ThemeMode.dark ? #1e1e2ec8 : #fffffff0;
+    out property <color> glass-panel:   ThemeMode.dark ? #161622d8 : #eaeaeef2;
+    out property <color> glass-raised:  ThemeMode.dark ? #262638d0 : #fffffff5;
+    // The hairline that gives a glass edge its shape. Slightly lighter than the fill, because
+    // a border darker than what it contains reads as a hole rather than a pane.
+    out property <color> glass-border:  ThemeMode.dark ? #ffffff1a : #00000014;
+    out property <color> glass-border-strong: ThemeMode.dark ? #ffffff2e : #00000022;
+
     // ─── Amber palette ────────────────────────────────────────────
     out property <color> amber:             ThemeOverrides.enabled ? ThemeOverrides.amber-override
         : (ThemeMode.dark ? #d4a574 : #8a6030);
@@ -201,6 +222,15 @@ export global Theme {
     out property <length> font-boot: 35px;
 
     // V63 — 6-role typography scale (tuned for 1080p)
+    //
+    // fs-hero is the one moment this OS raises its voice: the greeting on the desktop. The
+    // scale topped out at 20px, which is a panel title, so there was no size available for
+    // "say one thing, large, and nothing else near it" — and a desktop whose largest text is
+    // the same size as a section header has no focal point at all.
+    out property <length> fs-hero: 44px;
+    out property <int>    fw-hero: 600;
+    out property <length> fs-hero-sub: 17px;
+    out property <int>    fw-hero-sub: 400;
     out property <length> fs-display: 20px;      // Panel titles, major headers
     out property <int>    fw-display: 600;
     out property <length> fs-title-1: 18px;      // App titles, large section headers
