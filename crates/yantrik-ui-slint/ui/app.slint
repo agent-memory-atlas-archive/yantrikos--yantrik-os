@@ -10,7 +10,7 @@
 import { Theme, ThemeMode, ThemeOverrides, AccentPreset } from "theme.slint";
 import { Taskbar } from "components/taskbar.slint";
 import { StatusBar } from "components/status_bar.slint";
-import { BootScreen } from "boot.slint";
+import { BootScreen, BootStage } from "boot.slint";
 import { OnboardingScreen } from "onboarding.slint";
 import { DesktopScreen } from "desktop.slint";
 import { BondScreen, BondData } from "bond.slint";
@@ -74,7 +74,29 @@ export component App inherits Window {
     in-out property <length> window-h: (self.height - 60px) * 0.90;
 
     // Boot state
-    in property <string> boot-status: "remembering...";
+    // ── Boot ──
+    //
+    // Filled by wire/boot.rs from what the shell is genuinely waiting for. The status line is
+    // no longer a fixed word.
+    in property <string> boot-status: "";
+    in property <[BootStage]> boot-stages: [];
+    in property <float> progress: 0.0;
+    in property <string> version: "";
+    // Fired by wire/boot.rs when the stages are done, or when the deadline passes.
+    //
+    // The handler lives on the root because Rust can only invoke the ROOT's callbacks. It was
+    // on the BootScreen instance, so `ui.invoke_boot_complete()` reached a callback nobody had
+    // written a body for and the machine sat at 100% with four ticks and no desktop.
+    callback boot-complete();
+    boot-complete => {
+        if root.onboarding-step > 0 {
+            root.current-screen = 2;
+            root.navigate(2);
+        } else {
+            root.current-screen = 1;
+            root.navigate(1);
+        }
+    }
 
     // Companion state
     in property <int> memory-count: 0;
@@ -1025,15 +1047,10 @@ export component App inherits Window {
             ambient-interval-ms: root.ambient-interval-ms;
             status-text: root.boot-status;
             memory-count: root.memory-count;
-            boot-complete => {
-                if root.onboarding-step > 0 {
-                    root.current-screen = 2;
-                    root.navigate(2);
-                } else {
-                    root.current-screen = 1;
-                    root.navigate(1);
-                }
-            }
+            stages: root.boot-stages;
+            progress: root.progress;
+            version: root.version;
+            boot-complete => { root.boot-complete(); }
         }
 
         // Onboarding (first boot only)

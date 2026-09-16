@@ -141,7 +141,8 @@ impl AppContext {
         load_theme_overrides(ui);
 
         // Boot status + greeting (personalized with user name)
-        ui.set_boot_status("remembering...".into());
+        // No boot status word. The stages say what is happening, one line each, and a fixed
+        // "remembering..." underneath them was the last thing on that screen still pretending.
         ui.set_greeting_text(
             format!("{}, {}", time_of_day_greeting(), config.user_name).into(),
         );

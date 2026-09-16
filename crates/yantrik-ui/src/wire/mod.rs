@@ -36,6 +36,7 @@ pub mod version;
 pub mod ai_assist;
 pub mod ai_onboarding;
 pub mod ai_provider;
+pub mod boot;
 mod morning_brief;
 mod window_switcher;
 pub mod entity_bridge;

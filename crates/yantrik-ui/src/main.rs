@@ -134,6 +134,9 @@ fn main() {
     // The machine rail lists these; it needs the manager, which only exists from here.
     wire::services::wire(&ui, service_manager.clone());
 
+    // The boot screen's stages, read from the same manager the machine rail reads.
+    wire::boot::wire(&ui, &ctx, service_manager.clone());
+
     // Publish the companion so the apps under apps/ can use it. Without this their AI actions
     // are stubs: the model, the memory and the bond all live in this process.
     companion_rpc::serve(ctx.bridge.handle());
