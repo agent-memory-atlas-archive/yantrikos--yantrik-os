@@ -33,6 +33,8 @@ BUILD_FILE="$PREFIX/BUILD"
 UPDATES_DIR="$PREFIX/updates"
 BACKUP_DIR="$PREFIX/backups"
 CONF="$PREFIX/update.conf"
+LOG_DIR="$PREFIX/logs"
+LOG_FILE="$LOG_DIR/yantrik-os.log"
 
 # Config file may set CHANNEL and HOST. It is plain KEY=value, sourced only for those two.
 CHANNEL_DEFAULT="stable"
@@ -238,6 +240,22 @@ EOF
 
 # Restart the shell in the current session, then confirm it answers its control socket. If it
 # does not come up, roll back and restart the old one — the machine must never be left dark.
+# Start the shell, detached, with the session's wayland environment so it outlives this script.
+#
+# `mkdir -p` on the log directory is the whole point of this existing. Without it the append
+# redirect below fails, the shell never launches at all, and the update rolls back with a
+# perfectly healthy build and a message about a timeout. Worse: the rollback ran the same
+# redirect, so it could not restart the OLD shell either — one absent directory took the
+# machine dark and reported it as "the previous build is running again".
+start_shell() {
+  local runtime="$1"
+  mkdir -p "$PREFIX/logs" 2>/dev/null || true
+  setsid env \
+    XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+    SLINT_BACKEND="${SLINT_BACKEND:-winit}" \
+    "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$LOG_FILE" 2>&1 &
+}
+
 restart_and_verify() {
   local backup="$1"
   say "Restarting the shell"
@@ -252,11 +270,7 @@ restart_and_verify() {
   sleep 3
   pkill -9 -x yantrik-ui 2>/dev/null
   sleep 1
-  # Detached, with the session's wayland env, so it outlives this script.
-  setsid env \
-    XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-    SLINT_BACKEND="${SLINT_BACKEND:-winit}" \
-    "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$PREFIX/logs/yantrik-os.log" 2>&1 &
+  start_shell "$runtime"
 
   say "Waiting for the shell to answer"
   local sock="$runtime/yantrik/app-shell.sock"
@@ -269,14 +283,32 @@ restart_and_verify() {
   done
 
   warn "the new shell did not answer within 20s — rolling back"
+  # Say WHY before rolling back. A rollback with no reason attached turns a five-minute fix
+  # into an afternoon, and the log is the only witness the new shell leaves behind.
+  if [ -s "$LOG_FILE" ]; then
+    warn "last lines from $LOG_FILE:"
+    tail -n 15 "$LOG_FILE" | sed 's/^/    /'
+  else
+    warn "$LOG_FILE is empty — the new shell wrote nothing before it stopped"
+  fi
+
   restore_backup "$backup"
   pkill -9 -x yantrik-ui 2>/dev/null
   sleep 1
-  setsid env \
-    XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-    SLINT_BACKEND="${SLINT_BACKEND:-winit}" \
-    "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$PREFIX/logs/yantrik-os.log" 2>&1 &
-  fail "update rolled back — the previous build is running again"
+  start_shell "$runtime"
+
+  # Verify the ROLLBACK, rather than announcing one that did not happen. The restore used to
+  # print "the previous build is running again" without ever checking, and on the day the log
+  # directory was missing it said exactly that while the machine sat dark.
+  local sock_rb="$runtime/yantrik/app-shell.sock"
+  for _ in $(seq 1 20); do
+    if [ -S "$sock_rb" ] && "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
+      fail "update rolled back — the previous build is running again"
+    fi
+    sleep 1
+  done
+  fail "update rolled back, but the previous build did not answer either — this machine has \
+no shell running. Start one with: $BIN_DIR/yantrik-ui $PREFIX/config.yaml"
 }
 
 # Copy a backup's binaries back over the live ones, and restore its build marker.

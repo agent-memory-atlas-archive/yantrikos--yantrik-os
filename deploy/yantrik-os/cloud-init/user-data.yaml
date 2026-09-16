@@ -169,6 +169,16 @@ write_files:
         tar --zstd -xf "$tmp/payload" -C /opt/yantrik --strip-components=1
         rm -rf "$tmp"
         chown -R yantrik:yantrik /opt/yantrik
+
+        # Somewhere for the shell to write. Boot does not need it -- labwc starts yantrik-ui
+        # with no redirect -- but yantrik-update appends the shell's output to
+        # /opt/yantrik/logs/yantrik-os.log when it restarts after an update, and an append
+        # into a directory that is not there fails before the shell ever runs. On the machine
+        # this file provisions, that turned a good update into a rollback, and then took the
+        # rollback down with it: the restore used the same redirect and could not start the
+        # old shell either. One absent directory, one dark machine.
+        install -d -o yantrik -g yantrik /opt/yantrik/logs
+
         ln -sf /opt/yantrik/bin/yos /usr/local/bin/yos
         ln -sf /opt/yantrik/bin/yantrik-update /usr/local/bin/yantrik-update 2>/dev/null || true
         log "installed $(ls /opt/yantrik/bin | wc -l) binaries"
