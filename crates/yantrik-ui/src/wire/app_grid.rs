@@ -95,8 +95,27 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 .filter(|w| !w.starts_with('%'))
                 .collect::<Vec<_>>();
             if let Some(cmd) = exec_clean.first() {
-                let args = &exec_clean[1..];
-                let _ = std::process::Command::new(cmd).args(args).spawn();
+                // Through the shell's one launcher, not a bare Command.
+                //
+                // This spawned directly, so it inherited the shell's whole environment --
+                // including SLINT_FULLSCREEN=1, which the session sets because the shell IS the
+                // OS and must not be a window. An app that inherits it opens fullscreen with no
+                // titlebar, no taskbar and no way out: "I opened notes app and now its showing
+                // no option to close".
+                //
+                // spawn_app_in already removed that variable, registered the launch and reaped
+                // the child. Its own doc comment says the paths were unified "so the registry,
+                // the environment scrubbing and the reaper cannot end up applying to one launch
+                // path and not the other". This was a third path, and it was never brought in.
+                // Registered under the canonical id, not the .desktop basename.
+                //
+                // The catalogue keys entries by filename, so this OS's own apps come through as
+                // "yantrik-notes" while APP_NAMES — the single naming source the taskbar, the
+                // dock and the window list all read — says "notes". Passing the filename made
+                // the taskbar fall through to its title-casing fallback and label the window
+                // "Yantrik notes", beside a titlebar saying "Notes".
+                let canonical = app_id_str.strip_prefix("yantrik-").unwrap_or(&app_id_str);
+                super::dock::spawn_app_with_args(canonical, cmd, &exec_clean[1..]);
             }
         }
     });

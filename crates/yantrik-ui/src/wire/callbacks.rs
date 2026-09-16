@@ -296,7 +296,10 @@ fn wire_file_browser(ui: &App, ctx: &AppContext) {
                 }
             }
             FileAction::External(cmd) => {
-                let _ = std::process::Command::new(&cmd).arg(&full).spawn();
+                // Same launcher as everywhere else, for the same reason: a bare Command hands
+                // the child SLINT_FULLSCREEN and it opens with no way to close it.
+                let target = full.to_string_lossy().to_string();
+                super::dock::spawn_app_with_args(&cmd, &cmd, &[target.as_str()]);
             }
         }
     });
