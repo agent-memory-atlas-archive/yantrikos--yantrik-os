@@ -6,6 +6,8 @@ import { Theme } from "theme.slint";
 import { YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 
 // ── Data structs ──
@@ -133,6 +135,20 @@ component MetricTile inherits Rectangle {
 }
 
 export component WeatherDashboard inherits Rectangle {
+    // ── The agent layer ──
+    //
+    // Filled from what this app and the companion actually hold; every row says where it came
+    // from, and a section with nothing true to say does not draw. See agent_rail.slint.
+    in property <[AgentContextItem]> agent-context: [];
+    in property <[AgentSuggestion]> agent-suggestions: [];
+    in property <string> agent-unavailable: "";
+    callback agent-context-activated(string);
+    callback agent-suggestion-activated(string);
+    in property <AgentProposal> proposal;
+    in property <bool> proposal-working: false;
+    callback proposal-applied();
+    callback proposal-dismissed();
+
     // Whether there is anywhere to go back TO.
     //
     // The header's back arrow was hardcoded on, which is right inside the shell -- back means
@@ -215,6 +231,7 @@ export component WeatherDashboard inherits Rectangle {
     in property <string> weather-aqi-label: "N/A";
     in property <int> weather-aqi-level: 0;  // 0=good, 1=moderate, 2=unhealthy
 
+    // The content, with the agent rail beside it.
     VerticalLayout {
         width: 100%;
         height: 100%;
@@ -255,1084 +272,1106 @@ export component WeatherDashboard inherits Rectangle {
             }
         }
 
-        // ── Location Selector Panel ──
-        if root.weather-location-panel-open : Rectangle {
-            height: min(240px, loc-panel-col.preferred-height);
-            background: Theme.bg-surface;
-            border-width: 1px;
-            border-color: Theme.border-subtle;
+        // The content, with the agent rail beside it. The header stays full
+        // width above both.
+        HorizontalLayout {
+            if root.weather-location-panel-open : Rectangle {
+                height: min(240px, loc-panel-col.preferred-height);
+                background: Theme.bg-surface;
+                border-width: 1px;
+                border-color: Theme.border-subtle;
 
-            Flickable {
-                viewport-height: loc-panel-col.preferred-height;
+                Flickable {
+                    viewport-height: loc-panel-col.preferred-height;
 
-                loc-panel-col := VerticalLayout {
-                    alignment: start;
-                    padding: 12px;
-                    spacing: 6px;
+                    loc-panel-col := VerticalLayout {
+                        alignment: start;
+                        padding: 12px;
+                        spacing: 6px;
 
-                    // Add location row
-                    HorizontalLayout {
-                        spacing: 8px;
-                        height: 36px;
-
-                        Rectangle {
-                            horizontal-stretch: 1;
+                        // Add location row
+                        HorizontalLayout {
+                            spacing: 8px;
                             height: 36px;
-                            border-radius: 8px;
-                            background: Theme.bg-card;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            clip: true;
 
-                            loc-input := TextInput {
-                                text <=> root.weather-add-location-text;
-                                font-size: Theme.fs-caption;
-                                color: Theme.text-primary;
-                                width: parent.width - 16px;
-                                x: 8px;
-                                vertical-alignment: center;
-                                accepted => {
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 36px;
+                                border-radius: 8px;
+                                background: Theme.bg-card;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                clip: true;
+
+                                loc-input := TextInput {
+                                    text <=> root.weather-add-location-text;
+                                    font-size: Theme.fs-caption;
+                                    color: Theme.text-primary;
+                                    width: parent.width - 16px;
+                                    x: 8px;
+                                    vertical-alignment: center;
+                                    accepted => {
+                                        if root.weather-add-location-text != "" {
+                                            root.weather-add-location(root.weather-add-location-text);
+                                            root.weather-add-location-text = "";
+                                        }
+                                    }
+                                }
+
+                                // Placeholder
+                                if root.weather-add-location-text == "" : Text {
+                                    text: "Add city...";
+                                    color: Theme.text-dim;
+                                    font-size: Theme.fs-caption;
+                                    x: 8px;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                width: 36px;
+                                height: 36px;
+                                clicked => {
                                     if root.weather-add-location-text != "" {
                                         root.weather-add-location(root.weather-add-location-text);
                                         root.weather-add-location-text = "";
                                     }
                                 }
-                            }
-
-                            // Placeholder
-                            if root.weather-add-location-text == "" : Text {
-                                text: "Add city...";
-                                color: Theme.text-dim;
-                                font-size: Theme.fs-caption;
-                                x: 8px;
-                                vertical-alignment: center;
+                                add-loc-btn := Rectangle {
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: 8px;
+                                    background: parent.has-hover ? AppIdentity.accent : Theme.bg-card;
+                                    border-width: 1px;
+                                    border-color: Theme.border-subtle;
+                                    Text {
+                                        text: "+";
+                                        color: add-loc-btn.background == Theme.accent ? Theme.text-on-accent : Theme.accent;
+                                        font-size: Theme.fs-title-2;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
                             }
                         }
 
-                        TouchArea {
-                            width: 36px;
-                            height: 36px;
-                            clicked => {
-                                if root.weather-add-location-text != "" {
-                                    root.weather-add-location(root.weather-add-location-text);
-                                    root.weather-add-location-text = "";
+                        // Saved locations list
+                        for loc[idx] in root.weather-saved-locations : Rectangle {
+                            height: 40px;
+                            border-radius: 8px;
+                            background: loc.is-active ? AppIdentity.tint : (ta-loc.has-hover ? Theme.hover-fill : transparent);
+                            border-width: loc.is-active ? 1px : 0px;
+                            border-color: loc.is-active ? Theme.accent-dim : transparent;
+
+                            ta-loc := TouchArea {
+                                clicked => {
+                                    root.weather-select-location(idx);
+                                    root.weather-location-panel-open = false;
                                 }
                             }
-                            add-loc-btn := Rectangle {
-                                width: 36px;
-                                height: 36px;
-                                border-radius: 8px;
-                                background: parent.has-hover ? AppIdentity.accent : Theme.bg-card;
-                                border-width: 1px;
-                                border-color: Theme.border-subtle;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 8px;
+                                spacing: 8px;
+
+                                Icon {
+                                    commands: Icons.pin;
+                                    size: 14px;
+                                    tint: Theme.text-secondary;
+                                    y: (parent.height - self.height) / 2;
+                                }
                                 Text {
-                                    text: "+";
-                                    color: add-loc-btn.background == Theme.accent ? Theme.text-on-accent : Theme.accent;
-                                    font-size: Theme.fs-title-2;
-                                    font-weight: 700;
-                                    horizontal-alignment: center;
+                                    text: loc.name;
+                                    color: loc.is-active ? AppIdentity.accent : Theme.text-primary;
+                                    font-size: Theme.fs-body;
+                                    font-weight: loc.is-active ? 600 : 400;
                                     vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+
+                                if loc.is-active : Icon {
+                                    commands: Icons.check;
+                                    size: 14px;
+                                    tint: Theme.accent;
+                                    y: (parent.height - self.height) / 2;
+                                }
+
+                                // Remove button
+                                TouchArea {
+                                    width: 28px;
+                                    height: 28px;
+                                    clicked => { root.weather-remove-location(idx); }
+                                    Rectangle {
+                                        width: 28px;
+                                        height: 28px;
+                                        border-radius: 14px;
+                                        background: parent.has-hover ? Theme.hover-fill-strong : transparent;
+                                        Icon {
+                                            commands: Icons.close;
+                                            size: 12px;
+                                            tint: Theme.text-dim;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
+                }
+            }
 
-                    // Saved locations list
-                    for loc[idx] in root.weather-saved-locations : Rectangle {
-                        height: 40px;
-                        border-radius: 8px;
-                        background: loc.is-active ? AppIdentity.tint : (ta-loc.has-hover ? Theme.hover-fill : transparent);
-                        border-width: loc.is-active ? 1px : 0px;
-                        border-color: loc.is-active ? Theme.accent-dim : transparent;
+            // ── Severe Weather Alerts ──
+            for alert[ai] in root.weather-alerts : Rectangle {
+                height: 44px;
+                background: alert.severity >= 2 ? Theme.color-emotional.transparentize(85%)
+                           : alert.severity == 1 ? Theme.amber.transparentize(85%)
+                           : Theme.accent.transparentize(85%);
+                border-width: 1px;
+                border-color: alert.severity >= 2 ? Theme.color-emotional.transparentize(50%)
+                             : alert.severity == 1 ? Theme.amber.transparentize(50%)
+                             : Theme.accent.transparentize(50%);
 
-                        ta-loc := TouchArea {
-                            clicked => {
-                                root.weather-select-location(idx);
-                                root.weather-location-panel-open = false;
-                            }
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 10px;
+
+                    Icon {
+                        commands: Icons.glyph(alert.icon);
+                        size: 18px;
+                        tint: alert.severity >= 2 ? Theme.color-emotional
+                              : alert.severity == 1 ? Theme.amber : Theme.text-secondary;
+                        y: (parent.height - self.height) / 2;
+                    }
+
+                    Text {
+                        text: alert.title;
+                        color: alert.severity >= 2 ? Theme.color-emotional
+                              : alert.severity == 1 ? Theme.amber
+                              : Theme.accent;
+                        font-size: Theme.fs-caption;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: alert.description;
+                        color: alert.severity >= 2 ? Theme.color-emotional.transparentize(20%)
+                              : alert.severity == 1 ? Theme.amber-light
+                              : Theme.text-secondary;
+                        font-size: Theme.fs-caption;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+
+                    // Severity badge
+                    Rectangle {
+                        width: sev-text.preferred-width + 12px;
+                        height: 20px;
+                        y: (parent.height - 20px) / 2;
+                        border-radius: 10px;
+                        background: alert.severity >= 2 ? Theme.color-emotional.transparentize(60%)
+                                   : alert.severity == 1 ? Theme.amber.transparentize(60%)
+                                   : Theme.accent.transparentize(60%);
+                        sev-text := Text {
+                            text: alert.severity >= 2 ? "SEVERE"
+                                 : alert.severity == 1 ? "MODERATE"
+                                 : "INFO";
+                            color: alert.severity >= 2 ? Theme.color-emotional
+                                  : alert.severity == 1 ? Theme.amber
+                                  : Theme.accent;
+                            font-size: Theme.fs-micro;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
                         }
+                    }
+                }
+            }
+
+            // ── AI Response Panel ──
+            if root.ai-panel-open && root.ai-response != "" : Rectangle {
+                height: min(160px, ai-wx-resp.preferred-height + 16px);
+                background: Theme.bg-overlay-panel;
+                border-width: 1px;
+                border-color: Theme.accent.transparentize(70%);
+
+                Flickable {
+                    viewport-height: ai-wx-resp.preferred-height + 16px;
+
+                    ai-wx-resp := VerticalLayout {
+                        alignment: start;
+                        padding: Theme.sp-3;
+                        spacing: Theme.sp-2;
 
                         HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 8px;
-                            spacing: 8px;
-
+                            spacing: 6px;
                             Icon {
-                                commands: Icons.pin;
-                                size: 14px;
+                                commands: Icons.spark;
+                                size: 12px;
                                 tint: Theme.text-secondary;
                                 y: (parent.height - self.height) / 2;
                             }
                             Text {
-                                text: loc.name;
-                                color: loc.is-active ? AppIdentity.accent : Theme.text-primary;
-                                font-size: Theme.fs-body;
-                                font-weight: loc.is-active ? 600 : 400;
+                                text: "AI Insights";
+                                color: Theme.accent;
+                                font-size: Theme.fs-caption;
+                                font-weight: 600;
                                 vertical-alignment: center;
-                                horizontal-stretch: 1;
                             }
-
-                            if loc.is-active : Icon {
-                                commands: Icons.check;
-                                size: 14px;
-                                tint: Theme.accent;
-                                y: (parent.height - self.height) / 2;
-                            }
-
-                            // Remove button
-                            TouchArea {
-                                width: 28px;
-                                height: 28px;
-                                clicked => { root.weather-remove-location(idx); }
-                                Rectangle {
-                                    width: 28px;
-                                    height: 28px;
-                                    border-radius: 14px;
-                                    background: parent.has-hover ? Theme.hover-fill-strong : transparent;
-                                    Icon {
-                                        commands: Icons.close;
-                                        size: 12px;
-                                        tint: Theme.text-dim;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
-                                    }
+                            Rectangle { horizontal-stretch: 1; }
+                            YIconButton {
+                                icon-path: Icons.close;
+                                variant: 2;
+                                clicked => {
+                                    root.ai-panel-open = false;
+                                    root.ai-dismiss();
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
 
-        // ── Severe Weather Alerts ──
-        for alert[ai] in root.weather-alerts : Rectangle {
-            height: 44px;
-            background: alert.severity >= 2 ? Theme.color-emotional.transparentize(85%)
-                       : alert.severity == 1 ? Theme.amber.transparentize(85%)
-                       : Theme.accent.transparentize(85%);
-            border-width: 1px;
-            border-color: alert.severity >= 2 ? Theme.color-emotional.transparentize(50%)
-                         : alert.severity == 1 ? Theme.amber.transparentize(50%)
-                         : Theme.accent.transparentize(50%);
-
-            HorizontalLayout {
-                padding-left: 16px;
-                padding-right: 16px;
-                spacing: 10px;
-
-                Icon {
-                    commands: Icons.glyph(alert.icon);
-                    size: 18px;
-                    tint: alert.severity >= 2 ? Theme.color-emotional
-                          : alert.severity == 1 ? Theme.amber : Theme.text-secondary;
-                    y: (parent.height - self.height) / 2;
-                }
-
-                Text {
-                    text: alert.title;
-                    color: alert.severity >= 2 ? Theme.color-emotional
-                          : alert.severity == 1 ? Theme.amber
-                          : Theme.accent;
-                    font-size: Theme.fs-caption;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                }
-
-                Text {
-                    text: alert.description;
-                    color: alert.severity >= 2 ? Theme.color-emotional.transparentize(20%)
-                          : alert.severity == 1 ? Theme.amber-light
-                          : Theme.text-secondary;
-                    font-size: Theme.fs-caption;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    overflow: elide;
-                }
-
-                // Severity badge
-                Rectangle {
-                    width: sev-text.preferred-width + 12px;
-                    height: 20px;
-                    y: (parent.height - 20px) / 2;
-                    border-radius: 10px;
-                    background: alert.severity >= 2 ? Theme.color-emotional.transparentize(60%)
-                               : alert.severity == 1 ? Theme.amber.transparentize(60%)
-                               : Theme.accent.transparentize(60%);
-                    sev-text := Text {
-                        text: alert.severity >= 2 ? "SEVERE"
-                             : alert.severity == 1 ? "MODERATE"
-                             : "INFO";
-                        color: alert.severity >= 2 ? Theme.color-emotional
-                              : alert.severity == 1 ? Theme.amber
-                              : Theme.accent;
-                        font-size: Theme.fs-micro;
-                        font-weight: 700;
-                        letter-spacing: 1px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-        }
-
-        // ── AI Response Panel ──
-        if root.ai-panel-open && root.ai-response != "" : Rectangle {
-            height: min(160px, ai-wx-resp.preferred-height + 16px);
-            background: Theme.bg-overlay-panel;
-            border-width: 1px;
-            border-color: Theme.accent.transparentize(70%);
-
-            Flickable {
-                viewport-height: ai-wx-resp.preferred-height + 16px;
-
-                ai-wx-resp := VerticalLayout {
-                    alignment: start;
-                    padding: Theme.sp-3;
-                    spacing: Theme.sp-2;
-
-                    HorizontalLayout {
-                        spacing: 6px;
-                        Icon {
-                            commands: Icons.spark;
-                            size: 12px;
-                            tint: Theme.text-secondary;
-                            y: (parent.height - self.height) / 2;
-                        }
                         Text {
-                            text: "AI Insights";
-                            color: Theme.accent;
+                            text: root.ai-response;
+                            color: Theme.text-primary;
                             font-size: Theme.fs-caption;
-                            font-weight: 600;
-                            vertical-alignment: center;
+                            wrap: word-wrap;
                         }
-                        Rectangle { horizontal-stretch: 1; }
-                        YIconButton {
-                            icon-path: Icons.close;
-                            variant: 2;
-                            clicked => {
-                                root.ai-panel-open = false;
-                                root.ai-dismiss();
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: root.ai-response;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-caption;
-                        wrap: word-wrap;
                     }
                 }
             }
-        }
 
-        // ── Scrollable content ──
-        Flickable {
-            viewport-height: content-col.preferred-height + 40px;
+            // ── Scrollable content ──
+            Flickable {
+                viewport-height: content-col.preferred-height + 40px;
 
-            content-col := VerticalLayout {
-                alignment: start;
-                padding: Theme.sp-5;
-                spacing: Theme.sp-4;
+                content-col := VerticalLayout {
+                    alignment: start;
+                    padding: Theme.sp-5;
+                    spacing: Theme.sp-4;
 
-                // ══════ ERROR BANNER ══════
-                if root.current.error-text != "" : Rectangle {
-                    background: Theme.color-danger-dim;
-                    border-radius: Theme.r-lg;
-                    border-width: 1px;
-                    border-color: Theme.color-danger.with-alpha(0.25);
-                    height: 48px;
+                    // ══════ ERROR BANNER ══════
+                    if root.current.error-text != "" : Rectangle {
+                        background: Theme.color-danger-dim;
+                        border-radius: Theme.r-lg;
+                        border-width: 1px;
+                        border-color: Theme.color-danger.with-alpha(0.25);
+                        height: 48px;
 
-                    Text {
-                        text: root.current.error-text;
-                        color: Theme.color-danger;
-                        font-size: Theme.fs-body;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // ══════ SEVERE WEATHER ALERT BANNER ══════
-                if root.weather-severe-alert-active : Rectangle {
-                    background: root.weather-severe-alert-level == "watch" ? Theme.color-warning-dim
-                        : root.weather-severe-alert-level == "warning" ? Theme.color-danger-dim
-                        : root.weather-severe-alert-level == "emergency" ? Theme.color-danger.with-alpha(0.19)
-                        : Theme.color-warning-dim;
-                    border-radius: Theme.r-lg;
-                    border-width: 1px;
-                    border-color: root.weather-severe-alert-level == "watch" ? Theme.color-warning.with-alpha(0.37)
-                        : Theme.color-danger.with-alpha(0.37);
-                    height: severe-alert-row.preferred-height + 16px;
-
-                    severe-alert-row := HorizontalLayout {
-                        padding: 12px;
-                        spacing: 10px;
-                        alignment: center;
-
-                        Icon { commands: Icons.warning; size: 20px; tint: root.weather-severe-alert-level == "watch" ? Theme.amber : Theme.color-danger; thickness: 1.8px; y: (parent.height - self.height) / 2; }
-
-                        VerticalLayout {
-                            spacing: 2px;
-                            horizontal-stretch: 1;
-
-                            Text {
-                                text: root.weather-severe-alert-level == "watch" ? "Weather Watch"
-                                    : root.weather-severe-alert-level == "warning" ? "Weather Warning"
-                                    : "Weather Emergency";
-                                font-size: Theme.fs-body;
-                                font-weight: 700;
-                                color: root.weather-severe-alert-level == "watch" ? Theme.color-warning
-                                    : Theme.color-danger;
-                            }
-
-                            Text {
-                                text: root.weather-severe-alert-text;
-                                font-size: Theme.fs-caption;
-                                color: root.weather-severe-alert-level == "watch" ? Theme.color-warning
-                                    : Theme.color-danger;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-                }
-
-                // ══════ HERO SECTION — Current Conditions ══════
-                Rectangle {
-                    // A weather panel should have some air in it; a flat fill read as a form.
-                    background: @linear-gradient(160deg, Theme.bg-elevated 0%, Theme.bg-card 70%);
-                    border-radius: Theme.r-lg;
-                    border-width: 1px;
-                    border-color: Theme.border-subtle;
-                    height: hero-col.preferred-height;
-
-                    // Subtle accent glow at top
-                    Rectangle {
-                        height: 2px;
-                        width: parent.width;
-                        y: 0;
-                        background: Theme.accent-glow;
-                        border-radius: 1px;
-                    }
-
-                    hero-col := VerticalLayout {
-                        padding: Theme.sp-6;
-                        spacing: Theme.sp-4;
-
-                        // Loading indicator
-                        if root.current.is-loading : Text {
-                            text: "Fetching weather data...";
-                            color: Theme.text-dim;
+                        Text {
+                            text: root.current.error-text;
+                            color: Theme.color-danger;
                             font-size: Theme.fs-body;
                             horizontal-alignment: center;
+                            vertical-alignment: center;
                         }
+                    }
 
-                        // ── The reading, then today's numbers beside it ──
-                        HorizontalLayout {
-                            spacing: 24px;
+                    // ══════ SEVERE WEATHER ALERT BANNER ══════
+                    if root.weather-severe-alert-active : Rectangle {
+                        background: root.weather-severe-alert-level == "watch" ? Theme.color-warning-dim
+                            : root.weather-severe-alert-level == "warning" ? Theme.color-danger-dim
+                            : root.weather-severe-alert-level == "emergency" ? Theme.color-danger.with-alpha(0.19)
+                            : Theme.color-warning-dim;
+                        border-radius: Theme.r-lg;
+                        border-width: 1px;
+                        border-color: root.weather-severe-alert-level == "watch" ? Theme.color-warning.with-alpha(0.37)
+                            : Theme.color-danger.with-alpha(0.37);
+                        height: severe-alert-row.preferred-height + 16px;
+
+                        severe-alert-row := HorizontalLayout {
+                            padding: 12px;
+                            spacing: 10px;
+                            alignment: center;
+
+                            Icon { commands: Icons.warning; size: 20px; tint: root.weather-severe-alert-level == "watch" ? Theme.amber : Theme.color-danger; thickness: 1.8px; y: (parent.height - self.height) / 2; }
 
                             VerticalLayout {
+                                spacing: 2px;
                                 horizontal-stretch: 1;
-                                alignment: center;
-                                spacing: 6px;
-
-                                // Row 1: the icon on the temperature's own line. Centring it
-                                // against the whole stack pushed it below the number.
-                                HorizontalLayout {
-                                    alignment: start;
-                                    spacing: HERO-GUTTER;
-
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Icon {
-                                            commands: Icons.weather-kind(root.current.icon);
-                                            size: HERO-ICON;
-                                            thickness: 1.25px;
-                                            tint: root.current.is-day ? Theme.amber : Theme.holo-blue;
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Text {
-                                            text: root.current.temperature;
-                                            color: Theme.text-primary;
-                                            font-size: 62px;
-                                            font-weight: 250;
-                                        }
-                                    }
-                                }
-
-                                // Row 2: indented past the icon column so these sit under the
-                                // temperature, not under the icon. One left edge for both lines.
-                                HorizontalLayout {
-                                    alignment: start;
-
-                                    Rectangle { width: HERO-ICON + HERO-GUTTER; }
-
-                                    VerticalLayout {
-                                        spacing: 2px;
-
-                                        Text {
-                                            text: root.current.condition;
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-headline;
-                                            font-weight: 500;
-                                        }
-
-                                        Text {
-                                            text: "Feels like " + root.current.feels-like;
-                                            color: Theme.text-dim;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-                                }
-                            }
-
-                            VerticalLayout {
-                                width: 3 * root.HERO-TILE + 2 * 8px;
-                                alignment: center;
-                                spacing: 8px;
-
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    MetricTile {
-                                        width: root.HERO-TILE;
-                                        icon-path: Icons.droplet;
-                                        value: root.current.humidity;
-                                        label: "HUMIDITY";
-                                    }
-                                    MetricTile {
-                                        width: root.HERO-TILE;
-                                        icon-path: Icons.wind;
-                                        value: root.current.wind-speed;
-                                        label: "WIND " + root.current.wind-direction;
-                                    }
-                                    MetricTile {
-                                        width: root.HERO-TILE;
-                                        icon-path: Icons.sun;
-                                        value: root.current.uv-index;
-                                        label: "UV INDEX";
-                                    }
-                                }
-
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    MetricTile {
-                                        width: root.HERO-TILE;
-                                        icon-path: Icons.eye;
-                                        value: root.current.visibility;
-                                        label: "VISIBILITY";
-                                    }
-                                    MetricTile {
-                                        width: root.HERO-TILE;
-                                        icon-path: Icons.compass;
-                                        value: root.current.pressure;
-                                        label: "PRESSURE";
-                                    }
-                                    MetricTile {
-                                        width: root.HERO-TILE;
-                                        icon-path: Icons.cloud;
-                                        value: root.current.cloud-cover;
-                                        label: "CLOUD COVER";
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ══════ HOURLY FORECAST ══════
-                // Section header
-                HorizontalLayout {
-                    spacing: 8px;
-                    Rectangle {
-                        width: 3px; height: 14px;
-                        border-radius: 1.5px;
-                        background: Theme.accent;
-                        drop-shadow-blur: 4px;
-                        drop-shadow-color: Theme.accent-glow;
-                    }
-                    Text {
-                        text: "HOURLY FORECAST";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        letter-spacing: 2px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    background: Theme.bg-card;
-                    border-radius: Theme.r-lg;
-                    border-width: 1px;
-                    border-color: Theme.border-subtle;
-                    // Tall enough for time + icon + temp + the column + rain chance.
-                    // At 110px the columns and the rain line were clipped away.
-                    height: 168px;
-                    clip: true;
-
-                    Flickable {
-                        width: parent.width - Theme.sp-4;
-                        x: Theme.sp-2;
-                        height: parent.height;
-                        viewport-width: hourly.length * 70px + Theme.sp-4;
-
-                        HorizontalLayout {
-                            alignment: start;
-                            padding: Theme.sp-2;
-                            spacing: Theme.sp-1;
-
-                            for hour[i] in root.hourly : Rectangle {
-                                width: 64px;
-                                border-radius: Theme.r-md;
-                                background: hour.is-current ? AppIdentity.tint : transparent;
-                                border-width: hour.is-current ? 1px : 0px;
-                                border-color: hour.is-current ? Theme.accent-dim : transparent;
-
-                                VerticalLayout {
-                                    padding-top: 10px;
-                                    padding-bottom: 10px;
-                                    spacing: 6px;
-
-                                    Text {
-                                        text: hour.time;
-                                        color: hour.is-current ? AppIdentity.accent : Theme.text-dim;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: hour.is-current ? 700 : 500;
-                                        horizontal-alignment: center;
-                                    }
-
-                                    HorizontalLayout {
-                                        alignment: center;
-                                        Icon {
-                                            commands: Icons.weather-kind(hour.icon);
-                                            size: 20px;
-                                            tint: hour.is-current ? AppIdentity.accent : Theme.text-secondary;
-                                        }
-                                    }
-
-                                    Text {
-                                        text: hour.temp;
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-body;
-                                        font-weight: 600;
-                                        horizontal-alignment: center;
-                                    }
-
-                                    // A column per hour, so the strip reads as the shape of the
-                                    // day. The old 3px sliver read as dirt on the screen.
-                                    Rectangle {
-                                        height: 38px;
-
-                                        VerticalLayout {
-                                            alignment: end;
-
-                                            HorizontalLayout {
-                                                alignment: center;
-
-                                                Rectangle {
-                                                    width: 7px;
-                                                    // Mostly baseline, a little range: a 3-degree
-                                                    // day is genuinely flat, and a chart that
-                                                    // amplifies it to full height lies about it
-                                                    // while the cold end vanishes to a dot.
-                                                    height: 15px + 21px * (hour.t-max > hour.t-min
-                                                        ? (hour.temp-value - hour.t-min) / (hour.t-max - hour.t-min)
-                                                        : 0.5);
-                                                    border-radius: 3.5px;
-                                                    background: hour.is-current
-                                                        ? AppIdentity.accent
-                                                        : Theme.amber.transparentize(0.35);
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Rain chance annotates the hour; it should not outshout
-                                    // the temperature the way bright teal did.
-                                    Text {
-                                        text: hour.precip;
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-micro;
-                                        horizontal-alignment: center;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ══════ 5-DAY FORECAST ══════
-                // Section header
-                HorizontalLayout {
-                    spacing: 8px;
-                    Rectangle {
-                        width: 3px; height: 14px;
-                        border-radius: 1.5px;
-                        background: Theme.amber;
-                        drop-shadow-blur: 4px;
-                        drop-shadow-color: Theme.amber-glow;
-                    }
-                    Text {
-                        text: "5-DAY FORECAST";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        letter-spacing: 2px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    background: Theme.bg-card;
-                    border-radius: Theme.r-lg;
-                    border-width: 1px;
-                    border-color: Theme.border-subtle;
-                    height: daily-col.preferred-height;
-
-                    daily-col := VerticalLayout {
-                        padding: 8px;
-                        spacing: 0px;
-
-                        for day[i] in root.daily : Rectangle {
-                            height: 56px;
-
-                            HorizontalLayout {
-                                padding-left: 16px;
-                                padding-right: 16px;
-                                spacing: 12px;
 
                                 Text {
-                                    text: day.day-name;
-                                    color: Theme.text-primary;
+                                    text: root.weather-severe-alert-level == "watch" ? "Weather Watch"
+                                        : root.weather-severe-alert-level == "warning" ? "Weather Warning"
+                                        : "Weather Emergency";
                                     font-size: Theme.fs-body;
-                                    vertical-alignment: center;
-                                    width: 72px;
-                                }
-
-                                HorizontalLayout {
-                                    width: 32px;
-                                    alignment: center;
-                                    Icon {
-                                        commands: Icons.weather-kind(day.icon);
-                                        size: 22px;
-                                        tint: Theme.text-secondary;
-                                    }
+                                    font-weight: 700;
+                                    color: root.weather-severe-alert-level == "watch" ? Theme.color-warning
+                                        : Theme.color-danger;
                                 }
 
                                 Text {
-                                    text: day.precip-chance;
-                                    color: Theme.text-dim;
+                                    text: root.weather-severe-alert-text;
                                     font-size: Theme.fs-caption;
-                                    vertical-alignment: center;
-                                    width: 48px;
-                                    horizontal-alignment: right;
+                                    color: root.weather-severe-alert-level == "watch" ? Theme.color-warning
+                                        : Theme.color-danger;
+                                    wrap: word-wrap;
                                 }
+                            }
+                        }
+                    }
 
-                                // Low at the cold end, high at the warm end, bar between them —
-                                // one range to read, instead of a bar plus two numbers parked
-                                // together at the far right.
-                                Text {
-                                    text: day.low;
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-body;
-                                    vertical-alignment: center;
-                                    width: 40px;
-                                    horizontal-alignment: right;
-                                }
+                    // ══════ HERO SECTION — Current Conditions ══════
+                    Rectangle {
+                        // A weather panel should have some air in it; a flat fill read as a form.
+                        background: @linear-gradient(160deg, Theme.bg-elevated 0%, Theme.bg-card 70%);
+                        border-radius: Theme.r-lg;
+                        border-width: 1px;
+                        border-color: Theme.border-subtle;
+                        height: hero-col.preferred-height;
+
+                        // Subtle accent glow at top
+                        Rectangle {
+                            height: 2px;
+                            width: parent.width;
+                            y: 0;
+                            background: Theme.accent-glow;
+                            border-radius: 1px;
+                        }
+
+                        hero-col := VerticalLayout {
+                            padding: Theme.sp-6;
+                            spacing: Theme.sp-4;
+
+                            // Loading indicator
+                            if root.current.is-loading : Text {
+                                text: "Fetching weather data...";
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-body;
+                                horizontal-alignment: center;
+                            }
+
+                            // ── The reading, then today's numbers beside it ──
+                            HorizontalLayout {
+                                spacing: 24px;
 
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     alignment: center;
+                                    spacing: 6px;
 
-                                    Rectangle {
-                                        height: 8px;
-                                        border-radius: 4px;
-                                        background: Theme.bg-surface;
+                                    // Row 1: the icon on the temperature's own line. Centring it
+                                    // against the whole stack pushed it below the number.
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        spacing: HERO-GUTTER;
 
-                                        Rectangle {
-                                            x: parent.width * clamp(day.temp-range-min, 0, 1);
-                                            width: parent.width * clamp(day.temp-range-max - day.temp-range-min, 0.06, 1);
-                                            height: parent.height;
-                                            border-radius: 4px;
-                                            background: @linear-gradient(90deg,
-                                                Theme.holo-blue 0%, Theme.accent 55%, Theme.amber 100%);
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Icon {
+                                                commands: Icons.weather-kind(root.current.icon);
+                                                size: HERO-ICON;
+                                                thickness: 1.25px;
+                                                tint: root.current.is-day ? Theme.amber : Theme.holo-blue;
+                                            }
+                                        }
+
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text {
+                                                text: root.current.temperature;
+                                                color: Theme.text-primary;
+                                                font-size: 62px;
+                                                font-weight: 250;
+                                            }
+                                        }
+                                    }
+
+                                    // Row 2: indented past the icon column so these sit under the
+                                    // temperature, not under the icon. One left edge for both lines.
+                                    HorizontalLayout {
+                                        alignment: start;
+
+                                        Rectangle { width: HERO-ICON + HERO-GUTTER; }
+
+                                        VerticalLayout {
+                                            spacing: 2px;
+
+                                            Text {
+                                                text: root.current.condition;
+                                                color: Theme.text-secondary;
+                                                font-size: Theme.fs-headline;
+                                                font-weight: 500;
+                                            }
+
+                                            Text {
+                                                text: "Feels like " + root.current.feels-like;
+                                                color: Theme.text-dim;
+                                                font-size: Theme.fs-caption;
+                                            }
                                         }
                                     }
                                 }
 
-                                Text {
-                                    text: day.high;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-body;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                    width: 40px;
-                                    horizontal-alignment: left;
-                                }
-                            }
+                                VerticalLayout {
+                                    width: 3 * root.HERO-TILE + 2 * 8px;
+                                    alignment: center;
+                                    spacing: 8px;
 
-                            // Separator
-                            Rectangle {
-                                height: 1px;
-                                x: 16px;
-                                width: parent.width - 32px;
-                                y: parent.height - 1px;
-                                background: Theme.separator;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        MetricTile {
+                                            width: root.HERO-TILE;
+                                            icon-path: Icons.droplet;
+                                            value: root.current.humidity;
+                                            label: "HUMIDITY";
+                                        }
+                                        MetricTile {
+                                            width: root.HERO-TILE;
+                                            icon-path: Icons.wind;
+                                            value: root.current.wind-speed;
+                                            label: "WIND " + root.current.wind-direction;
+                                        }
+                                        MetricTile {
+                                            width: root.HERO-TILE;
+                                            icon-path: Icons.sun;
+                                            value: root.current.uv-index;
+                                            label: "UV INDEX";
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        MetricTile {
+                                            width: root.HERO-TILE;
+                                            icon-path: Icons.eye;
+                                            value: root.current.visibility;
+                                            label: "VISIBILITY";
+                                        }
+                                        MetricTile {
+                                            width: root.HERO-TILE;
+                                            icon-path: Icons.compass;
+                                            value: root.current.pressure;
+                                            label: "PRESSURE";
+                                        }
+                                        MetricTile {
+                                            width: root.HERO-TILE;
+                                            icon-path: Icons.cloud;
+                                            value: root.current.cloud-cover;
+                                            label: "CLOUD COVER";
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                }
 
-                // ══════ WEATHER DETAILS GRID ══════
-                // Section header
-                HorizontalLayout {
-                    spacing: 8px;
+                    // ══════ HOURLY FORECAST ══════
+                    // Section header
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            width: 3px; height: 14px;
+                            border-radius: 1.5px;
+                            background: Theme.accent;
+                            drop-shadow-blur: 4px;
+                            drop-shadow-color: Theme.accent-glow;
+                        }
+                        Text {
+                            text: "HOURLY FORECAST";
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-micro;
+                            letter-spacing: 2px;
+                            vertical-alignment: center;
+                        }
+                    }
+
                     Rectangle {
-                        width: 3px; height: 14px;
-                        border-radius: 1.5px;
-                        background: Theme.accent;
-                        drop-shadow-blur: 4px;
-                        drop-shadow-color: Theme.accent-glow;
-                    }
-                    Text {
-                        text: "DETAILS";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        letter-spacing: 2px;
-                        vertical-alignment: center;
-                    }
-                }
+                        background: Theme.bg-card;
+                        border-radius: Theme.r-lg;
+                        border-width: 1px;
+                        border-color: Theme.border-subtle;
+                        // Tall enough for time + icon + temp + the column + rain chance.
+                        // At 110px the columns and the rain line were clipped away.
+                        height: 168px;
+                        clip: true;
 
-                // Details grid (2 columns)
-                HorizontalLayout {
-                    spacing: 12px;
+                        Flickable {
+                            width: parent.width - Theme.sp-4;
+                            x: Theme.sp-2;
+                            height: parent.height;
+                            viewport-width: hourly.length * 70px + Theme.sp-4;
 
-                    // Left column
-                    VerticalLayout {
-                        horizontal-stretch: 1;
+                            HorizontalLayout {
+                                alignment: start;
+                                padding: Theme.sp-2;
+                                spacing: Theme.sp-1;
+
+                                for hour[i] in root.hourly : Rectangle {
+                                    width: 64px;
+                                    border-radius: Theme.r-md;
+                                    background: hour.is-current ? AppIdentity.tint : transparent;
+                                    border-width: hour.is-current ? 1px : 0px;
+                                    border-color: hour.is-current ? Theme.accent-dim : transparent;
+
+                                    VerticalLayout {
+                                        padding-top: 10px;
+                                        padding-bottom: 10px;
+                                        spacing: 6px;
+
+                                        Text {
+                                            text: hour.time;
+                                            color: hour.is-current ? AppIdentity.accent : Theme.text-dim;
+                                            font-size: Theme.fs-micro;
+                                            font-weight: hour.is-current ? 700 : 500;
+                                            horizontal-alignment: center;
+                                        }
+
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            Icon {
+                                                commands: Icons.weather-kind(hour.icon);
+                                                size: 20px;
+                                                tint: hour.is-current ? AppIdentity.accent : Theme.text-secondary;
+                                            }
+                                        }
+
+                                        Text {
+                                            text: hour.temp;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-body;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                        }
+
+                                        // A column per hour, so the strip reads as the shape of the
+                                        // day. The old 3px sliver read as dirt on the screen.
+                                        Rectangle {
+                                            height: 38px;
+
+                                            VerticalLayout {
+                                                alignment: end;
+
+                                                HorizontalLayout {
+                                                    alignment: center;
+
+                                                    Rectangle {
+                                                        width: 7px;
+                                                        // Mostly baseline, a little range: a 3-degree
+                                                        // day is genuinely flat, and a chart that
+                                                        // amplifies it to full height lies about it
+                                                        // while the cold end vanishes to a dot.
+                                                        height: 15px + 21px * (hour.t-max > hour.t-min
+                                                            ? (hour.temp-value - hour.t-min) / (hour.t-max - hour.t-min)
+                                                            : 0.5);
+                                                        border-radius: 3.5px;
+                                                        background: hour.is-current
+                                                            ? AppIdentity.accent
+                                                            : Theme.amber.transparentize(0.35);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Rain chance annotates the hour; it should not outshout
+                                        // the temperature the way bright teal did.
+                                        Text {
+                                            text: hour.precip;
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.fs-micro;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ══════ 5-DAY FORECAST ══════
+                    // Section header
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            width: 3px; height: 14px;
+                            border-radius: 1.5px;
+                            background: Theme.amber;
+                            drop-shadow-blur: 4px;
+                            drop-shadow-color: Theme.amber-glow;
+                        }
+                        Text {
+                            text: "5-DAY FORECAST";
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-micro;
+                            letter-spacing: 2px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        background: Theme.bg-card;
+                        border-radius: Theme.r-lg;
+                        border-width: 1px;
+                        border-color: Theme.border-subtle;
+                        height: daily-col.preferred-height;
+
+                        daily-col := VerticalLayout {
+                            padding: 8px;
+                            spacing: 0px;
+
+                            for day[i] in root.daily : Rectangle {
+                                height: 56px;
+
+                                HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    spacing: 12px;
+
+                                    Text {
+                                        text: day.day-name;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-body;
+                                        vertical-alignment: center;
+                                        width: 72px;
+                                    }
+
+                                    HorizontalLayout {
+                                        width: 32px;
+                                        alignment: center;
+                                        Icon {
+                                            commands: Icons.weather-kind(day.icon);
+                                            size: 22px;
+                                            tint: Theme.text-secondary;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: day.precip-chance;
+                                        color: Theme.text-dim;
+                                        font-size: Theme.fs-caption;
+                                        vertical-alignment: center;
+                                        width: 48px;
+                                        horizontal-alignment: right;
+                                    }
+
+                                    // Low at the cold end, high at the warm end, bar between them —
+                                    // one range to read, instead of a bar plus two numbers parked
+                                    // together at the far right.
+                                    Text {
+                                        text: day.low;
+                                        color: Theme.text-dim;
+                                        font-size: Theme.fs-body;
+                                        vertical-alignment: center;
+                                        width: 40px;
+                                        horizontal-alignment: right;
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+
+                                        Rectangle {
+                                            height: 8px;
+                                            border-radius: 4px;
+                                            background: Theme.bg-surface;
+
+                                            Rectangle {
+                                                x: parent.width * clamp(day.temp-range-min, 0, 1);
+                                                width: parent.width * clamp(day.temp-range-max - day.temp-range-min, 0.06, 1);
+                                                height: parent.height;
+                                                border-radius: 4px;
+                                                background: @linear-gradient(90deg,
+                                                    Theme.holo-blue 0%, Theme.accent 55%, Theme.amber 100%);
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: day.high;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-body;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        width: 40px;
+                                        horizontal-alignment: left;
+                                    }
+                                }
+
+                                // Separator
+                                Rectangle {
+                                    height: 1px;
+                                    x: 16px;
+                                    width: parent.width - 32px;
+                                    y: parent.height - 1px;
+                                    background: Theme.separator;
+                                }
+                            }
+                        }
+                    }
+
+                    // ══════ WEATHER DETAILS GRID ══════
+                    // Section header
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            width: 3px; height: 14px;
+                            border-radius: 1.5px;
+                            background: Theme.accent;
+                            drop-shadow-blur: 4px;
+                            drop-shadow-color: Theme.accent-glow;
+                        }
+                        Text {
+                            text: "DETAILS";
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-micro;
+                            letter-spacing: 2px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Details grid (2 columns)
+                    // ── What the companion is proposing ──
+                    if root.proposal.title != "" : AgentProposalCard {
+                        data: root.proposal;
+                        working: root.proposal-working;
+                        apply => { root.proposal-applied(); }
+                        dismiss => { root.proposal-dismissed(); }
+                    }
+
+                    HorizontalLayout {
                         spacing: 12px;
 
-                        // Sunrise
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 72px;
+                        // Left column
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 12px;
 
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 4px;
+                            // Sunrise
+                            Rectangle {
+                                background: Theme.bg-card;
+                                border-radius: Theme.r-lg;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                height: 72px;
 
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Icon {
-                                        commands: Icons.sunrise;
-                                        size: 16px;
-                                        tint: Theme.text-secondary;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                    Text {
-                                        text: "Sunrise";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-caption;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                Text {
-                                    text: root.current.sunrise;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-title-1;
-                                    font-weight: 600;
-                                }
-                            }
-                        }
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
 
-                        // Pressure
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 72px;
-
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 4px;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Icon {
-                                        commands: Icons.chart;
-                                        size: 16px;
-                                        tint: Theme.text-secondary;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                    Text {
-                                        text: "Pressure";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-caption;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                Text {
-                                    text: root.current.pressure;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-title-1;
-                                    font-weight: 600;
-                                }
-                            }
-                        }
-
-                        // Cloud Cover
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 72px;
-
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 4px;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Icon {
-                                        commands: Icons.cloud;
-                                        size: 16px;
-                                        tint: Theme.text-secondary;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                    Text {
-                                        text: "Cloud Cover";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-caption;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                Text {
-                                    text: root.current.cloud-cover;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-title-1;
-                                    font-weight: 600;
-                                }
-                            }
-                        }
-
-                        // AQI Card
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 72px;
-
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 4px;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Icon {
-                                        commands: Icons.wind;
-                                        size: 16px;
-                                        tint: Theme.text-secondary;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                    Text {
-                                        text: "Air Quality";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-caption;
-                                        vertical-alignment: center;
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    // AQI level badge
-                                    Rectangle {
-                                        width: aqi-badge-text.preferred-width + 10px;
-                                        height: 18px;
-                                        border-radius: 9px;
-                                        background: root.weather-aqi-level == 0 ? Theme.color-success-dim
-                                                   : root.weather-aqi-level == 1 ? Theme.amber.transparentize(70%)
-                                                   : Theme.color-emotional.transparentize(70%);
-                                        aqi-badge-text := Text {
-                                            text: root.weather-aqi-label;
-                                            color: root.weather-aqi-level == 0 ? Theme.color-success
-                                                  : root.weather-aqi-level == 1 ? Theme.amber
-                                                  : Theme.color-emotional;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Icon {
+                                            commands: Icons.sunrise;
+                                            size: 16px;
+                                            tint: Theme.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        Text {
+                                            text: "Sunrise";
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-caption;
                                             vertical-alignment: center;
                                         }
                                     }
+                                    Text {
+                                        text: root.current.sunrise;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-title-1;
+                                        font-weight: 600;
+                                    }
                                 }
-                                Text {
-                                    text: root.weather-aqi-value;
-                                    color: root.weather-aqi-level == 0 ? Theme.color-success
-                                          : root.weather-aqi-level == 1 ? Theme.amber
-                                          : Theme.color-emotional;
-                                    font-size: Theme.fs-title-1;
-                                    font-weight: 600;
+                            }
+
+                            // Pressure
+                            Rectangle {
+                                background: Theme.bg-card;
+                                border-radius: Theme.r-lg;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                height: 72px;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Icon {
+                                            commands: Icons.chart;
+                                            size: 16px;
+                                            tint: Theme.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        Text {
+                                            text: "Pressure";
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-caption;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Text {
+                                        text: root.current.pressure;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-title-1;
+                                        font-weight: 600;
+                                    }
+                                }
+                            }
+
+                            // Cloud Cover
+                            Rectangle {
+                                background: Theme.bg-card;
+                                border-radius: Theme.r-lg;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                height: 72px;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Icon {
+                                            commands: Icons.cloud;
+                                            size: 16px;
+                                            tint: Theme.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        Text {
+                                            text: "Cloud Cover";
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-caption;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Text {
+                                        text: root.current.cloud-cover;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-title-1;
+                                        font-weight: 600;
+                                    }
+                                }
+                            }
+
+                            // AQI Card
+                            Rectangle {
+                                background: Theme.bg-card;
+                                border-radius: Theme.r-lg;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                height: 72px;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Icon {
+                                            commands: Icons.wind;
+                                            size: 16px;
+                                            tint: Theme.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        Text {
+                                            text: "Air Quality";
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-caption;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        // AQI level badge
+                                        Rectangle {
+                                            width: aqi-badge-text.preferred-width + 10px;
+                                            height: 18px;
+                                            border-radius: 9px;
+                                            background: root.weather-aqi-level == 0 ? Theme.color-success-dim
+                                                       : root.weather-aqi-level == 1 ? Theme.amber.transparentize(70%)
+                                                       : Theme.color-emotional.transparentize(70%);
+                                            aqi-badge-text := Text {
+                                                text: root.weather-aqi-label;
+                                                color: root.weather-aqi-level == 0 ? Theme.color-success
+                                                      : root.weather-aqi-level == 1 ? Theme.amber
+                                                      : Theme.color-emotional;
+                                                font-size: Theme.fs-micro;
+                                                font-weight: 700;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: root.weather-aqi-value;
+                                        color: root.weather-aqi-level == 0 ? Theme.color-success
+                                              : root.weather-aqi-level == 1 ? Theme.amber
+                                              : Theme.color-emotional;
+                                        font-size: Theme.fs-title-1;
+                                        font-weight: 600;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Right column
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 12px;
+
+                            // Sunset
+                            Rectangle {
+                                background: Theme.bg-card;
+                                border-radius: Theme.r-lg;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                height: 72px;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Icon {
+                                            commands: Icons.sunset;
+                                            size: 16px;
+                                            tint: Theme.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        Text {
+                                            text: "Sunset";
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-caption;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Text {
+                                        text: root.current.sunset;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-title-1;
+                                        font-weight: 600;
+                                    }
+                                }
+                            }
+
+                            // Dew Point
+                            Rectangle {
+                                background: Theme.bg-card;
+                                border-radius: Theme.r-lg;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                height: 72px;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Icon {
+                                            commands: Icons.droplet;
+                                            size: 16px;
+                                            tint: Theme.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        Text {
+                                            text: "Dew Point";
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-caption;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Text {
+                                        text: root.current.dew-point;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-title-1;
+                                        font-weight: 600;
+                                    }
+                                }
+                            }
+
+                            // Precipitation
+                            Rectangle {
+                                background: Theme.bg-card;
+                                border-radius: Theme.r-lg;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                height: 72px;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Icon {
+                                            commands: Icons.rain;
+                                            size: 16px;
+                                            tint: Theme.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        Text {
+                                            text: "Precip.";
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-caption;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Text {
+                                        text: root.current.dew-point != "--" ? "See daily" : "--";
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-title-1;
+                                        font-weight: 600;
+                                    }
+                                }
+                            }
+
+                            // Wind Direction detail
+                            Rectangle {
+                                background: Theme.bg-card;
+                                border-radius: Theme.r-lg;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                height: 72px;
+
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Icon {
+                                            commands: Icons.compass;
+                                            size: 16px;
+                                            tint: Theme.text-secondary;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        Text {
+                                            text: "Wind Dir.";
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-caption;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Text {
+                                        text: root.current.wind-direction;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-title-1;
+                                        font-weight: 600;
+                                    }
                                 }
                             }
                         }
                     }
 
-                    // Right column
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        spacing: 12px;
-
-                        // Sunset
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 72px;
-
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 4px;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Icon {
-                                        commands: Icons.sunset;
-                                        size: 16px;
-                                        tint: Theme.text-secondary;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                    Text {
-                                        text: "Sunset";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-caption;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                Text {
-                                    text: root.current.sunset;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-title-1;
-                                    font-weight: 600;
-                                }
-                            }
-                        }
-
-                        // Dew Point
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 72px;
-
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 4px;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Icon {
-                                        commands: Icons.droplet;
-                                        size: 16px;
-                                        tint: Theme.text-secondary;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                    Text {
-                                        text: "Dew Point";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-caption;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                Text {
-                                    text: root.current.dew-point;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-title-1;
-                                    font-weight: 600;
-                                }
-                            }
-                        }
-
-                        // Precipitation
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 72px;
-
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 4px;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Icon {
-                                        commands: Icons.rain;
-                                        size: 16px;
-                                        tint: Theme.text-secondary;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                    Text {
-                                        text: "Precip.";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-caption;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                Text {
-                                    text: root.current.dew-point != "--" ? "See daily" : "--";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-title-1;
-                                    font-weight: 600;
-                                }
-                            }
-                        }
-
-                        // Wind Direction detail
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 72px;
-
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 4px;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Icon {
-                                        commands: Icons.compass;
-                                        size: 16px;
-                                        tint: Theme.text-secondary;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                    Text {
-                                        text: "Wind Dir.";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-caption;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                Text {
-                                    text: root.current.wind-direction;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-title-1;
-                                    font-weight: 600;
-                                }
-                            }
-                        }
-                    }
+                    // Bottom spacer
+                    Rectangle { height: 40px; }
                 }
-
-                // Bottom spacer
-                Rectangle { height: 40px; }
             }
+
+                // ── What Yantrik knows about this ──
+                //
+                // Full height beside the content. Collapses to nothing when there is nothing true to say.
+                AgentRail {
+                    context-items: root.agent-context;
+                    suggestions: root.agent-suggestions;
+                    unavailable: root.agent-unavailable;
+                    context-activated(id) => { root.agent-context-activated(id); }
+                    suggestion-activated(id) => { root.agent-suggestion-activated(id); }
+                }
         }
     }
 }

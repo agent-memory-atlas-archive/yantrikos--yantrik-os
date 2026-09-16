@@ -2,6 +2,8 @@
 // Wraps the shared NetworkManager component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
 import { NetworkManager, WifiNetwork, EthernetInterface, BluetoothDevice,
          VpnConnection, FirewallRule, DiagTestResult, ConnectionEvent,
@@ -9,8 +11,20 @@ import { NetworkManager, WifiNetwork, EthernetInterface, BluetoothDevice,
 
 export { WifiNetwork, EthernetInterface, BluetoothDevice, VpnConnection,
          FirewallRule, DiagTestResult, ConnectionEvent, NetAIProviderStatus, ThemeMode, AccentPreset }
+export { AgentContextItem, AgentSuggestion, AgentProposal }
 
 export component NetworkManagerApp inherits Window {
+    // ── The agent layer ──
+    in property <[AgentContextItem]> agent-context <=> net.agent-context;
+    in property <[AgentSuggestion]> agent-suggestions <=> net.agent-suggestions;
+    in property <string> agent-unavailable <=> net.agent-unavailable;
+    callback agent-context-activated <=> net.agent-context-activated;
+    callback agent-suggestion-activated <=> net.agent-suggestion-activated;
+    in property <AgentProposal> proposal <=> net.proposal;
+    in property <bool> proposal-working <=> net.proposal-working;
+    callback proposal-applied <=> net.proposal-applied;
+    callback proposal-dismissed <=> net.proposal-dismissed;
+    
     // What app this window is.
     //
     // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers

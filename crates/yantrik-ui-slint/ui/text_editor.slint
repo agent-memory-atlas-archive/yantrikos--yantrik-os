@@ -7,6 +7,8 @@ import { Theme } from "theme.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct EditorTabData {
@@ -17,6 +19,20 @@ export struct EditorTabData {
 }
 
 export component TextEditorScreen inherits Rectangle {
+    // ── The agent layer ──
+    //
+    // Filled from what this app and the companion actually hold; every row says where it came
+    // from, and a section with nothing true to say does not draw. See agent_rail.slint.
+    in property <[AgentContextItem]> agent-context: [];
+    in property <[AgentSuggestion]> agent-suggestions: [];
+    in property <string> agent-unavailable: "";
+    callback agent-context-activated(string);
+    callback agent-suggestion-activated(string);
+    in property <AgentProposal> proposal;
+    in property <bool> proposal-working: false;
+    callback proposal-applied();
+    callback proposal-dismissed();
+
     // ── Window chrome ──
     //
     // Passed down from the shell's WindowFrame rather than decided here, because this same
@@ -107,329 +123,186 @@ export component TextEditorScreen inherits Rectangle {
     callback editor-set-line-ending(string);
     callback editor-toggle-minimap();
 
-    VerticalLayout {
-        spacing: 0px;
-        // -- Header --
-        AppHeader {
-            show-window-controls: root.show-window-controls;
-            maximized: root.maximized;
-            minimize => { root.minimize(); }
-            toggle-maximize => { root.toggle-maximize(); }
-            close-window => { root.close-window(); }
-            app-id: "editor";
-            icon: Icons.editor;
-            title: root.file-name;
-            subtitle: root.is-readonly ? "read-only  -  " + root.file-type : root.file-type;
-            modified: root.is-modified;
-            actions: [
-                { id: "goto", icon: Icons.sort,   label: "\{root.cursor-line}:\{root.cursor-col}",
-                  active: root.show-goto-line },
-                { id: "find", icon: Icons.search, label: "Find", active: root.show-find-bar },
-                { id: "ai",   icon: Icons.spark,  label: root.ai-is-working ? "Working" : "AI",
-                  emphasis: 1, loading: root.ai-is-working, active: root.show-ai-panel },
-                { id: "save", icon: Icons.save,   label: "Save", emphasis: 2, active: root.is-modified },
-            ];
-            action(id) => {
-                if (id == "goto") { root.show-goto-line = !root.show-goto-line; }
-                else if (id == "find") { root.show-find-bar = !root.show-find-bar; }
-                else if (id == "ai") { root.show-ai-panel = !root.show-ai-panel; }
-                else if (id == "save") { root.save-file(); }
+    // The content, with the agent rail beside it.
+    // The editor, with the agent rail beside it.
+    //
+    // Around the whole column rather than around some part of it: this screen is a
+    // stack of conditional bars -- tabs, go-to-line, find, AI, save, warnings -- and
+    // every attempt to put the rail "next to the content" landed in one of them.
+    // One of those bars is hidden, which is why the rail vanished rather than moved.
+    HorizontalLayout {
+        VerticalLayout {
+            spacing: 0px;
+            // -- Header --
+            AppHeader {
+                show-window-controls: root.show-window-controls;
+                maximized: root.maximized;
+                minimize => { root.minimize(); }
+                toggle-maximize => { root.toggle-maximize(); }
+                close-window => { root.close-window(); }
+                app-id: "editor";
+                icon: Icons.editor;
+                title: root.file-name;
+                subtitle: root.is-readonly ? "read-only  -  " + root.file-type : root.file-type;
+                modified: root.is-modified;
+                actions: [
+                    { id: "goto", icon: Icons.sort,   label: "\{root.cursor-line}:\{root.cursor-col}",
+                      active: root.show-goto-line },
+                    { id: "find", icon: Icons.search, label: "Find", active: root.show-find-bar },
+                    { id: "ai",   icon: Icons.spark,  label: root.ai-is-working ? "Working" : "AI",
+                      emphasis: 1, loading: root.ai-is-working, active: root.show-ai-panel },
+                    { id: "save", icon: Icons.save,   label: "Save", emphasis: 2, active: root.is-modified },
+                ];
+                action(id) => {
+                    if (id == "goto") { root.show-goto-line = !root.show-goto-line; }
+                    else if (id == "find") { root.show-find-bar = !root.show-find-bar; }
+                    else if (id == "ai") { root.show-ai-panel = !root.show-ai-panel; }
+                    else if (id == "save") { root.save-file(); }
+                }
             }
-        }
+            if root.tab-count > 0 : Rectangle {
+                height: Theme.h-regular;
+                background: Theme.bg-surface;
 
-        // ── Tab Bar ──
-        if root.tab-count > 0 : Rectangle {
-            height: Theme.h-regular;
-            background: Theme.bg-surface;
+                HorizontalLayout {
+                    padding-left: Theme.sp-1;
+                    padding-right: Theme.sp-1;
+                    spacing: 0px;
+                    alignment: start;
 
-            HorizontalLayout {
-                padding-left: Theme.sp-1;
-                padding-right: Theme.sp-1;
-                spacing: 0px;
-                alignment: start;
+                    for tab[idx] in root.tabs : Rectangle {
+                        property <bool> hovered: ed-tab-ta.has-hover;
 
-                for tab[idx] in root.tabs : Rectangle {
-                    property <bool> hovered: ed-tab-ta.has-hover;
+                        width: 150px;
+                        height: Theme.h-regular;
+                        background: tab.is-active ? Theme.bg-elevated
+                                  : hovered ? Theme.hover-fill
+                                  : transparent;
 
-                    width: 150px;
-                    height: Theme.h-regular;
-                    background: tab.is-active ? Theme.bg-elevated
-                              : hovered ? Theme.hover-fill
-                              : transparent;
+                        animate background { duration: Theme.dur-fast; }
 
-                    animate background { duration: Theme.dur-fast; }
-
-                    // Active tab bottom accent
-                    if tab.is-active : Rectangle {
-                        y: parent.height - 2px;
-                        width: parent.width;
-                        height: 2px;
-                        background: Theme.accent;
-                    }
-
-                    ed-tab-ta := TouchArea {
-                        clicked => { root.switch-tab(idx); }
-                        mouse-cursor: pointer;
-                    }
-
-                    HorizontalLayout {
-                        padding-left: Theme.sp-3;
-                        padding-right: Theme.sp-1;
-                        spacing: Theme.sp-1;
-                        alignment: space-between;
-
-                        HorizontalLayout {
-                            spacing: Theme.sp-2;
-                            alignment: start;
-
-                            // Modified indicator
-                            if tab.is-modified : Text {
-                                text: "\u{25CF}";
-                                color: Theme.amber;
-                                font-size: Theme.fs-micro;
-                                vertical-alignment: center;
-                            }
-
-                            // Tab title
-                            Text {
-                                text: tab.title;
-                                color: tab.is-active ? Theme.text-primary : Theme.text-secondary;
-                                font-size: Theme.fs-caption;
-                                font-weight: tab.is-active ? Theme.fw-headline : Theme.fw-body;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
+                        // Active tab bottom accent
+                        if tab.is-active : Rectangle {
+                            y: parent.height - 2px;
+                            width: parent.width;
+                            height: 2px;
+                            background: Theme.accent;
                         }
 
-                        // Close button
-                        tab-close-ta := TouchArea {
-                            width: 18px;
-                            height: 18px;
-                            clicked => { root.close-tab(idx); }
+                        ed-tab-ta := TouchArea {
+                            clicked => { root.switch-tab(idx); }
+                            mouse-cursor: pointer;
+                        }
 
-                            Rectangle {
+                        HorizontalLayout {
+                            padding-left: Theme.sp-3;
+                            padding-right: Theme.sp-1;
+                            spacing: Theme.sp-1;
+                            alignment: space-between;
+
+                            HorizontalLayout {
+                                spacing: Theme.sp-2;
+                                alignment: start;
+
+                                // Modified indicator
+                                if tab.is-modified : Text {
+                                    text: "\u{25CF}";
+                                    color: Theme.amber;
+                                    font-size: Theme.fs-micro;
+                                    vertical-alignment: center;
+                                }
+
+                                // Tab title
+                                Text {
+                                    text: tab.title;
+                                    color: tab.is-active ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: Theme.fs-caption;
+                                    font-weight: tab.is-active ? Theme.fw-headline : Theme.fw-body;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+
+                            // Close button
+                            tab-close-ta := TouchArea {
                                 width: 18px;
                                 height: 18px;
-                                border-radius: Theme.r-sm;
-                                background: tab-close-ta.has-hover ? Theme.hover-fill-strong : transparent;
-                                animate background { duration: Theme.dur-fast; }
+                                clicked => { root.close-tab(idx); }
 
-                                Icon {
-                                    commands: Icons.close;
-                                    size: 14px;
-                                    tint: tab-close-ta.has-hover ? Theme.text-primary : Theme.text-dim;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    border-radius: Theme.r-sm;
+                                    background: tab-close-ta.has-hover ? Theme.hover-fill-strong : transparent;
+                                    animate background { duration: Theme.dur-fast; }
+
+                                    Icon {
+                                        commands: Icons.close;
+                                        size: 14px;
+                                        tint: tab-close-ta.has-hover ? Theme.text-primary : Theme.text-dim;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // New tab button (+)
-                if root.tab-count < 12 : Rectangle {
-                    property <bool> hovered: new-ed-tab-ta.has-hover;
+                    // New tab button (+)
+                    if root.tab-count < 12 : Rectangle {
+                        property <bool> hovered: new-ed-tab-ta.has-hover;
 
-                    width: Theme.h-compact;
-                    height: Theme.h-regular;
-                    background: hovered ? Theme.hover-fill : transparent;
-                    animate background { duration: Theme.dur-fast; }
+                        width: Theme.h-compact;
+                        height: Theme.h-regular;
+                        background: hovered ? Theme.hover-fill : transparent;
+                        animate background { duration: Theme.dur-fast; }
 
-                    new-ed-tab-ta := TouchArea {
-                        clicked => { root.new-tab(); }
-                        mouse-cursor: pointer;
-                    }
-
-                    Text {
-                        text: "+";
-                        color: hovered ? Theme.text-secondary : Theme.text-dim;
-                        font-size: Theme.fs-title-2;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-        }
-
-        // Tab bar separator
-        if root.tab-count > 0 : Rectangle { height: 1px; background: Theme.separator; }
-
-
-        Rectangle { height: 1px; background: Theme.separator; }
-
-        // ── Go-to-line bar ──
-        if root.show-goto-line : Rectangle {
-            height: 38px;
-            background: Theme.bg-elevated;
-            border-width: 1px;
-            border-color: Theme.accent-dim;
-
-            HorizontalLayout {
-                padding: Theme.sp-1;
-                padding-left: Theme.sp-3;
-                padding-right: Theme.sp-3;
-                spacing: Theme.sp-2;
-
-                Text {
-                    text: "Go to line:";
-                    color: Theme.accent;
-                    font-size: Theme.fs-caption;
-                    vertical-alignment: center;
-                    width: 80px;
-                }
-
-                Rectangle {
-                    horizontal-stretch: 0;
-                    width: 100px;
-                    height: 28px;
-                    border-radius: 6px;
-                    background: Theme.bg-input;
-                    border-width: 1px;
-                    border-color: Theme.border-subtle;
-                    clip: true;
-
-                    goto-input := TextInput {
-                        x: 8px;
-                        y: (parent.height - self.preferred-height) / 2;
-                        width: parent.width - 16px;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-body;
-                        text <=> root.goto-line-input;
-                        input-type: number;
-                        single-line: true;
-                        accepted => {
-                            root.goto-line(root.goto-line-input.to-float());
-                            root.show-goto-line = false;
+                        new-ed-tab-ta := TouchArea {
+                            clicked => { root.new-tab(); }
+                            mouse-cursor: pointer;
                         }
-                    }
-                }
 
-                Text {
-                    text: "of \{root.total-lines}";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-caption;
-                    vertical-alignment: center;
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-
-                // Close
-                YIconButton {
-                    icon-path: Icons.close;
-                    variant: 2;
-                    clicked => { root.show-goto-line = false; }
-                }
-            }
-        }
-
-        if root.show-goto-line : Rectangle { height: 1px; background: Theme.separator; }
-
-        // ── Find & Replace bar ──
-        if root.show-find-bar : Rectangle {
-            height: find-bar-layout.preferred-height;
-            background: Theme.bg-elevated;
-            border-width: 1px;
-            border-color: Theme.accent-dim;
-
-            find-bar-layout := VerticalLayout {
-                padding: Theme.sp-2;
-                padding-left: Theme.sp-3;
-                padding-right: Theme.sp-3;
-                spacing: Theme.sp-2;
-
-                // Row 1: Search input + match count + prev/next + close
-                HorizontalLayout {
-                    spacing: Theme.sp-2;
-
-                    Icon {
-                        commands: Icons.link;
-                        size: 14px;
-                        tint: Theme.accent;
-                        y: (parent.height - self.height) / 2;
-                    }
-
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 28px;
-                        border-radius: 6px;
-                        background: Theme.bg-input;
-                        border-width: 1px;
-                        border-color: root.find-query != "" && root.find-match-count > 0
-                            ? Theme.accent-dim
-                            : (root.find-query != "" ? Theme.color-emotional : Theme.border-subtle);
-                        clip: true;
-
-                        find-input := TextInput {
-                            x: 10px;
-                            y: (parent.height - self.preferred-height) / 2;
-                            width: parent.width - 20px;
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-caption;
-                            text <=> root.find-query;
-                            input-type: text;
-                            single-line: true;
-                            accepted => { root.find-next(); }
-                            edited => { root.find-query-changed(self.text); }
-                        }
-                    }
-
-                    if root.find-query != "" : Rectangle {
-                        width: match-count-text.preferred-width + 14px;
-                        height: 22px;
-                        border-radius: 11px;
-                        background: root.find-match-count > 0 ? AppIdentity.tint : Theme.color-danger-dim;
-
-                        match-count-text := Text {
-                            text: root.find-match-count > 0
-                                ? "\{root.find-current-match} of \{root.find-match-count}"
-                                : "0";
-                            color: root.find-match-count > 0 ? AppIdentity.accent : Theme.color-emotional;
-                            font-size: Theme.fs-micro;
-                            font-weight: 500;
+                        Text {
+                            text: "+";
+                            color: hovered ? Theme.text-secondary : Theme.text-dim;
+                            font-size: Theme.fs-title-2;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
-
-                    YIconButton {
-                        icon-path: Icons.chevron-up;
-                        variant: 2;
-                        clicked => { root.find-prev(); }
-                    }
-
-                    YIconButton {
-                        icon-path: Icons.chevron-down;
-                        variant: 2;
-                        clicked => { root.find-next(); }
-                    }
-
-                    YIconButton {
-                        icon-path: root.show-replace-row ? Icons.chevron-down : Icons.chevron-right;
-                        variant: root.show-replace-row ? 0 : 2;
-                        clicked => { root.show-replace-row = !root.show-replace-row; }
-                    }
-
-                    YIconButton {
-                        icon-path: Icons.close;
-                        variant: 2;
-                        clicked => {
-                            root.show-find-bar = false;
-                            root.find-query = "";
-                            root.replace-text = "";
-                            root.show-replace-row = false;
-                            root.find-query-changed("");
-                        }
-                    }
                 }
+            }
 
-                // Row 2: Replace input + Replace + Replace All
-                if root.show-replace-row && !root.is-readonly : HorizontalLayout {
-                    spacing: 6px;
+            // Tab bar separator
+            if root.tab-count > 0 : Rectangle { height: 1px; background: Theme.separator; }
 
-                    Rectangle { width: 18px; }
+
+            Rectangle { height: 1px; background: Theme.separator; }
+
+            // ── Go-to-line bar ──
+            if root.show-goto-line : Rectangle {
+                height: 38px;
+                background: Theme.bg-elevated;
+                border-width: 1px;
+                border-color: Theme.accent-dim;
+
+                HorizontalLayout {
+                    padding: Theme.sp-1;
+                    padding-left: Theme.sp-3;
+                    padding-right: Theme.sp-3;
+                    spacing: Theme.sp-2;
+
+                    Text {
+                        text: "Go to line:";
+                        color: Theme.accent;
+                        font-size: Theme.fs-caption;
+                        vertical-alignment: center;
+                        width: 80px;
+                    }
 
                     Rectangle {
-                        horizontal-stretch: 1;
+                        horizontal-stretch: 0;
+                        width: 100px;
                         height: 28px;
                         border-radius: 6px;
                         background: Theme.bg-input;
@@ -437,605 +310,770 @@ export component TextEditorScreen inherits Rectangle {
                         border-color: Theme.border-subtle;
                         clip: true;
 
-                        replace-input := TextInput {
-                            x: 10px;
+                        goto-input := TextInput {
+                            x: 8px;
                             y: (parent.height - self.preferred-height) / 2;
-                            width: parent.width - 20px;
+                            width: parent.width - 16px;
                             color: Theme.text-primary;
-                            font-size: Theme.fs-caption;
-                            text <=> root.replace-text;
-                            input-type: text;
+                            font-size: Theme.fs-body;
+                            text <=> root.goto-line-input;
+                            input-type: number;
                             single-line: true;
-                            accepted => { root.replace-current(); }
+                            accepted => {
+                                root.goto-line(root.goto-line-input.to-float());
+                                root.show-goto-line = false;
+                            }
                         }
                     }
 
-                    YButton {
-                        label: "Replace";
-                        variant: 1;
-                        size: 0;
-                        clicked => { root.replace-current(); }
-                    }
-
-                    YButton {
-                        label: "Replace All";
-                        variant: 1;
-                        size: 0;
-                        clicked => { root.replace-all(); }
-                    }
-                }
-            }
-        }
-
-        if root.show-find-bar : Rectangle { height: 1px; background: Theme.separator; }
-
-        // ── AI assist panel ──
-        if root.show-ai-panel : Rectangle {
-            max-height: 220px;
-            background: Theme.bg-elevated;
-            border-width: 1px;
-            border-color: Theme.amber-dim;
-
-            ai-panel-layout := VerticalLayout {
-                padding: Theme.sp-3;
-                spacing: Theme.sp-2;
-
-                // Header: label + quick actions + close
-                HorizontalLayout {
-                    spacing: Theme.sp-2;
-
                     Text {
-                        text: "AI Assist";
-                        color: Theme.amber;
+                        text: "of \{root.total-lines}";
+                        color: Theme.text-dim;
                         font-size: Theme.fs-caption;
-                        font-weight: Theme.fw-headline;
                         vertical-alignment: center;
                     }
 
                     Rectangle { horizontal-stretch: 1; }
 
-                    YButton {
-                        label: "Summarize";
-                        variant: 2;
-                        size: 0;
-                        clicked => { root.ai-request("summarize"); }
-                    }
-
-                    YButton {
-                        label: "Improve";
-                        variant: 2;
-                        size: 0;
-                        clicked => { root.ai-request("improve"); }
-                    }
-
+                    // Close
                     YIconButton {
                         icon-path: Icons.close;
                         variant: 2;
-                        clicked => { root.ai-dismiss(); }
+                        clicked => { root.show-goto-line = false; }
                     }
                 }
+            }
 
-                // Prompt input row
-                HorizontalLayout {
-                    spacing: 6px;
+            if root.show-goto-line : Rectangle { height: 1px; background: Theme.separator; }
 
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 30px;
-                        border-radius: 6px;
-                        background: Theme.bg-input;
-                        border-width: 1px;
-                        border-color: Theme.border-subtle;
-                        clip: true;
+            // ── Find & Replace bar ──
+            if root.show-find-bar : Rectangle {
+                height: find-bar-layout.preferred-height;
+                background: Theme.bg-elevated;
+                border-width: 1px;
+                border-color: Theme.accent-dim;
 
-                        ai-input := TextInput {
-                            x: 10px;
-                            y: (parent.height - self.preferred-height) / 2;
-                            width: parent.width - 20px;
-                            color: Theme.text-primary;
+                find-bar-layout := VerticalLayout {
+                    padding: Theme.sp-2;
+                    padding-left: Theme.sp-3;
+                    padding-right: Theme.sp-3;
+                    spacing: Theme.sp-2;
+
+                    // Row 1: Search input + match count + prev/next + close
+                    HorizontalLayout {
+                        spacing: Theme.sp-2;
+
+                        Icon {
+                            commands: Icons.link;
+                            size: 14px;
+                            tint: Theme.accent;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 28px;
+                            border-radius: 6px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: root.find-query != "" && root.find-match-count > 0
+                                ? Theme.accent-dim
+                                : (root.find-query != "" ? Theme.color-emotional : Theme.border-subtle);
+                            clip: true;
+
+                            find-input := TextInput {
+                                x: 10px;
+                                y: (parent.height - self.preferred-height) / 2;
+                                width: parent.width - 20px;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-caption;
+                                text <=> root.find-query;
+                                input-type: text;
+                                single-line: true;
+                                accepted => { root.find-next(); }
+                                edited => { root.find-query-changed(self.text); }
+                            }
+                        }
+
+                        if root.find-query != "" : Rectangle {
+                            width: match-count-text.preferred-width + 14px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: root.find-match-count > 0 ? AppIdentity.tint : Theme.color-danger-dim;
+
+                            match-count-text := Text {
+                                text: root.find-match-count > 0
+                                    ? "\{root.find-current-match} of \{root.find-match-count}"
+                                    : "0";
+                                color: root.find-match-count > 0 ? AppIdentity.accent : Theme.color-emotional;
+                                font-size: Theme.fs-micro;
+                                font-weight: 500;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        YIconButton {
+                            icon-path: Icons.chevron-up;
+                            variant: 2;
+                            clicked => { root.find-prev(); }
+                        }
+
+                        YIconButton {
+                            icon-path: Icons.chevron-down;
+                            variant: 2;
+                            clicked => { root.find-next(); }
+                        }
+
+                        YIconButton {
+                            icon-path: root.show-replace-row ? Icons.chevron-down : Icons.chevron-right;
+                            variant: root.show-replace-row ? 0 : 2;
+                            clicked => { root.show-replace-row = !root.show-replace-row; }
+                        }
+
+                        YIconButton {
+                            icon-path: Icons.close;
+                            variant: 2;
+                            clicked => {
+                                root.show-find-bar = false;
+                                root.find-query = "";
+                                root.replace-text = "";
+                                root.show-replace-row = false;
+                                root.find-query-changed("");
+                            }
+                        }
+                    }
+
+                    // Row 2: Replace input + Replace + Replace All
+                    if root.show-replace-row && !root.is-readonly : HorizontalLayout {
+                        spacing: 6px;
+
+                        Rectangle { width: 18px; }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 28px;
+                            border-radius: 6px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border-subtle;
+                            clip: true;
+
+                            replace-input := TextInput {
+                                x: 10px;
+                                y: (parent.height - self.preferred-height) / 2;
+                                width: parent.width - 20px;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-caption;
+                                text <=> root.replace-text;
+                                input-type: text;
+                                single-line: true;
+                                accepted => { root.replace-current(); }
+                            }
+                        }
+
+                        YButton {
+                            label: "Replace";
+                            variant: 1;
+                            size: 0;
+                            clicked => { root.replace-current(); }
+                        }
+
+                        YButton {
+                            label: "Replace All";
+                            variant: 1;
+                            size: 0;
+                            clicked => { root.replace-all(); }
+                        }
+                    }
+                }
+            }
+
+            if root.show-find-bar : Rectangle { height: 1px; background: Theme.separator; }
+
+            // ── AI assist panel ──
+            if root.show-ai-panel : Rectangle {
+                max-height: 220px;
+                background: Theme.bg-elevated;
+                border-width: 1px;
+                border-color: Theme.amber-dim;
+
+                ai-panel-layout := VerticalLayout {
+                    padding: Theme.sp-3;
+                    spacing: Theme.sp-2;
+
+                    // Header: label + quick actions + close
+                    HorizontalLayout {
+                        spacing: Theme.sp-2;
+
+                        Text {
+                            text: "AI Assist";
+                            color: Theme.amber;
                             font-size: Theme.fs-caption;
-                            text <=> root.ai-prompt;
-                            input-type: text;
-                            wrap: word-wrap;
-                            single-line: false;
-                            accepted => {
+                            font-weight: Theme.fw-headline;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        YButton {
+                            label: "Summarize";
+                            variant: 2;
+                            size: 0;
+                            clicked => { root.ai-request("summarize"); }
+                        }
+
+                        YButton {
+                            label: "Improve";
+                            variant: 2;
+                            size: 0;
+                            clicked => { root.ai-request("improve"); }
+                        }
+
+                        YIconButton {
+                            icon-path: Icons.close;
+                            variant: 2;
+                            clicked => { root.ai-dismiss(); }
+                        }
+                    }
+
+                    // Prompt input row
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 30px;
+                            border-radius: 6px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border-subtle;
+                            clip: true;
+
+                            ai-input := TextInput {
+                                x: 10px;
+                                y: (parent.height - self.preferred-height) / 2;
+                                width: parent.width - 20px;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-caption;
+                                text <=> root.ai-prompt;
+                                input-type: text;
+                                wrap: word-wrap;
+                                single-line: false;
+                                accepted => {
+                                    if root.ai-prompt != "" {
+                                        root.ai-request(root.ai-prompt);
+                                    }
+                                }
+                            }
+                        }
+
+                        send-ta := TouchArea {
+                            width: 48px;
+                            height: 30px;
+                            clicked => {
                                 if root.ai-prompt != "" {
                                     root.ai-request(root.ai-prompt);
                                 }
                             }
+                            Rectangle {
+                                width: 48px; height: 30px; border-radius: 6px;
+                                background: root.ai-is-working ? Theme.hover-fill : (send-ta.has-hover ? Theme.amber : Theme.hover-fill-strong);
+                                border-width: send-ta.has-hover ? 0px : 1px;
+                                border-color: Theme.amber-dim;
+                                Text { text: root.ai-is-working ? "..." : "Ask"; color: send-ta.has-hover && !root.ai-is-working ? Theme.bg-deep : Theme.amber; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            }
                         }
                     }
 
-                    send-ta := TouchArea {
-                        width: 48px;
-                        height: 30px;
-                        clicked => {
-                            if root.ai-prompt != "" {
-                                root.ai-request(root.ai-prompt);
+                    // AI response area
+                    if root.ai-response != "" : Rectangle {
+                        min-height: 36px;
+                        max-height: 120px;
+                        border-radius: 6px;
+                        background: Theme.bg-input;
+
+                        Flickable {
+                            width: parent.width;
+                            height: parent.height;
+                            viewport-height: ai-resp-text.preferred-height + 14px;
+
+                            ai-resp-text := Text {
+                                x: 10px;
+                                y: 7px;
+                                width: parent.width - 20px;
+                                text: root.ai-response;
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-caption;
+                                wrap: word-wrap;
                             }
                         }
-                        Rectangle {
-                            width: 48px; height: 30px; border-radius: 6px;
-                            background: root.ai-is-working ? Theme.hover-fill : (send-ta.has-hover ? Theme.amber : Theme.hover-fill-strong);
-                            border-width: send-ta.has-hover ? 0px : 1px;
-                            border-color: Theme.amber-dim;
-                            Text { text: root.ai-is-working ? "..." : "Ask"; color: send-ta.has-hover && !root.ai-is-working ? Theme.bg-deep : Theme.amber; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+
+                    // Insert button
+                    if root.ai-response != "" && !root.ai-is-working : HorizontalLayout {
+                        alignment: end;
+                        spacing: 6px;
+
+                        ins-ta := TouchArea {
+                            width: 100px;
+                            height: 26px;
+                            clicked => { root.ai-insert(); }
+                            Rectangle {
+                                width: 100px; height: 26px; border-radius: 6px;
+                                background: ins-ta.has-hover ? AppIdentity.accent : Theme.hover-fill-strong;
+                                border-width: ins-ta.has-hover ? 0px : 1px;
+                                border-color: Theme.accent-dim;
+                                Text { text: "Insert into doc"; color: ins-ta.has-hover ? Theme.bg-deep : Theme.accent; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                            }
                         }
                     }
                 }
+            }
 
-                // AI response area
-                if root.ai-response != "" : Rectangle {
-                    min-height: 36px;
-                    max-height: 120px;
-                    border-radius: 6px;
-                    background: Theme.bg-input;
+            if root.show-ai-panel : Rectangle { height: 1px; background: Theme.separator; }
+
+            // ── Save As dialog ──
+            if root.show-save-dialog : Rectangle {
+                height: save-dialog-layout.preferred-height;
+                background: Theme.bg-elevated;
+                border-width: 1px;
+                border-color: Theme.accent-dim;
+
+                save-dialog-layout := VerticalLayout {
+                    padding: 14px;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Save As"; color: Theme.accent; font-size: Theme.fs-body; font-weight: 600; horizontal-stretch: 1; vertical-alignment: center; }
+                        saveas-close-ta := TouchArea {
+                            width: 24px; height: 24px;
+                            clicked => { root.show-save-dialog = false; }
+                            Rectangle {
+                                width: 24px; height: 24px; border-radius: 6px;
+                                background: saveas-close-ta.has-hover ? Theme.hover-fill-strong : transparent;
+                                Icon {
+                                    commands: Icons.close;
+                                    size: 14px;
+                                    tint: Theme.text-secondary;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text { text: "Directory"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                        Rectangle {
+                            height: 30px; border-radius: 6px; background: Theme.bg-input; clip: true;
+                            border-width: 1px; border-color: Theme.border-subtle;
+                            dir-input := TextInput {
+                                x: 10px; y: (parent.height - self.preferred-height) / 2; width: parent.width - 20px;
+                                color: Theme.text-primary; font-size: Theme.fs-caption; text <=> root.save-dir;
+                                accepted => { root.save-file-as(root.save-dir, root.save-filename); }
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text { text: "Filename"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                        Rectangle {
+                            height: 30px; border-radius: 6px; background: Theme.bg-input; clip: true;
+                            border-width: 1px; border-color: Theme.border-subtle;
+                            name-input := TextInput {
+                                x: 10px; y: (parent.height - self.preferred-height) / 2; width: parent.width - 20px;
+                                color: Theme.text-primary; font-size: Theme.fs-caption; text <=> root.save-filename;
+                                accepted => { root.save-file-as(root.save-dir, root.save-filename); }
+                            }
+                        }
+                    }
+
+                    if root.save-error != "" : Text {
+                        text: root.save-error;
+                        color: Theme.color-emotional;
+                        font-size: Theme.fs-micro;
+                    }
+
+                    HorizontalLayout {
+                        spacing: Theme.sp-2;
+                        alignment: end;
+                        YButton {
+                            label: "Cancel";
+                            variant: 1;
+                            size: 0;
+                            clicked => { root.show-save-dialog = false; }
+                        }
+                        YButton {
+                            label: "Save";
+                            variant: 0;
+                            size: 0;
+                            clicked => { root.save-file-as(root.save-dir, root.save-filename); }
+                        }
+                    }
+                }
+            }
+
+            if root.show-save-dialog : Rectangle { height: 1px; background: Theme.separator; }
+
+            // ── Large file warning banner ──
+            if root.editor-large-file-warning : Rectangle {
+                height: 28px;
+                background: Theme.color-warning-dim;
+                border-width: 1px;
+                border-color: Theme.amber-dim;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    alignment: start;
+
+                    Icon {
+                        commands: Icons.warning;
+                        size: 12px;
+                        tint: Theme.amber;
+                        y: (parent.height - self.height) / 2;
+                    }
+
+                    Text {
+                        text: "Large file — some features disabled for performance";
+                        color: Theme.amber;
+                        font-size: Theme.fs-micro;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ── Editor area with line numbers ──
+            HorizontalLayout {
+                spacing: 0px;
+                vertical-stretch: 1;
+
+                // Line numbers gutter
+                Rectangle {
+                    width: 50px;
+                    background: Theme.bg-surface;
 
                     Flickable {
+                        x: 0px;
+                        y: 0px;
                         width: parent.width;
                         height: parent.height;
-                        viewport-height: ai-resp-text.preferred-height + 14px;
+                        viewport-height: line-num-text.preferred-height + 24px;
 
-                        ai-resp-text := Text {
-                            x: 10px;
-                            y: 7px;
-                            width: parent.width - 20px;
-                            text: root.ai-response;
-                            color: Theme.text-secondary;
-                            font-size: Theme.fs-caption;
-                            wrap: word-wrap;
+                        line-num-text := Text {
+                            x: 0px;
+                            y: 14px;
+                            width: 40px;
+                            text: root.line-numbers-text;
+                            color: Theme.text-dim.transparentize(20%);
+                            font-family: Theme.font-mono;
+                            font-size: Theme.fs-body;
+                            horizontal-alignment: right;
+                            wrap: no-wrap;
                         }
                     }
-                }
 
-                // Insert button
-                if root.ai-response != "" && !root.ai-is-working : HorizontalLayout {
-                    alignment: end;
-                    spacing: 6px;
-
-                    ins-ta := TouchArea {
-                        width: 100px;
-                        height: 26px;
-                        clicked => { root.ai-insert(); }
-                        Rectangle {
-                            width: 100px; height: 26px; border-radius: 6px;
-                            background: ins-ta.has-hover ? AppIdentity.accent : Theme.hover-fill-strong;
-                            border-width: ins-ta.has-hover ? 0px : 1px;
-                            border-color: Theme.accent-dim;
-                            Text { text: "Insert into doc"; color: ins-ta.has-hover ? Theme.bg-deep : Theme.accent; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                    }
-                }
-            }
-        }
-
-        if root.show-ai-panel : Rectangle { height: 1px; background: Theme.separator; }
-
-        // ── Save As dialog ──
-        if root.show-save-dialog : Rectangle {
-            height: save-dialog-layout.preferred-height;
-            background: Theme.bg-elevated;
-            border-width: 1px;
-            border-color: Theme.accent-dim;
-
-            save-dialog-layout := VerticalLayout {
-                padding: 14px;
-                spacing: 10px;
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text { text: "Save As"; color: Theme.accent; font-size: Theme.fs-body; font-weight: 600; horizontal-stretch: 1; vertical-alignment: center; }
-                    saveas-close-ta := TouchArea {
-                        width: 24px; height: 24px;
-                        clicked => { root.show-save-dialog = false; }
-                        Rectangle {
-                            width: 24px; height: 24px; border-radius: 6px;
-                            background: saveas-close-ta.has-hover ? Theme.hover-fill-strong : transparent;
-                            Icon {
-                                commands: Icons.close;
-                                size: 14px;
-                                tint: Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-                }
-
-                VerticalLayout {
-                    spacing: 4px;
-                    Text { text: "Directory"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                    // Gutter separator
                     Rectangle {
-                        height: 30px; border-radius: 6px; background: Theme.bg-input; clip: true;
-                        border-width: 1px; border-color: Theme.border-subtle;
-                        dir-input := TextInput {
-                            x: 10px; y: (parent.height - self.preferred-height) / 2; width: parent.width - 20px;
-                            color: Theme.text-primary; font-size: Theme.fs-caption; text <=> root.save-dir;
-                            accepted => { root.save-file-as(root.save-dir, root.save-filename); }
-                        }
+                        x: parent.width - 1px;
+                        y: 0px;
+                        width: 1px;
+                        height: parent.height;
+                        background: Theme.separator;
                     }
                 }
 
-                VerticalLayout {
-                    spacing: 4px;
-                    Text { text: "Filename"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                    Rectangle {
-                        height: 30px; border-radius: 6px; background: Theme.bg-input; clip: true;
-                        border-width: 1px; border-color: Theme.border-subtle;
-                        name-input := TextInput {
-                            x: 10px; y: (parent.height - self.preferred-height) / 2; width: parent.width - 20px;
-                            color: Theme.text-primary; font-size: Theme.fs-caption; text <=> root.save-filename;
-                            accepted => { root.save-file-as(root.save-dir, root.save-filename); }
-                        }
-                    }
-                }
-
-                if root.save-error != "" : Text {
-                    text: root.save-error;
-                    color: Theme.color-emotional;
-                    font-size: Theme.fs-micro;
-                }
-
-                HorizontalLayout {
-                    spacing: Theme.sp-2;
-                    alignment: end;
-                    YButton {
-                        label: "Cancel";
-                        variant: 1;
-                        size: 0;
-                        clicked => { root.show-save-dialog = false; }
-                    }
-                    YButton {
-                        label: "Save";
-                        variant: 0;
-                        size: 0;
-                        clicked => { root.save-file-as(root.save-dir, root.save-filename); }
-                    }
-                }
-            }
-        }
-
-        if root.show-save-dialog : Rectangle { height: 1px; background: Theme.separator; }
-
-        // ── Large file warning banner ──
-        if root.editor-large-file-warning : Rectangle {
-            height: 28px;
-            background: Theme.color-warning-dim;
-            border-width: 1px;
-            border-color: Theme.amber-dim;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                spacing: 8px;
-                alignment: start;
-
-                Icon {
-                    commands: Icons.warning;
-                    size: 12px;
-                    tint: Theme.amber;
-                    y: (parent.height - self.height) / 2;
-                }
-
-                Text {
-                    text: "Large file — some features disabled for performance";
-                    color: Theme.amber;
-                    font-size: Theme.fs-micro;
-                    font-weight: 500;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
-        // ── Editor area with line numbers ──
-        HorizontalLayout {
-            spacing: 0px;
-            vertical-stretch: 1;
-
-            // Line numbers gutter
-            Rectangle {
-                width: 50px;
-                background: Theme.bg-surface;
-
-                Flickable {
-                    x: 0px;
-                    y: 0px;
-                    width: parent.width;
-                    height: parent.height;
-                    viewport-height: line-num-text.preferred-height + 24px;
-
-                    line-num-text := Text {
-                        x: 0px;
-                        y: 14px;
-                        width: 40px;
-                        text: root.line-numbers-text;
-                        color: Theme.text-dim.transparentize(20%);
-                        font-family: Theme.font-mono;
-                        font-size: Theme.fs-body;
-                        horizontal-alignment: right;
-                        wrap: no-wrap;
-                    }
-                }
-
-                // Gutter separator
+                // Main editor
                 Rectangle {
-                    x: parent.width - 1px;
-                    y: 0px;
-                    width: 1px;
-                    height: parent.height;
-                    background: Theme.separator;
-                }
-            }
+                    background: Theme.bg-deep; clip: true;
+                    horizontal-stretch: 1;
 
-            // Main editor
-            Rectangle {
-                background: Theme.bg-deep; clip: true;
-                horizontal-stretch: 1;
-
-                // A blank editor should say what to do with it.
-                if root.file-content == "" : Text {
-                    x: 16px;
-                    y: 14px;
-                    text: root.is-readonly ? "This file is read-only." : "Start typing, or open a file from Files.";
-                    color: Theme.text-dim.transparentize(25%);
-                    font-family: Theme.font-mono;
-                    font-size: Theme.fs-body;
-                }
-
-                Flickable {
-                    x: 0px;
-                    y: 0px;
-                    width: parent.width;
-                    height: parent.height;
-                    viewport-height: editor-input.preferred-height + 32px;
-
-                    editor-input := TextInput {
+                    // A blank editor should say what to do with it.
+                    if root.file-content == "" : Text {
                         x: 16px;
                         y: 14px;
-                        width: parent.width - 32px;
-                        color: Theme.text-primary;
+                        text: root.is-readonly ? "This file is read-only." : "Start typing, or open a file from Files.";
+                        color: Theme.text-dim.transparentize(25%);
                         font-family: Theme.font-mono;
                         font-size: Theme.fs-body;
-                        text <=> root.file-content;
-                        read-only: root.is-readonly;
-                        single-line: false;
-                        wrap: no-wrap;
-                        selection-foreground-color: Theme.bg-deep;
-                        selection-background-color: Theme.accent;
-                        edited => { root.content-changed(self.text); }
+                    }
+
+                    Flickable {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width;
+                        height: parent.height;
+                        viewport-height: editor-input.preferred-height + 32px;
+
+                        editor-input := TextInput {
+                            x: 16px;
+                            y: 14px;
+                            width: parent.width - 32px;
+                            color: Theme.text-primary;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.fs-body;
+                            text <=> root.file-content;
+                            read-only: root.is-readonly;
+                            single-line: false;
+                            wrap: no-wrap;
+                            selection-foreground-color: Theme.bg-deep;
+                            selection-background-color: Theme.accent;
+                            edited => { root.content-changed(self.text); }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: Theme.h-compact;
+                background: Theme.bg-surface;
+
+                // Top divider
+                Rectangle {
+                    y: 0;
+                    width: 100%;
+                    height: 1px;
+                    background: Theme.separator;
+                }
+
+                // ── What the companion is proposing ──
+                if root.proposal.title != "" : AgentProposalCard {
+                    data: root.proposal;
+                    working: root.proposal-working;
+                    apply => { root.proposal-applied(); }
+                    dismiss => { root.proposal-dismissed(); }
+                }
+
+                HorizontalLayout {
+                    padding-left: Theme.sp-3;
+                    padding-right: Theme.sp-3;
+                    spacing: Theme.sp-4;
+                    alignment: start;
+
+                    // Cursor position
+                    Text {
+                        text: "Ln \{root.cursor-line}, Col \{root.cursor-col}";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
+                    }
+
+                    // Total lines
+                    Text {
+                        text: "\{root.total-lines} lines";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
+                    }
+
+                    // File size
+                    if root.editor-file-size-text != "" : Text {
+                        text: root.editor-file-size-text;
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // Autosave indicator
+                    if root.autosave-enabled && root.last-saved-time != "" : Text {
+                        text: "Saved \{root.last-saved-time}";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
+                    }
+
+                    // Encoding (clickable with dropdown)
+                    Rectangle {
+                        width: enc-click-text.preferred-width + 4px;
+                        height: 24px;
+
+                        enc-ta := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                root.editor-show-encoding-picker = !root.editor-show-encoding-picker;
+                                root.editor-show-line-ending-picker = false;
+                            }
+
+                            enc-click-text := Text {
+                                text: root.encoding;
+                                color: enc-ta.has-hover || root.editor-show-encoding-picker ? AppIdentity.accent : Theme.text-dim;
+                                font-size: Theme.fs-micro;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Encoding picker dropdown
+                        if root.editor-show-encoding-picker : Rectangle {
+                            x: 0px;
+                            y: -100px;
+                            width: 100px;
+                            height: 92px;
+                            border-radius: 8px;
+                            background: Theme.bg-elevated;
+                            border-width: 1px;
+                            border-color: Theme.accent-dim;
+
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 2px;
+
+                                enc-utf8-ta := TouchArea {
+                                    height: 26px;
+                                    clicked => {
+                                        root.editor-set-encoding("UTF-8");
+                                        root.editor-show-encoding-picker = false;
+                                    }
+                                    Rectangle {
+                                        height: 26px; border-radius: 6px;
+                                        background: root.encoding == "UTF-8" ? AppIdentity.tint : (enc-utf8-ta.has-hover ? Theme.hover-fill : transparent);
+                                        HorizontalLayout { padding-left: 10px;
+                                            Text { text: "UTF-8"; color: root.encoding == "UTF-8" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
+                                        }
+                                    }
+                                }
+
+                                enc-latin1-ta := TouchArea {
+                                    height: 26px;
+                                    clicked => {
+                                        root.editor-set-encoding("Latin-1");
+                                        root.editor-show-encoding-picker = false;
+                                    }
+                                    Rectangle {
+                                        height: 26px; border-radius: 6px;
+                                        background: root.encoding == "Latin-1" ? AppIdentity.tint : (enc-latin1-ta.has-hover ? Theme.hover-fill : transparent);
+                                        HorizontalLayout { padding-left: 10px;
+                                            Text { text: "Latin-1"; color: root.encoding == "Latin-1" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
+                                        }
+                                    }
+                                }
+
+                                enc-utf16-ta := TouchArea {
+                                    height: 26px;
+                                    clicked => {
+                                        root.editor-set-encoding("UTF-16");
+                                        root.editor-show-encoding-picker = false;
+                                    }
+                                    Rectangle {
+                                        height: 26px; border-radius: 6px;
+                                        background: root.encoding == "UTF-16" ? AppIdentity.tint : (enc-utf16-ta.has-hover ? Theme.hover-fill : transparent);
+                                        HorizontalLayout { padding-left: 10px;
+                                            Text { text: "UTF-16"; color: root.encoding == "UTF-16" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Line ending (clickable with dropdown)
+                    Rectangle {
+                        width: le-click-text.preferred-width + 4px;
+                        height: 24px;
+
+                        le-ta := TouchArea {
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => {
+                                root.editor-show-line-ending-picker = !root.editor-show-line-ending-picker;
+                                root.editor-show-encoding-picker = false;
+                            }
+
+                            le-click-text := Text {
+                                text: root.line-ending;
+                                color: le-ta.has-hover || root.editor-show-line-ending-picker ? AppIdentity.accent : Theme.text-dim;
+                                font-size: Theme.fs-micro;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Line ending picker dropdown
+                        if root.editor-show-line-ending-picker : Rectangle {
+                            x: 0px;
+                            y: -92px;
+                            width: 80px;
+                            height: 84px;
+                            border-radius: 8px;
+                            background: Theme.bg-elevated;
+                            border-width: 1px;
+                            border-color: Theme.accent-dim;
+
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 2px;
+
+                                le-lf-ta := TouchArea {
+                                    height: 24px;
+                                    clicked => {
+                                        root.editor-set-line-ending("LF");
+                                        root.editor-show-line-ending-picker = false;
+                                    }
+                                    Rectangle {
+                                        height: 24px; border-radius: 6px;
+                                        background: root.line-ending == "LF" ? AppIdentity.tint : (le-lf-ta.has-hover ? Theme.hover-fill : transparent);
+                                        HorizontalLayout { padding-left: 10px;
+                                            Text { text: "LF"; color: root.line-ending == "LF" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
+                                        }
+                                    }
+                                }
+
+                                le-crlf-ta := TouchArea {
+                                    height: 24px;
+                                    clicked => {
+                                        root.editor-set-line-ending("CRLF");
+                                        root.editor-show-line-ending-picker = false;
+                                    }
+                                    Rectangle {
+                                        height: 24px; border-radius: 6px;
+                                        background: root.line-ending == "CRLF" ? AppIdentity.tint : (le-crlf-ta.has-hover ? Theme.hover-fill : transparent);
+                                        HorizontalLayout { padding-left: 10px;
+                                            Text { text: "CRLF"; color: root.line-ending == "CRLF" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
+                                        }
+                                    }
+                                }
+
+                                le-cr-ta := TouchArea {
+                                    height: 24px;
+                                    clicked => {
+                                        root.editor-set-line-ending("CR");
+                                        root.editor-show-line-ending-picker = false;
+                                    }
+                                    Rectangle {
+                                        height: 24px; border-radius: 6px;
+                                        background: root.line-ending == "CR" ? AppIdentity.tint : (le-cr-ta.has-hover ? Theme.hover-fill : transparent);
+                                        HorizontalLayout { padding-left: 10px;
+                                            Text { text: "CR"; color: root.line-ending == "CR" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // File type
+                    Text {
+                        text: root.file-type;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
                     }
                 }
             }
         }
 
-        // ── Status bar ──
-        Rectangle {
-            height: Theme.h-compact;
-            background: Theme.bg-surface;
-
-            // Top divider
-            Rectangle {
-                y: 0;
-                width: 100%;
-                height: 1px;
-                background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                padding-left: Theme.sp-3;
-                padding-right: Theme.sp-3;
-                spacing: Theme.sp-4;
-                alignment: start;
-
-                // Cursor position
-                Text {
-                    text: "Ln \{root.cursor-line}, Col \{root.cursor-col}";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                // Total lines
-                Text {
-                    text: "\{root.total-lines} lines";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                // File size
-                if root.editor-file-size-text != "" : Text {
-                    text: root.editor-file-size-text;
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-
-                // Autosave indicator
-                if root.autosave-enabled && root.last-saved-time != "" : Text {
-                    text: "Saved \{root.last-saved-time}";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                // Encoding (clickable with dropdown)
-                Rectangle {
-                    width: enc-click-text.preferred-width + 4px;
-                    height: 24px;
-
-                    enc-ta := TouchArea {
-                        width: parent.width;
-                        height: parent.height;
-                        clicked => {
-                            root.editor-show-encoding-picker = !root.editor-show-encoding-picker;
-                            root.editor-show-line-ending-picker = false;
-                        }
-
-                        enc-click-text := Text {
-                            text: root.encoding;
-                            color: enc-ta.has-hover || root.editor-show-encoding-picker ? AppIdentity.accent : Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Encoding picker dropdown
-                    if root.editor-show-encoding-picker : Rectangle {
-                        x: 0px;
-                        y: -100px;
-                        width: 100px;
-                        height: 92px;
-                        border-radius: 8px;
-                        background: Theme.bg-elevated;
-                        border-width: 1px;
-                        border-color: Theme.accent-dim;
-
-                        VerticalLayout {
-                            padding: 4px;
-                            spacing: 2px;
-
-                            enc-utf8-ta := TouchArea {
-                                height: 26px;
-                                clicked => {
-                                    root.editor-set-encoding("UTF-8");
-                                    root.editor-show-encoding-picker = false;
-                                }
-                                Rectangle {
-                                    height: 26px; border-radius: 6px;
-                                    background: root.encoding == "UTF-8" ? AppIdentity.tint : (enc-utf8-ta.has-hover ? Theme.hover-fill : transparent);
-                                    HorizontalLayout { padding-left: 10px;
-                                        Text { text: "UTF-8"; color: root.encoding == "UTF-8" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                                    }
-                                }
-                            }
-
-                            enc-latin1-ta := TouchArea {
-                                height: 26px;
-                                clicked => {
-                                    root.editor-set-encoding("Latin-1");
-                                    root.editor-show-encoding-picker = false;
-                                }
-                                Rectangle {
-                                    height: 26px; border-radius: 6px;
-                                    background: root.encoding == "Latin-1" ? AppIdentity.tint : (enc-latin1-ta.has-hover ? Theme.hover-fill : transparent);
-                                    HorizontalLayout { padding-left: 10px;
-                                        Text { text: "Latin-1"; color: root.encoding == "Latin-1" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                                    }
-                                }
-                            }
-
-                            enc-utf16-ta := TouchArea {
-                                height: 26px;
-                                clicked => {
-                                    root.editor-set-encoding("UTF-16");
-                                    root.editor-show-encoding-picker = false;
-                                }
-                                Rectangle {
-                                    height: 26px; border-radius: 6px;
-                                    background: root.encoding == "UTF-16" ? AppIdentity.tint : (enc-utf16-ta.has-hover ? Theme.hover-fill : transparent);
-                                    HorizontalLayout { padding-left: 10px;
-                                        Text { text: "UTF-16"; color: root.encoding == "UTF-16" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Line ending (clickable with dropdown)
-                Rectangle {
-                    width: le-click-text.preferred-width + 4px;
-                    height: 24px;
-
-                    le-ta := TouchArea {
-                        width: parent.width;
-                        height: parent.height;
-                        clicked => {
-                            root.editor-show-line-ending-picker = !root.editor-show-line-ending-picker;
-                            root.editor-show-encoding-picker = false;
-                        }
-
-                        le-click-text := Text {
-                            text: root.line-ending;
-                            color: le-ta.has-hover || root.editor-show-line-ending-picker ? AppIdentity.accent : Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Line ending picker dropdown
-                    if root.editor-show-line-ending-picker : Rectangle {
-                        x: 0px;
-                        y: -92px;
-                        width: 80px;
-                        height: 84px;
-                        border-radius: 8px;
-                        background: Theme.bg-elevated;
-                        border-width: 1px;
-                        border-color: Theme.accent-dim;
-
-                        VerticalLayout {
-                            padding: 4px;
-                            spacing: 2px;
-
-                            le-lf-ta := TouchArea {
-                                height: 24px;
-                                clicked => {
-                                    root.editor-set-line-ending("LF");
-                                    root.editor-show-line-ending-picker = false;
-                                }
-                                Rectangle {
-                                    height: 24px; border-radius: 6px;
-                                    background: root.line-ending == "LF" ? AppIdentity.tint : (le-lf-ta.has-hover ? Theme.hover-fill : transparent);
-                                    HorizontalLayout { padding-left: 10px;
-                                        Text { text: "LF"; color: root.line-ending == "LF" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                                    }
-                                }
-                            }
-
-                            le-crlf-ta := TouchArea {
-                                height: 24px;
-                                clicked => {
-                                    root.editor-set-line-ending("CRLF");
-                                    root.editor-show-line-ending-picker = false;
-                                }
-                                Rectangle {
-                                    height: 24px; border-radius: 6px;
-                                    background: root.line-ending == "CRLF" ? AppIdentity.tint : (le-crlf-ta.has-hover ? Theme.hover-fill : transparent);
-                                    HorizontalLayout { padding-left: 10px;
-                                        Text { text: "CRLF"; color: root.line-ending == "CRLF" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                                    }
-                                }
-                            }
-
-                            le-cr-ta := TouchArea {
-                                height: 24px;
-                                clicked => {
-                                    root.editor-set-line-ending("CR");
-                                    root.editor-show-line-ending-picker = false;
-                                }
-                                Rectangle {
-                                    height: 24px; border-radius: 6px;
-                                    background: root.line-ending == "CR" ? AppIdentity.tint : (le-cr-ta.has-hover ? Theme.hover-fill : transparent);
-                                    HorizontalLayout { padding-left: 10px;
-                                        Text { text: "CR"; color: root.line-ending == "CR" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // File type
-                Text {
-                    text: root.file-type;
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-            }
+        AgentRail {
+        context-items: root.agent-context;
+        suggestions: root.agent-suggestions;
+        unavailable: root.agent-unavailable;
+        context-activated(id) => { root.agent-context-activated(id); }
+        suggestion-activated(id) => { root.agent-suggestion-activated(id); }
         }
     }
 }

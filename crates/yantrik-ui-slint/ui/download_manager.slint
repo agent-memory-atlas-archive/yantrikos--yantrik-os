@@ -7,6 +7,8 @@ import { ListView } from "std-widgets.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 
 export struct DownloadItem {
@@ -32,6 +34,20 @@ export struct DownloadItem {
 }
 
 export component DownloadManagerScreen inherits Rectangle {
+    // ── The agent layer ──
+    //
+    // Filled from what this app and the companion actually hold; every row says where it came
+    // from, and a section with nothing true to say does not draw. See agent_rail.slint.
+    in property <[AgentContextItem]> agent-context: [];
+    in property <[AgentSuggestion]> agent-suggestions: [];
+    in property <string> agent-unavailable: "";
+    callback agent-context-activated(string);
+    callback agent-suggestion-activated(string);
+    in property <AgentProposal> proposal;
+    in property <bool> proposal-working: false;
+    callback proposal-applied();
+    callback proposal-dismissed();
+
     background: transparent;
 
     in property <[DownloadItem]> downloads: [];
@@ -567,6 +583,14 @@ export component DownloadManagerScreen inherits Rectangle {
                             spacing: 6px;
 
                             // Row 1: checkbox + filename + status + actions
+                            // ── What the companion is proposing ──
+                            if root.proposal.title != "" : AgentProposalCard {
+                                data: root.proposal;
+                                working: root.proposal-working;
+                                apply => { root.proposal-applied(); }
+                                dismiss => { root.proposal-dismissed(); }
+                            }
+
                             HorizontalLayout {
                                 spacing: 12px;
 
@@ -835,6 +859,15 @@ export component DownloadManagerScreen inherits Rectangle {
                                             }
                                         }
                                     }
+                                }
+
+                                // ── What Yantrik knows about this ──
+                                AgentRail {
+                                    context-items: root.agent-context;
+                                    suggestions: root.agent-suggestions;
+                                    unavailable: root.agent-unavailable;
+                                    context-activated(id) => { root.agent-context-activated(id); }
+                                    suggestion-activated(id) => { root.agent-suggestion-activated(id); }
                                 }
                             }
 

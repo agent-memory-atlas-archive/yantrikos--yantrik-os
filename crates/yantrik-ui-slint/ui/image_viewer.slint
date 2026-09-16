@@ -6,6 +6,8 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 
@@ -42,6 +44,20 @@ component ToolbarButton inherits TouchArea {
 }
 
 export component ImageViewer inherits Rectangle {
+    // ── The agent layer ──
+    //
+    // Filled from what this app and the companion actually hold; every row says where it came
+    // from, and a section with nothing true to say does not draw. See agent_rail.slint.
+    in property <[AgentContextItem]> agent-context: [];
+    in property <[AgentSuggestion]> agent-suggestions: [];
+    in property <string> agent-unavailable: "";
+    callback agent-context-activated(string);
+    callback agent-suggestion-activated(string);
+    in property <AgentProposal> proposal;
+    in property <bool> proposal-working: false;
+    callback proposal-applied();
+    callback proposal-dismissed();
+
     // ── Window chrome ──
     //
     // Passed down from the shell's WindowFrame rather than decided here, because this same
@@ -167,6 +183,7 @@ export component ImageViewer inherits Rectangle {
         }
     }
 
+    // The content, with the agent rail beside it.
     VerticalLayout {
         spacing: 0px;
 
@@ -233,263 +250,63 @@ export component ImageViewer inherits Rectangle {
             }
         }
 
-        // -- View controls --
-        //
-        // How you are looking at the picture, not what you are doing to it.
-        Rectangle {
-            height: Theme.h-prominent;
-            background: Theme.bg-deep;
-
-            Rectangle {
-                y: parent.height - 1px;
-                width: 100%;
-                height: 1px;
-                background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                alignment: center;
-                spacing: 6px;
-                padding-top: 4px;
-                padding-bottom: 4px;
-
-                ToolbarButton {
-                    label: ""; icon-only: true; icon-path: Icons.minus;
-                    clicked => {
-                        root.zoom-level = root.clamp-zoom(root.zoom-level / 1.25);
-                        root.is-custom-zoom = true;
-                    }
-                }
-
-                VerticalLayout {
-                    alignment: center;
-                    Text {
-                        text: root.zoom-text;
-                        color: root.is-custom-zoom ? Theme.accent-light : Theme.text-dim;
-                        font-size: Theme.fs-caption;
-                        font-weight: root.is-custom-zoom ? 600 : 400;
-                        min-width: 52px;
-                        horizontal-alignment: center;
-                    }
-                }
-
-                ToolbarButton {
-                    label: ""; icon-only: true; icon-path: Icons.plus;
-                    clicked => {
-                        root.zoom-level = root.clamp-zoom(root.zoom-level * 1.25);
-                        root.is-custom-zoom = true;
-                    }
-                }
-
-                ToolbarButton {
-                    label: "Fit";
-                    active: !root.is-custom-zoom;
-                    clicked => { root.reset-zoom(); }
-                }
-
-                ToolbarButton {
-                    label: "1:1";
-                    clicked => {
-                        root.zoom-level = 1.0;
-                        root.pan-x = 0.0;
-                        root.pan-y = 0.0;
-                        root.is-custom-zoom = true;
-                        root.fit-contain = false;
-                    }
-                }
-
-                ToolbarButton {
-                    label: ""; icon-only: true; icon-path: Icons.rotate-ccw;
-                    clicked => {
-                        root.viewer-rotation = mod(root.viewer-rotation + 270, 360);
-                        root.viewer-rotate-left();
-                    }
-                }
-
-                ToolbarButton {
-                    label: ""; icon-only: true; icon-path: Icons.rotate-cw;
-                    clicked => {
-                        root.viewer-rotation = mod(root.viewer-rotation + 90, 360);
-                        root.viewer-rotate-right();
-                    }
-                }
-
-                ToolbarButton {
-                    label: ""; icon-only: true; icon-path: Icons.flip-h;
-                    active: root.viewer-flip-h;
-                    clicked => {
-                        root.viewer-flip-h = !root.viewer-flip-h;
-                        root.viewer-flip-horizontal();
-                    }
-                }
-
-                ToolbarButton {
-                    label: ""; icon-only: true; icon-path: Icons.sort;
-                    active: root.viewer-flip-v;
-                    clicked => {
-                        root.viewer-flip-v = !root.viewer-flip-v;
-                        root.viewer-flip-vertical();
-                    }
-                }
-
-                ToolbarButton {
-                    label: ""; icon-only: true;
-                    icon-path: root.fit-contain ? Icons.maximize : Icons.minimize;
-                    clicked => {
-                        root.toggle-fit();
-                        if (!root.is-custom-zoom) { root.fit-contain = !root.fit-contain; }
-                    }
-                }
-            }
-        }
-
-        // Separator
-        Rectangle { height: 1px; background: Theme.separator; }
-
-        // ── AI Response Panel ──
-        if root.ai-panel-open && root.ai-response != "" : Rectangle {
-            height: min(160px, ai-img-resp.preferred-height + 16px);
-            background: Theme.bg-overlay-panel;
-            border-width: 1px;
-            border-color: Theme.accent.transparentize(70%);
-
-            Flickable {
-                viewport-height: ai-img-resp.preferred-height + 16px;
-
-                ai-img-resp := VerticalLayout {
-                    alignment: start;
-                    padding: 12px;
-                    spacing: 8px;
-
-                    HorizontalLayout {
-                        spacing: 6px;
-                        Icon {
-                            commands: Icons.spark;
-                            size: 12px;
-                            tint: Theme.text-secondary;
-                            y: (parent.height - self.height) / 2;
-                        }
-                        Text {
-                            text: "AI Description";
-                            color: Theme.accent;
-                            font-size: Theme.fs-caption;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-
-                        // Dismiss button
-                        TouchArea {
-                            width: 24px;
-                            height: 24px;
-                            clicked => {
-                                root.ai-panel-open = false;
-                                root.ai-dismiss();
-                            }
-                            Rectangle {
-                                width: 24px; height: 24px;
-                                border-radius: 12px;
-                                background: parent.has-hover ? Theme.hover-fill : transparent;
-                                Icon {
-                                    commands: Icons.close;
-                                    size: 12px;
-                                    tint: Theme.text-dim;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: root.ai-response;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-caption;
-                        wrap: word-wrap;
-                    }
-                }
-            }
-        }
-
-        // ── Main content: image area + optional EXIF panel ──
+        // The content, with the agent rail beside it. The header stays full
+        // width above both.
         HorizontalLayout {
-            spacing: 0px;
-
-            // Image area with zoom/pan
             Rectangle {
+                height: Theme.h-prominent;
                 background: Theme.bg-deep;
-                clip: true;
-                horizontal-stretch: 1;
 
-                // Helper function: compute scale-x for flip
-                // Slint doesn't have conditional scale, so we use two Image variants
-
-                if root.file-name == "" : YEmptyState {
-                    icon-path: Icons.image;
-                    title: "No image open";
-                    description: "Open a picture from Files, or pass a path on the command line.";
-                }
-
-                if !root.is-custom-zoom : Image {
+                Rectangle {
+                    y: parent.height - 1px;
                     width: 100%;
-                    height: 100%;
-                    source: root.current-image;
-                    image-fit: root.fit-contain ? contain : cover;
-                    transform-rotation: root.computed-rotation;
+                    height: 1px;
+                    background: Theme.separator;
                 }
 
-                if root.is-custom-zoom : Rectangle {
-                    // Zoomed image container — positioned via pan offsets
-                    img := Image {
-                        x: root.pan-x * 1px;
-                        y: root.pan-y * 1px;
-                        width: parent.width * root.zoom-level;
-                        height: parent.height * root.zoom-level;
-                        source: root.current-image;
-                        image-fit: contain;
-                        transform-rotation: root.computed-rotation;
-                    }
-                }
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 6px;
+                    padding-top: 4px;
+                    padding-bottom: 4px;
 
-                // Flip overlay: render a second image with mirroring when flipped
-                // Slint doesn't support negative scale, so we use image-rendering
-                // with rotation to simulate flips:
-                //   flip-h = rotate 180° around Y axis → not directly supported
-                // Instead we handle flips by pre-processing in the backend (Rust).
-                // The flip-h/flip-v properties signal the backend to do the transform.
-
-                // Zoom + pan interaction layer
-                touch := TouchArea {
-                    x: 0;
-                    y: 0;
-                    width: 100%;
-                    height: 100%;
-                    mouse-cursor: root.is-custom-zoom ? move : default;
-
-                    scroll-event(e) => {
-                        if (e.delta-y > 0) {
-                            // Scroll up = zoom in
-                            root.zoom-level = root.clamp-zoom(root.zoom-level * 1.15);
-                        } else if (e.delta-y < 0) {
-                            // Scroll down = zoom out
-                            root.zoom-level = root.clamp-zoom(root.zoom-level / 1.15);
-                        }
-                        if (root.zoom-level != 1.0 || root.is-custom-zoom) {
+                    ToolbarButton {
+                        label: ""; icon-only: true; icon-path: Icons.minus;
+                        clicked => {
+                            root.zoom-level = root.clamp-zoom(root.zoom-level / 1.25);
                             root.is-custom-zoom = true;
                         }
-                        // If zoomed back to ~1.0, reset
-                        if (root.zoom-level > 0.95 && root.zoom-level < 1.05 && !root.is-custom-zoom) {
-                            root.reset-zoom();
-                        }
-                        return accept;
                     }
 
-                    double-clicked => {
-                        if (root.is-custom-zoom) {
-                            // Double-click: go back to fit
-                            root.reset-zoom();
-                        } else {
-                            // Double-click: go to 100%
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: root.zoom-text;
+                            color: root.is-custom-zoom ? Theme.accent-light : Theme.text-dim;
+                            font-size: Theme.fs-caption;
+                            font-weight: root.is-custom-zoom ? 600 : 400;
+                            min-width: 52px;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    ToolbarButton {
+                        label: ""; icon-only: true; icon-path: Icons.plus;
+                        clicked => {
+                            root.zoom-level = root.clamp-zoom(root.zoom-level * 1.25);
+                            root.is-custom-zoom = true;
+                        }
+                    }
+
+                    ToolbarButton {
+                        label: "Fit";
+                        active: !root.is-custom-zoom;
+                        clicked => { root.reset-zoom(); }
+                    }
+
+                    ToolbarButton {
+                        label: "1:1";
+                        clicked => {
                             root.zoom-level = 1.0;
                             root.pan-x = 0.0;
                             root.pan-y = 0.0;
@@ -498,187 +315,839 @@ export component ImageViewer inherits Rectangle {
                         }
                     }
 
-                    pointer-event(e) => {
-                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
-                            root.drag-start-x = self.mouse-x / 1px;
-                            root.drag-start-y = self.mouse-y / 1px;
-                            root.pan-start-x = root.pan-x;
-                            root.pan-start-y = root.pan-y;
+                    ToolbarButton {
+                        label: ""; icon-only: true; icon-path: Icons.rotate-ccw;
+                        clicked => {
+                            root.viewer-rotation = mod(root.viewer-rotation + 270, 360);
+                            root.viewer-rotate-left();
                         }
                     }
 
-                    moved => {
-                        if (self.pressed && root.is-custom-zoom) {
-                            root.pan-x = root.pan-start-x + (self.mouse-x / 1px - root.drag-start-x);
-                            root.pan-y = root.pan-start-y + (self.mouse-y / 1px - root.drag-start-y);
+                    ToolbarButton {
+                        label: ""; icon-only: true; icon-path: Icons.rotate-cw;
+                        clicked => {
+                            root.viewer-rotation = mod(root.viewer-rotation + 90, 360);
+                            root.viewer-rotate-right();
                         }
                     }
-                }
 
-                // Left nav zone (only when not zoomed, to avoid conflicting with pan)
-                if !root.is-custom-zoom && !root.viewer-slideshow-active : TouchArea {
-                    x: 0;
-                    y: 0;
-                    width: parent.width * 0.25;
-                    height: 100%;
-                    clicked => {
-                        root.reset-zoom();
-                        root.nav-prev();
-                    }
-
-                    if self.has-hover : Rectangle {
-                        width: 100%;
-                        height: 100%;
-                        background: @linear-gradient(90deg, Theme.overlay-backdrop 0%, transparent 100%);
-
-                        Icon {
-                            commands: Icons.chevron-left;
-                            size: 20px;
-                            tint: Theme.text-primary;
-                            y: (parent.height - self.height) / 2;
-                            x: 16px;
+                    ToolbarButton {
+                        label: ""; icon-only: true; icon-path: Icons.flip-h;
+                        active: root.viewer-flip-h;
+                        clicked => {
+                            root.viewer-flip-h = !root.viewer-flip-h;
+                            root.viewer-flip-horizontal();
                         }
                     }
-                }
 
-                // Right nav zone (only when not zoomed)
-                if !root.is-custom-zoom && !root.viewer-slideshow-active : TouchArea {
-                    x: parent.width * 0.75;
-                    y: 0;
-                    width: parent.width * 0.25;
-                    height: 100%;
-                    clicked => {
-                        root.reset-zoom();
-                        root.nav-next();
+                    ToolbarButton {
+                        label: ""; icon-only: true; icon-path: Icons.sort;
+                        active: root.viewer-flip-v;
+                        clicked => {
+                            root.viewer-flip-v = !root.viewer-flip-v;
+                            root.viewer-flip-vertical();
+                        }
                     }
 
-                    if self.has-hover : Rectangle {
-                        width: 100%;
-                        height: 100%;
-                        background: @linear-gradient(270deg, Theme.overlay-backdrop 0%, transparent 100%);
-
-                        Icon {
-                            commands: Icons.chevron-right;
-                            size: 20px;
-                            tint: Theme.text-primary;
-                            y: (parent.height - self.height) / 2;
-                            x: parent.width - 40px;
+                    ToolbarButton {
+                        label: ""; icon-only: true;
+                        icon-path: root.fit-contain ? Icons.maximize : Icons.minimize;
+                        clicked => {
+                            root.toggle-fit();
+                            if (!root.is-custom-zoom) { root.fit-contain = !root.fit-contain; }
                         }
                     }
                 }
+            }
 
-                // ── Image info overlay (bottom, visible on hover) ──
-                if touch.has-hover || root.viewer-slideshow-active : Rectangle {
-                    x: 0;
-                    y: parent.height - 32px;
-                    width: parent.width;
-                    height: 32px;
-                    background: Theme.overlay-shadow;
+            // Separator
+            Rectangle { height: 1px; background: Theme.separator; }
 
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 16px;
+            // ── AI Response Panel ──
+            if root.ai-panel-open && root.ai-response != "" : Rectangle {
+                height: min(160px, ai-img-resp.preferred-height + 16px);
+                background: Theme.bg-overlay-panel;
+                border-width: 1px;
+                border-color: Theme.accent.transparentize(70%);
+
+                Flickable {
+                    viewport-height: ai-img-resp.preferred-height + 16px;
+
+                    ai-img-resp := VerticalLayout {
                         alignment: start;
+                        padding: 12px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Icon {
+                                commands: Icons.spark;
+                                size: 12px;
+                                tint: Theme.text-secondary;
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: "AI Description";
+                                color: Theme.accent;
+                                font-size: Theme.fs-caption;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+
+                            // Dismiss button
+                            TouchArea {
+                                width: 24px;
+                                height: 24px;
+                                clicked => {
+                                    root.ai-panel-open = false;
+                                    root.ai-dismiss();
+                                }
+                                Rectangle {
+                                    width: 24px; height: 24px;
+                                    border-radius: 12px;
+                                    background: parent.has-hover ? Theme.hover-fill : transparent;
+                                    Icon {
+                                        commands: Icons.close;
+                                        size: 12px;
+                                        tint: Theme.text-dim;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
+                            }
+                        }
 
                         Text {
-                            text: root.file-name;
+                            text: root.ai-response;
                             color: Theme.text-primary;
-                            font-size: Theme.fs-micro;
-                            vertical-alignment: center;
-                            overflow: elide;
+                            font-size: Theme.fs-caption;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            // ── Main content: image area + optional EXIF panel ──
+            // ── What the companion is proposing ──
+            if root.proposal.title != "" : AgentProposalCard {
+                data: root.proposal;
+                working: root.proposal-working;
+                apply => { root.proposal-applied(); }
+                dismiss => { root.proposal-dismissed(); }
+            }
+
+            HorizontalLayout {
+                spacing: 0px;
+
+                // Image area with zoom/pan
+                Rectangle {
+                    background: Theme.bg-deep;
+                    clip: true;
+                    horizontal-stretch: 1;
+
+                    // Helper function: compute scale-x for flip
+                    // Slint doesn't have conditional scale, so we use two Image variants
+
+                    if root.file-name == "" : YEmptyState {
+                        icon-path: Icons.image;
+                        title: "No image open";
+                        description: "Open a picture from Files, or pass a path on the command line.";
+                    }
+
+                    if !root.is-custom-zoom : Image {
+                        width: 100%;
+                        height: 100%;
+                        source: root.current-image;
+                        image-fit: root.fit-contain ? contain : cover;
+                        transform-rotation: root.computed-rotation;
+                    }
+
+                    if root.is-custom-zoom : Rectangle {
+                        // Zoomed image container — positioned via pan offsets
+                        img := Image {
+                            x: root.pan-x * 1px;
+                            y: root.pan-y * 1px;
+                            width: parent.width * root.zoom-level;
+                            height: parent.height * root.zoom-level;
+                            source: root.current-image;
+                            image-fit: contain;
+                            transform-rotation: root.computed-rotation;
+                        }
+                    }
+
+                    // Flip overlay: render a second image with mirroring when flipped
+                    // Slint doesn't support negative scale, so we use image-rendering
+                    // with rotation to simulate flips:
+                    //   flip-h = rotate 180° around Y axis → not directly supported
+                    // Instead we handle flips by pre-processing in the backend (Rust).
+                    // The flip-h/flip-v properties signal the backend to do the transform.
+
+                    // Zoom + pan interaction layer
+                    touch := TouchArea {
+                        x: 0;
+                        y: 0;
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: root.is-custom-zoom ? move : default;
+
+                        scroll-event(e) => {
+                            if (e.delta-y > 0) {
+                                // Scroll up = zoom in
+                                root.zoom-level = root.clamp-zoom(root.zoom-level * 1.15);
+                            } else if (e.delta-y < 0) {
+                                // Scroll down = zoom out
+                                root.zoom-level = root.clamp-zoom(root.zoom-level / 1.15);
+                            }
+                            if (root.zoom-level != 1.0 || root.is-custom-zoom) {
+                                root.is-custom-zoom = true;
+                            }
+                            // If zoomed back to ~1.0, reset
+                            if (root.zoom-level > 0.95 && root.zoom-level < 1.05 && !root.is-custom-zoom) {
+                                root.reset-zoom();
+                            }
+                            return accept;
                         }
 
-                        Text {
-                            text: root.viewer-exif-dimensions;
-                            color: Theme.text-secondary;
-                            font-size: Theme.fs-micro;
-                            vertical-alignment: center;
+                        double-clicked => {
+                            if (root.is-custom-zoom) {
+                                // Double-click: go back to fit
+                                root.reset-zoom();
+                            } else {
+                                // Double-click: go to 100%
+                                root.zoom-level = 1.0;
+                                root.pan-x = 0.0;
+                                root.pan-y = 0.0;
+                                root.is-custom-zoom = true;
+                                root.fit-contain = false;
+                            }
                         }
 
-                        Text {
-                            text: root.zoom-text;
-                            color: Theme.text-secondary;
-                            font-size: Theme.fs-micro;
-                            vertical-alignment: center;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                                root.drag-start-x = self.mouse-x / 1px;
+                                root.drag-start-y = self.mouse-y / 1px;
+                                root.pan-start-x = root.pan-x;
+                                root.pan-start-y = root.pan-y;
+                            }
                         }
 
-                        if root.viewer-rotation != 0 : Text {
-                            text: root.viewer-rotation + "\u{00b0}";
-                            color: Theme.text-secondary;
-                            font-size: Theme.fs-micro;
-                            vertical-alignment: center;
+                        moved => {
+                            if (self.pressed && root.is-custom-zoom) {
+                                root.pan-x = root.pan-start-x + (self.mouse-x / 1px - root.drag-start-x);
+                                root.pan-y = root.pan-start-y + (self.mouse-y / 1px - root.drag-start-y);
+                            }
+                        }
+                    }
+
+                    // Left nav zone (only when not zoomed, to avoid conflicting with pan)
+                    if !root.is-custom-zoom && !root.viewer-slideshow-active : TouchArea {
+                        x: 0;
+                        y: 0;
+                        width: parent.width * 0.25;
+                        height: 100%;
+                        clicked => {
+                            root.reset-zoom();
+                            root.nav-prev();
+                        }
+
+                        if self.has-hover : Rectangle {
+                            width: 100%;
+                            height: 100%;
+                            background: @linear-gradient(90deg, Theme.overlay-backdrop 0%, transparent 100%);
+
+                            Icon {
+                                commands: Icons.chevron-left;
+                                size: 20px;
+                                tint: Theme.text-primary;
+                                y: (parent.height - self.height) / 2;
+                                x: 16px;
+                            }
+                        }
+                    }
+
+                    // Right nav zone (only when not zoomed)
+                    if !root.is-custom-zoom && !root.viewer-slideshow-active : TouchArea {
+                        x: parent.width * 0.75;
+                        y: 0;
+                        width: parent.width * 0.25;
+                        height: 100%;
+                        clicked => {
+                            root.reset-zoom();
+                            root.nav-next();
+                        }
+
+                        if self.has-hover : Rectangle {
+                            width: 100%;
+                            height: 100%;
+                            background: @linear-gradient(270deg, Theme.overlay-backdrop 0%, transparent 100%);
+
+                            Icon {
+                                commands: Icons.chevron-right;
+                                size: 20px;
+                                tint: Theme.text-primary;
+                                y: (parent.height - self.height) / 2;
+                                x: parent.width - 40px;
+                            }
+                        }
+                    }
+
+                    // ── Image info overlay (bottom, visible on hover) ──
+                    if touch.has-hover || root.viewer-slideshow-active : Rectangle {
+                        x: 0;
+                        y: parent.height - 32px;
+                        width: parent.width;
+                        height: 32px;
+                        background: Theme.overlay-shadow;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 16px;
+                            alignment: start;
+
+                            Text {
+                                text: root.file-name;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-micro;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: root.viewer-exif-dimensions;
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-micro;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: root.zoom-text;
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-micro;
+                                vertical-alignment: center;
+                            }
+
+                            if root.viewer-rotation != 0 : Text {
+                                text: root.viewer-rotation + "\u{00b0}";
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-micro;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // ── Slideshow progress bar ──
+                    if root.viewer-slideshow-active : Rectangle {
+                        x: 0;
+                        y: parent.height - 3px;
+                        width: parent.width;
+                        height: 3px;
+                        background: Theme.hover-fill-strong;
+
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: parent.width * root.viewer-slideshow-progress;
+                            height: 3px;
+                            background: Theme.accent;
+
+                            animate width { duration: 50ms; }
+                        }
+                    }
+
+                    // ── Crop mode overlay ──
+                    if root.viewer-crop-mode : Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        background: Theme.overlay-backdrop;
+
+                        // Block interaction with image beneath
+                        TouchArea { width: 100%; height: 100%; }
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 16px;
+
+                            Text {
+                                text: "Select crop area";
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-title-1;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "Drag to select region (scaffold — full crop selection coming soon)";
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-caption;
+                                horizontal-alignment: center;
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 12px;
+
+                                // Apply crop
+                                TouchArea {
+                                    width: crop-apply-bg.width;
+                                    height: 34px;
+                                    clicked => { root.viewer-apply-crop(); }
+
+                                    crop-apply-bg := Rectangle {
+                                        width: crop-apply-txt.preferred-width + 28px;
+                                        height: 34px;
+                                        border-radius: 8px;
+                                        background: parent.has-hover ? AppIdentity.accent : Theme.accent-dim;
+
+                                        crop-apply-txt := Text {
+                                            text: "Apply Crop";
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-body;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                // Cancel crop
+                                TouchArea {
+                                    width: crop-cancel-bg.width;
+                                    height: 34px;
+                                    clicked => { root.viewer-cancel-crop(); }
+
+                                    crop-cancel-bg := Rectangle {
+                                        width: crop-cancel-txt.preferred-width + 28px;
+                                        height: 34px;
+                                        border-radius: 8px;
+                                        background: parent.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
+
+                                        crop-cancel-txt := Text {
+                                            text: "Cancel";
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-body;
+                                            font-weight: 500;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
-                // ── Slideshow progress bar ──
-                if root.viewer-slideshow-active : Rectangle {
-                    x: 0;
-                    y: parent.height - 3px;
-                    width: parent.width;
-                    height: 3px;
-                    background: Theme.hover-fill-strong;
+                // ── EXIF Info Panel (right side, 250px) ──
+                if root.viewer-info-open : Rectangle {
+                    width: 250px;
+                    background: Theme.bg-surface;
+                    border-width: 0px;
 
+                    // Left border separator
                     Rectangle {
                         x: 0;
                         y: 0;
-                        width: parent.width * root.viewer-slideshow-progress;
-                        height: 3px;
-                        background: Theme.accent;
+                        width: 1px;
+                        height: 100%;
+                        background: Theme.separator;
+                    }
 
-                        animate width { duration: 50ms; }
+                    Flickable {
+                        x: 1px;
+                        width: parent.width - 1px;
+                        viewport-height: info-content.preferred-height + 24px;
+
+                        info-content := VerticalLayout {
+                            alignment: start;
+                            padding: 16px;
+                            spacing: 12px;
+
+                            // Panel title
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: "Image Info";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-body;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                TouchArea {
+                                    width: 24px; height: 24px;
+                                    clicked => {
+                                        root.viewer-info-open = false;
+                                    }
+                                    Rectangle {
+                                        border-radius: 12px;
+                                        background: parent.has-hover ? Theme.hover-fill : transparent;
+                                        Icon {
+                                            commands: Icons.close;
+                                            size: 12px;
+                                            tint: Theme.text-dim;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Separator
+                            Rectangle { height: 1px; background: Theme.separator; }
+
+                            // File section
+                            Text {
+                                text: "File";
+                                color: Theme.accent;
+                                font-size: Theme.fs-micro;
+                                font-weight: 600;
+                            }
+
+                            // Filename
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Name"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.file-name;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            // Dimensions
+                            if root.viewer-exif-dimensions != "" : VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Dimensions"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.viewer-exif-dimensions;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                }
+                            }
+
+                            // File size
+                            if root.viewer-exif-file-size != "" : VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "File Size"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.viewer-exif-file-size;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                }
+                            }
+
+                            // Format
+                            if root.viewer-exif-format != "" : VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Format"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.viewer-exif-format;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                }
+                            }
+
+                            // EXIF section separator
+                            if root.viewer-exif-camera != "" || root.viewer-exif-focal-length != ""
+                                || root.viewer-exif-iso != "" || root.viewer-exif-exposure != ""
+                                || root.viewer-exif-date-taken != "" || root.viewer-exif-gps != "" : Rectangle {
+                                height: 1px;
+                                background: Theme.separator;
+                            }
+
+                            if root.viewer-exif-camera != "" || root.viewer-exif-focal-length != ""
+                                || root.viewer-exif-iso != "" : Text {
+                                text: "EXIF Data";
+                                color: Theme.accent;
+                                font-size: Theme.fs-micro;
+                                font-weight: 600;
+                            }
+
+                            // Camera
+                            if root.viewer-exif-camera != "" : VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Camera"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.viewer-exif-camera;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            // Focal length
+                            if root.viewer-exif-focal-length != "" : VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Focal Length"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.viewer-exif-focal-length;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                }
+                            }
+
+                            // ISO
+                            if root.viewer-exif-iso != "" : VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "ISO"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.viewer-exif-iso;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                }
+                            }
+
+                            // Exposure
+                            if root.viewer-exif-exposure != "" : VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Exposure"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.viewer-exif-exposure;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                }
+                            }
+
+                            // Date taken
+                            if root.viewer-exif-date-taken != "" : VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "Date Taken"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.viewer-exif-date-taken;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                }
+                            }
+
+                            // GPS
+                            if root.viewer-exif-gps != "" : VerticalLayout {
+                                spacing: 2px;
+                                Text { text: "GPS"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                Text {
+                                    text: root.viewer-exif-gps;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-caption;
+                                }
+                            }
+                        }
                     }
                 }
 
-                // ── Crop mode overlay ──
-                if root.viewer-crop-mode : Rectangle {
-                    x: 0;
-                    y: 0;
-                    width: parent.width;
-                    height: parent.height;
-                    background: Theme.overlay-backdrop;
+                // ── Batch Operations Panel (right side, 260px) ──
+                if root.viewer-batch-panel-open : Rectangle {
+                    width: 260px;
+                    background: Theme.bg-surface;
 
-                    // Block interaction with image beneath
-                    TouchArea { width: 100%; height: 100%; }
+                    // Left border separator
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: 1px;
+                        height: 100%;
+                        background: Theme.separator;
+                    }
 
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 16px;
+                    Flickable {
+                        x: 1px;
+                        width: parent.width - 1px;
+                        viewport-height: batch-content.preferred-height + 24px;
 
-                        Text {
-                            text: "Select crop area";
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-title-1;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                        }
-
-                        Text {
-                            text: "Drag to select region (scaffold — full crop selection coming soon)";
-                            color: Theme.text-secondary;
-                            font-size: Theme.fs-caption;
-                            horizontal-alignment: center;
-                        }
-
-                        HorizontalLayout {
-                            alignment: center;
+                        batch-content := VerticalLayout {
+                            alignment: start;
+                            padding: 16px;
                             spacing: 12px;
 
-                            // Apply crop
-                            TouchArea {
-                                width: crop-apply-bg.width;
-                                height: 34px;
-                                clicked => { root.viewer-apply-crop(); }
+                            // Panel title
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: "Batch Operations";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-body;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                TouchArea {
+                                    width: 24px; height: 24px;
+                                    clicked => {
+                                        root.viewer-batch-panel-open = false;
+                                    }
+                                    Rectangle {
+                                        border-radius: 12px;
+                                        background: parent.has-hover ? Theme.hover-fill : transparent;
+                                        Icon {
+                                            commands: Icons.close;
+                                            size: 12px;
+                                            tint: Theme.text-dim;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                    }
+                                }
+                            }
 
-                                crop-apply-bg := Rectangle {
-                                    width: crop-apply-txt.preferred-width + 28px;
+                            // Separator
+                            Rectangle { height: 1px; background: Theme.separator; }
+
+                            // ── Rotate All ──
+                            Text {
+                                text: "Rotate All Images";
+                                color: Theme.accent;
+                                font-size: Theme.fs-micro;
+                                font-weight: 600;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                TouchArea {
+                                    width: batch-rot-90.width;
+                                    height: 32px;
+                                    clicked => { root.viewer-batch-rotate-all(90); }
+                                    batch-rot-90 := Rectangle {
+                                        width: batch-rot-90-txt.preferred-width + 20px;
+                                        height: 32px;
+                                        border-radius: 8px;
+                                        background: parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        batch-rot-90-txt := Text {
+                                            text: "90\u{00b0} CW";
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.fs-caption;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                TouchArea {
+                                    width: batch-rot-180.width;
+                                    height: 32px;
+                                    clicked => { root.viewer-batch-rotate-all(180); }
+                                    batch-rot-180 := Rectangle {
+                                        width: batch-rot-180-txt.preferred-width + 20px;
+                                        height: 32px;
+                                        border-radius: 8px;
+                                        background: parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        batch-rot-180-txt := Text {
+                                            text: "180\u{00b0}";
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.fs-caption;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                TouchArea {
+                                    width: batch-rot-270.width;
+                                    height: 32px;
+                                    clicked => { root.viewer-batch-rotate-all(270); }
+                                    batch-rot-270 := Rectangle {
+                                        width: batch-rot-270-txt.preferred-width + 20px;
+                                        height: 32px;
+                                        border-radius: 8px;
+                                        background: parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        batch-rot-270-txt := Text {
+                                            text: "90\u{00b0} CCW";
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.fs-caption;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Separator
+                            Rectangle { height: 1px; background: Theme.separator; }
+
+                            // ── Resize All ──
+                            Text {
+                                text: "Resize All Images";
+                                color: Theme.accent;
+                                font-size: Theme.fs-micro;
+                                font-weight: 600;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    Text { text: "Width"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                    Rectangle {
+                                        width: 80px;
+                                        height: 30px;
+                                        background: Theme.bg-input; clip: true;
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        TextInput {
+                                            x: 6px;
+                                            width: parent.width - 12px;
+                                            height: 100%;
+                                            text <=> root.batch-resize-w;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-caption;
+                                        }
+                                    }
+                                }
+
+                                Icon {
+                                    commands: Icons.close;
+                                    size: 14px;
+                                    tint: Theme.text-dim;
+                                    y: 10px;
+                                }
+
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    Text { text: "Height"; color: Theme.text-dim; font-size: Theme.fs-micro; }
+                                    Rectangle {
+                                        width: 80px;
+                                        height: 30px;
+                                        background: Theme.bg-input; clip: true;
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        TextInput {
+                                            x: 6px;
+                                            width: parent.width - 12px;
+                                            height: 100%;
+                                            text <=> root.batch-resize-h;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-caption;
+                                        }
+                                    }
+                                }
+                            }
+
+                            TouchArea {
+                                width: batch-resize-btn.width;
+                                height: 34px;
+                                clicked => {
+                                    // Parse width/height from text inputs
+                                    root.viewer-batch-resize(Math.round(root.batch-resize-w.to-float()), Math.round(root.batch-resize-h.to-float()));
+                                }
+                                batch-resize-btn := Rectangle {
+                                    width: batch-resize-btn-txt.preferred-width + 24px;
                                     height: 34px;
                                     border-radius: 8px;
                                     background: parent.has-hover ? AppIdentity.accent : Theme.accent-dim;
-
-                                    crop-apply-txt := Text {
-                                        text: "Apply Crop";
+                                    batch-resize-btn-txt := Text {
+                                        text: "Resize All";
                                         color: Theme.text-primary;
                                         font-size: Theme.fs-body;
                                         font-weight: 600;
@@ -688,504 +1157,72 @@ export component ImageViewer inherits Rectangle {
                                 }
                             }
 
-                            // Cancel crop
-                            TouchArea {
-                                width: crop-cancel-bg.width;
-                                height: 34px;
-                                clicked => { root.viewer-cancel-crop(); }
+                            // Separator
+                            Rectangle { height: 1px; background: Theme.separator; }
 
-                                crop-cancel-bg := Rectangle {
-                                    width: crop-cancel-txt.preferred-width + 28px;
-                                    height: 34px;
-                                    border-radius: 8px;
-                                    background: parent.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
-
-                                    crop-cancel-txt := Text {
-                                        text: "Cancel";
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-body;
-                                        font-weight: 500;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ── EXIF Info Panel (right side, 250px) ──
-            if root.viewer-info-open : Rectangle {
-                width: 250px;
-                background: Theme.bg-surface;
-                border-width: 0px;
-
-                // Left border separator
-                Rectangle {
-                    x: 0;
-                    y: 0;
-                    width: 1px;
-                    height: 100%;
-                    background: Theme.separator;
-                }
-
-                Flickable {
-                    x: 1px;
-                    width: parent.width - 1px;
-                    viewport-height: info-content.preferred-height + 24px;
-
-                    info-content := VerticalLayout {
-                        alignment: start;
-                        padding: 16px;
-                        spacing: 12px;
-
-                        // Panel title
-                        HorizontalLayout {
-                            spacing: 6px;
-                            Text {
-                                text: "Image Info";
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-body;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                            TouchArea {
-                                width: 24px; height: 24px;
-                                clicked => {
-                                    root.viewer-info-open = false;
-                                }
-                                Rectangle {
-                                    border-radius: 12px;
-                                    background: parent.has-hover ? Theme.hover-fill : transparent;
-                                    Icon {
-                                        commands: Icons.close;
-                                        size: 12px;
-                                        tint: Theme.text-dim;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Separator
-                        Rectangle { height: 1px; background: Theme.separator; }
-
-                        // File section
-                        Text {
-                            text: "File";
-                            color: Theme.accent;
-                            font-size: Theme.fs-micro;
-                            font-weight: 600;
-                        }
-
-                        // Filename
-                        VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "Name"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.file-name;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                                wrap: word-wrap;
-                            }
-                        }
-
-                        // Dimensions
-                        if root.viewer-exif-dimensions != "" : VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "Dimensions"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.viewer-exif-dimensions;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                            }
-                        }
-
-                        // File size
-                        if root.viewer-exif-file-size != "" : VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "File Size"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.viewer-exif-file-size;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                            }
-                        }
-
-                        // Format
-                        if root.viewer-exif-format != "" : VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "Format"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.viewer-exif-format;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                            }
-                        }
-
-                        // EXIF section separator
-                        if root.viewer-exif-camera != "" || root.viewer-exif-focal-length != ""
-                            || root.viewer-exif-iso != "" || root.viewer-exif-exposure != ""
-                            || root.viewer-exif-date-taken != "" || root.viewer-exif-gps != "" : Rectangle {
-                            height: 1px;
-                            background: Theme.separator;
-                        }
-
-                        if root.viewer-exif-camera != "" || root.viewer-exif-focal-length != ""
-                            || root.viewer-exif-iso != "" : Text {
-                            text: "EXIF Data";
-                            color: Theme.accent;
-                            font-size: Theme.fs-micro;
-                            font-weight: 600;
-                        }
-
-                        // Camera
-                        if root.viewer-exif-camera != "" : VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "Camera"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.viewer-exif-camera;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                                wrap: word-wrap;
-                            }
-                        }
-
-                        // Focal length
-                        if root.viewer-exif-focal-length != "" : VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "Focal Length"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.viewer-exif-focal-length;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                            }
-                        }
-
-                        // ISO
-                        if root.viewer-exif-iso != "" : VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "ISO"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.viewer-exif-iso;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                            }
-                        }
-
-                        // Exposure
-                        if root.viewer-exif-exposure != "" : VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "Exposure"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.viewer-exif-exposure;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                            }
-                        }
-
-                        // Date taken
-                        if root.viewer-exif-date-taken != "" : VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "Date Taken"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.viewer-exif-date-taken;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                            }
-                        }
-
-                        // GPS
-                        if root.viewer-exif-gps != "" : VerticalLayout {
-                            spacing: 2px;
-                            Text { text: "GPS"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                            Text {
-                                text: root.viewer-exif-gps;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-caption;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ── Batch Operations Panel (right side, 260px) ──
-            if root.viewer-batch-panel-open : Rectangle {
-                width: 260px;
-                background: Theme.bg-surface;
-
-                // Left border separator
-                Rectangle {
-                    x: 0;
-                    y: 0;
-                    width: 1px;
-                    height: 100%;
-                    background: Theme.separator;
-                }
-
-                Flickable {
-                    x: 1px;
-                    width: parent.width - 1px;
-                    viewport-height: batch-content.preferred-height + 24px;
-
-                    batch-content := VerticalLayout {
-                        alignment: start;
-                        padding: 16px;
-                        spacing: 12px;
-
-                        // Panel title
-                        HorizontalLayout {
-                            spacing: 6px;
-                            Text {
-                                text: "Batch Operations";
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-body;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                            TouchArea {
-                                width: 24px; height: 24px;
-                                clicked => {
-                                    root.viewer-batch-panel-open = false;
-                                }
-                                Rectangle {
-                                    border-radius: 12px;
-                                    background: parent.has-hover ? Theme.hover-fill : transparent;
-                                    Icon {
-                                        commands: Icons.close;
-                                        size: 12px;
-                                        tint: Theme.text-dim;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Separator
-                        Rectangle { height: 1px; background: Theme.separator; }
-
-                        // ── Rotate All ──
-                        Text {
-                            text: "Rotate All Images";
-                            color: Theme.accent;
-                            font-size: Theme.fs-micro;
-                            font-weight: 600;
-                        }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-
-                            TouchArea {
-                                width: batch-rot-90.width;
-                                height: 32px;
-                                clicked => { root.viewer-batch-rotate-all(90); }
-                                batch-rot-90 := Rectangle {
-                                    width: batch-rot-90-txt.preferred-width + 20px;
-                                    height: 32px;
-                                    border-radius: 8px;
-                                    background: parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
-                                    border-width: 1px;
-                                    border-color: Theme.border-subtle;
-                                    batch-rot-90-txt := Text {
-                                        text: "90\u{00b0} CW";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-caption;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-
-                            TouchArea {
-                                width: batch-rot-180.width;
-                                height: 32px;
-                                clicked => { root.viewer-batch-rotate-all(180); }
-                                batch-rot-180 := Rectangle {
-                                    width: batch-rot-180-txt.preferred-width + 20px;
-                                    height: 32px;
-                                    border-radius: 8px;
-                                    background: parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
-                                    border-width: 1px;
-                                    border-color: Theme.border-subtle;
-                                    batch-rot-180-txt := Text {
-                                        text: "180\u{00b0}";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-caption;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-
-                            TouchArea {
-                                width: batch-rot-270.width;
-                                height: 32px;
-                                clicked => { root.viewer-batch-rotate-all(270); }
-                                batch-rot-270 := Rectangle {
-                                    width: batch-rot-270-txt.preferred-width + 20px;
-                                    height: 32px;
-                                    border-radius: 8px;
-                                    background: parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
-                                    border-width: 1px;
-                                    border-color: Theme.border-subtle;
-                                    batch-rot-270-txt := Text {
-                                        text: "90\u{00b0} CCW";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-caption;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Separator
-                        Rectangle { height: 1px; background: Theme.separator; }
-
-                        // ── Resize All ──
-                        Text {
-                            text: "Resize All Images";
-                            color: Theme.accent;
-                            font-size: Theme.fs-micro;
-                            font-weight: 600;
-                        }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-
-                            VerticalLayout {
-                                spacing: 4px;
-                                Text { text: "Width"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                Rectangle {
-                                    width: 80px;
-                                    height: 30px;
-                                    background: Theme.bg-input; clip: true;
-                                    border-radius: 6px;
-                                    border-width: 1px;
-                                    border-color: Theme.border-subtle;
-                                    TextInput {
-                                        x: 6px;
-                                        width: parent.width - 12px;
-                                        height: 100%;
-                                        text <=> root.batch-resize-w;
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-caption;
-                                    }
-                                }
-                            }
-
-                            Icon {
-                                commands: Icons.close;
-                                size: 14px;
-                                tint: Theme.text-dim;
-                                y: 10px;
-                            }
-
-                            VerticalLayout {
-                                spacing: 4px;
-                                Text { text: "Height"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                Rectangle {
-                                    width: 80px;
-                                    height: 30px;
-                                    background: Theme.bg-input; clip: true;
-                                    border-radius: 6px;
-                                    border-width: 1px;
-                                    border-color: Theme.border-subtle;
-                                    TextInput {
-                                        x: 6px;
-                                        width: parent.width - 12px;
-                                        height: 100%;
-                                        text <=> root.batch-resize-h;
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-caption;
-                                    }
-                                }
-                            }
-                        }
-
-                        TouchArea {
-                            width: batch-resize-btn.width;
-                            height: 34px;
-                            clicked => {
-                                // Parse width/height from text inputs
-                                root.viewer-batch-resize(Math.round(root.batch-resize-w.to-float()), Math.round(root.batch-resize-h.to-float()));
-                            }
-                            batch-resize-btn := Rectangle {
-                                width: batch-resize-btn-txt.preferred-width + 24px;
-                                height: 34px;
-                                border-radius: 8px;
-                                background: parent.has-hover ? AppIdentity.accent : Theme.accent-dim;
-                                batch-resize-btn-txt := Text {
-                                    text: "Resize All";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-body;
-                                    font-weight: 600;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        // Separator
-                        Rectangle { height: 1px; background: Theme.separator; }
-
-                        // ── Progress ──
-                        if root.viewer-batch-total > 0 : VerticalLayout {
-                            spacing: 6px;
-
-                            HorizontalLayout {
+                            // ── Progress ──
+                            if root.viewer-batch-total > 0 : VerticalLayout {
                                 spacing: 6px;
-                                Text {
-                                    text: "Progress:";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-micro;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    text: root.viewer-batch-done + " / " + root.viewer-batch-total;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-micro;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-                            }
 
-                            // Progress bar
-                            Rectangle {
-                                height: 4px;
-                                border-radius: 2px;
-                                background: Theme.bg-elevated;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Progress:";
+                                        color: Theme.text-dim;
+                                        font-size: Theme.fs-micro;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.viewer-batch-done + " / " + root.viewer-batch-total;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-micro;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
 
+                                // Progress bar
                                 Rectangle {
-                                    x: 0;
-                                    y: 0;
-                                    width: root.viewer-batch-total > 0
-                                        ? parent.width * (root.viewer-batch-done / root.viewer-batch-total)
-                                        : 0px;
                                     height: 4px;
                                     border-radius: 2px;
-                                    background: Theme.accent;
+                                    background: Theme.bg-elevated;
 
-                                    animate width { duration: 200ms; }
+                                    Rectangle {
+                                        x: 0;
+                                        y: 0;
+                                        width: root.viewer-batch-total > 0
+                                            ? parent.width * (root.viewer-batch-done / root.viewer-batch-total)
+                                            : 0px;
+                                        height: 4px;
+                                        border-radius: 2px;
+                                        background: Theme.accent;
+
+                                        animate width { duration: 200ms; }
+                                    }
                                 }
-                            }
 
-                            if root.viewer-batch-status != "" : Text {
-                                text: root.viewer-batch-status;
-                                color: Theme.text-secondary;
-                                font-size: Theme.fs-micro;
-                                wrap: word-wrap;
+                                if root.viewer-batch-status != "" : Text {
+                                    text: root.viewer-batch-status;
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-micro;
+                                    wrap: word-wrap;
+                                }
                             }
                         }
                     }
                 }
             }
+
+                // ── What Yantrik knows about this ──
+                //
+                // Full height beside the content. Collapses to nothing when there is nothing true to say.
+                AgentRail {
+                    context-items: root.agent-context;
+                    suggestions: root.agent-suggestions;
+                    unavailable: root.agent-unavailable;
+                    context-activated(id) => { root.agent-context-activated(id); }
+                    suggestion-activated(id) => { root.agent-suggestion-activated(id); }
+                }
         }
     }
 }

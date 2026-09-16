@@ -12,6 +12,52 @@ use yantrik_ipc_transport::SyncRpcClient;
 
 slint::include_modules!();
 
+/// Fill the agent rail from the conditions already on screen.
+///
+/// The readings are the context. A forecast app's one genuinely useful question is not what the
+/// numbers ARE -- they are right there -- but what to do about them.
+fn refresh_agent_rail(ui: &WeatherApp) {
+    let c = ui.get_current();
+    let mut context: Vec<AgentContextItem> = Vec::new();
+    if !c.temperature.is_empty() {
+        context.push(AgentContextItem {
+            id: "now".into(),
+            label: format!("{}, {}", c.temperature, c.condition).into(),
+            detail: c.feels_like.clone(),
+            source: "file".into(),
+        });
+    }
+    let updated = ui.get_weather_last_updated().to_string();
+    if !updated.is_empty() {
+        context.push(AgentContextItem {
+            id: "updated".into(),
+            label: updated.into(),
+            detail: "last updated".into(),
+            source: "file".into(),
+        });
+    }
+    ui.set_agent_context(ModelRc::new(VecModel::from(context)));
+
+    let online = companion::is_online();
+    let mut next: Vec<AgentSuggestion> = Vec::new();
+    if online && !c.temperature.is_empty() {
+        next.push(AgentSuggestion {
+            id: "advise".into(),
+            label: "What should I plan for?".into(),
+            detail: "reads today's conditions".into(),
+            icon: "spark".into(),
+            running: ui.get_proposal_working(),
+            proposes: false,
+        });
+    }
+    ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
+    ui.set_agent_unavailable(if online {
+        SharedString::new()
+    } else {
+        companion::OFFLINE_HINT.into()
+    });
+}
+
 fn main() {
     init_tracing("yantrik-weather");
 
@@ -26,6 +72,86 @@ fn main() {
     app.global::<AccentPreset>().set_index(theme.accent_index);
 
     wire(&app);
+    // ── The agent layer ──
+    {
+        let weak = app.as_weak();
+        app.on_agent_suggestion_activated(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            if id != "advise" {
+                return;
+            }
+            let c = ui.get_current();
+            let (temp, cond, feels) = (
+                c.temperature.to_string(),
+                c.condition.to_string(),
+                c.feels_like.to_string(),
+            );
+            ui.set_proposal_working(true);
+            ui.set_proposal(AgentProposal {
+                title: "Today outside".into(),
+                source: "from today's conditions".into(),
+                ..Default::default()
+            });
+            let prompt = format!(
+                "It is {cond} at {temp}, feels like {feels}. In at most three short lines say \
+                 what to plan for today. Use only these conditions."
+            );
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&prompt);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_proposal_working(false);
+                    match outcome {
+                        Ok(text) => ui.set_proposal(AgentProposal {
+                            title: "Today outside".into(),
+                            body: text.into(),
+                            source: "from today's conditions".into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                        Err(e) => ui.set_proposal(AgentProposal {
+                            title: "The companion did not answer".into(),
+                            body: format!("{e}").into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_proposal_dismissed(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_proposal(AgentProposal::default());
+            }
+        });
+    }
+    app.on_proposal_applied(|| {});
+    app.on_agent_context_activated(|_| {});
+    // The rail follows the app's state on a timer.
+    //
+    // Calling it once at startup was not enough: at that moment Weather has no reading yet and
+    // Image Viewer has no file, so both rails computed "nothing to say", collapsed, and stayed
+    // collapsed for the life of the process. Every app loads its content on some path of its own
+    // and hooking each one is how a refresh gets missed; asking every few seconds is cheap and
+    // cannot be forgotten.
+    let rail_timer = slint::Timer::default();
+    {
+        let weak = app.as_weak();
+        rail_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(4),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    refresh_agent_rail(&ui);
+                }
+            },
+        );
+    }
+    refresh_agent_rail(&app);
+
     app.run().unwrap();
 }
 

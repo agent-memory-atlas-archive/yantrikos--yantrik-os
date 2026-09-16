@@ -2,10 +2,25 @@
 // Wraps the shared ImageViewer component in its own Window.
 
 import { Theme } from "theme.slint";
+import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
 import { ImageViewer } from "image_viewer.slint";
 
+export { AgentContextItem, AgentSuggestion, AgentProposal }
+
 export component ImageViewerApp inherits Window {
+    // ── The agent layer ──
+    in property <[AgentContextItem]> agent-context <=> viewer.agent-context;
+    in property <[AgentSuggestion]> agent-suggestions <=> viewer.agent-suggestions;
+    in property <string> agent-unavailable <=> viewer.agent-unavailable;
+    callback agent-context-activated <=> viewer.agent-context-activated;
+    callback agent-suggestion-activated <=> viewer.agent-suggestion-activated;
+    in property <AgentProposal> proposal <=> viewer.proposal;
+    in property <bool> proposal-working <=> viewer.proposal-working;
+    callback proposal-applied <=> viewer.proposal-applied;
+    callback proposal-dismissed <=> viewer.proposal-dismissed;
+    
     // What app this window is.
     //
     // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers

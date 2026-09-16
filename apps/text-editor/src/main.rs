@@ -2,16 +2,138 @@
 //!
 //! Multi-tab code/text editor with file open/save, find/replace, and AI assist.
 
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
 
 slint::include_modules!();
+
+/// Fill the agent rail from the file in the buffer.
+///
+/// What a plain-text editor knows is the file: its name, its type, how long it is. All three
+/// are on screen already and none needs asking.
+fn refresh_agent_rail(ui: &TextEditorApp) {
+    let name = ui.get_file_name().to_string();
+    let mut context: Vec<AgentContextItem> = Vec::new();
+    if !name.is_empty() {
+        context.push(AgentContextItem {
+            id: "file".into(),
+            label: name.clone().into(),
+            detail: format!("{}, {} lines", ui.get_file_type(), ui.get_total_lines()).into(),
+            source: "file".into(),
+        });
+    }
+    ui.set_agent_context(ModelRc::new(VecModel::from(context)));
+
+    let has_text = !ui.get_file_content().to_string().trim().is_empty();
+    let online = companion::is_online();
+    let mut next: Vec<AgentSuggestion> = Vec::new();
+    if online && has_text {
+        next.push(AgentSuggestion {
+            id: "explain".into(),
+            label: "Explain this file".into(),
+            detail: "what it is and what it does".into(),
+            icon: "spark".into(),
+            running: ui.get_proposal_working(),
+            proposes: false,
+        });
+    }
+    ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
+    ui.set_agent_unavailable(if online || !has_text {
+        SharedString::new()
+    } else {
+        companion::OFFLINE_HINT.into()
+    });
+}
 
 fn main() {
     init_tracing("yantrik-text-editor");
 
     let app = TextEditorApp::new().unwrap();
     wire(&app);
+    // ── The agent layer ──
+    {
+        let weak = app.as_weak();
+        app.on_agent_suggestion_activated(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            if id != "explain" {
+                return;
+            }
+            let name = ui.get_file_name().to_string();
+            let kind = ui.get_file_type().to_string();
+            // The head of the file, not all of it: the question is what this IS.
+            let head: String = ui
+                .get_file_content()
+                .to_string()
+                .lines()
+                .take(80)
+                .collect::<Vec<_>>()
+                .join("\n");
+            ui.set_proposal_working(true);
+            ui.set_proposal(AgentProposal {
+                title: "What this file is".into(),
+                source: "from the open file".into(),
+                ..Default::default()
+            });
+            let prompt = format!(
+                "This is {name}, a {kind} file. In at most four short lines say what it is and \
+                 what it does. Use only what is here.\n\n{head}"
+            );
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&prompt);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_proposal_working(false);
+                    match outcome {
+                        Ok(text) => ui.set_proposal(AgentProposal {
+                            title: "What this file is".into(),
+                            body: text.into(),
+                            source: "from the open file".into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                        Err(e) => ui.set_proposal(AgentProposal {
+                            title: "The companion did not answer".into(),
+                            body: format!("{e}").into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_proposal_dismissed(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_proposal(AgentProposal::default());
+            }
+        });
+    }
+    app.on_proposal_applied(|| {});
+    app.on_agent_context_activated(|_| {});
+    // The rail follows the app's state on a timer.
+    //
+    // Calling it once at startup was not enough: at that moment Weather has no reading yet and
+    // Image Viewer has no file, so both rails computed "nothing to say", collapsed, and stayed
+    // collapsed for the life of the process. Every app loads its content on some path of its own
+    // and hooking each one is how a refresh gets missed; asking every few seconds is cheap and
+    // cannot be forgotten.
+    let rail_timer = slint::Timer::default();
+    {
+        let weak = app.as_weak();
+        rail_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(4),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    refresh_agent_rail(&ui);
+                }
+            },
+        );
+    }
+    refresh_agent_rail(&app);
+
     app.run().unwrap();
 }
 

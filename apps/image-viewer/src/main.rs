@@ -2,16 +2,72 @@
 //!
 //! Image display with zoom, rotate, slideshow, crop, and batch operations.
 
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
 
 slint::include_modules!();
+
+/// Fill the agent rail from the picture on screen.
+///
+/// Name and dimensions, both of which the app already read off the file. No suggestion: what
+/// would be useful here is describing the IMAGE, and that needs a vision model this OS does
+/// not currently attach. Offering it anyway is the fifty-five-dead-buttons mistake, so the
+/// NEXT section simply does not appear.
+fn refresh_agent_rail(ui: &ImageViewerApp) {
+    let name = ui.get_file_name().to_string();
+    let mut context: Vec<AgentContextItem> = Vec::new();
+    if !name.is_empty() {
+        context.push(AgentContextItem {
+            id: "file".into(),
+            label: name.into(),
+            detail: ui.get_viewer_exif_dimensions(),
+            source: "file".into(),
+        });
+    }
+    ui.set_agent_context(ModelRc::new(VecModel::from(context)));
+    ui.set_agent_suggestions(ModelRc::new(VecModel::from(Vec::<AgentSuggestion>::new())));
+    ui.set_agent_unavailable(SharedString::new());
+}
 
 fn main() {
     init_tracing("yantrik-image-viewer");
 
     let app = ImageViewerApp::new().unwrap();
     wire(&app);
+    // ── The agent layer ──
+    app.on_agent_suggestion_activated(|_| {});
+    app.on_agent_context_activated(|_| {});
+    app.on_proposal_applied(|| {});
+    {
+        let weak = app.as_weak();
+        app.on_proposal_dismissed(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_proposal(AgentProposal::default());
+            }
+        });
+    }
+    // The rail follows the app's state on a timer.
+    //
+    // Calling it once at startup was not enough: at that moment Weather has no reading yet and
+    // Image Viewer has no file, so both rails computed "nothing to say", collapsed, and stayed
+    // collapsed for the life of the process. Every app loads its content on some path of its own
+    // and hooking each one is how a refresh gets missed; asking every few seconds is cheap and
+    // cannot be forgotten.
+    let rail_timer = slint::Timer::default();
+    {
+        let weak = app.as_weak();
+        rail_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(4),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    refresh_agent_rail(&ui);
+                }
+            },
+        );
+    }
+    refresh_agent_rail(&app);
+
     app.run().unwrap();
 }
 

@@ -3,6 +3,8 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposalCard, AgentProposal } from "components/agent_proposal.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 
@@ -335,6 +337,20 @@ component VolumeRow inherits Rectangle {
 // ── Main component ──
 
 export component ContainerManagerScreen inherits Rectangle {
+    // ── The agent layer ──
+    //
+    // Filled from what this app and the companion actually hold; every row says where it came
+    // from, and a section with nothing true to say does not draw. See agent_rail.slint.
+    in property <[AgentContextItem]> agent-context: [];
+    in property <[AgentSuggestion]> agent-suggestions: [];
+    in property <string> agent-unavailable: "";
+    callback agent-context-activated(string);
+    callback agent-suggestion-activated(string);
+    in property <AgentProposal> proposal;
+    in property <bool> proposal-working: false;
+    callback proposal-applied();
+    callback proposal-dismissed();
+
     background: Theme.bg-deep;
 
     // Tab state
@@ -386,6 +402,7 @@ export component ContainerManagerScreen inherits Rectangle {
     callback ai-summarize-logs();
     callback ai-dismiss();
 
+    // The content, with the agent rail beside it.
     VerticalLayout {
         spacing: 0px;
 
@@ -420,83 +437,208 @@ export component ContainerManagerScreen inherits Rectangle {
             }
         }
 
-        // ── Containers tab ──
-        if active-tab == 0 : VerticalLayout {
-            vertical-stretch: 1;
-            spacing: 0px;
+        // The content, with the agent rail beside it. The header stays full
+        // width above both.
+        HorizontalLayout {
+            if active-tab == 0 : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 0px;
 
-            // Summary bar
-            Rectangle {
-                height: 48px;
-                background: Theme.bg-card;
-                border-width: 0px;
+                // Summary bar
+                Rectangle {
+                    height: 48px;
+                    background: Theme.bg-card;
+                    border-width: 0px;
 
-                HorizontalLayout {
-                    padding-left: Theme.sp-4;
-                    padding-right: Theme.sp-4;
-                    spacing: Theme.sp-6;
-                    alignment: start;
+                    // ── What the companion is proposing ──
+                    if root.proposal.title != "" : AgentProposalCard {
+                        data: root.proposal;
+                        working: root.proposal-working;
+                        apply => { root.proposal-applied(); }
+                        dismiss => { root.proposal-dismissed(); }
+                    }
 
-                    // Running
                     HorizontalLayout {
-                        spacing: Theme.sp-1;
+                        padding-left: Theme.sp-4;
+                        padding-right: Theme.sp-4;
+                        spacing: Theme.sp-6;
+                        alignment: start;
 
-                        Rectangle {
-                            width: 8px;
-                            height: 8px;
-                            border-radius: 4px;
-                            background: Theme.color-success;
-                            y: 20px;
+                        // Running
+                        HorizontalLayout {
+                            spacing: Theme.sp-1;
+
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: Theme.color-success;
+                                y: 20px;
+                            }
+
+                            Text {
+                                text: running-count + " running";
+                                color: Theme.color-success;
+                                font-size: Theme.font-small;
+                                font-weight: 500;
+                                vertical-alignment: center;
+                            }
                         }
 
+                        // Stopped
+                        HorizontalLayout {
+                            spacing: Theme.sp-1;
+
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: Theme.color-danger;
+                                y: 20px;
+                            }
+
+                            Text {
+                                text: stopped-count + " stopped";
+                                color: Theme.color-danger;
+                                font-size: Theme.font-small;
+                                font-weight: 500;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Total
                         Text {
-                            text: running-count + " running";
-                            color: Theme.color-success;
+                            text: total-count + " total";
+                            color: Theme.text-secondary;
                             font-size: Theme.font-small;
-                            font-weight: 500;
                             vertical-alignment: center;
                         }
+
+                        // Spacer
+                        Rectangle { horizontal-stretch: 1; }
+
+                        // Run New container
+                        HorizontalLayout {
+                            spacing: Theme.sp-2;
+                            alignment: center;
+
+                            Rectangle {
+                                width: 200px;
+                                height: 32px;
+                                border-radius: Theme.r-md;
+                                background: Theme.bg-input;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                clip: true;
+
+                                run-input := TextInput {
+                                    x: 10px;
+                                    y: 4px;
+                                    width: parent.width - 20px;
+                                    height: parent.height - 8px;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-small;
+                                    text <=> run-image-input;
+
+                                    accepted => {
+                                        if self.text != "" {
+                                            ct-run(self.text);
+                                            self.text = "";
+                                        }
+                                    }
+                                }
+
+                                // Placeholder
+                                if run-input.text == "" : Text {
+                                    x: 10px;
+                                    text: "Image to run...";
+                                    color: Theme.text-dim;
+                                    font-size: Theme.font-small;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            ActionButton {
+                                label: "Run New";
+                                primary: true;
+                                width: 72px;
+                                clicked => {
+                                    if run-image-input != "" {
+                                        ct-run(run-image-input);
+                                        run-image-input = "";
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    // Stopped
-                    HorizontalLayout {
-                        spacing: Theme.sp-1;
+                    // Bottom border
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border-subtle;
+                    }
+                }
 
-                        Rectangle {
-                            width: 8px;
-                            height: 8px;
-                            border-radius: 4px;
-                            background: Theme.color-danger;
-                            y: 20px;
+                // Container list
+                Flickable {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 2px;
+                        alignment: start;
+
+                        for ct[idx] in containers : ContainerRow {
+                            data: ct;
+                            start-clicked => { ct-start(ct.id); }
+                            stop-clicked => { ct-stop(ct.id); }
+                            restart-clicked => { ct-restart(ct.id); }
+                            remove-clicked => { ct-remove(ct.id); }
+                            logs-clicked => { ct-logs(ct.id); }
                         }
 
-                        Text {
-                            text: stopped-count + " stopped";
-                            color: Theme.color-danger;
-                            font-size: Theme.font-small;
-                            font-weight: 500;
-                            vertical-alignment: center;
+                        // Empty state
+                        if total-count == 0 : YEmptyState {
+                            height: 220px;
+                            icon-path: Icons.packages;
+                            title: "No containers";
+                            description: "Run an image to start one, or pull one from the Images tab.";
                         }
                     }
+                }
+            }
 
-                    // Total
-                    Text {
-                        text: total-count + " total";
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-small;
-                        vertical-alignment: center;
-                    }
+            // ── Images tab ──
+            if active-tab == 1 : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 0px;
 
-                    // Spacer
-                    Rectangle { horizontal-stretch: 1; }
+                // Pull image bar
+                Rectangle {
+                    height: 48px;
+                    background: Theme.bg-card;
+                    border-width: 0px;
 
-                    // Run New container
                     HorizontalLayout {
+                        padding-left: Theme.sp-4;
+                        padding-right: Theme.sp-4;
                         spacing: Theme.sp-2;
-                        alignment: center;
+                        alignment: start;
+
+                        Text {
+                            text: images.length + " images";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-small;
+                            vertical-alignment: center;
+                        }
+
+                        // Spacer
+                        Rectangle { horizontal-stretch: 1; }
 
                         Rectangle {
-                            width: 200px;
+                            width: 280px;
                             height: 32px;
                             border-radius: Theme.r-md;
                             background: Theme.bg-input;
@@ -504,27 +646,26 @@ export component ContainerManagerScreen inherits Rectangle {
                             border-color: Theme.border-subtle;
                             clip: true;
 
-                            run-input := TextInput {
+                            pull-input := TextInput {
                                 x: 10px;
                                 y: 4px;
                                 width: parent.width - 20px;
                                 height: parent.height - 8px;
                                 color: Theme.text-primary;
                                 font-size: Theme.font-small;
-                                text <=> run-image-input;
+                                text <=> pull-image-input;
 
                                 accepted => {
                                     if self.text != "" {
-                                        ct-run(self.text);
+                                        ct-pull(self.text);
                                         self.text = "";
                                     }
                                 }
                             }
 
-                            // Placeholder
-                            if run-input.text == "" : Text {
+                            if pull-input.text == "" : Text {
                                 x: 10px;
-                                text: "Image to run...";
+                                text: "Image to pull (e.g. nginx:latest)...";
                                 color: Theme.text-dim;
                                 font-size: Theme.font-small;
                                 vertical-alignment: center;
@@ -532,276 +673,174 @@ export component ContainerManagerScreen inherits Rectangle {
                         }
 
                         ActionButton {
-                            label: "Run New";
+                            label: "Pull";
                             primary: true;
-                            width: 72px;
+                            width: 56px;
                             clicked => {
-                                if run-image-input != "" {
-                                    ct-run(run-image-input);
-                                    run-image-input = "";
+                                if pull-image-input != "" {
+                                    ct-pull(pull-image-input);
+                                    pull-image-input = "";
                                 }
                             }
                         }
                     }
-                }
-
-                // Bottom border
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%;
-                    height: 1px;
-                    background: Theme.border-subtle;
-                }
-            }
-
-            // Container list
-            Flickable {
-                vertical-stretch: 1;
-
-                VerticalLayout {
-                    padding: 8px;
-                    spacing: 2px;
-                    alignment: start;
-
-                    for ct[idx] in containers : ContainerRow {
-                        data: ct;
-                        start-clicked => { ct-start(ct.id); }
-                        stop-clicked => { ct-stop(ct.id); }
-                        restart-clicked => { ct-restart(ct.id); }
-                        remove-clicked => { ct-remove(ct.id); }
-                        logs-clicked => { ct-logs(ct.id); }
-                    }
-
-                    // Empty state
-                    if total-count == 0 : YEmptyState {
-                        height: 220px;
-                        icon-path: Icons.packages;
-                        title: "No containers";
-                        description: "Run an image to start one, or pull one from the Images tab.";
-                    }
-                }
-            }
-        }
-
-        // ── Images tab ──
-        if active-tab == 1 : VerticalLayout {
-            vertical-stretch: 1;
-            spacing: 0px;
-
-            // Pull image bar
-            Rectangle {
-                height: 48px;
-                background: Theme.bg-card;
-                border-width: 0px;
-
-                HorizontalLayout {
-                    padding-left: Theme.sp-4;
-                    padding-right: Theme.sp-4;
-                    spacing: Theme.sp-2;
-                    alignment: start;
-
-                    Text {
-                        text: images.length + " images";
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-small;
-                        vertical-alignment: center;
-                    }
-
-                    // Spacer
-                    Rectangle { horizontal-stretch: 1; }
 
                     Rectangle {
-                        width: 280px;
-                        height: 32px;
-                        border-radius: Theme.r-md;
-                        background: Theme.bg-input;
-                        border-width: 1px;
-                        border-color: Theme.border-subtle;
-                        clip: true;
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border-subtle;
+                    }
+                }
 
-                        pull-input := TextInput {
-                            x: 10px;
-                            y: 4px;
-                            width: parent.width - 20px;
-                            height: parent.height - 8px;
-                            color: Theme.text-primary;
+                // Image list
+                Flickable {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 2px;
+                        alignment: start;
+
+                        for img[idx] in images : ImageRow {
+                            data: img;
+                            remove-clicked => { ct-remove-image(img.id); }
+                        }
+
+                        if images.length == 0 : Rectangle {
+                            height: 120px;
+                            Text {
+                                text: "No images found";
+                                color: Theme.text-dim;
+                                font-size: Theme.font-body;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Volumes tab ──
+            if active-tab == 2 : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 0px;
+
+                // Create volume bar
+                Rectangle {
+                    height: 48px;
+                    background: Theme.bg-card;
+                    border-width: 0px;
+
+                    HorizontalLayout {
+                        padding-left: Theme.sp-4;
+                        padding-right: Theme.sp-4;
+                        spacing: Theme.sp-2;
+                        alignment: start;
+
+                        Text {
+                            text: volumes.length + " volumes";
+                            color: Theme.text-secondary;
                             font-size: Theme.font-small;
-                            text <=> pull-image-input;
+                            vertical-alignment: center;
+                        }
 
-                            accepted => {
-                                if self.text != "" {
-                                    ct-pull(self.text);
-                                    self.text = "";
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Rectangle {
+                            width: 220px;
+                            height: 32px;
+                            border-radius: Theme.r-md;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border-subtle;
+                            clip: true;
+
+                            vol-input := TextInput {
+                                x: 10px;
+                                y: 4px;
+                                width: parent.width - 20px;
+                                height: parent.height - 8px;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-small;
+                                text <=> create-volume-input;
+
+                                accepted => {
+                                    if self.text != "" {
+                                        ct-create-volume(self.text);
+                                        self.text = "";
+                                    }
+                                }
+                            }
+
+                            if vol-input.text == "" : Text {
+                                x: 10px;
+                                text: "Volume name...";
+                                color: Theme.text-dim;
+                                font-size: Theme.font-small;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        ActionButton {
+                            label: "Create";
+                            primary: true;
+                            width: 64px;
+                            clicked => {
+                                if create-volume-input != "" {
+                                    ct-create-volume(create-volume-input);
+                                    create-volume-input = "";
                                 }
                             }
                         }
-
-                        if pull-input.text == "" : Text {
-                            x: 10px;
-                            text: "Image to pull (e.g. nginx:latest)...";
-                            color: Theme.text-dim;
-                            font-size: Theme.font-small;
-                            vertical-alignment: center;
-                        }
                     }
-
-                    ActionButton {
-                        label: "Pull";
-                        primary: true;
-                        width: 56px;
-                        clicked => {
-                            if pull-image-input != "" {
-                                ct-pull(pull-image-input);
-                                pull-image-input = "";
-                            }
-                        }
-                    }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%;
-                    height: 1px;
-                    background: Theme.border-subtle;
-                }
-            }
-
-            // Image list
-            Flickable {
-                vertical-stretch: 1;
-
-                VerticalLayout {
-                    padding: 8px;
-                    spacing: 2px;
-                    alignment: start;
-
-                    for img[idx] in images : ImageRow {
-                        data: img;
-                        remove-clicked => { ct-remove-image(img.id); }
-                    }
-
-                    if images.length == 0 : Rectangle {
-                        height: 120px;
-                        Text {
-                            text: "No images found";
-                            color: Theme.text-dim;
-                            font-size: Theme.font-body;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Volumes tab ──
-        if active-tab == 2 : VerticalLayout {
-            vertical-stretch: 1;
-            spacing: 0px;
-
-            // Create volume bar
-            Rectangle {
-                height: 48px;
-                background: Theme.bg-card;
-                border-width: 0px;
-
-                HorizontalLayout {
-                    padding-left: Theme.sp-4;
-                    padding-right: Theme.sp-4;
-                    spacing: Theme.sp-2;
-                    alignment: start;
-
-                    Text {
-                        text: volumes.length + " volumes";
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-small;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle { horizontal-stretch: 1; }
 
                     Rectangle {
-                        width: 220px;
-                        height: 32px;
-                        border-radius: Theme.r-md;
-                        background: Theme.bg-input;
-                        border-width: 1px;
-                        border-color: Theme.border-subtle;
-                        clip: true;
-
-                        vol-input := TextInput {
-                            x: 10px;
-                            y: 4px;
-                            width: parent.width - 20px;
-                            height: parent.height - 8px;
-                            color: Theme.text-primary;
-                            font-size: Theme.font-small;
-                            text <=> create-volume-input;
-
-                            accepted => {
-                                if self.text != "" {
-                                    ct-create-volume(self.text);
-                                    self.text = "";
-                                }
-                            }
-                        }
-
-                        if vol-input.text == "" : Text {
-                            x: 10px;
-                            text: "Volume name...";
-                            color: Theme.text-dim;
-                            font-size: Theme.font-small;
-                            vertical-alignment: center;
-                        }
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border-subtle;
                     }
+                }
 
-                    ActionButton {
-                        label: "Create";
-                        primary: true;
-                        width: 64px;
-                        clicked => {
-                            if create-volume-input != "" {
-                                ct-create-volume(create-volume-input);
-                                create-volume-input = "";
+                // Volume list
+                Flickable {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 2px;
+                        alignment: start;
+
+                        for vol[idx] in volumes : VolumeRow {
+                            data: vol;
+                            remove-clicked => { ct-remove-volume(vol.name); }
+                        }
+
+                        if volumes.length == 0 : Rectangle {
+                            height: 120px;
+                            Text {
+                                text: "No volumes found";
+                                color: Theme.text-dim;
+                                font-size: Theme.font-body;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
                             }
                         }
                     }
                 }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%;
-                    height: 1px;
-                    background: Theme.border-subtle;
-                }
             }
 
-            // Volume list
-            Flickable {
-                vertical-stretch: 1;
-
-                VerticalLayout {
-                    padding: 8px;
-                    spacing: 2px;
-                    alignment: start;
-
-                    for vol[idx] in volumes : VolumeRow {
-                        data: vol;
-                        remove-clicked => { ct-remove-volume(vol.name); }
-                    }
-
-                    if volumes.length == 0 : Rectangle {
-                        height: 120px;
-                        Text {
-                            text: "No volumes found";
-                            color: Theme.text-dim;
-                            font-size: Theme.font-body;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
+                // ── What Yantrik knows about this ──
+                //
+                // Full height beside the content. Collapses to nothing when there is nothing true to say.
+                AgentRail {
+                    context-items: root.agent-context;
+                    suggestions: root.agent-suggestions;
+                    unavailable: root.agent-unavailable;
+                    context-activated(id) => { root.agent-context-activated(id); }
+                    suggestion-activated(id) => { root.agent-suggestion-activated(id); }
                 }
-            }
         }
     }
 

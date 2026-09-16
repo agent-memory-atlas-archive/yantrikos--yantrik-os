@@ -2,10 +2,50 @@
 //!
 //! Manages Docker/Podman containers via `std::process::Command`.
 
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
 
 slint::include_modules!();
+
+/// Fill the agent rail from what the runtime reports.
+///
+/// Counts are facts the app already has. The suggestion only appears when there are logs on
+/// screen to read -- offering to explain logs that are not there is the kind of empty promise
+/// this rail exists not to make.
+fn refresh_agent_rail(ui: &ContainerManagerApp) {
+    let context = vec![AgentContextItem {
+        id: "counts".into(),
+        label: format!(
+            "{} running, {} stopped",
+            ui.get_running_count(),
+            ui.get_stopped_count()
+        )
+        .into(),
+        detail: ui.get_runtime_name(),
+        source: "file".into(),
+    }];
+    ui.set_agent_context(ModelRc::new(VecModel::from(context)));
+
+    let has_logs = !ui.get_log_text().to_string().trim().is_empty();
+    let online = companion::is_online();
+    let mut next: Vec<AgentSuggestion> = Vec::new();
+    if online && has_logs {
+        next.push(AgentSuggestion {
+            id: "logs".into(),
+            label: "Explain these logs".into(),
+            detail: "reads the last of the output".into(),
+            icon: "spark".into(),
+            running: ui.get_proposal_working(),
+            proposes: false,
+        });
+    }
+    ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
+    ui.set_agent_unavailable(if online || !has_logs {
+        SharedString::new()
+    } else {
+        companion::OFFLINE_HINT.into()
+    });
+}
 
 fn main() {
     init_tracing("yantrik-container-manager");
@@ -21,6 +61,92 @@ fn main() {
     app.global::<AccentPreset>().set_index(theme.accent_index);
 
     wire(&app);
+    // ── The agent layer ──
+    {
+        let weak = app.as_weak();
+        app.on_agent_suggestion_activated(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            if id != "logs" {
+                return;
+            }
+            let name = ui.get_log_container_name().to_string();
+            let all = ui.get_log_text().to_string();
+            let tail = all
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            ui.set_proposal_working(true);
+            ui.set_proposal(AgentProposal {
+                title: "What these logs say".into(),
+                source: "from the container log".into(),
+                ..Default::default()
+            });
+            let prompt = format!(
+                "These are the last lines of the log for container {name}. In at most four short \
+                 lines say what is happening and whether anything is wrong. Use only what is \
+                 shown.\n\n{tail}"
+            );
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&prompt);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_proposal_working(false);
+                    match outcome {
+                        Ok(text) => ui.set_proposal(AgentProposal {
+                            title: "What these logs say".into(),
+                            body: text.into(),
+                            source: "from the container log".into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                        Err(e) => ui.set_proposal(AgentProposal {
+                            title: "The companion did not answer".into(),
+                            body: format!("{e}").into(),
+                            verb: "Close".into(),
+                            ..Default::default()
+                        }),
+                    }
+                });
+            });
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_proposal_dismissed(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_proposal(AgentProposal::default());
+            }
+        });
+    }
+    app.on_proposal_applied(|| {});
+    app.on_agent_context_activated(|_| {});
+    // The rail follows the app's state on a timer.
+    //
+    // Calling it once at startup was not enough: at that moment Weather has no reading yet and
+    // Image Viewer has no file, so both rails computed "nothing to say", collapsed, and stayed
+    // collapsed for the life of the process. Every app loads its content on some path of its own
+    // and hooking each one is how a refresh gets missed; asking every few seconds is cheap and
+    // cannot be forgotten.
+    let rail_timer = slint::Timer::default();
+    {
+        let weak = app.as_weak();
+        rail_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(4),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    refresh_agent_rail(&ui);
+                }
+            },
+        );
+    }
+    refresh_agent_rail(&app);
+
     app.run().unwrap();
 }
 

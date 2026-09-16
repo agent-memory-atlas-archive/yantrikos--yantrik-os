@@ -2,13 +2,27 @@
 // Wraps the shared WeatherDashboard component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
 import { WeatherDashboard, WeatherCurrent, WeatherHourly, WeatherDaily,
          WeatherSavedLocation, WeatherAlert } from "weather.slint";
 
 export { WeatherCurrent, WeatherHourly, WeatherDaily, WeatherSavedLocation, WeatherAlert, ThemeMode, AccentPreset }
+export { AgentContextItem, AgentSuggestion, AgentProposal }
 
 export component WeatherApp inherits Window {
+    // ── The agent layer ──
+    in property <[AgentContextItem]> agent-context <=> dash.agent-context;
+    in property <[AgentSuggestion]> agent-suggestions <=> dash.agent-suggestions;
+    in property <string> agent-unavailable <=> dash.agent-unavailable;
+    callback agent-context-activated <=> dash.agent-context-activated;
+    callback agent-suggestion-activated <=> dash.agent-suggestion-activated;
+    in property <AgentProposal> proposal <=> dash.proposal;
+    in property <bool> proposal-working <=> dash.proposal-working;
+    callback proposal-applied <=> dash.proposal-applied;
+    callback proposal-dismissed <=> dash.proposal-dismissed;
+    
     // What app this window is.
     //
     // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
