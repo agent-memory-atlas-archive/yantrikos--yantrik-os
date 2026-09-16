@@ -6,6 +6,7 @@ import { Theme } from "theme.slint";
 import { YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 // ── Data structs ──
 
@@ -116,6 +117,7 @@ export component SystemMonitor inherits Rectangle {
 
         // -- Header --
         AppHeader {
+            app-id: "sysmonitor";
             show-back: true;
             icon: Icons.monitor;
             title: "System Monitor";

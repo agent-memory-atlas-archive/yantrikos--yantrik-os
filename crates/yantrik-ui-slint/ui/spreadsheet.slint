@@ -8,6 +8,7 @@ import { ScrollView, LineEdit } from "std-widgets.slint";
 import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButton, RibbonQuickAction, RibbonGroupLabel, RibbonColorButton, RibbonDropdown } from "components/app_ribbon.slint";
 import { Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 export struct SpreadsheetCell {
     text: string,
@@ -297,6 +298,7 @@ export component SpreadsheetScreen inherits Rectangle {
     VerticalLayout {
         // -- Header --
         AppHeader {
+            app-id: "spreadsheet";
             icon: Icons.sheets;
             title: "ySheets";
             subtitle: root.status-text;

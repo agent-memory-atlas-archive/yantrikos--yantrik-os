@@ -4,6 +4,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 export struct ComponentVersionData {
     name: string,
@@ -50,6 +51,7 @@ export component AboutScreen inherits Rectangle {
         // A 56px bar with its own back button, its own title type and its own padding, three
         // pixels taller than every app's and built from scratch to be almost the same.
         AppHeader {
+            app-id: "about";
             show-back: true;
             icon: Icons.chip;
             title: "About";

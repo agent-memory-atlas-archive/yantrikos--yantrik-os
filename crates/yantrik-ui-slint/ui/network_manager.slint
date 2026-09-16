@@ -4,6 +4,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 // ── Data structs ──
 
@@ -326,6 +327,7 @@ export component NetworkManager inherits Rectangle {
         // the line directly under the app name -- and the app gets the same top edge as the
         // other fifteen instead of a 56px status panel unique to itself.
         AppHeader {
+            app-id: "network";
             icon: root.status-connection-type == "Ethernet" ? Icons.network : Icons.wifi;
             title: "Network";
             subtitle: root.conn-summary;

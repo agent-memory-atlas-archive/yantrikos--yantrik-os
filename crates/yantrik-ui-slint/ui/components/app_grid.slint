@@ -7,6 +7,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
+import { AppColor } from "app_color.slint";
 
 export struct AppGridItem {
     app-id: string,
@@ -254,10 +255,18 @@ export component AppGrid inherits Rectangle {
                                                 y: (parent.height - self.height) / 2;
                                                 image-fit: contain;
                                             }
+                                            // The app's own colour, brightening on hover.
+                                            //
+                                            // These were all Theme.text-secondary: thirty-three
+                                            // applications rendered in one grey, so the grid
+                                            // could only be read by its labels and the icons
+                                            // were decoration.
                                             if !app.has-icon : Icon {
                                                 commands: Icons.app-or-category(app.icon-id, app.category);
                                                 size: 22px;
-                                                tint: cell.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                                tint: cell.has-hover
+                                                    ? AppColor.for-app(app.icon-id).brighter(25%)
+                                                    : AppColor.for-app(app.icon-id);
                                                 x: (parent.width - self.width) / 2;
                                                 y: (parent.height - self.height) / 2;
                                             }

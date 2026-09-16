@@ -1,0 +1,107 @@
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// app_color.slint — every app its own colour
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//
+// This OS had one accent and painted everything with it. Every app glyph in the launcher,
+// every header tile, every icon in the taskbar: the same teal, at the same weight. Sixteen
+// applications and thirty screens, and no way to tell any of them apart at a glance — you had
+// to read the label every single time, because the picture beside it carried no information.
+//
+// Monochrome is a legitimate choice and it was not a choice; it was the default falling
+// through everywhere. The cost is that the desktop reads as one undifferentiated surface —
+// competent and lifeless — which is the difference between an interface you can navigate by
+// memory and one you have to parse.
+//
+// So colour becomes identity here, the way it is on every desktop worth comparing to: Mail is
+// blue, Calendar is red, Notes is yellow, Music is pink. You learn the colour once and then
+// stop reading labels. That is not decoration, it is a second channel of information running
+// alongside the shape, and using only one of the two was leaving half the signal on the floor.
+//
+// Rules for anything added here:
+//
+//   Hue carries meaning where meaning exists. Anything about writing is warm, anything about
+//   the system is cool, anything destructive stays with the danger colour rather than getting
+//   a personality of its own.
+//
+//   Neighbours differ. The launcher sorts alphabetically, so Calendar and Containers land side
+//   by side and must not be the same blue.
+//
+//   Readable on the dark surface first. This palette is tuned against #0c0c14, because that is
+//   what the OS is nearly all of the time; the light theme takes the same hues darkened rather
+//   than a second set, so there is one list to keep honest.
+import { Theme } from "theme.slint";
+import { ThemeMode } from "theme.slint";
+
+export global AppColor {
+    // ── The palette ──
+    //
+    // Deliberately a fixed set rather than free-form per app: twelve hues spaced around the
+    // wheel, so two apps that land next to each other are always visibly different, and an app
+    // added later picks one rather than inventing a shade nothing else uses.
+    out property <color> blue:    ThemeMode.dark ? #4a9eff : #1f6fd0;
+    out property <color> azure:   ThemeMode.dark ? #35c4e8 : #0f8ba8;
+    out property <color> teal:    ThemeMode.dark ? #34d3b4 : #12907a;
+    out property <color> green:   ThemeMode.dark ? #52d36a : #2a9440;
+    out property <color> lime:    ThemeMode.dark ? #9ed44a : #5f8a1e;
+    out property <color> yellow:  ThemeMode.dark ? #e8c44a : #9a7a10;
+    out property <color> orange:  ThemeMode.dark ? #f0954a : #b8611a;
+    out property <color> red:     ThemeMode.dark ? #f0655f : #c2352f;
+    out property <color> pink:    ThemeMode.dark ? #f06aa8 : #b8306e;
+    out property <color> magenta: ThemeMode.dark ? #cf6ae8 : #9330b0;
+    out property <color> violet:  ThemeMode.dark ? #9a7cf0 : #5f42c0;
+    out property <color> slate:   ThemeMode.dark ? #8a94a8 : #5a6274;
+
+    // ── Which app is which ──
+    //
+    // Keyed by the shell's own app ids, the same ones Icons.app is keyed by, so an app has one
+    // identity rather than a picture from one table and a colour from another.
+    public pure function for-app(id: string) -> color {
+        return id == "notes"          ? root.yellow    // writing, warm
+             : id == "editor"         ? root.violet
+             : id == "documents"      ? root.blue
+             : id == "spreadsheet"    ? root.green
+             : id == "presentation"   ? root.orange
+             : id == "snippets"       ? root.magenta
+
+             : id == "email"          ? root.blue      // communication
+             : id == "calendar"       ? root.red
+             : id == "notifications"  ? root.orange
+
+             : id == "music"          ? root.pink      // media
+             : id == "media"          ? root.pink
+             : id == "image"          ? root.magenta
+
+             : id == "terminal"       ? root.green     // the machine, cool
+             : id == "system"         ? root.azure
+             : id == "sysmonitor"     ? root.lime
+             : id == "network"        ? root.azure
+             : id == "containers"     ? root.teal
+             : id == "packages"       ? root.teal
+             : id == "devices"        ? root.slate
+             : id == "downloads"      ? root.teal
+             : id == "files"          ? root.yellow
+             : id == "browser"        ? root.azure
+
+             : id == "memory"         ? root.violet    // the companion
+             : id == "bond"           ? root.pink
+             : id == "personality"    ? root.magenta
+             : id == "skills"         ? root.lime
+             : id == "permissions"    ? root.red
+             : id == "settings"       ? root.slate
+             : id == "about"          ? root.slate
+             : id == "launchpad"      ? root.blue
+
+             // Anything else — a third-party app, or one added without an entry here — takes
+             // the shell's accent. It is the honest answer: we do not know what this is, so it
+             // gets the house colour rather than a hue that would imply a category.
+             : Theme.accent;
+    }
+
+    /// The same colour as a surface behind it: the badge a glyph sits in.
+    ///
+    /// One derivation rather than a second hand-written list, so a colour and its tint can
+    /// never disagree.
+    public pure function tint-for-app(id: string) -> color {
+        return root.for-app(id).transparentize(ThemeMode.dark ? 0.86 : 0.90);
+    }
+}

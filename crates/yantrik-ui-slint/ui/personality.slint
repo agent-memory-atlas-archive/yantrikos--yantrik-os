@@ -3,6 +3,7 @@
 import { Theme } from "theme.slint";
 import { Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 import { RadarChart } from "components/radar_chart.slint";
 
 export struct OpinionData {
@@ -37,6 +38,7 @@ export component PersonalityScreen inherits Rectangle {
         // browser's search field, where it drew as nothing and made the whole field look blank.
         // AppHeader's back button is a stroke path from the Icons set.
         AppHeader {
+            app-id: "personality";
             show-back: true;
             icon: Icons.companion;
             title: "Personality";

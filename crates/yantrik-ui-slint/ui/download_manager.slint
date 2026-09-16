@@ -7,6 +7,7 @@ import { ListView } from "std-widgets.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 export struct DownloadItem {
     id: int,
@@ -98,6 +99,7 @@ export component DownloadManagerScreen inherits Rectangle {
         // subtitle now, on the line the frame reserves for exactly this: what the app is
         // currently doing, said quietly, under what the app is.
         AppHeader {
+            app-id: "downloads";
             icon: Icons.download;
             title: "Downloads";
             subtitle: "\{root.active-count} active  -  \{root.total-speed}  -  \{root.completed-today} done today";

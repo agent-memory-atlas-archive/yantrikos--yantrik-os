@@ -8,6 +8,7 @@ import { YButton, YIconButton } from "components/y_button.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 // ── Data Structures ──
 
@@ -517,6 +518,7 @@ export component EmailClient inherits Rectangle {
     if root.has-account : VerticalLayout {
         // -- Header --
         AppHeader {
+            app-id: "email";
             icon: Icons.mail;
             title: "Email";
             subtitle: root.account-name != ""

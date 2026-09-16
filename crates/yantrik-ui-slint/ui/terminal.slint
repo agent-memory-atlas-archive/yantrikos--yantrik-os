@@ -6,6 +6,7 @@
 import { Theme } from "theme.slint";
 import { Icons, Icon } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 export struct TerminalTabData {
     title: string,
@@ -111,6 +112,7 @@ export component TerminalScreen inherits Rectangle {
         // They are the subtitle now: still the second thing you read, no longer the app's own
         // private idea of what a badge looks like.
         AppHeader {
+            app-id: "terminal";
             icon: Icons.terminal;
             title: "Terminal";
             subtitle: root.last-command-duration != ""

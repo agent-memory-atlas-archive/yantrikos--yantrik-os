@@ -3,6 +3,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 
 // ── Data structs ──
@@ -393,6 +394,7 @@ export component ContainerManagerScreen inherits Rectangle {
         // The three tabs are leading-actions: they sit beside the title because they change
         // what you are looking at, rather than doing something to it. Verbs go on the right.
         AppHeader {
+            app-id: "containers";
             icon: Icons.packages;
             title: "Containers";
             subtitle: root.runtime-name;

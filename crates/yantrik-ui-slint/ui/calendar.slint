@@ -6,6 +6,7 @@ import { ScrollView } from "std-widgets.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 // ── Data Structures ──
 
@@ -126,6 +127,7 @@ export component CalendarScreen inherits Rectangle {
         // The month and the three view modes used to live inside the left pane, which meant
         // the thing telling you where you are scrolled with the thing you were looking at.
         AppHeader {
+            app-id: "calendar";
             icon: Icons.calendar;
             title: "Calendar";
             subtitle: root.month-title;

@@ -6,6 +6,7 @@ import { Theme } from "theme.slint";
 import { YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 // ── Data structs ──
 
@@ -217,6 +218,7 @@ export component WeatherDashboard inherits Rectangle {
         // is an action that reads as pressed, which is the same thing the sliding pill said
         // with thirty lines of its own geometry.
         AppHeader {
+            app-id: "weather";
             show-back: true;
             icon: Icons.weather;
             title: "Weather";

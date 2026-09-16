@@ -12,6 +12,7 @@ import { YButton, YIconButton } from "components/y_button.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 // Data model for a track in the library or queue
 export struct MusicTrackData {
@@ -213,6 +214,7 @@ export component MusicPlayerScreen inherits Rectangle {
         // are looking at -- and the library search is the frame's own search field, which is
         // why it is now the same 240px box in the same place as in every other app.
         AppHeader {
+            app-id: "music";
             icon: Icons.music;
             title: "Music";
             subtitle: root.browse-sub-header;

@@ -6,6 +6,7 @@ import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 export struct NotificationData {
     id: string,
@@ -44,6 +45,7 @@ export component NotificationCenter inherits Rectangle {
         // installed font happens to carry it. They are Icons paths now, and the unread count is
         // the subtitle instead of a pill the header had to size by hand.
         AppHeader {
+            app-id: "notifications";
             show-back: true;
             icon: Icons.alerts;
             title: "Notifications";

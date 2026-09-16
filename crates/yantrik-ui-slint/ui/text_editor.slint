@@ -7,6 +7,7 @@ import { Theme } from "theme.slint";
 import { YButton, YIconButton } from "components/y_button.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 export struct EditorTabData {
     title: string,
@@ -97,6 +98,7 @@ export component TextEditorScreen inherits Rectangle {
         spacing: 0px;
         // -- Header --
         AppHeader {
+            app-id: "editor";
             icon: Icons.editor;
             title: root.file-name;
             subtitle: root.is-readonly ? "read-only  -  " + root.file-type : root.file-type;

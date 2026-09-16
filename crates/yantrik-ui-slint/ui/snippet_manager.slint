@@ -5,6 +5,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { ListView, LineEdit, TextEdit } from "std-widgets.slint";
 
@@ -117,6 +118,7 @@ export component SnippetManagerScreen inherits Rectangle {
     // a status bar it draws over the bottom 28px. The panes below now start at the header's
     // height instead of at zero.
     AppHeader {
+            app-id: "snippets";
         x: 0;
         y: 0;
         width: parent.width;

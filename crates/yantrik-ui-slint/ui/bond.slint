@@ -4,6 +4,7 @@
 import { Theme } from "theme.slint";
 import { Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 import { BondRing } from "components/bond_ring.slint";
 
 export struct BondData {
@@ -33,6 +34,7 @@ export component BondScreen inherits Rectangle {
         // browser's search field, where it drew as nothing and made the whole field look blank.
         // AppHeader's back button is a stroke path from the Icons set.
         AppHeader {
+            app-id: "bond";
             show-back: true;
             icon: Icons.bond;
             title: "Bond";

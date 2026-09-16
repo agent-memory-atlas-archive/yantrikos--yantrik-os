@@ -6,6 +6,7 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 
 component ToolbarButton inherits TouchArea {
@@ -168,6 +169,7 @@ export component ImageViewer inherits Rectangle {
         // transforms get their own strip underneath, which is where every image viewer worth
         // using puts them.
         AppHeader {
+            app-id: "image";
             icon: Icons.image;
             title: root.file-name != "" ? root.file-name : "No image open";
             subtitle: root.counter-text;

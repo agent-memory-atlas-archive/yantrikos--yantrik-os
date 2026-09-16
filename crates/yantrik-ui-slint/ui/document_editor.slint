@@ -8,6 +8,7 @@ import { ListView, LineEdit, ScrollView } from "std-widgets.slint";
 import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButton, RibbonQuickAction, RibbonGroupLabel } from "components/app_ribbon.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 export struct DocHeadingEntry {
     title: string,
@@ -170,6 +171,7 @@ export component DocumentEditorScreen inherits Rectangle {
     VerticalLayout {
         // -- Header --
         AppHeader {
+            app-id: "documents";
             icon: Icons.doc;
             title: root.doc-title != "" ? root.doc-title : "yDoc";
             modified: root.doc-is-modified;

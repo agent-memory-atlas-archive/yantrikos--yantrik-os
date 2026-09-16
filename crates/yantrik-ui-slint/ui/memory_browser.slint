@@ -4,6 +4,7 @@ import { Theme } from "theme.slint";
 import { Icons } from "components/icon.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 import { ListView } from "std-widgets.slint";
 
 export struct MemoryItem {
@@ -42,6 +43,7 @@ export component MemoryBrowser inherits Rectangle {
         // AppHeader draws both as stroke paths from the Icons set, at the size everything else
         // uses, and gives the field a placeholder.
         AppHeader {
+            app-id: "memory";
             show-back: true;
             icon: Icons.chip;
             title: "Memories";

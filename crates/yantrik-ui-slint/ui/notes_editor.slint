@@ -8,6 +8,7 @@ import { YButton, YIconButton } from "components/y_button.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 export struct NoteEntry {
     title: string,
@@ -152,6 +153,7 @@ export component NotesEditor inherits Rectangle {
         // need a note now grey out instead of vanishing — a toolbar that reflows as you click
         // around it is the jumpiest thing a window can do.
         AppHeader {
+            app-id: "notes";
             icon: Icons.notes;
             title: root.current-title != "" ? root.current-title : "Notes";
             modified: root.is-modified;

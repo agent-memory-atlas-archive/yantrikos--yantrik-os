@@ -11,6 +11,7 @@ import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButto
          RibbonAccentButton } from "components/app_ribbon.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
+import { AppColor } from "components/app_color.slint";
 
 export struct SlideData {
     title: string,
@@ -427,6 +428,7 @@ export component PresentationScreen inherits Rectangle {
             // belong in one. The deck's name, whether it is saved, and the verbs that apply to
             // the whole file belong in the frame every app wears.
             AppHeader {
+            app-id: "presentation";
                 icon: Icons.present;
                 title: root.presentation-title != "" ? root.presentation-title : "yPresent";
                 subtitle: root.slide-progress;
