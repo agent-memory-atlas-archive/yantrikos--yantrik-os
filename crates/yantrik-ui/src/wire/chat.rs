@@ -47,18 +47,18 @@ fn dispatch(
     ui_weak: &slint::Weak<App>,
     bridge: &Arc<CompanionBridge>,
     text: &str,
-    slot: &Rc<RefCell<Option<Timer>>>,
+    streams: &streaming::Streams,
 ) {
     let Some(host) = super::harness::host() else {
         // No host yet (very early boot). The builtin is the only thing that could answer.
-        streaming::start_ai_stream(ui_weak.clone(), bridge, text, slot);
+        streaming::start_ai_stream(ui_weak.clone(), bridge, text, streams);
         return;
     };
 
     // The builtin keeps its own path: it carries tool calls, the __REPLACE__ convention and the
     // job board, none of which the harness protocol has or needs.
     if host.active_id() == super::harness::BUILTIN_ID {
-        streaming::start_ai_stream(ui_weak.clone(), bridge, text, slot);
+        streaming::start_ai_stream(ui_weak.clone(), bridge, text, streams);
         return;
     }
 
@@ -87,7 +87,7 @@ fn dispatch(
         }
         let _ = tx.send("__DONE__".to_string());
     });
-    streaming::stream_into(ui_weak.clone(), rx, text, slot);
+    streaming::stream_into(ui_weak.clone(), rx, text, streams);
 }
 
 /// Wire on_send_message and on_lens_submit callbacks.
@@ -100,8 +100,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 fn wire_send_message(ui: &App, ctx: &AppContext) {
     let bridge = ctx.bridge.clone();
     let ui_weak = ui.as_weak();
-    let timer_slot: Rc<RefCell<Option<Timer>>> = Rc::new(RefCell::new(None));
-    let slot = timer_slot.clone();
+    // One per entry point, holding the pumps for answers still arriving. Two at once is ordinary:
+    // a person answers an approval while the task waiting on it keeps talking.
+    let streams = streaming::Streams::new();
 
     ui.on_send_message(move |text| {
         let text = text.to_string();
@@ -110,7 +111,7 @@ fn wire_send_message(ui: &App, ctx: &AppContext) {
         }
         // V22: No offline guard — companion handles offline mode internally
         // via OfflineResponder (memory recall + pattern matching + templates)
-        dispatch(&ui_weak, &bridge, &text, &slot);
+        dispatch(&ui_weak, &bridge, &text, &streams);
     });
 }
 
@@ -119,8 +120,9 @@ fn wire_lens_submit(ui: &App, ctx: &AppContext) {
     let bridge = ctx.bridge.clone();
     let ui_weak = ui.as_weak();
     let catalogue = ctx.installed_apps.clone();
-    let timer_slot: Rc<RefCell<Option<Timer>>> = Rc::new(RefCell::new(None));
-    let slot = timer_slot.clone();
+    // One per entry point, holding the pumps for answers still arriving. Two at once is ordinary:
+    // a person answers an approval while the task waiting on it keeps talking.
+    let streams = streaming::Streams::new();
 
     ui.on_lens_submit(move |query| {
         let query = query.to_string();
@@ -174,7 +176,7 @@ fn wire_lens_submit(ui: &App, ctx: &AppContext) {
         // whichever mind is answering, the same as one typed into chat. This line called the
         // builtin directly, which meant the Lens (the primary way anyone talks to this desktop)
         // ignored the mind picker even after chat stopped doing so.
-        dispatch(&ui_weak, &bridge, &query, &slot);
+        dispatch(&ui_weak, &bridge, &query, &streams);
     });
 }
 
