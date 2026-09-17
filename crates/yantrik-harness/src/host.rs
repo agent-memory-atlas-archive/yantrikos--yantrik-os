@@ -331,6 +331,11 @@ impl Host {
         let Some(tx) = harness.in_flight.get(&turn_id) else {
             return Err(format!("turn {turn_id} is not one this harness was given"));
         };
+        // An empty delta is a heartbeat: the call has already refreshed this session's presence,
+        // which is its whole purpose, and forwarding "" would only wake the panel for nothing.
+        if delta.is_empty() {
+            return Ok(serde_json::json!({}));
+        }
         if tx.send(Chunk::Text(delta)).is_err() {
             // The panel stopped listening — the person closed it or asked something else.
             harness.in_flight.remove(&turn_id);
@@ -499,6 +504,28 @@ mod tests {
 
         let answer = host.send(Turn::new("anyone there?"));
         assert!(crate::collect(answer).unwrap_err().contains("no longer attached"));
+    }
+
+    /// An empty chunk keeps a long turn's presence and adds nothing to the answer.
+    #[test]
+    fn an_empty_chunk_is_a_heartbeat_not_text() {
+        let host = host();
+        let session = attach(&host, "mind");
+        host.set_active("mind").unwrap();
+        let answer = host.send(Turn::new("hi"));
+        let assignment =
+            host.handle(protocol::POLL, &serde_json::json!({ "session": session })).unwrap();
+        let turn_id = assignment["turn_id"].as_u64().unwrap();
+        for delta in ["", "Hello", "", " there"] {
+            host.handle(
+                protocol::CHUNK,
+                &serde_json::json!({ "session": session, "turn_id": turn_id, "delta": delta }),
+            )
+            .unwrap();
+        }
+        host.handle(protocol::COMPLETE, &serde_json::json!({ "session": session, "turn_id": turn_id }))
+            .unwrap();
+        assert_eq!(crate::collect(answer).unwrap(), "Hello there");
     }
 
     #[test]

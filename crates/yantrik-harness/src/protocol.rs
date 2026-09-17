@@ -55,6 +55,9 @@ pub const METHODS: &[&str] = &[ATTACH, POLL, CHUNK, COMPLETE, FAIL, DETACH];
 
 /// How long a harness may go without polling before it is considered gone.
 ///
+/// Any session call counts, so a harness still working on a long turn keeps its place by sending
+/// a chunk with an empty delta — a heartbeat that adds no text.
+///
 /// Generous, because a harness is usually blocked in its own long poll and a slow one must not be
 /// evicted mid-answer. It only has to be shorter than a person's patience with a picker listing
 /// something that is no longer there.
