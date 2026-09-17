@@ -378,7 +378,7 @@ impl Host {
 /// Lives here so the polling interval is defined once, by the side that knows what the timeout
 /// means, rather than guessed at by every harness author.
 pub fn poll_interval() -> Duration {
-    Duration::from_millis(200)
+    Duration::from_millis(protocol::POLL_INTERVAL_MS)
 }
 
 #[cfg(test)]

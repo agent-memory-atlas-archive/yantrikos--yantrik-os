@@ -8,8 +8,8 @@
 //! # Why the harness dials in, and polls
 //!
 //! The socket bus here is request/response: a server answers calls, it does not push. Rather than
-//! bend that, the harness asks for work — [`POLL`] blocks until there is a turn or the timeout
-//! elapses. Three things fall out of it, all of them wanted:
+//! bend that, the harness asks for work — [`POLL`] answers with a turn if one is waiting and with
+//! `{}` if none is, and the harness asks again. Three things fall out of it, all of them wanted:
 //!
 //! - **Anything with a JSON-RPC client can be a harness.** No callback URL to configure, no port
 //!   to open, no inbound reachability. A harness behind NAT or in a container works the same as
@@ -24,7 +24,8 @@
 //! ```text
 //! attach  {id, name, capabilities}      → {session}
 //! loop:
-//!   poll  {session, timeout_ms}         → {turn_id, text, context} | {}
+//!   poll  {session}                     → {turn_id, text, context} | {}
+//!   …if {}: wait POLL_INTERVAL_MS and poll again
 //!   chunk {session, turn_id, delta}     → {}          … as many as you like
 //!   complete {session, turn_id}         → {}
 //! ```
@@ -38,7 +39,7 @@ use serde::{Deserialize, Serialize};
 
 /// Announce yourself. Answers with a session id used by every later call.
 pub const ATTACH: &str = "harness.attach";
-/// Ask for a turn. Blocks until there is one or `timeout_ms` passes.
+/// Ask for a turn. Answers immediately: the turn if one is waiting, `{}` if none is.
 pub const POLL: &str = "harness.poll";
 /// Part of an answer, as soon as it exists.
 pub const CHUNK: &str = "harness.chunk";
@@ -59,9 +60,23 @@ pub const METHODS: &[&str] = &[ATTACH, POLL, CHUNK, COMPLETE, FAIL, DETACH];
 /// something that is no longer there.
 pub const PRESENCE_TIMEOUT_SECS: u64 = 90;
 
-/// The longest a poll is held open. Long enough that a harness is not spinning, short enough that
-/// it notices the OS went away.
-pub const MAX_POLL_MS: u64 = 30_000;
+/// How long to wait after an empty poll before asking again.
+///
+/// This used to be `MAX_POLL_MS = 30_000`, documented as "the longest a poll is held open" — and
+/// nothing held a poll open for any length of time. `poll` takes the lock, pops the queue and
+/// returns `{}` if it is empty, which is a deliberate and good design (it never occupies a
+/// connection, so a harness cannot wedge the bus by existing). But the constant and the module
+/// doc both described a long poll that was never written, and the only complete harness in the
+/// tree quietly slept 300ms in a loop to work around the contract it had been handed.
+///
+/// A published protocol that describes something other than what the server does is the single
+/// most expensive kind of wrong here: a harness is written by someone who has this file and no
+/// access to the host, and every one of them would have written `timeout_ms: 30000`, got an empty
+/// answer in a millisecond, and spun a core.
+///
+/// So: this is the client's wait, it is named for what it is, and 200ms is what the host's own
+/// `poll_interval()` has always returned. Nobody notices 200ms in front of a model call.
+pub const POLL_INTERVAL_MS: u64 = 200;
 
 /// What a harness says about itself when it attaches.
 ///

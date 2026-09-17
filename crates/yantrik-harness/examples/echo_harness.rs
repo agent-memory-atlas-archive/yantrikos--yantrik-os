@@ -65,8 +65,9 @@ fn main() {
         };
 
         let Some(turn_id) = turn["turn_id"].as_u64() else {
-            // Nothing waiting. Ordinary: a person types far less often than this loop runs.
-            std::thread::sleep(Duration::from_millis(300));
+            // Nothing waiting. Ordinary: a person types far less often than this loop runs, and
+            // `poll` answers `{}` straight away rather than holding the connection.
+            std::thread::sleep(Duration::from_millis(protocol::POLL_INTERVAL_MS));
             continue;
         };
         let text = turn["text"].as_str().unwrap_or_default().to_string();
