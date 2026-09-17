@@ -62,8 +62,38 @@ script that only acts never needs to attach.
 - **Nothing waiting is an ordinary reply**, not an error. You will poll far more often than a
   person types.
 
+## Two harnesses exist
+
+**Yantrik Mind** attaches from its own process (`crates/mind-core/src/harness.rs` in its repo).
+It is the reference for a mind written in Rust that already has its own model and memory.
+
+**Hermes Agent** attaches through a plugin this repo ships, `harnesses/hermes`, because Hermes
+is a gateway with its own platforms (Telegram, Slack, IRC) and this makes the desktop one more
+of them. To install it on a machine that already runs Hermes:
+
+```sh
+cp -r harnesses/hermes ~/.hermes/plugins/yantrik
+hermes plugins enable yantrik-desktop
+systemctl --user restart hermes-gateway    # or however Hermes is started
+yos act shell use_harness id=hermes        # once it appears in the picker
+```
+
+Hermes keeps its model, endpoint, keys and memory in `~/.hermes`, as it always has. The plugin
+reads none of it except the model name, which it passes as the `detail` the picker shows.
+
+Two things a gateway-shaped harness has to get right, both learned by running one:
+
+- **Close every turn exactly once.** The desktop is waiting on the turn it handed over, and a
+  gateway has paths that answer without going through its own completion hook — a `/stop`, a
+  command answered inline. Anything that leaves a turn open leaves the desktop waiting forever,
+  and a heartbeat keeps it waiting convincingly.
+- **A message that arrives while you are working is a turn too.** Queueing it behind the current
+  one is fine for a chat app, where nothing is owed; here the turn it came from is owed an
+  answer. Answer it — even if the answer is "still working on the last one".
+
 ## What is not here yet
 
-The shell does not serve this socket yet, and the picker and Settings screen are not built. The
-protocol, the host state machine and the reference client are, and the host is tested without a
-socket in the loop — `cargo test -p yantrik-harness`.
+Tasks, events with sequence numbers, approvals as a first-class message and automations are
+designed (`design/hermes-on-yantrik.html`) but not in the protocol: today a long task is one turn with
+its progress streamed as text, and an approval is a line of that text the person answers by
+typing `/approve`.

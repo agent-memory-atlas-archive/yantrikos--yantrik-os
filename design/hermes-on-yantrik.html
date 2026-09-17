@@ -1,0 +1,1282 @@
+<title>Hermes on Yantrik</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #09090f;
+    --ground: #0c0c14;
+    --surface: #161622;
+    --card: #1e1e2e;
+    --elevated: #262638;
+    --glass: rgba(30, 30, 46, 0.82);
+    --line: rgba(255, 255, 255, 0.06);
+    --line-2: rgba(255, 255, 255, 0.10);
+    --line-3: rgba(255, 255, 255, 0.17);
+    --hover: rgba(255, 255, 255, 0.05);
+    --text: #e8eaef;
+    --text-2: #9aa1b0;
+    --text-3: #6f7688;
+    --accent: #4ecdc4;
+    --accent-hi: #7ee0d8;
+    --accent-soft: rgba(78, 205, 196, 0.13);
+    --accent-line: rgba(78, 205, 196, 0.45);
+    --amber: #d4a574;
+    --amber-soft: rgba(212, 165, 116, 0.16);
+    --warn: #ffb74d;
+    --warn-soft: rgba(255, 183, 77, 0.13);
+    --ok: #26a69a;
+    --ok-soft: rgba(38, 166, 154, 0.16);
+    --danger: #ef9a9a;
+    --danger-soft: rgba(239, 154, 154, 0.12);
+    --ui: "Barlow", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--page);
+    color: var(--text);
+    font-family: var(--ui);
+    font-size: 15px;
+    line-height: 1.55;
+    padding-inline: 20px;
+    padding-block: 0 80px;
+  }
+  .wrap { max-width: 1120px; margin-inline: auto; }
+  .prose { max-width: 68ch; }
+  h1, h2, h3, h4 { text-wrap: balance; margin: 0; font-weight: 600; }
+  p { margin: 0; }
+  code { font-family: var(--mono); font-size: 0.86em; color: var(--text); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+  [hidden] { display: none !important; }
+
+  .i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .i-sm { width: 13px; height: 13px; }
+  .i-lg { width: 22px; height: 22px; }
+  .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 1.1px; text-transform: uppercase; color: var(--text-3); }
+
+  /* ── Document ─────────────────────────────────────────── */
+  .head { display: grid; gap: 14px; padding-block: 56px 30px; }
+  .head h1 { font-size: 44px; line-height: 1.08; letter-spacing: -0.5px; }
+  .head h1 span { color: var(--accent); }
+  .lede { color: var(--text-2); font-size: 17px; line-height: 1.6; }
+  .lede strong { color: var(--text); font-weight: 500; }
+  .credit { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; color: var(--text-3); }
+  .credit b { color: var(--text-2); font-weight: 500; }
+
+  .section { display: grid; gap: 22px; padding-block: 60px 0; }
+  .section-head { display: grid; gap: 10px; }
+  .section-head h2 { font-size: 26px; line-height: 1.2; letter-spacing: -0.2px; }
+  .section-head p { color: var(--text-2); }
+  .caption { color: var(--text-3); font-size: 13px; }
+  .scroll-hint { display: none; margin-bottom: 8px; }
+  @media (max-width: 1080px) { .scroll-hint { display: block; } }
+
+  /* ══════════════════════════════════════════════════════════
+     Screens
+     ══════════════════════════════════════════════════════════ */
+  .screen-scroll { overflow-x: auto; border-radius: 14px; }
+  .screen {
+    min-width: 1040px; border-radius: 14px; border: 1px solid var(--line-2); overflow: hidden; position: relative;
+    font-size: 14px; line-height: 1.4; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+    display: grid; grid-template-rows: 32px auto 40px;
+    background:
+      radial-gradient(120% 60% at 34% 54%, rgba(140, 104, 110, 0.30), transparent 60%),
+      linear-gradient(180deg, #121827 0%, #1a2032 34%, #3c3444 49%, #6a5561 53%, #2b3044 58%, #161b2a 70%, #0d101a 100%);
+  }
+  .screen.flat { background: var(--ground); }
+
+  .sb {
+    display: flex; align-items: center; gap: 14px; padding-inline: 14px;
+    background: rgba(12, 12, 20, 0.74); border-bottom: 1px solid var(--line);
+    font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums;
+  }
+  .sb .grow { flex: 1; }
+  .sb .brand { color: var(--text); font-weight: 600; letter-spacing: 0.2px; }
+  .sb .clock { color: var(--text); font-weight: 500; }
+  .sb-btn { height: 22px; padding-inline: 6px; border-radius: 6px; display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); }
+  .sb-btn:hover { background: var(--hover); color: var(--text); }
+
+  .mind-chip {
+    display: inline-flex; align-items: center; gap: 7px; height: 22px; padding-inline: 9px; border-radius: 6px;
+    background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 500; white-space: nowrap;
+  }
+  .mind-chip:hover { background: rgba(78, 205, 196, 0.2); }
+  .mind-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .mind-chip .extra { color: var(--text); font-weight: 500; }
+  .mind-chip.need { background: var(--warn-soft); color: var(--warn); }
+  .mind-chip.need .extra { color: var(--warn); }
+  .mind-chip.work .dot { background: var(--amber); }
+
+  .tb { display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: rgba(22, 22, 34, 0.88); border-top: 1px solid var(--line); }
+  .tb-apps { height: 100%; display: inline-flex; align-items: center; gap: 7px; padding-inline: 11px; border-radius: 6px; background: var(--accent); color: #07201e; font-weight: 600; font-size: 13px; }
+  .tb-sep { width: 1px; height: 20px; background: var(--line-2); margin-inline: 2px; }
+  .tb-item { height: 100%; display: inline-flex; align-items: center; gap: 8px; padding-inline: 10px; border-radius: 6px; font-size: 12px; color: var(--text-2); position: relative; }
+  .tb-item.active { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+  .tb-item.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--accent); }
+  .tb .grow { flex: 1; }
+  .tb-comp { height: 100%; display: inline-flex; align-items: center; gap: 7px; padding-inline: 11px; border-radius: 6px; border: 1px solid var(--line-2); font-size: 12px; color: var(--text); }
+  .tb-comp::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+  /* ── Desktop: two columns ── */
+  .desk { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; padding: 16px; min-height: 690px; }
+  .nav { background: rgba(16, 16, 26, 0.72); border: 1px solid var(--line); border-radius: 12px; padding: 14px 10px; display: grid; gap: 14px; align-content: start; }
+  .nav h4 { font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; color: var(--text-3); padding-inline: 8px; margin-bottom: 2px; }
+  .nav-list { display: grid; gap: 1px; }
+  .nav-row { display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 6px; font-size: 13px; color: var(--text); }
+  .nav-row:hover { background: var(--hover); }
+  .nav-row .i { color: var(--text-2); }
+  .nav-row .meta { margin-left: auto; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+  .main { display: grid; justify-items: center; align-content: start; }
+  .col { width: 100%; max-width: 720px; display: grid; gap: 22px; padding-top: 20px; }
+  .greet h3 { font-size: 36px; line-height: 1.1; letter-spacing: -0.3px; }
+  .greet p { color: var(--text-2); font-size: 15px; margin-top: 3px; }
+
+  /* composer */
+  .composer { background: rgba(20, 20, 32, 0.95); border: 1px solid var(--line-3); border-radius: 12px; }
+  .composer:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 4px rgba(78, 205, 196, 0.07); }
+  .composer-row { display: flex; align-items: center; gap: 10px; padding: 12px 12px 10px 16px; }
+  .composer-row .i { color: var(--text-3); }
+  .composer input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: var(--text); font: 400 16px/1.3 var(--ui); }
+  .composer input::placeholder { color: var(--text-3); }
+  .submit-hint { font-size: 12px; color: var(--text-2); white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
+  .submit-hint kbd, .kbd { font: 500 11px var(--mono); color: var(--text-2); border: 1px solid var(--line-2); border-radius: 4px; padding: 0 5px; }
+  .composer-actions { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--line); }
+  .act { height: 32px; padding-inline: 12px; border-radius: 8px; font-size: 13px; font-weight: 500; color: var(--text-2); display: inline-flex; align-items: center; gap: 7px; }
+  .act:hover { background: var(--hover); color: var(--text); }
+  .act.primary { background: var(--elevated); color: var(--text); }
+  .act.primary:hover { background: #2e2e44; }
+  .act .kbd { margin-left: 2px; }
+  .act .i { color: var(--text-3); }
+  .act.primary .i { color: var(--accent); }
+
+  .block-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+  .link { color: var(--text-2); font-size: 12px; display: inline-flex; align-items: center; gap: 3px; }
+  .link:hover { color: var(--text); }
+  .glass { background: var(--glass); border: 1px solid var(--line); border-radius: 12px; }
+  .pins { display: flex; padding: 8px; }
+  .pin { width: 88px; display: grid; justify-items: center; gap: 5px; padding-block: 9px 7px; border-radius: 8px; font-size: 12px; color: var(--text-2); }
+  .pin:hover { background: var(--hover); color: var(--text); }
+
+  /* activity preview rows */
+  .rows { overflow: hidden; }
+  .row { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 56px; padding: 8px 14px; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; }
+  .badge { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; }
+  .st-need .badge { background: var(--warn-soft); color: var(--warn); }
+  .st-work .badge { color: var(--amber); }
+  .st-done .badge { background: var(--ok-soft); color: var(--ok); }
+  .st-fail .badge { background: var(--danger-soft); color: var(--danger); }
+  .st-cancel .badge { background: var(--hover); color: var(--text-3); }
+  .spin { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--amber-soft); border-top-color: var(--amber); animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .row-title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row-sub { font-size: 12px; color: var(--text-2); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row-sub .state { font-weight: 500; }
+  .st-need .state { color: var(--warn); }
+  .st-work .state { color: var(--amber); }
+  .st-done .state { color: var(--ok); }
+  .st-fail .state { color: var(--danger); }
+  .row-side { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .btn { height: 28px; padding-inline: 12px; border-radius: 7px; font-size: 12px; font-weight: 500; border: 1px solid var(--line-2); color: var(--text); display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { background: var(--hover); border-color: var(--line-3); }
+  .btn-accent { background: var(--accent); color: #07201e; border-color: transparent; font-weight: 600; }
+  .btn-accent:hover { background: var(--accent-hi); }
+  .btn-warn { color: var(--warn); border-color: rgba(255, 183, 77, 0.35); }
+  .btn-warn:hover { background: var(--warn-soft); }
+  .btn-lg { height: 34px; padding-inline: 16px; font-size: 13px; }
+  .empty { padding: 20px 16px; display: grid; gap: 2px; }
+  .empty b { font-weight: 500; }
+  .empty span { color: var(--text-2); font-size: 13px; }
+
+  /* overlays inside a screen */
+  .scrim { position: absolute; inset: 32px 0 40px; background: rgba(6, 6, 12, 0.62); display: grid; place-items: start center; padding-top: 70px; z-index: 5; }
+  .dialog { background: var(--card); border: 1px solid var(--line-3); border-radius: 14px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6); overflow: hidden; }
+  .dialog-head { padding: 16px 20px 12px; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .dialog-head h3 { font-size: 18px; }
+  .dialog-body { padding: 0 20px 16px; display: grid; gap: 14px; }
+  .dialog-foot { display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--surface); }
+  .dialog-foot .grow { flex: 1; }
+  .x { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; color: var(--text-2); }
+  .x:hover { background: var(--hover); color: var(--text); }
+
+  .fieldset { border: 1px solid var(--line-2); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; }
+  .fieldset .eyebrow { display: flex; justify-content: space-between; align-items: center; }
+  .fieldset textarea {
+    width: 100%; min-height: 64px; resize: vertical; background: transparent; border: 0; outline: none; color: var(--text);
+    font: 400 14px/1.5 var(--ui);
+  }
+  .note { font-size: 12px; color: var(--text-2); }
+  .kv { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; font-size: 13px; }
+  .kv dt { color: var(--text-2); }
+  .kv dd { margin: 0; }
+  .enforced { border-color: var(--accent-line); background: rgba(78, 205, 196, 0.04); }
+  .enforced .eyebrow { color: var(--accent); }
+  .pill { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding-inline: 8px; border-radius: 6px; font-size: 12px; background: var(--hover); color: var(--text); margin-right: 4px; }
+  .pill.off { color: var(--text-3); text-decoration: line-through; }
+
+  .sheet-grid { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 7px 14px; font-size: 13px; }
+  .sheet-grid dt { color: var(--text-2); }
+  .sheet-grid dd { margin: 0; }
+  .cmd { font-family: var(--mono); font-size: 12px; color: var(--text); background: rgba(0, 0, 0, 0.35); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; overflow-x: auto; white-space: nowrap; }
+  .scope { border-radius: 10px; padding: 12px 14px; display: grid; gap: 5px; font-size: 13px; }
+  .scope.checked { background: rgba(38, 166, 154, 0.07); border: 1px solid rgba(38, 166, 154, 0.3); }
+  .scope.unverified { background: var(--warn-soft); border: 1px solid rgba(255, 183, 77, 0.3); }
+  .scope .eyebrow { color: var(--ok); }
+  .scope.unverified .eyebrow { color: var(--warn); }
+  .scope .muted { color: var(--text-2); font-size: 12px; }
+  .paths { font: 400 11.5px/1.7 var(--mono); color: var(--text-2); max-height: 96px; overflow: auto; margin-top: 4px; }
+  .seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--hover); gap: 2px; }
+  .seg button { height: 26px; padding-inline: 10px; border-radius: 6px; font-size: 12px; color: var(--text-2); }
+  .seg button[aria-pressed="true"] { background: var(--elevated); color: var(--text); }
+
+  .toast { position: absolute; right: 18px; bottom: 54px; width: 320px; padding: 11px 13px; border-radius: 10px; background: var(--card); border: 1px solid var(--line-3); box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5); font-size: 13px; display: grid; gap: 2px; z-index: 8; }
+  .toast .t { font-weight: 600; }
+  .toast .s { color: var(--text-2); font-size: 12px; }
+
+  /* ── What changed ── */
+  .changes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; }
+  .change { display: grid; gap: 4px; padding-block: 14px; border-top: 1px solid var(--line); }
+  .change .from { font-size: 13px; color: var(--text-3); text-decoration: line-through; text-decoration-color: rgba(255, 255, 255, 0.25); }
+  .change .to { font-size: 15px; font-weight: 500; }
+  .change p { font-size: 14px; color: var(--text-2); }
+  @media (max-width: 760px) { .changes { grid-template-columns: 1fr; } }
+
+  /* ── Floating composer frame ── */
+  .app-frame { padding: 16px; min-height: 420px; position: relative; }
+  .app-win { position: absolute; inset: 16px; border-radius: 10px; border: 1px solid var(--line-2); background: #11111b; overflow: hidden; }
+  .app-bar { height: 32px; display: flex; align-items: center; padding-inline: 12px; gap: 8px; background: var(--surface); border-bottom: 1px solid var(--line); font-size: 12px; color: var(--text-2); }
+  .code { padding: 14px 18px; font: 400 12px/1.8 var(--mono); color: #6f7688; white-space: pre; }
+  .code .k { color: #9ab8ff; } .code .s { color: #cfe8a4; } .code .c { color: #4a5060; }
+  .float-scrim { position: absolute; inset: 0; background: rgba(6, 6, 12, 0.5); display: grid; place-items: start center; padding-top: 58px; }
+  .float { width: 680px; background: var(--card); border: 1px solid var(--line-3); border-radius: 14px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6); overflow: hidden; }
+  .float .results { border-top: 1px solid var(--line); padding: 6px; display: grid; }
+  .float .res { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; font-size: 13px; }
+  .float .res .kind { margin-left: auto; font-size: 11px; color: var(--text-3); }
+  .float .res.sel { background: var(--hover); }
+
+  /* ── Activity frame ── */
+  .act-view { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 0; margin: 16px; border-radius: 12px; border: 1px solid var(--line); background: var(--ground); overflow: hidden; min-height: 640px; }
+  .act-side { background: var(--surface); border-right: 1px solid var(--line); padding: 12px 10px; display: grid; gap: 14px; align-content: start; }
+  .back { font-size: 12px; color: var(--text-2); display: inline-flex; gap: 4px; align-items: center; padding: 4px 8px; }
+  .side-sec { display: grid; gap: 1px; }
+  .side-row { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 7px; font-size: 13px; color: var(--text-2); }
+  .side-row.on { background: rgba(255, 255, 255, 0.07); color: var(--text); font-weight: 500; }
+  .side-row .n { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .side-row .n.hot { color: var(--warn); font-weight: 600; }
+  .side-tasks .row { min-height: 50px; padding: 6px 8px; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; border: 0; border-radius: 7px; }
+  .side-tasks .row.sel { background: rgba(255, 255, 255, 0.06); }
+  .side-tasks .badge { width: 22px; height: 22px; }
+  .side-tasks .spin { width: 14px; height: 14px; }
+
+  .detail { display: grid; grid-template-rows: auto 1fr; min-width: 0; }
+  .detail-head { display: flex; align-items: center; gap: 14px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+  .detail-head h3 { font-size: 18px; }
+  .detail-head .sub { font-size: 12px; color: var(--text-2); }
+  .detail-head .grow { flex: 1; }
+  .detail-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; min-width: 0; }
+  .content { padding: 16px 20px; display: grid; gap: 18px; align-content: start; min-width: 0; }
+  .inspector { border-left: 1px solid var(--line); padding: 16px; display: grid; gap: 16px; align-content: start; }
+  .result { border: 1px dashed var(--line-3); border-radius: 10px; padding: 14px; color: var(--text-2); font-size: 13px; }
+  .phases { display: grid; gap: 2px; }
+  .phase { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 7px 0; }
+  .phase .m { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; margin-top: 1px; }
+  .phase.done .m { background: var(--ok-soft); color: var(--ok); }
+  .phase.now .m { border: 2px solid var(--amber-soft); border-top-color: var(--amber); animation: spin 0.9s linear infinite; }
+  .phase.later .m { border: 1.5px solid var(--line-3); }
+  .phase .t { font-size: 14px; }
+  .phase .d { font-size: 12px; color: var(--text-2); }
+  .phase .r { font-size: 12px; color: var(--text-3); }
+  .phase.now .r { color: var(--amber); }
+  .sub-task { margin-top: 6px; border-left: 1px solid var(--line-2); padding-left: 12px; display: grid; gap: 3px; font-size: 12px; color: var(--text-2); }
+  .sub-task span b { color: var(--text); font-weight: 500; }
+  .events-toggle { font-size: 12px; color: var(--text-2); display: inline-flex; align-items: center; gap: 5px; }
+  .events-toggle:hover { color: var(--text); }
+  .events { font: 400 11.5px/1.75 var(--mono); color: var(--text-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: rgba(0, 0, 0, 0.25); overflow-x: auto; white-space: nowrap; }
+  .events .ev { color: var(--text-3); }
+  .events .tn { color: var(--accent); }
+  .convo { display: grid; gap: 8px; font-size: 13px; }
+  .msg { display: grid; gap: 2px; }
+  .msg .who { font-size: 11px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text-3); }
+  .instr { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line-2); border-radius: 9px; padding: 6px 6px 6px 10px; }
+  .instr input { flex: 1; background: transparent; border: 0; outline: none; color: var(--text); font: 400 13px var(--ui); min-width: 0; }
+  .target { font-size: 11px; color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 2px 7px; white-space: nowrap; }
+  .insp h4 { font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; color: var(--text-3); margin-bottom: 6px; }
+  .insp-list { display: grid; gap: 5px; font-size: 13px; }
+  .insp-list div { display: flex; justify-content: space-between; gap: 10px; }
+  .insp-list span:first-child { color: var(--text-2); }
+  .insp-list span:last-child { text-align: right; }
+  .file { font: 400 12px var(--mono); }
+
+  /* ── Mind settings frame ── */
+  .win { border: 1px solid var(--line-2); border-radius: 14px; overflow: hidden; background: var(--ground); box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45); }
+  .win-bar { height: 36px; display: flex; align-items: center; justify-content: space-between; padding-left: 14px; background: var(--surface); border-bottom: 1px solid var(--line); font-size: 13px; color: var(--text-2); }
+  .win-ctl { display: flex; height: 100%; }
+  .win-ctl span { width: 40px; display: grid; place-items: center; color: var(--text-3); }
+  .win-body { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-height: 560px; }
+  .set-nav { background: var(--surface); border-right: 1px solid var(--line); padding: 10px; display: grid; gap: 1px; align-content: start; }
+  .set-nav div { padding: 7px 10px; border-radius: 6px; font-size: 13px; color: var(--text-2); }
+  .set-nav div.on { background: rgba(255, 255, 255, 0.07); color: var(--text); font-weight: 500; }
+  .set-main { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; }
+  .mind-head { padding: 18px 22px 14px; display: grid; gap: 12px; border-bottom: 1px solid var(--line); }
+  .mind-title { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .mind-logo { width: 38px; height: 38px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; }
+  .mind-title h3 { font-size: 20px; line-height: 1.1; }
+  .mind-title .v { font-size: 12px; color: var(--text-2); }
+  .health { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+  .health span { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding-inline: 9px; border-radius: 6px; background: var(--hover); font-size: 12px; color: var(--text-2); }
+  .health span::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  .tabs { display: flex; gap: 4px; }
+  .tab { height: 30px; padding-inline: 12px; border-radius: 7px; font-size: 13px; color: var(--text-2); }
+  .tab[aria-selected="true"] { background: rgba(255, 255, 255, 0.07); color: var(--text); font-weight: 500; }
+  .pane { padding: 4px 22px 20px; overflow: auto; }
+  .group { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 10px 22px; padding-block: 16px; border-top: 1px solid var(--line); }
+  .group:first-child { border-top: 0; }
+  .group-name { font-size: 13px; font-weight: 600; }
+  .group-name small { display: block; color: var(--text-3); font-weight: 400; font-size: 12px; margin-top: 2px; }
+  .fields { display: grid; gap: 12px; min-width: 0; }
+  .field { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; align-items: center; }
+  .field label, .field .lbl { font-size: 13px; color: var(--text-2); }
+  .ctl { height: 32px; width: 100%; border-radius: 7px; border: 1px solid var(--line-2); background: var(--surface); color: var(--text); font: 400 13px var(--ui); padding-inline: 10px; }
+  .ctl.mono { font-family: var(--mono); font-size: 12px; }
+  select.ctl { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--text-2) 50%), linear-gradient(135deg, var(--text-2) 50%, transparent 50%); background-position: calc(100% - 15px) 14px, calc(100% - 10px) 14px; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 28px; }
+  .ctl:focus { border-color: var(--accent-line); outline: none; box-shadow: 0 0 0 3px rgba(78, 205, 196, 0.12); }
+  .ctl.changed { border-color: rgba(212, 165, 116, 0.6); }
+  .secret { display: flex; align-items: center; gap: 8px; }
+  .secret .s { font-size: 13px; color: var(--text-2); flex: 1; }
+  .secret .s b { color: var(--ok); font-weight: 500; }
+  .toggles { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tg { height: 28px; padding-inline: 10px; border-radius: 7px; border: 1px solid var(--line-2); font-size: 12px; color: var(--text-2); display: inline-flex; align-items: center; gap: 6px; }
+  .tg::before { content: ""; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--text-3); }
+  .tg[aria-pressed="true"] { color: var(--text); border-color: var(--accent-line); background: var(--accent-soft); }
+  .tg[aria-pressed="true"]::before { background: var(--accent); border-color: var(--accent); }
+  .folder { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line-2); border-radius: 10px; padding: 12px 14px; }
+  .folder p { font-size: 13px; color: var(--text-2); flex: 1; }
+  .folder p b { color: var(--text); font-weight: 500; display: block; }
+  .set-foot { display: flex; align-items: center; gap: 10px; padding: 12px 22px; border-top: 1px solid var(--line); background: var(--surface); flex-wrap: wrap; }
+  .set-foot .msg-line { font-size: 12px; color: var(--text-2); flex: 1; min-width: 200px; }
+  .set-foot .msg-line b { color: var(--amber); font-weight: 500; }
+  .set-foot .msg-line.ok b { color: var(--ok); }
+  .btn[disabled] { opacity: 0.4; cursor: default; }
+
+  .handover { display: grid; gap: 14px; padding-top: 16px; }
+  .swap { display: grid; grid-template-columns: 1fr 40px 1fr; align-items: center; gap: 8px; }
+  .swap-card { border: 1px solid var(--line-2); border-radius: 10px; padding: 12px 14px; display: grid; gap: 2px; }
+  .swap-card.to { border-color: var(--accent-line); background: rgba(78, 205, 196, 0.05); }
+  .swap-card b { font-size: 15px; font-weight: 600; }
+  .swap-card span { font-size: 12px; color: var(--text-2); }
+  .swap .arrow { color: var(--text-3); display: grid; place-items: center; }
+  .checklist { border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; }
+  .check { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 13px; align-items: start; }
+  .check:first-child { border-top: 0; }
+  .check .c { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; }
+  .check.warn .c { background: var(--warn-soft); color: var(--warn); }
+  .check.ok .c { background: var(--ok-soft); color: var(--ok); }
+  .check .d { color: var(--text-2); font-size: 12px; margin-top: 1px; }
+  .memory-note { border-left: 2px solid var(--accent); padding: 6px 0 6px 14px; display: grid; gap: 2px; }
+  .memory-note b { font-weight: 600; }
+  .memory-note span { color: var(--text-2); font-size: 13px; }
+  .radio { display: grid; gap: 6px; }
+  .radio label { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 9px; cursor: pointer; }
+  .radio label:has(input:checked) { border-color: var(--accent-line); background: rgba(78, 205, 196, 0.05); }
+  .radio input { accent-color: var(--accent); margin-top: 3px; }
+  .radio small { display: block; color: var(--text-2); font-size: 12px; }
+
+  @media (max-width: 860px) {
+    .win-body { grid-template-columns: 1fr; }
+    .set-nav { display: none; }
+    .group { grid-template-columns: 1fr; }
+    .health { margin-left: 0; }
+  }
+  @media (max-width: 560px) {
+    .field { grid-template-columns: 1fr; gap: 5px; }
+    .head h1 { font-size: 34px; }
+    .swap { grid-template-columns: 1fr; }
+    .swap .arrow { transform: rotate(90deg); }
+  }
+
+  /* ── Wiring ── */
+  .flow { display: grid; grid-template-columns: 1fr 58px 1fr 58px 1fr; align-items: stretch; }
+  .node { border: 1px solid var(--line-2); border-radius: 12px; padding: 16px; display: grid; gap: 6px; align-content: start; background: rgba(255, 255, 255, 0.02); }
+  .node h3 { font-size: 15px; }
+  .node p { font-size: 13px; color: var(--text-2); }
+  .node .where { font: 400 11px var(--mono); color: var(--text-3); }
+  .node.plugin { border-color: var(--accent-line); background: rgba(78, 205, 196, 0.05); }
+  .arrow-h { display: grid; place-items: center; position: relative; }
+  .arrow-h::before { content: ""; position: absolute; left: 6px; right: 6px; top: 50%; height: 1px; background: var(--line-3); }
+  .arrow-h span { position: relative; background: var(--page); padding: 2px 4px; font: 400 10px var(--mono); color: var(--text-3); text-align: center; line-height: 1.3; }
+  @media (max-width: 820px) {
+    .flow { grid-template-columns: 1fr; }
+    .arrow-h { height: 38px; }
+    .arrow-h::before { left: 50%; right: auto; top: 4px; bottom: 4px; width: 1px; height: auto; }
+  }
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+  table { width: 100%; border-collapse: collapse; min-width: 760px; font-size: 13px; }
+  th { text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; color: var(--text-3); padding: 11px 14px; border-bottom: 1px solid var(--line-2); background: rgba(255, 255, 255, 0.02); }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--text-2); }
+  tr:last-child td { border-bottom: 0; }
+  td:first-child { color: var(--text); white-space: nowrap; }
+  .dir { font: 500 11px var(--mono); white-space: nowrap; }
+  .dir.in { color: var(--accent); }
+  .dir.out { color: var(--amber); }
+  .dir.os { color: var(--text-2); }
+  .rule-note { font-size: 14px; color: var(--text-2); border-left: 2px solid var(--accent); padding: 4px 0 4px 14px; }
+  .rule-note strong { color: var(--text); font-weight: 500; }
+
+  /* ── Build order ── */
+  .steps-list { list-style: none; margin: 0; padding: 0; counter-reset: step; }
+  .step { display: grid; grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr); gap: 18px; padding-block: 16px; border-top: 1px solid var(--line); counter-increment: step; }
+  .step:first-child { border-top: 0; }
+  .step::before { content: counter(step); font: 500 13px var(--mono); color: var(--accent); width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--accent-line); display: grid; place-items: center; }
+  .step h3 { font-size: 15px; }
+  .step .what { color: var(--text-2); font-size: 14px; margin-top: 3px; }
+  .step .see { font-size: 13px; color: var(--text-2); }
+  .step .see b { display: block; font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; color: var(--text-3); margin-bottom: 3px; }
+  @media (max-width: 720px) { .step { grid-template-columns: 34px minmax(0, 1fr); } .step .see { grid-column: 2; } }
+  .later { display: flex; flex-wrap: wrap; gap: 8px; }
+  .later span { font-size: 13px; color: var(--text-2); border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; }
+
+  /* ── Decisions ── */
+  .decisions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .decision { border: 1px solid var(--line-2); border-radius: 12px; padding: 18px; display: grid; gap: 10px; align-content: start; }
+  .decision.settled { border-color: var(--line); background: rgba(255, 255, 255, 0.015); }
+  .decision h3 { font-size: 16px; line-height: 1.3; }
+  .decision p { font-size: 14px; color: var(--text-2); }
+  .rec { font-size: 13px; color: var(--text); display: flex; gap: 8px; align-items: flex-start; padding-top: 10px; border-top: 1px solid var(--line); }
+  .rec b { color: var(--accent); font-weight: 600; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; flex: none; margin-top: 2px; }
+  .decision.settled .rec b { color: var(--ok); }
+  @media (max-width: 900px) { .decisions { grid-template-columns: 1fr; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spin, .phase.now .m { animation: none; border-top-color: var(--amber); border-right-color: var(--amber); }
+  }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-search" viewBox="0 0 20 20"><path d="M3.5 9A5.5 5.5 0 1 0 14.5 9A5.5 5.5 0 1 0 3.5 9Z M13 13L16.5 16.5"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 20 20"><path d="M3.5 4.5H16.5V13H9L5.5 16V13H3.5Z"/></symbol>
+  <symbol id="i-task" viewBox="0 0 20 20"><path d="M4 5.5H16 M4 10H12 M4 14.5H9 M13 13.5L14.8 15.3L18 12"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 20 20"><path d="M3 10A7 7 0 1 0 17 10A7 7 0 1 0 3 10Z M10 6V10L13 12"/></symbol>
+  <symbol id="i-check" viewBox="0 0 20 20"><path d="M4.5 10.5L8.5 14.5L15.5 6"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 20 20"><path d="M10 3.2L17.5 16.5H2.5Z M10 8.5V11.5 M10 14H10.01"/></symbol>
+  <symbol id="i-x" viewBox="0 0 20 20"><path d="M6 6L14 14 M14 6L6 14"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 20 20"><path d="M6.5 6.5H13.5V13.5H6.5Z"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 20 20"><path d="M8 5L13 10L8 15"/></symbol>
+  <symbol id="i-back" viewBox="0 0 20 20"><path d="M12 5L7 10L12 15"/></symbol>
+  <symbol id="i-down" viewBox="0 0 20 20"><path d="M5.5 8L10 12.5L14.5 8"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 20 20"><path d="M4 10H16 M11 5L16 10L11 15"/></symbol>
+  <symbol id="i-companion" viewBox="0 0 20 20"><path d="M3 10A7 7 0 1 0 17 10A7 7 0 1 0 3 10Z M7.5 10A2.5 2.5 0 1 0 12.5 10A2.5 2.5 0 1 0 7.5 10Z"/></symbol>
+  <symbol id="i-min" viewBox="0 0 20 20"><path d="M5 10H15"/></symbol>
+  <symbol id="i-max" viewBox="0 0 20 20"><path d="M5 5H15V15H5Z"/></symbol>
+  <symbol id="i-close" viewBox="0 0 20 20"><path d="M5.5 5.5L14.5 14.5 M14.5 5.5L5.5 14.5"/></symbol>
+  <symbol id="i-home" viewBox="0 0 20 20"><path d="M3.5 9L10 3.5L16.5 9V16.5H3.5Z M8 16.5V11.5H12V16.5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 20 20"><path d="M2.5 5.5H8L9.5 7H17.5V15.5H2.5Z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 20 20"><path d="M10 3V12.5 M6 9L10 13L14 9 M4 16.5H16"/></symbol>
+  <symbol id="i-star" viewBox="0 0 20 20"><path d="M10 2.8L12.2 7.4L17.2 8L13.5 11.5L14.4 16.5L10 14.1L5.6 16.5L6.5 11.5L2.8 8L7.8 7.4Z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 20 20"><path d="M5.5 2.5H11.5L14.5 5.5V17.5H5.5Z M11.5 2.5V5.5H14.5"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 20 20"><path d="M3 10A7 7 0 1 0 17 10A7 7 0 1 0 3 10Z M3 10H17 M10 3C7.5 5.5 7.5 14.5 10 17 M10 3C12.5 5.5 12.5 14.5 10 17"/></symbol>
+  <symbol id="i-term" viewBox="0 0 20 20"><path d="M3 4.5H17V15.5H3Z M6 8L8.5 10L6 12 M10 12H13.5"/></symbol>
+  <symbol id="i-note" viewBox="0 0 20 20"><path d="M5 3H15V17H5Z M7.5 7H12.5 M7.5 10H12.5 M7.5 13H10.5"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 20 20"><path d="M3 5H17V15H3Z M3 5.5L10 11L17 5.5"/></symbol>
+  <symbol id="i-cal" viewBox="0 0 20 20"><path d="M3.5 5H16.5V16H3.5Z M3.5 8.5H16.5 M7 3V6 M13 3V6"/></symbol>
+  <symbol id="i-apps" viewBox="0 0 20 20"><path d="M4 4H8.5V8.5H4Z M11.5 4H16V8.5H11.5Z M4 11.5H8.5V16H4Z M11.5 11.5H16V16H11.5Z"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 20 20"><path d="M3 8A10 10 0 0 1 17 8 M5.5 10.5A6.5 6.5 0 0 1 14.5 10.5 M8 13A3 3 0 0 1 12 13 M10 15.5H10.01"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 20 20"><path d="M2.5 10.5H6L8 5.5L12 15L14 10.5H17.5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 20 20"><path d="M5.5 9H14.5V16H5.5Z M7.5 9V6.5A2.5 2.5 0 0 1 12.5 6.5V9"/></symbol>
+  <symbol id="i-db" viewBox="0 0 20 20"><path d="M4 5C4 3.9 6.7 3 10 3S16 3.9 16 5V15C16 16.1 13.3 17 10 17S4 16.1 4 15Z M4 5C4 6.1 6.7 7 10 7S16 6.1 16 5 M4 10C4 11.1 6.7 12 10 12S16 11.1 16 10"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 4.5V15.5 M4.5 10H15.5"/></symbol>
+</svg>
+
+<div class="wrap">
+
+  <header class="head">
+    <div class="eyebrow">Yantrik OS · Design proposal · revised</div>
+    <h1>Hermes on <span>Yantrik</span></h1>
+    <p class="lede prose">
+      <strong>Ask without committing, commit explicitly, see work in one place, and never dress an instruction up as a guarantee.</strong>
+      Hermes 0.14 already runs tasks with live tool events, approvals and schedules; this is how the desktop starts that work, shows it, and asks for permission.
+      The screens are live — type in the composer, press <strong>Ctrl+Enter</strong>, and review the approval.
+    </p>
+    <div class="credit">
+      <span><b>Revised after</b> a two-round design review with GPT-6 Astra</span>
+      <span><b>Settled</b> one mind at a time · YantrikDB is the default memory</span>
+    </div>
+  </header>
+
+  <!-- ═════════════════════ DESKTOP ═════════════════════ -->
+  <section aria-label="The desktop">
+    <p class="caption scroll-hint">These are full-width screens. Scroll sideways inside each to see all of it.</p>
+    <div class="screen-scroll">
+      <div class="screen" id="desk-screen">
+        <div class="sb">
+          <span class="brand">Yantrik</span>
+          <span class="grow"></span>
+          <button class="mind-chip need" id="mind-chip" type="button" title="Open Activity">
+            <span class="dot"></span>Hermes<span class="extra" id="mind-extra">· Needs you 1</span>
+          </button>
+          <button class="sb-btn" type="button" title="System: CPU, memory, services"><svg class="i i-sm"><use href="#i-pulse"/></svg>System</button>
+          <svg class="i i-sm" style="color:var(--accent)"><use href="#i-wifi"/></svg>
+          <span class="clock">21:40</span><span>Wed 16 Sep</span>
+        </div>
+
+        <div class="desk">
+          <nav class="nav" aria-label="Places">
+            <div>
+              <h4>Places</h4>
+              <div class="nav-list">
+                <div class="nav-row"><svg class="i"><use href="#i-home"/></svg>Home</div>
+                <div class="nav-row"><svg class="i"><use href="#i-folder"/></svg>Documents</div>
+                <div class="nav-row"><svg class="i"><use href="#i-download"/></svg>Downloads<span class="meta">3.1 GB</span></div>
+              </div>
+            </div>
+            <div>
+              <h4>Favourites</h4>
+              <div class="nav-list">
+                <div class="nav-row"><svg class="i"><use href="#i-star"/></svg>yantrik-os</div>
+                <div class="nav-row"><svg class="i"><use href="#i-star"/></svg>Notes</div>
+              </div>
+            </div>
+            <div>
+              <h4>Recent files</h4>
+              <div class="nav-list">
+                <div class="nav-row"><svg class="i"><use href="#i-file"/></svg>intent_lens.slint<span class="meta">21:12</span></div>
+                <div class="nav-row"><svg class="i"><use href="#i-file"/></svg>pins.rs<span class="meta">20:58</span></div>
+                <div class="nav-row"><svg class="i"><use href="#i-note"/></svg>Week 38 digest<span class="meta">20:31</span></div>
+              </div>
+            </div>
+          </nav>
+
+          <div class="main">
+            <div class="col">
+              <div class="greet">
+                <h3>Good evening, Pranab</h3>
+                <p>Wednesday, 16 September</p>
+              </div>
+
+              <form class="composer" id="composer" autocomplete="off">
+                <div class="composer-row">
+                  <svg class="i"><use href="#i-search"/></svg>
+                  <label for="comp-input" style="position:absolute;left:-9999px">Ask, find an app, or search files</label>
+                  <input id="comp-input" type="text" placeholder="Ask, find an app, or search files" value="Compare December flights from XNA to Kolkata">
+                  <span class="submit-hint" id="submit-hint">Ask Hermes <kbd>↵</kbd></span>
+                </div>
+                <div class="composer-actions">
+                  <button class="act" type="button" id="btn-ask"><svg class="i i-sm"><use href="#i-chat"/></svg>Ask</button>
+                  <button class="act primary" type="button" id="btn-task"><svg class="i i-sm"><use href="#i-task"/></svg>Start task…<span class="kbd">Ctrl ↵</span></button>
+                  <button class="act" type="button" id="btn-auto"><svg class="i i-sm"><use href="#i-clock"/></svg>Automate…</button>
+                </div>
+              </form>
+
+              <div>
+                <div class="block-head">
+                  <span class="eyebrow">Pinned apps</span>
+                  <button class="link" type="button">All apps<svg class="i i-sm"><use href="#i-chev"/></svg></button>
+                </div>
+                <div class="glass pins">
+                  <button class="pin" type="button"><svg class="i i-lg" style="color:#e8c35c"><use href="#i-folder"/></svg>Files</button>
+                  <button class="pin" type="button"><svg class="i i-lg" style="color:#5eb8ff"><use href="#i-globe"/></svg>Browser</button>
+                  <button class="pin" type="button"><svg class="i i-lg" style="color:#6ad08a"><use href="#i-term"/></svg>Terminal</button>
+                  <button class="pin" type="button"><svg class="i i-lg" style="color:#e8c35c"><use href="#i-note"/></svg>Notes</button>
+                  <button class="pin" type="button"><svg class="i i-lg" style="color:#6aa8ff"><use href="#i-mail"/></svg>Email</button>
+                  <button class="pin" type="button"><svg class="i i-lg" style="color:#ff7b7b"><use href="#i-cal"/></svg>Calendar</button>
+                </div>
+              </div>
+
+              <div>
+                <div class="block-head">
+                  <span class="eyebrow">Activity</span>
+                  <button class="link" type="button" id="view-all">View all<svg class="i i-sm"><use href="#i-chev"/></svg></button>
+                </div>
+                <div class="glass rows" id="preview"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tb">
+          <span class="tb-apps"><svg class="i"><use href="#i-apps"/></svg>Apps</span>
+          <span class="tb-sep"></span>
+          <span class="tb-item active"><svg class="i i-sm" style="color:#e8c35c"><use href="#i-note"/></svg>Week 38 digest — Notes</span>
+          <span class="grow"></span>
+          <span class="tb-comp">Companion</span>
+        </div>
+
+        <!-- Task draft -->
+        <div class="scrim" id="draft" hidden>
+          <div class="dialog" style="width:680px" role="dialog" aria-modal="true" aria-labelledby="draft-title">
+            <div class="dialog-head">
+              <h3 id="draft-title">Start task</h3>
+              <button class="x" type="button" data-close="draft" aria-label="Cancel"><svg class="i"><use href="#i-x"/></svg></button>
+            </div>
+            <div class="dialog-body">
+              <div class="fieldset">
+                <div class="eyebrow">Instructions</div>
+                <label for="draft-text" style="position:absolute;left:-9999px">Instructions</label>
+                <textarea id="draft-text"></textarea>
+                <div class="note">Requests to Hermes, not access restrictions. "Don't book anything" is asked, not enforced.</div>
+              </div>
+              <div class="fieldset">
+                <div class="eyebrow">Context <button class="btn" type="button" style="height:24px"><svg class="i i-sm"><use href="#i-plus"/></svg>Add files…</button></div>
+                <div class="note">No files attached.</div>
+              </div>
+              <div class="fieldset enforced">
+                <div class="eyebrow">Enforced by Hermes <span style="color:var(--text-3);font-weight:500;letter-spacing:0.4px;text-transform:none">confirmed by Hermes · 21:40</span></div>
+                <dl class="kv">
+                  <dt>Tools</dt><dd><span class="pill">Web search</span><span class="pill">Browser</span><span class="pill">Files</span></dd><dd></dd>
+                  <dt>Commands</dt><dd><span class="pill off">Terminal</span><span class="note">Not available to this task</span></dd><dd></dd>
+                  <dt>Approvals</dt><dd>Ask before risky commands</dd><dd><button class="link" type="button">View policy</button></dd>
+                </dl>
+                <div class="note">Browser access can still reach sites that make changes on your behalf. <button class="link" type="button" style="display:inline">Change access…</button></div>
+              </div>
+            </div>
+            <div class="dialog-foot">
+              <span class="note">Runs in the background · appears in Activity</span>
+              <span class="grow"></span>
+              <button class="btn btn-lg" type="button" data-close="draft">Cancel</button>
+              <button class="btn btn-lg btn-accent" type="button" id="draft-start">Start task</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Automation editor -->
+        <div class="scrim" id="auto" hidden>
+          <div class="dialog" style="width:680px" role="dialog" aria-modal="true" aria-labelledby="auto-title">
+            <div class="dialog-head">
+              <h3 id="auto-title">New automation</h3>
+              <button class="x" type="button" data-close="auto" aria-label="Cancel"><svg class="i"><use href="#i-x"/></svg></button>
+            </div>
+            <div class="dialog-body">
+              <div class="field" style="grid-template-columns:110px minmax(0,1fr)"><label for="auto-name">Name</label><input class="ctl" id="auto-name" value="Morning email summary"></div>
+              <div class="fieldset">
+                <div class="eyebrow">Instructions</div>
+                <label for="auto-text" style="position:absolute;left:-9999px">Automation instructions</label>
+                <textarea id="auto-text">Summarise my unread email and flag anything that needs a reply today.</textarea>
+              </div>
+              <div class="field" style="grid-template-columns:110px minmax(0,1fr)">
+                <span class="lbl">Schedule</span>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                  <div class="seg" id="auto-seg"><button type="button" aria-pressed="false">Daily</button><button type="button" aria-pressed="true">Weekdays</button><button type="button" aria-pressed="false">Advanced</button></div>
+                  <label for="auto-time" style="position:absolute;left:-9999px">Time</label>
+                  <input class="ctl" id="auto-time" style="width:90px" value="08:00">
+                  <span class="note">America/Chicago</span>
+                </div>
+              </div>
+              <div class="field" style="grid-template-columns:110px minmax(0,1fr)"><span class="lbl">Next runs</span><span class="note" style="color:var(--text)">Thu 17 Sep 08:00 · Fri 18 Sep 08:00 · Mon 21 Sep 08:00</span></div>
+              <div class="field" style="grid-template-columns:110px minmax(0,1fr)"><label for="auto-deliver">Deliver to</label>
+                <select class="ctl" id="auto-deliver"><option>Activity</option><option>Activity and Telegram</option></select></div>
+              <div class="field" style="grid-template-columns:110px minmax(0,1fr)"><span class="lbl">Access</span><span class="note">Email (read), Web · set in Mind settings</span></div>
+              <div class="note">Runs only while this computer is on and Hermes is attached. If a run is still going when the next is due, Hermes skips the next one.</div>
+            </div>
+            <div class="dialog-foot">
+              <button class="btn btn-lg" type="button" id="auto-run">Run now</button>
+              <span class="grow"></span>
+              <button class="btn btn-lg" type="button" data-close="auto">Cancel</button>
+              <button class="btn btn-lg btn-accent" type="button" id="auto-save">Save automation</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Approval sheet -->
+        <div class="scrim" id="sheet" hidden>
+          <div class="dialog" style="width:720px" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+            <div class="dialog-head">
+              <div>
+                <h3 id="sheet-title">Allow command?</h3>
+                <div class="note" style="margin-top:2px">Task: Clean up ~/Downloads · requested by Hermes</div>
+              </div>
+              <button class="x" type="button" data-close="sheet" aria-label="Close without answering"><svg class="i"><use href="#i-x"/></svg></button>
+            </div>
+            <div class="dialog-body">
+              <dl class="sheet-grid">
+                <dt>Command</dt><dd><div class="cmd">rm ~/Downloads/*.dmg ~/Downloads/*.zip</div></dd>
+                <dt>Location</dt><dd><code>/home/pranab</code></dd>
+                <dt>Runs on</dt><dd>This computer</dd>
+                <dt>Flagged for</dt><dd>Deleting files</dd>
+              </dl>
+              <div class="seg" id="scope-seg" aria-label="Preview both scope states">
+                <button type="button" aria-pressed="true" data-scope="checked">Scope checked</button>
+                <button type="button" aria-pressed="false" data-scope="unverified">Scope not verified</button>
+              </div>
+              <div class="scope checked" id="scope-checked">
+                <div class="eyebrow">Scope checked · 21:40:18</div>
+                <div>12 matching files, 3.1 GB <button class="link" type="button" id="paths-btn" style="display:inline-flex">Show files<svg class="i i-sm"><use href="#i-down"/></svg></button></div>
+                <div class="paths" id="paths" hidden>~/Downloads/Slint-1.17.1.dmg<br>~/Downloads/ollama-linux-amd64.zip<br>~/Downloads/jetbrains-mono-2.304.zip<br>~/Downloads/barlow.zip<br>~/Downloads/proxmox-ve_9.0.iso.zip<br>~/Downloads/VirtualBox-7.1.dmg<br>… 6 more</div>
+                <div class="muted">Files may have changed since this check. Deleted files do not go to the trash.</div>
+              </div>
+              <div class="scope unverified" id="scope-unverified" hidden>
+                <div class="eyebrow">Scope not verified</div>
+                <div>Which files this affects, and how many, is unknown.</div>
+                <div class="muted">Check the command and where it runs before allowing it.</div>
+              </div>
+            </div>
+            <div class="dialog-foot">
+              <button class="btn" type="button">More options<svg class="i i-sm"><use href="#i-down"/></svg></button>
+              <span class="grow"></span>
+              <button class="btn btn-lg" type="button" id="deny">Deny</button>
+              <button class="btn btn-lg" type="button" id="allow">Allow once</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="toast" id="toast" role="status" hidden><div class="t" id="toast-t"></div><div class="s" id="toast-s"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════════════ WHAT CHANGED ═════════════════════ -->
+  <section class="section">
+    <div class="section-head">
+      <div class="eyebrow">After the review</div>
+      <h2>What changed from the first draft</h2>
+      <p class="prose">GPT-6 Astra argued the draft exposed the engine instead of designing the experience. Most of that held up. Where it did not — shell-side guessing, a boundary that looked like a permission — the second round fixed it.</p>
+    </div>
+    <div class="changes">
+      <div class="change">
+        <div class="from">Chat · Agent · Schedule mode switch</div>
+        <div class="to">Ask · Start task… · Automate…</div>
+        <p>A person starts a task, not an agent — Hermes already is the agent. Enter asks; nothing turns into work without Ctrl+Enter or a click.</p>
+      </div>
+      <div class="change">
+        <div class="from">Guessing whether text is a task</div>
+        <div class="to">Only certain results are automatic</div>
+        <p>The shell opens apps, files and settings it is sure of. Everything else is a question, so a wrong guess never starts real work.</p>
+      </div>
+      <div class="change">
+        <div class="from">The same run list in four places</div>
+        <div class="to">One Activity, one chip, a four-row preview</div>
+        <p>Tasks no longer appear in the taskbar. The status bar says <em>Hermes · Needs you 1</em>, and Activity holds everything else.</p>
+      </div>
+      <div class="change">
+        <div class="from">Tool toggles next to "no booking"</div>
+        <div class="to">Enforced controls, separate from instructions</div>
+        <p>The task draft shows what Hermes actually enforces apart from what it is only asked to do.</p>
+      </div>
+      <div class="change">
+        <div class="from">Approve inline, four equal buttons</div>
+        <div class="to">A review sheet: Deny or Allow once</div>
+        <p>Nothing preselected, scope marked checked or not verified, and "Always allow" left out until Hermes can describe what it would grant.</p>
+      </div>
+      <div class="change">
+        <div class="from">A raw config.yaml tab in Settings</div>
+        <div class="to">A form, plus "Open Hermes config folder"</div>
+        <p>The form covers the common settings, and the full file stays Hermes' own to edit. The shell never reads or passes it along.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════════════ FLOATING COMPOSER ═════════════════════ -->
+  <section class="section">
+    <div class="section-head">
+      <div class="eyebrow">Ctrl K, anywhere</div>
+      <h2>The same composer, over whatever you are doing</h2>
+      <p class="prose">Most of the day a window covers the desktop. Ctrl K brings the composer up over it without a blur, with the same buttons and keys. The submit hint always says what Enter will do — here it opens a file, because that result is exact.</p>
+    </div>
+    <div class="screen-scroll">
+      <div class="screen flat" style="grid-template-rows:32px 460px 40px">
+        <div class="sb"><span class="brand">Yantrik</span><span class="grow"></span><span class="mind-chip work"><span class="dot"></span>Hermes<span class="extra">· 1 working</span></span><span class="sb-btn"><svg class="i i-sm"><use href="#i-pulse"/></svg>System</span><span class="clock">21:44</span><span>Wed 16 Sep</span></div>
+        <div class="app-frame">
+          <div class="app-win">
+            <div class="app-bar"><svg class="i i-sm"><use href="#i-file"/></svg>intent_lens.slint — Editor</div>
+            <div class="code"><span class="c">// The Lens panel — right-docked side panel, between the two bars</span>
+<span class="k">Rectangle</span> {
+    x: root.is-open ? root.width - Theme.chat-panel-width : root.width;
+    y: Theme.status-bar-height;
+    height: root.height - Theme.status-bar-height - Theme.taskbar-height;
+    background: <span class="s">@linear-gradient</span>(180deg, …);</div>
+          </div>
+          <div class="float-scrim">
+            <div class="float">
+              <div class="composer-row">
+                <svg class="i"><use href="#i-search"/></svg>
+                <span style="flex:1;font-size:16px">flight notes</span>
+                <span class="submit-hint">Open flight-notes.md <kbd>↵</kbd></span>
+              </div>
+              <div class="composer-actions">
+                <span class="act"><svg class="i i-sm"><use href="#i-chat"/></svg>Ask</span>
+                <span class="act primary"><svg class="i i-sm"><use href="#i-task"/></svg>Start task…<span class="kbd">Ctrl ↵</span></span>
+                <span class="act"><svg class="i i-sm"><use href="#i-clock"/></svg>Automate…</span>
+                <span class="grow" style="flex:1"></span>
+                <span class="act" style="color:var(--text-3)">Esc</span>
+              </div>
+              <div class="results">
+                <div class="res sel"><svg class="i" style="color:#e8c35c"><use href="#i-note"/></svg>flight-notes.md<span class="kind">File · ~/Documents</span></div>
+                <div class="res"><svg class="i" style="color:#5eb8ff"><use href="#i-globe"/></svg>Flights — Google search<span class="kind">Web</span></div>
+                <div class="res"><svg class="i" style="color:var(--amber)"><use href="#i-task"/></svg>Compare December flights<span class="kind">Task · Working</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="tb"><span class="tb-apps"><svg class="i"><use href="#i-apps"/></svg>Apps</span><span class="tb-sep"></span><span class="tb-item active"><svg class="i i-sm" style="color:#b48cff"><use href="#i-file"/></svg>intent_lens.slint — Editor</span><span class="grow"></span><span class="tb-comp">Companion</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════════════ ACTIVITY ═════════════════════ -->
+  <section class="section">
+    <div class="section-head">
+      <div class="eyebrow">Activity</div>
+      <h2>One home for tasks and automations</h2>
+      <p class="prose">A full view between the bars. The result comes first, then plain-language progress. Sub-tasks nest under their parent, the 60 raw tool events stay folded away, and an instruction goes to the task only when you address it to the task.</p>
+    </div>
+    <div class="screen-scroll">
+      <div class="screen flat" style="grid-template-rows:32px auto 40px">
+        <div class="sb"><span class="brand">Yantrik</span><span class="grow"></span><span class="mind-chip need"><span class="dot"></span>Hermes<span class="extra">· Needs you 1</span></span><span class="sb-btn"><svg class="i i-sm"><use href="#i-pulse"/></svg>System</span><span class="clock">21:46</span><span>Wed 16 Sep</span></div>
+        <div class="act-view">
+          <aside class="act-side">
+            <button class="back" type="button"><svg class="i i-sm"><use href="#i-back"/></svg>Desktop</button>
+            <div class="side-sec">
+              <div class="side-row on"><svg class="i i-sm"><use href="#i-task"/></svg>Tasks</div>
+              <div class="side-row"><svg class="i i-sm"><use href="#i-clock"/></svg>Automations<span class="n">3</span></div>
+            </div>
+            <div class="side-sec">
+              <div class="eyebrow" style="padding:0 10px 4px">Show</div>
+              <div class="side-row">All<span class="n">7</span></div>
+              <div class="side-row">Needs you<span class="n hot">1</span></div>
+              <div class="side-row">Working<span class="n">2</span></div>
+              <div class="side-row">History<span class="n">4</span></div>
+            </div>
+            <div class="side-tasks">
+              <div class="row st-need"><span class="badge"><svg class="i i-sm"><use href="#i-alert"/></svg></span><div><div class="row-title">Clean up ~/Downloads</div><div class="row-sub"><span class="state">Needs approval</span></div></div></div>
+              <div class="row st-work sel"><span class="badge"><span class="spin"></span></span><div><div class="row-title">Compare December flights</div><div class="row-sub"><span class="state">Working</span> · 6 min</div></div></div>
+              <div class="row st-work"><span class="badge"><span class="spin"></span></span><div><div class="row-title">Test release 0.19</div><div class="row-sub"><span class="state">Working</span> · 2 min</div></div></div>
+              <div class="row st-fail"><span class="badge"><svg class="i i-sm"><use href="#i-x"/></svg></span><div><div class="row-title">Weekly repo digest</div><div class="row-sub"><span class="state">Failed</span> · source unavailable</div></div></div>
+            </div>
+          </aside>
+          <div class="detail">
+            <div class="detail-head">
+              <div>
+                <h3>Compare December flights from XNA to Kolkata</h3>
+                <div class="sub">Working · started 21:40 from the desktop · 6 min</div>
+              </div>
+              <span class="grow"></span>
+              <button class="btn" type="button"><svg class="i i-sm"><use href="#i-stop"/></svg>Stop…</button>
+            </div>
+            <div class="detail-body">
+              <div class="content">
+                <div>
+                  <div class="eyebrow" style="margin-bottom:6px">Result</div>
+                  <div class="result">The comparison appears here when the task finishes.</div>
+                </div>
+                <div>
+                  <div class="eyebrow" style="margin-bottom:4px">Progress</div>
+                  <div class="phases">
+                    <div class="phase done"><span class="m"><svg class="i i-sm"><use href="#i-check"/></svg></span><div><div class="t">Search routes</div><div class="d">Checked three flight sites</div></div><span class="r">Done</span></div>
+                    <div class="phase now"><span class="m"></span><div><div class="t">Compare options</div><div class="d">23 itineraries, one stop or fewer</div>
+                      <div class="sub-task"><span><b>Sub-task</b> · Check baggage rules · Done</span><span><b>Sub-task</b> · Check Qatar and Emirates fares · Working</span></div></div><span class="r">Working</span></div>
+                    <div class="phase later"><span class="m"></span><div><div class="t">Write the recommendation</div><div class="d">Save the best three to a note</div></div><span class="r">Waiting</span></div>
+                  </div>
+                </div>
+                <div>
+                  <button class="events-toggle" type="button" id="ev-toggle" aria-expanded="false"><svg class="i i-sm"><use href="#i-chev"/></svg><span>Show 60 technical events</span></button>
+                  <div class="events" id="events" hidden>
+                    <div><span class="ev">21:44:02</span> <span class="tn">tool.started</span> browser_snapshot google.com/travel/flights</div>
+                    <div><span class="ev">21:43:51</span> <span class="tn">tool.completed</span> browser_navigate 1.9 s</div>
+                    <div><span class="ev">21:43:49</span> <span class="tn">tool.started</span> browser_navigate google.com/travel/flights?q=XNA+CCU</div>
+                    <div><span class="ev">21:42:10</span> <span class="tn">tool.completed</span> web_search "XNA to CCU December fares" · 8 results</div>
+                    <div style="color:var(--text-3)">… 56 earlier events</div>
+                  </div>
+                </div>
+                <div class="convo">
+                  <div class="eyebrow">This task's conversation</div>
+                  <div class="msg"><span class="who">You · 21:41</span>Prefer one stop or fewer, and nothing that lands after 22:00.</div>
+                  <div class="msg"><span class="who">Hermes · 21:41</span>Got it — filtering to one stop or fewer and arrivals before 22:00.</div>
+                  <div class="instr">
+                    <span class="target">To this task</span>
+                    <label for="instr-input" style="position:absolute;left:-9999px">Add an instruction</label>
+                    <input id="instr-input" placeholder="Add an instruction…">
+                    <button class="btn btn-accent" type="button">Send</button>
+                  </div>
+                </div>
+              </div>
+              <aside class="inspector">
+                <div class="insp"><h4>Outputs</h4><div class="insp-list"><div><span class="file">flights-december.md</span><span style="color:var(--text-3)">Draft</span></div></div></div>
+                <div class="insp"><h4>File changes</h4><div class="insp-list"><div><span>Created</span><span>1</span></div><div><span>Modified</span><span>0</span></div><div><span>Deleted</span><span>0</span></div></div></div>
+                <div class="insp"><h4>Access</h4><div class="insp-list"><div><span>Tools</span><span>Web, browser, files</span></div><div><span>Commands</span><span>Not available</span></div><div><span>Approvals</span><span>Ask first</span></div></div></div>
+                <div class="insp"><h4>Details</h4><div class="insp-list"><div><span>Started from</span><span>Desktop</span></div><div><span>Mind</span><span>Hermes 0.14.0</span></div><div><span>Tokens</span><span>41,280 reported</span></div></div></div>
+              </aside>
+            </div>
+          </div>
+        </div>
+        <div class="tb"><span class="tb-apps"><svg class="i"><use href="#i-apps"/></svg>Apps</span><span class="tb-sep"></span><span class="grow"></span><span class="tb-comp">Companion</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════════════ MIND SETTINGS ═════════════════════ -->
+  <section class="section">
+    <div class="section-head">
+      <div class="eyebrow">Settings · Mind</div>
+      <h2>Configure the mind, or switch to the other one</h2>
+      <p class="prose">One mind at a time. Configure edits the settings Hermes publishes and saves itself, with keys write-only. Switch stops one mind's service and starts the other — after the tasks it is running are finished or stopped, and after saying plainly what happens to memory.</p>
+    </div>
+
+    <div class="win">
+      <div class="win-bar"><span>Settings</span><span class="win-ctl"><span><svg class="i i-sm"><use href="#i-min"/></svg></span><span><svg class="i i-sm"><use href="#i-max"/></svg></span><span><svg class="i i-sm"><use href="#i-close"/></svg></span></span></div>
+      <div class="win-body">
+        <nav class="set-nav" aria-label="Settings sections"><div>Appearance</div><div>Desktop</div><div>Network</div><div>Accounts</div><div>Privacy</div><div>System</div><div class="on">Mind</div></nav>
+        <div class="set-main">
+          <div class="mind-head">
+            <div class="mind-title">
+              <div class="mind-logo"><svg class="i"><use href="#i-companion"/></svg></div>
+              <div><h3>Hermes Agent</h3><div class="v">0.14.0 · the active mind</div></div>
+              <div class="health"><span>Attached</span><span>Memory: YantrikDB</span></div>
+            </div>
+            <div class="tabs" role="tablist" aria-label="Mind settings">
+              <button class="tab" role="tab" type="button" aria-selected="true" id="tab-config" aria-controls="pane-config">Configure</button>
+              <button class="tab" role="tab" type="button" aria-selected="false" id="tab-switch" aria-controls="pane-switch">Switch mind</button>
+            </div>
+          </div>
+
+          <div class="pane" id="pane-config" role="tabpanel" aria-labelledby="tab-config">
+            <div class="group">
+              <div class="group-name">Model<small>What Hermes thinks with</small></div>
+              <div class="fields">
+                <div class="field"><label for="cfg-provider">Provider</label><select class="ctl" id="cfg-provider"><option selected>Custom endpoint</option><option>OpenRouter</option><option>Anthropic</option><option>Nous Portal</option><option>Ollama Cloud</option></select></div>
+                <div class="field"><label for="cfg-base">Address</label><input class="ctl mono" id="cfg-base" value="http://192.168.4.35:11434/v1"></div>
+                <div class="field"><label for="cfg-model">Model</label><input class="ctl mono" id="cfg-model" value="qwen3.6:27b"></div>
+                <div class="field"><span class="lbl">API key</span><div class="secret"><span class="s" id="key-state">Not needed for this address</span><button class="btn" type="button" id="key-btn">Set key…</button></div></div>
+              </div>
+            </div>
+            <div class="group">
+              <div class="group-name">Tools<small>What Hermes may use</small></div>
+              <div class="fields"><div class="toggles" id="toolsets">
+                <button class="tg" type="button" aria-pressed="true">Web search</button><button class="tg" type="button" aria-pressed="true">Browser</button><button class="tg" type="button" aria-pressed="true">Files</button><button class="tg" type="button" aria-pressed="true">Terminal</button><button class="tg" type="button" aria-pressed="false">Code execution</button><button class="tg" type="button" aria-pressed="true">Sub-tasks</button><button class="tg" type="button" aria-pressed="true">Automations</button>
+              </div></div>
+            </div>
+            <div class="group">
+              <div class="group-name">Safety<small>What needs you first</small></div>
+              <div class="fields">
+                <div class="field"><label for="cfg-appr">Risky commands</label><select class="ctl" id="cfg-appr"><option selected>Ask me every time</option><option>Ask once per task</option><option>Never ask</option></select></div>
+                <div class="field"><label for="cfg-backend">Run commands in</label><select class="ctl" id="cfg-backend"><option selected>This computer</option><option>A Docker container</option><option>Another computer over SSH</option></select></div>
+              </div>
+            </div>
+            <div class="group">
+              <div class="group-name">Advanced<small>Everything else</small></div>
+              <div class="fields">
+                <div class="folder">
+                  <svg class="i i-lg" style="color:#e8c35c"><use href="#i-folder"/></svg>
+                  <p><b>Hermes' own files</b>Advanced settings live in <code>~/.hermes/config.yaml</code>. Hermes checks them when it reloads and reports problems here.</p>
+                  <button class="btn" type="button">Open Hermes config folder</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pane" id="pane-switch" role="tabpanel" aria-labelledby="tab-switch" hidden>
+            <div class="handover">
+              <div class="swap">
+                <div class="swap-card"><span>Active now</span><b>Hermes Agent</b><span>0.14.0</span></div>
+                <div class="arrow"><svg class="i"><use href="#i-arrow"/></svg></div>
+                <div class="swap-card to"><span>Switch to</span><b>Yantrik Mind</b><span>Installed · service stopped</span></div>
+              </div>
+              <div class="checklist">
+                <div class="check warn"><span class="c"><svg class="i i-sm"><use href="#i-alert"/></svg></span><div><b>2 tasks are still working</b><div class="d">Compare December flights · Test release 0.19</div></div><span class="note">Tasks do not move to the other mind</span></div>
+                <div class="check warn"><span class="c"><svg class="i i-sm"><use href="#i-alert"/></svg></span><div><b>1 approval is waiting</b><div class="d">Answer it, or the task stops with the switch</div></div><button class="link" type="button">Review</button></div>
+                <div class="check warn"><span class="c"><svg class="i i-sm"><use href="#i-clock"/></svg></span><div><b>3 automations belong to Hermes</b><div class="d">They pause while Yantrik Mind is active and resume when you switch back</div></div><span></span></div>
+                <div class="check ok"><span class="c"><svg class="i i-sm"><use href="#i-db"/></svg></span><div><b>Memory stays with this computer</b><div class="d">Both minds use the same YantrikDB service. Conversations, tasks and automations do not transfer.</div></div><span></span></div>
+              </div>
+              <div class="radio" role="radiogroup" aria-label="When to switch">
+                <label><input type="radio" name="when" id="when-finish" checked><span>Switch when tasks finish<small>Nothing new starts; the switch happens after the last task ends</small></span></label>
+                <label><input type="radio" name="when" id="when-now"><span>Stop tasks and switch now<small>Work already done stays; unfinished steps are abandoned</small></span></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="set-foot" id="foot-config">
+            <span class="msg-line" id="cfg-msg">No changes</span>
+            <button class="btn" type="button" id="cfg-discard" disabled>Discard</button>
+            <button class="btn btn-accent" type="button" id="cfg-apply" disabled>Send to Hermes</button>
+          </div>
+          <div class="set-foot" id="foot-switch" hidden>
+            <span class="msg-line" id="sw-msg">Switching stops Hermes' service and starts Yantrik Mind's.</span>
+            <button class="btn btn-accent" type="button" id="sw-go">Switch to Yantrik Mind</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════════════ WIRING ═════════════════════ -->
+  <section class="section">
+    <div class="section-head">
+      <div class="eyebrow">How it connects</div>
+      <h2>Hermes dials in. The OS never calls out.</h2>
+      <p class="prose">Hermes has an HTTP API for all of this, but using it would mean the OS holding Hermes' address and key — which the harness rule forbids, and a test enforces. So Hermes attaches the way Yantrik Mind does, through a small platform plugin, and the harness protocol grows to carry tasks, events, approvals, automations and settings.</p>
+    </div>
+    <div class="flow">
+      <div class="node"><div class="eyebrow">Yantrik OS</div><h3>The shell</h3><p>Composer, Activity, approvals, settings forms, and which mind's service is running. Nothing about the mind's endpoints.</p><div class="where">crates/yantrik-harness</div></div>
+      <div class="arrow-h"><span>harness.sock<br>unix · 0700</span></div>
+      <div class="node plugin"><div class="eyebrow" style="color:var(--accent)">New</div><h3>Yantrik platform plugin</h3><p>Runs inside the Hermes gateway like its Telegram adapter: attaches, polls, translates both ways, replays events after a reconnect.</p><div class="where">~/.hermes/plugins/yantrik/</div></div>
+      <div class="arrow-h"><span>in-process</span></div>
+      <div class="node"><div class="eyebrow">Hermes 0.14</div><h3>The agent</h3><p>Tasks, tools, approvals, automations and settings already exist. Memory goes to the local YantrikDB service.</p><div class="where">gateway · cron · config.yaml</div></div>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Message</th><th>Direction</th><th>What it carries</th><th>Hermes already has</th></tr></thead>
+        <tbody>
+          <tr><td><code>harness.attach</code></td><td><span class="dir out">Hermes → OS</span></td><td>Name, version, and what it supports: <code>chat tasks automations approvals config</code></td><td>Platform adapter start-up</td></tr>
+          <tr><td><code>poll → task.start</code></td><td><span class="dir in">OS → Hermes</span></td><td>Instructions, context files, requested access; answered with the <em>effective</em> controls</td><td><code>POST /v1/runs</code> code path</td></tr>
+          <tr><td><code>harness.event</code></td><td><span class="dir out">Hermes → OS</span></td><td>Task id, sequence number, <code>tool.started</code> <code>tool.completed</code> <code>approval.request</code> <code>run.completed</code> <code>run.failed</code></td><td><code>/v1/runs/{id}/events</code></td></tr>
+          <tr><td><code>harness.replay</code></td><td><span class="dir out">Hermes → OS</span></td><td>Events after the last sequence the OS saw, so a reconnect never invents a status</td><td>Run event log</td></tr>
+          <tr><td><code>poll → approval.respond</code></td><td><span class="dir in">OS → Hermes</span></td><td>Approval id bound to the exact command, and <code>once</code> or <code>deny</code></td><td><code>/v1/runs/{id}/approval</code></td></tr>
+          <tr><td><code>poll → task.instruct · task.stop</code></td><td><span class="dir in">OS → Hermes</span></td><td>Instruction text, or a stop request; answered with acknowledged or not delivered</td><td>Session messages · <code>/stop</code></td></tr>
+          <tr><td><code>harness.automations</code> · <code>poll → automation.*</code></td><td><span class="dir out">both ways</span></td><td>Name, schedule, timezone, next runs, last outcome · save, pause, resume, run now, delete</td><td><code>cron/jobs.py</code>, <code>/api/jobs</code></td></tr>
+          <tr><td><code>harness.config</code> · <code>poll → config.set</code></td><td><span class="dir out">both ways</span></td><td>Schema and display values, keys as set or unset · changed fields, validated by Hermes</td><td><code>config.yaml</code>, plugin schemas</td></tr>
+          <tr><td>Mind switch</td><td><span class="dir os">OS only</span></td><td>Stop one allowlisted user service, confirm it stopped, start the other, wait for it to attach</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="rule-note"><strong>The rule still holds.</strong> Nothing in this list carries an address or a key to the OS. A key goes one way — from the form into Hermes — and comes back only as "set". None of these messages are Hermes-specific; Yantrik Mind can speak them too.</p>
+  </section>
+
+  <!-- ═════════════════════ BUILD ORDER ═════════════════════ -->
+  <section class="section">
+    <div class="section-head">
+      <div class="eyebrow">Build order</div>
+      <h2>Each step ends on the machine, checked through <code>yos</code></h2>
+      <p class="prose">Nothing on screen can be real until Hermes is attached and sending events, so the protocol and the plugin come first.</p>
+    </div>
+    <ol class="steps-list">
+      <li class="step"><div><h3>Protocol and host</h3><p class="what">Tasks, events with sequence numbers and replay, approvals, automations and config in <code>yantrik-harness</code>, with the no-endpoint test kept.</p></div><p class="see"><b>You'll see</b><code>yos describe shell</code> reports tasks and automations.</p></li>
+      <li class="step"><div><h3>Hermes on the machine</h3><p class="what">Hermes 0.14 as a user service using the LAN Ollama and YantrikDB memory, plus the Yantrik platform plugin.</p></div><p class="see"><b>You'll see</b>Hermes answering in the Companion panel.</p></li>
+      <li class="step"><div><h3>Composer</h3><p class="what">Ask, Start task… and Automate… on the desktop and over apps with Ctrl K, including the task draft.</p></div><p class="see"><b>You'll see</b>A task started from the desktop, with its enforced controls shown.</p></li>
+      <li class="step"><div><h3>Activity</h3><p class="what">The status chip, the four-row preview, the task list and task detail, and "Connection lost" handled honestly.</p></div><p class="see"><b>You'll see</b>A task started from Telegram showing up live on the desktop.</p></li>
+      <li class="step"><div><h3>Approvals</h3><p class="what">The review sheet, scope checking for simple delete, move and permission commands, and one notification that doesn't steal focus.</p></div><p class="see"><b>You'll see</b>Risky commands wait for you instead of failing.</p></li>
+      <li class="step"><div><h3>Automations</h3><p class="what">The library and the editor, with timezone and next runs from Hermes' scheduler.</p></div><p class="see"><b>You'll see</b>A weekday email summary that survives restarts.</p></li>
+      <li class="step"><div><h3>Mind settings</h3><p class="what">The configuration form, the config folder, and switching minds with the handover and the memory check.</p></div><p class="see"><b>You'll see</b>Switch between Hermes and Yantrik Mind from Settings.</p></li>
+    </ol>
+    <div>
+      <div class="eyebrow" style="margin-bottom:10px">Waits until later</div>
+      <div class="later"><span>Always-allow permissions</span><span>Guessing the active project</span><span>Planning tasks in the shell</span><span>Sub-task graphs</span><span>Cost estimates</span><span>Moving tasks between minds</span><span>Live token streaming on the desktop</span></div>
+    </div>
+  </section>
+
+  <!-- ═════════════════════ DECISIONS ═════════════════════ -->
+  <section class="section">
+    <div class="section-head">
+      <div class="eyebrow">Your call</div>
+      <h2>Two settled, three open</h2>
+    </div>
+    <div class="decisions">
+      <div class="decision settled"><h3>One mind or two?</h3><p>Hermes or Yantrik Mind, never both attached.</p><div class="rec"><b>Settled</b><span>One at a time, switched from Settings › Mind.</span></div></div>
+      <div class="decision settled"><h3>Default memory?</h3><p>Whichever mind is active.</p><div class="rec"><b>Settled</b><span>YantrikDB.</span></div></div>
+      <div class="decision"><h3>Drop the right rail?</h3><p>At rest it is an empty column, and while work runs it repeats Activity. CPU, memory and services would move to a System panel in the status bar.</p><div class="rec"><b>Suggest</b><span>Drop it, and let the work column breathe.</span></div></div>
+      <div class="decision"><h3>Places instead of Project?</h3><p>"No active project" has never been filled in. Places, favourites and recent files are always true.</p><div class="rec"><b>Suggest</b><span>Replace it, and bring projects back once you choose one on purpose.</span></div></div>
+      <div class="decision"><h3>One memory for both minds?</h3><p>Their YantrikDB versions differ today, so sharing one file could break the older mind.</p><div class="rec"><b>Suggest</b><span>One local YantrikDB service that both minds use, turned on only once both are confirmed compatible.</span></div></div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+(function () {
+  // ── State ───────────────────────────────────────────────
+  const tasks = [
+    { id: "t1", title: "Clean up ~/Downloads", status: "need", sub: "Needs approval", side: "review" },
+    { id: "t2", title: "Compare December flights", status: "work", sub: "Comparing 23 itineraries", time: 361 },
+    { id: "t3", title: "Test release 0.19", status: "work", sub: "Running the test suite", time: 128 },
+    { id: "t4", title: "Weekly repo digest", status: "fail", sub: "The repository was unreachable · partial notes kept", side: "open" }
+  ];
+  let uid = 10;
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const fmt = s => s < 60 ? "just now" : `${Math.floor(s / 60)} min`;
+
+  const STATE = { need: "Needs you", work: "Working", done: "Done", fail: "Failed", cancel: "Cancelled" };
+  const ICON = { need: "i-alert", done: "i-check", fail: "i-x", cancel: "i-stop" };
+
+  function rowHTML(t) {
+    const badge = t.status === "work" ? `<span class="spin"></span>` : `<svg class="i i-sm"><use href="#${ICON[t.status]}"/></svg>`;
+    let side = "";
+    if (t.side === "review") side = `<button class="btn btn-warn" type="button" data-review="${t.id}">Review</button>`;
+    else if (t.status === "work") side = `<span>${fmt(t.time)}</span>`;
+    else side = `<button class="btn" type="button">Open</button>`;
+    return `<div class="row st-${t.status}">
+      <span class="badge">${badge}</span>
+      <div><div class="row-title">${esc(t.title)}</div><div class="row-sub"><span class="state">${STATE[t.status]}</span> · ${esc(t.sub)}</div></div>
+      <div class="row-side">${side}</div>
+    </div>`;
+  }
+
+  function render() {
+    const rank = { need: 0, work: 1, fail: 2, done: 2, cancel: 3 };
+    const shown = tasks.slice().sort((a, b) => rank[a.status] - rank[b.status]).slice(0, 4);
+    $("preview").innerHTML = shown.length
+      ? shown.map(rowHTML).join("")
+      : `<div class="empty"><b>No active tasks</b><span>Work you start appears here.</span></div>`;
+    $("view-all").innerHTML = `View all ${tasks.length}<svg class="i i-sm"><use href="#i-chev"/></svg>`;
+
+    const need = tasks.filter(t => t.status === "need").length;
+    const work = tasks.filter(t => t.status === "work").length;
+    const chip = $("mind-chip");
+    chip.className = "mind-chip" + (need ? " need" : work ? " work" : "");
+    $("mind-extra").textContent = need ? `· Needs you ${need}` : work ? `· ${work} working` : "";
+  }
+
+  let toastTimer;
+  function toast(t, s) {
+    $("toast-t").textContent = t;
+    $("toast-s").textContent = s;
+    $("toast").hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { $("toast").hidden = true; }, 3400);
+  }
+
+  // ── Composer ────────────────────────────────────────────
+  const input = $("comp-input");
+  function open(id) { $(id).hidden = false; }
+  function close(id) { $(id).hidden = true; }
+  document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => close(b.dataset.close)));
+  document.querySelectorAll(".scrim").forEach(s => s.addEventListener("keydown", e => { if (e.key === "Escape") close(s.id); }));
+
+  function openDraft() {
+    $("draft-text").value = input.value.trim() || "";
+    open("draft");
+    $("draft-text").focus();
+  }
+  function ask() {
+    const q = input.value.trim();
+    if (!q) return;
+    toast("Asked Hermes", "The answer opens in the Companion panel. Nothing runs in the background.");
+  }
+  $("composer").addEventListener("submit", e => { e.preventDefault(); ask(); });
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); openDraft(); }
+  });
+  $("btn-ask").addEventListener("click", ask);
+  $("btn-task").addEventListener("click", openDraft);
+  $("btn-auto").addEventListener("click", () => { open("auto"); $("auto-name").focus(); });
+
+  $("draft-start").addEventListener("click", () => {
+    const text = $("draft-text").value.trim() || "Untitled task";
+    tasks.unshift({ id: "t" + (++uid), title: text.length > 60 ? text.slice(0, 57) + "…" : text, status: "work", sub: "Starting", time: 0 });
+    close("draft");
+    input.value = "";
+    render();
+    toast("Task started", "It's in Activity. Hermes will ask before anything risky.");
+  });
+
+  $("auto-seg").addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    $("auto-seg").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  });
+  $("auto-save").addEventListener("click", () => { close("auto"); toast("Automation saved", "Morning email summary · weekdays at 08:00. It hasn't run yet."); });
+  $("auto-run").addEventListener("click", () => {
+    tasks.unshift({ id: "t" + (++uid), title: $("auto-name").value || "Automation", status: "work", sub: "Started by Run now", time: 0 });
+    close("auto"); render();
+    toast("Running once now", "The schedule itself isn't saved until you choose Save automation.");
+  });
+
+  // ── Approval ────────────────────────────────────────────
+  $("preview").addEventListener("click", e => {
+    if (e.target.closest("[data-review]")) { open("sheet"); $("deny").focus(); }
+  });
+  $("mind-chip").addEventListener("click", () => {
+    if (tasks.some(t => t.status === "need")) { open("sheet"); $("deny").focus(); }
+  });
+  $("scope-seg").addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    $("scope-seg").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    $("scope-checked").hidden = b.dataset.scope !== "checked";
+    $("scope-unverified").hidden = b.dataset.scope !== "unverified";
+  });
+  $("paths-btn").addEventListener("click", () => { $("paths").hidden = !$("paths").hidden; });
+
+  const cleanup = () => tasks.find(t => t.id === "t1");
+  $("deny").addEventListener("click", () => {
+    const t = cleanup(); if (!t) return;
+    Object.assign(t, { status: "cancel", sub: "You denied the command · nothing was deleted", side: "open" });
+    close("sheet"); render();
+  });
+  $("allow").addEventListener("click", () => {
+    const t = cleanup(); if (!t) return;
+    Object.assign(t, { status: "work", sub: "Deleting 12 files", side: null, time: 245 });
+    close("sheet"); render();
+    setTimeout(() => {
+      Object.assign(t, { status: "done", sub: "12 files deleted · 3.1 GB freed", side: "open" });
+      render();
+      toast("Clean up ~/Downloads is done", "12 files deleted · 3.1 GB freed");
+    }, 2600);
+  });
+
+  setInterval(() => { tasks.forEach(t => { if (t.status === "work") t.time++; }); }, 1000);
+  setInterval(render, 15000);
+
+  // ── Activity detail ─────────────────────────────────────
+  $("ev-toggle").addEventListener("click", () => {
+    const opened = $("events").hidden;
+    $("events").hidden = !opened;
+    $("ev-toggle").setAttribute("aria-expanded", String(opened));
+    $("ev-toggle").querySelector("span").textContent = opened ? "Hide technical events" : "Show 60 technical events";
+    $("ev-toggle").querySelector("svg").style.transform = opened ? "rotate(90deg)" : "";
+  });
+
+  // ── Mind settings ───────────────────────────────────────
+  function selectTab(which) {
+    const cfg = which === "config";
+    $("tab-config").setAttribute("aria-selected", String(cfg));
+    $("tab-switch").setAttribute("aria-selected", String(!cfg));
+    $("pane-config").hidden = !cfg; $("pane-switch").hidden = cfg;
+    $("foot-config").hidden = !cfg; $("foot-switch").hidden = cfg;
+  }
+  $("tab-config").addEventListener("click", () => selectTab("config"));
+  $("tab-switch").addEventListener("click", () => selectTab("switch"));
+
+  const fields = ["cfg-provider", "cfg-base", "cfg-model", "cfg-appr", "cfg-backend"];
+  const initial = {};
+  fields.forEach(id => { initial[id] = $(id).value; });
+  const tools = [...document.querySelectorAll("#toolsets .tg")];
+  let toolInit = tools.map(t => t.getAttribute("aria-pressed"));
+  let keySet = false;
+
+  function refresh() {
+    let n = 0;
+    fields.forEach(id => { const d = $(id).value !== initial[id]; $(id).classList.toggle("changed", d); if (d) n++; });
+    tools.forEach((t, i) => { if (t.getAttribute("aria-pressed") !== toolInit[i]) n++; });
+    if (keySet) n++;
+    $("cfg-msg").className = "msg-line";
+    $("cfg-msg").innerHTML = n ? `<b>${n} change${n > 1 ? "s" : ""}</b> not sent yet` : "No changes";
+    $("cfg-apply").disabled = !n; $("cfg-discard").disabled = !n;
+  }
+  fields.forEach(id => $(id).addEventListener("input", refresh));
+  $("toolsets").addEventListener("click", e => {
+    const t = e.target.closest(".tg"); if (!t) return;
+    t.setAttribute("aria-pressed", String(t.getAttribute("aria-pressed") !== "true")); refresh();
+  });
+  $("key-btn").addEventListener("click", () => {
+    keySet = !keySet;
+    $("key-state").innerHTML = keySet ? "<b>Set</b> · replaced just now" : "Not needed for this address";
+    $("key-btn").textContent = keySet ? "Undo" : "Set key…";
+    refresh();
+  });
+  $("cfg-discard").addEventListener("click", () => {
+    fields.forEach(id => { $(id).value = initial[id]; });
+    tools.forEach((t, i) => t.setAttribute("aria-pressed", toolInit[i]));
+    keySet = false; $("key-state").textContent = "Not needed for this address"; $("key-btn").textContent = "Set key…";
+    refresh();
+  });
+  $("cfg-apply").addEventListener("click", () => {
+    const n = [...fields.filter(id => $(id).value !== initial[id])].length + tools.filter((t, i) => t.getAttribute("aria-pressed") !== toolInit[i]).length + (keySet ? 1 : 0);
+    fields.forEach(id => { initial[id] = $(id).value; });
+    toolInit = tools.map(t => t.getAttribute("aria-pressed"));
+    keySet = false; $("key-btn").textContent = "Set key…";
+    refresh();
+    $("cfg-msg").className = "msg-line ok";
+    $("cfg-msg").innerHTML = `<b>Saved by Hermes</b> · ${n} change${n > 1 ? "s" : ""} checked and applied`;
+  });
+
+  $("sw-go").addEventListener("click", () => {
+    const now = $("when-now").checked;
+    $("sw-msg").innerHTML = now
+      ? "<b style='color:var(--amber)'>Stopping 2 tasks…</b> then starting Yantrik Mind and waiting for it to attach."
+      : "<b style='color:var(--amber)'>Waiting for 2 tasks to finish.</b> Nothing new will start. You can cancel the switch until then.";
+    $("sw-go").textContent = "Cancel switch";
+  });
+
+  render();
+})();
+</script>
