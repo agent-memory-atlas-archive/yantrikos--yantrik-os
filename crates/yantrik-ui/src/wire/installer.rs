@@ -557,7 +557,9 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     fi
 
     START_TIME=$(date +%s)
-    labwc 2>/opt/yantrik/logs/labwc.log
+    # The session every Yantrik machine runs, whatever installed it: the shipped compositor
+    # config, fullscreen, and the shell as the session client.
+    /opt/yantrik/bin/yantrik-session 2>>/opt/yantrik/logs/labwc.log
     EXIT_TIME=$(date +%s)
 
     if [ $((EXIT_TIME - START_TIME)) -lt 5 ]; then
@@ -579,35 +581,15 @@ fi
         "WLR_RENDERER=pixman\nWLR_RENDERER_ALLOW_SOFTWARE=1\nXDG_SESSION_TYPE=wayland\nQT_QPA_PLATFORM=wayland\nMOZ_ENABLE_WAYLAND=1\nSLINT_BACKEND=winit\nLIBGL_ALWAYS_SOFTWARE=1\nYANTRIK_START_SCREEN=32\n",
     )?;
 
-    // labwc autostart — launch yantrik-ui
-    sudo_write(
-        &format!("{labwc_dir}/autostart"),
-        "#!/bin/sh\n/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml >> /opt/yantrik/logs/yantrik-os.log 2>&1 &\n",
-    )?;
-    let _ = run_cmd("chmod", &["+x", &format!("{labwc_dir}/autostart")]);
+    // No autostart or rc.xml here. `yantrik-session` installs the shipped ones from
+    // /opt/yantrik/share at every login. This installer used to write its own, and they drifted:
+    // an installed machine drew the shell inside a window with a title bar and minimise, maximise
+    // and close buttons, with none of the key bindings the real config carries.
 
-    // labwc rc.xml — fullscreen, no decorations
-    sudo_write(
-        &format!("{labwc_dir}/rc.xml"),
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<labwc_config>
-  <core><gap>0</gap></core>
-  <theme><titlebar><height>0</height></titlebar></theme>
-  <keyboard>
-    <keybind key="A-Tab"><action name="NextWindow" /></keybind>
-    <keybind key="A-F4"><action name="Close" /></keybind>
-    <keybind key="W-t">
-      <action name="Execute"><command>foot</command></action>
-    </keybind>
-  </keyboard>
-  <windowRules>
-    <windowRule identifier="*" title="*">
-      <action name="Maximize" />
-    </windowRule>
-  </windowRules>
-</labwc_config>
-"#,
-    )?;
+    // The person has just answered onboarding, in this installer. Without the marker the
+    // installed desktop opened on the same questions again, starting with their name.
+    let _ = run_cmd("mkdir", &["-p", &format!("{dst_home}/.yantrik")]);
+    sudo_write(&format!("{dst_home}/.yantrik/.onboarding_complete"), "done")?;
 
     // Fix ownership of everything in home
     let _ = chroot_cmd(mount_dir, &["chown", "-R", &format!("{username}:{username}"), &format!("/home/{username}")]);
@@ -619,6 +601,12 @@ fi
         &format!("{mount_dir}/etc/tmpfiles.d/yantrik-xdg.conf"),
         &format!("d /run/user/{uid} 0700 {username} {username} -\n"),
     );
+
+    // Root stays locked on an installed machine. The live image once shipped `root:root` with SSH
+    // root login allowed, and copying the live system carried both onto every install; the image
+    // no longer does, and this holds for any image that still might.
+    let _ = chroot_cmd(mount_dir, &["passwd", "-l", "root"]);
+    let _ = run_cmd("sed", &["-i", "/^PermitRootLogin/d", &format!("{mount_dir}/etc/ssh/sshd_config.d/yantrik.conf")]);
 
     // Passwordless sudo (needed for labwc/system operations)
     let sudoers_file = format!("{mount_dir}/etc/sudoers.d/{username}");

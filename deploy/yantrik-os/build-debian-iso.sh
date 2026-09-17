@@ -257,7 +257,9 @@ set -e
 # Create yantrik user
 useradd -m -s /bin/bash -G sudo,video,audio,input yantrik
 echo "yantrik:yantrik" | chpasswd
-echo "root:root" | chpasswd
+# Root is locked. It used to be root:root with SSH root login allowed, and the installer copies
+# this filesystem, so every installed machine accepted that login from the network.
+passwd -l root
 
 # Passwordless sudo for yantrik
 echo "yantrik ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/yantrik
@@ -299,6 +301,18 @@ tar --zstd -xf "$RELEASE_TARBALL" -C "$UNPACK" --strip-components=1 \
 sudo mkdir -p "$ROOTFS/opt/yantrik/bin" "$ROOTFS/opt/yantrik/models"
 sudo cp -a "$UNPACK/bin/." "$ROOTFS/opt/yantrik/bin/"
 sudo chmod +x "$ROOTFS/opt/yantrik/bin/"*
+
+# The session's own furniture: compositor config, theme, fonts, desktop entries. `yantrik-session`
+# installs these into the person's session at every login. The image used to leave them out and
+# start labwc with a hand-written config instead, so an installed machine drew the shell inside a
+# window with a title bar while every cloud-init machine did not.
+[ -d "$UNPACK/share" ] || fail "release tarball carries no share/ — the session would have no compositor config"
+sudo mkdir -p "$ROOTFS/opt/yantrik/share"
+sudo cp -a "$UNPACK/share/." "$ROOTFS/opt/yantrik/share/"
+sudo chown -R root:root "$ROOTFS/opt/yantrik/share"
+for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session; do
+    [ -e "$ROOTFS/opt/yantrik/$required" ] || fail "$required missing from the image — the desktop session would not be the shipped one"
+done
 
 # The build manifest travels with the image so a running machine can answer
 # "which build is this?" — a question that was unanswerable on the VM all day.
@@ -695,9 +709,10 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then
         fi
     fi
 
-    # Start labwc, record crash timestamp if it exits quickly
+    # Start the session every Yantrik machine runs (shipped compositor config, fullscreen shell),
+    # and record a crash timestamp if it exits quickly
     START_TIME=$(date +%s)
-    labwc 2>/opt/yantrik/logs/labwc.log
+    /opt/yantrik/bin/yantrik-session 2>>/opt/yantrik/logs/labwc.log
     EXIT_TIME=$(date +%s)
 
     # If labwc ran less than 5 seconds, it probably crashed
@@ -883,7 +898,7 @@ sudo chroot "$ROOTFS" systemctl enable NetworkManager 2>/dev/null || true
 sudo chroot "$ROOTFS" systemctl enable ssh 2>/dev/null || true
 sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "$ROOTFS/etc/ssh/sshd_config"
 sudo mkdir -p "$ROOTFS/etc/ssh/sshd_config.d"
-echo -e "PasswordAuthentication yes\nPermitRootLogin yes" | sudo tee "$ROOTFS/etc/ssh/sshd_config.d/yantrik.conf" > /dev/null
+echo -e "PasswordAuthentication yes" | sudo tee "$ROOTFS/etc/ssh/sshd_config.d/yantrik.conf" > /dev/null
 
 # Load VM display drivers at boot (VBox vmwgfx, virtio-gpu, etc.)
 echo -e "vmwgfx\nvirtio-gpu\ndrm" | sudo tee "$ROOTFS/etc/modules-load.d/yantrik-display.conf" > /dev/null
