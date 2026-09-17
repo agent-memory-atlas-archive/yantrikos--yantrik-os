@@ -405,7 +405,21 @@ def run_tool(tool, args):
     action was reported to the person as "Done — refused: …". MCP marks a tool that ran
     and failed with isError; that is what the flag is for.
     """
+    # Required arguments, said plainly. A call without one used to fail inside argv as a bare
+    # KeyError — "could not run os_describe: 'app'" — which tells a model nothing it can act on.
+    missing = [k for k in tool.get("inputSchema", {}).get("required", []) if not args.get(k)]
+    if missing:
+        return ("%s needs %s. %s" % (
+            tool["name"], " and ".join(repr(k) for k in missing),
+            "Say which app, e.g. {\"app\": \"shell\"} for the desktop." if "app" in missing else "",
+        )).strip(), True
+
     if tool["name"] == "os_act":
+        # os_describe lists actions as `act: new_note()`, and a model copying that sends
+        # "new_note()". The name is the part before the parenthesis; refusing the call over the
+        # punctuation cost a whole confirmed turn on the third live drive.
+        args = dict(args)
+        args["action"] = str(args["action"]).strip().split("(", 1)[0].strip()
         refusal = guard_act(args)
         if refusal is not None:
             return "refused: " + refusal, True
