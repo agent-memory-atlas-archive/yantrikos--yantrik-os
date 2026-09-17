@@ -41,7 +41,9 @@ TOOLS = [
                        "that can be described and acted on. The desktop itself is `shell` "
                        "(listed as app-shell): describe it to open an app (open_app), switch "
                        "windows, work with files or send a message. An app that is not running "
-                       "is not listed here; open it through `shell`.",
+                       "is not listed here; open it through `shell`. A service listed here is "
+                       "already running: to read it, call os_describe with its name — e.g. "
+                       "system-monitor for CPU and memory, weather for local conditions.",
         "inputSchema": {"type": "object", "properties": {}},
         "argv": lambda a: ["ls"],
         "timeout": 15,
