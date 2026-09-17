@@ -102,13 +102,25 @@ fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Record that the shell has started `app_id` as pid `pid`.
+/// Record that the shell has started `app_id` as pid `pid`. Says whether the record is now this
+/// pid's.
 ///
-/// One entry per id: launching an app that is already open replaces the record, which matches the
-/// shell's one-window-per-app rule. The previous window's reaper, when it fires, will see the pid
-/// no longer matches and leave the new one alone (see [`mark_exited`]).
-pub fn mark_launched(app_id: &str, pid: u32, binary: &str) {
+/// One entry per id, and the entry belongs to the process that owns the window. Our apps are
+/// single-instance: start `yantrik-notes` while Notes is open and the second copy asks the first
+/// to show itself, then exits within milliseconds. Replacing the record with that copy's pid lost
+/// the window twice over — the shell reported the app as launched a moment ago, and when the copy
+/// exited, `mark_exited` matched and removed Notes from "what is open" while its window was still
+/// on screen.
+///
+/// So a live record is left alone, and the caller is told, because a second copy exiting at once
+/// is a handover rather than the failed launch it looks like.
+pub fn mark_launched(app_id: &str, pid: u32, binary: &str) -> bool {
     if let Ok(mut map) = registry().lock() {
+        if let Some(open) = map.get(app_id) {
+            if open.pid != pid && pid_alive(open.pid) {
+                return false;
+            }
+        }
         map.insert(
             app_id.to_string(),
             RunningApp {
@@ -118,7 +130,9 @@ pub fn mark_launched(app_id: &str, pid: u32, binary: &str) {
                 since_unix: now_unix(),
             },
         );
+        return true;
     }
+    false
 }
 
 /// Record that pid `pid`, launched as `app_id`, has exited.
@@ -168,4 +182,36 @@ pub fn is_running(app_id: &str) -> bool {
         .and_then(|map| map.get(app_id).map(|a| a.pid))
         .map(pid_alive)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A second copy of a single-instance app does not take the record from the window that is
+    /// open, and does not take it away when it exits a moment later.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_copy_does_not_evict_the_window_that_is_open() {
+        let app = "notes-test-second-copy";
+        let open = std::process::id();
+        assert!(mark_launched(app, open, "yantrik-notes"));
+        let second = u32::MAX; // never a live pid
+        assert!(!mark_launched(app, second, "yantrik-notes"), "the open window keeps the record");
+        mark_exited(app, second);
+        assert!(is_running(app), "the window is still open");
+        mark_exited(app, open);
+        assert!(!is_running(app));
+    }
+
+    /// A record left behind by a process that has gone is replaced, not honoured.
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_record_does_not_block_a_relaunch() {
+        let app = "notes-test-dead-record";
+        assert!(mark_launched(app, u32::MAX, "yantrik-notes"));
+        assert!(mark_launched(app, std::process::id(), "yantrik-notes"));
+        assert!(is_running(app));
+        mark_exited(app, std::process::id());
+    }
 }

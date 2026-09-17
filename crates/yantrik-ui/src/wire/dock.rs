@@ -445,7 +445,7 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
             // The shell now knows this window is open without asking the compositor. Recorded
             // before the reaper thread starts, so a describe that lands in the same instant sees
             // it.
-            crate::running::mark_launched(app_id, pid, bin);
+            let owns_window = crate::running::mark_launched(app_id, pid, bin);
             // Reap it when it exits. Without a wait, every app the shell ever launched lingers
             // as a zombie until the shell itself quits — and a zombie still has a /proc entry,
             // which is enough to confuse anything that checks "is that pid alive". The same wait
@@ -464,7 +464,19 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
                     Ok(status) => {
                         let lived = started.elapsed();
                         let lived_ms = lived.as_millis() as u64;
-                        if lived_ms < crate::running::LAUNCH_GRACE_MS {
+                        // A second copy of a single-instance app exits at once, on purpose: it
+                        // has asked the window that is already open to show itself. That is a
+                        // handover, and reporting it as a failed launch put every relaunch of
+                        // notes or the terminal in `describe shell`'s failed_launches.
+                        if lived_ms < crate::running::LAUNCH_GRACE_MS
+                            && !owns_window
+                            && status.success()
+                        {
+                            tracing::info!(
+                                app = %name, lived_ms,
+                                "A second copy handed over to the window already open"
+                            );
+                        } else if lived_ms < crate::running::LAUNCH_GRACE_MS {
                             tracing::warn!(
                                 app = %name, %status, lived_ms,
                                 "App exited immediately — it never showed a window"
