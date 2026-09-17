@@ -85,8 +85,14 @@ TOOLS = [
             "properties": {
                 "app": {"type": "string"},
                 "action": {"type": "string"},
+                # Free-form, and saying so matters. An object schema with no properties reads as
+                # "any keys" to most clients, but Hermes normalises it to `properties: {}`, and a
+                # llama.cpp server turns that into a grammar that admits only `{}`. The model
+                # then cannot send `{"name": "notes"}` however hard it tries: every open_app
+                # arrived without its name, and Hermes shut the desktop's tools off after four.
                 "args": {
                     "type": "object",
+                    "additionalProperties": True,
                     "description": "action arguments as an object keyed by the parameter names os_describe lists, e.g. {\"text\": \"hello\"}. A single-parameter action also accepts the bare value.",
                 },
             },
