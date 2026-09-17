@@ -438,6 +438,14 @@ def run_tool(tool, args):
 
     out = (p.stdout or "").strip()
     err = (p.stderr or "").strip()
+    app = args.get("app")
+    if p.returncode != 0 and app and "no socket for" in err and tool["name"] in ("os_describe", "os_act"):
+        # The second live drive: told the app was not running ("no socket for 'notes'"), the
+        # model described it twice more and gave up. The way forward belongs in the failure
+        # itself, where it is read, rather than only in a tool description read turns earlier.
+        return ("%s is not running, so it cannot be described or acted on yet. Open it first "
+                "with os_act: app \"shell\", action \"open_app\", args {\"name\": \"%s\"}; "
+                "then describe it." % (app, app)), True
     if p.returncode != 0:
         return "failed (exit %d)%s%s" % (
             p.returncode,
