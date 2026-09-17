@@ -84,6 +84,8 @@ skill_store_screenshot.png
 test-*.sh
 test_*.sh
 test_*.py
+# ...but not the unit tests that ship with a harness plugin.
+!harnesses/*/tests/test_*.py
 
 # Brainstorm outputs
 brainstorm_*.py

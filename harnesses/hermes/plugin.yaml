@@ -1,0 +1,18 @@
+name: yantrik-desktop
+label: Yantrik OS
+kind: platform
+version: 0.1.0
+description: >
+  Makes Hermes a mind of a Yantrik OS desktop. Attaches to the desktop's harness socket, takes
+  what the person types in the chat panel as messages, and streams answers, progress and approval
+  prompts back. Hermes keeps its own model, keys and memory; nothing about them reaches the OS.
+author: Yantrik OS
+optional_env:
+  - name: YANTRIK_HARNESS
+    description: "Set to off to keep Hermes off the desktop"
+    prompt: "Attach to the Yantrik desktop? (off to disable)"
+    password: false
+  - name: YANTRIK_HARNESS_SOCKET
+    description: "The desktop's harness socket, when it is not in the usual place"
+    prompt: "Harness socket path (or empty)"
+    password: false
