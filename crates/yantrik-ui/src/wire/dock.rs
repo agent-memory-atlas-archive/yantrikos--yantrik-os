@@ -1,31 +1,85 @@
-//! Dock wiring — on_launch_app callback.
+//! Dock wiring — on_launch_app callback, and the one answer to "can this app open here?".
+
+use std::path::{Path, PathBuf};
 
 use slint::ComponentHandle;
 
 use crate::app_context::AppContext;
+use crate::apps::DesktopEntry;
 use crate::App;
 
-/// The app ids this shell can actually launch, in the spelling the dispatch matches on.
+/// What opening one of the shell's own apps does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// One of the shell's own screens. Compiled into the shell, so always there.
+    Screen(i32),
+    /// Settings, opened at one of its sections.
+    SettingsSection(i32),
+    /// The editor screen, on a blank file.
+    Editor,
+    /// The Apps launcher.
+    Launchpad,
+    /// A program shipped beside the shell, registered as `id` while it runs.
+    Program { id: &'static str, bin: &'static str },
+    /// Whichever web browser this machine has.
+    Browser,
+}
+
+/// Every app the shell opens by name, and what opening it does.
 ///
-/// These mirror the match arms in `wire()` below and must be kept with them. The list exists
-/// because the control surface used to answer `{"launching": "<anything>"}` for any string at
-/// all: the dispatch quietly reached its `_` arm, logged "Unknown app" and returned, long after
-/// the caller had been told the launch was under way.
+/// The first name in each row is the one the app is listed by; the rest are the spellings the
+/// same app arrives under — the name its binary carries, the id it publishes on its control
+/// surface — after `canonical_id` has folded their punctuation.
 ///
-/// "Must be kept with them" was doing no work on its own — ten arms were missing from this list,
-/// so `open_app name=containers` was refused as unknown while the arm that launches it sat right
-/// there. There is now a test that walks this list against what the dispatch accepts, because a
-/// comment asking two lists to agree is not a mechanism that makes them agree.
-pub const BUILTIN_APP_IDS: &[&str] = &[
-    "terminal", "browser", "files", "settings", "notes", "editor", "bond", "personality",
-    "memory", "notifications", "system", "media", "email", "calendar", "packages", "network",
-    "weather", "spreadsheet", "launchpad",
-    // Every arm below also answers to the name its app publishes on its control surface, which
-    // `canonical_id` folds onto these.
-    "sysmonitor", "system_monitor", "music", "music_player", "downloads", "download_manager",
-    "snippets", "snippet_manager", "containers", "container_manager", "devices",
-    "device_dashboard", "permissions", "permission_dashboard", "documents", "document_editor",
-    "presentation", "slides", "text_editor", "image_viewer", "images", "network_manager",
+/// This table IS the dispatch. There used to be a match in `wire()` and, beside it, a list of the
+/// ids that match accepted, with a comment asking the two to agree. They did not: ten arms were
+/// missing from the list, and the launcher's About and Skills tiles had no arm at all, so
+/// clicking them logged "Unknown app" while `open_app` answered "launching". One table cannot
+/// disagree with itself.
+///
+/// Three rows carry history worth keeping:
+///
+/// - `text_editor` is the name the binary carries and the name a person would try; `editor` is
+///   what the arm was always called. Both land on screen 12, the implementation
+///   `control_editor.rs` drives and the only one that can open and save a file.
+/// - The image viewer had no arm, so yantrik-image-viewer sat in /opt/yantrik/bin unreachable.
+///   Screen 11 is the viewer the file browser's "open" is wired to, so it is the one that
+///   actually receives a picture.
+/// - `network_manager` was accepted by the guard — a .desktop entry matched — and then reached
+///   no arm, so open_app answered "launching" and nothing happened.
+const ROUTES: &[(&[&str], Launch)] = &[
+    (&["terminal"], Launch::Program { id: "terminal", bin: "yantrik-terminal" }),
+    (&["browser"], Launch::Browser),
+    (&["files"], Launch::Screen(8)),
+    (&["settings"], Launch::Screen(7)),
+    (&["notes"], Launch::Program { id: "notes", bin: "yantrik-notes" }),
+    (&["editor", "text_editor"], Launch::Editor),
+    (&["image_viewer", "images"], Launch::Screen(11)),
+    (&["bond"], Launch::Screen(4)),
+    (&["personality"], Launch::Screen(5)),
+    (&["memory"], Launch::Screen(6)),
+    (&["notifications"], Launch::Screen(9)),
+    (&["system"], Launch::Screen(10)),
+    (&["media"], Launch::Screen(13)),
+    (&["about"], Launch::Screen(16)),
+    // "Install companion skills" is a section of Settings, not a screen of its own.
+    (&["skills"], Launch::SettingsSection(7)),
+    (&["email"], Launch::Program { id: "email", bin: "yantrik-email" }),
+    (&["calendar"], Launch::Program { id: "calendar", bin: "yantrik-calendar" }),
+    (&["packages"], Launch::Screen(21)),
+    (&["network", "network_manager"], Launch::Program { id: "network", bin: "yantrik-network-manager" }),
+    (&["sysmonitor", "system_monitor"], Launch::Program { id: "sysmonitor", bin: "yantrik-system-monitor" }),
+    (&["weather"], Launch::Program { id: "weather", bin: "yantrik-weather" }),
+    (&["music", "music_player"], Launch::Program { id: "music", bin: "yantrik-music-player" }),
+    (&["downloads", "download_manager"], Launch::Program { id: "downloads", bin: "yantrik-download-manager" }),
+    (&["snippets", "snippet_manager"], Launch::Program { id: "snippets", bin: "yantrik-snippet-manager" }),
+    (&["containers", "container_manager"], Launch::Program { id: "containers", bin: "yantrik-container-manager" }),
+    (&["devices", "device_dashboard"], Launch::Screen(27)),
+    (&["permissions", "permission_dashboard"], Launch::Screen(28)),
+    (&["spreadsheet"], Launch::Program { id: "spreadsheet", bin: "yantrik-spreadsheet" }),
+    (&["documents", "document_editor"], Launch::Program { id: "documents", bin: "yantrik-document-editor" }),
+    (&["presentation", "slides"], Launch::Program { id: "presentation", bin: "yantrik-presentation" }),
+    (&["launchpad"], Launch::Launchpad),
 ];
 
 /// One spelling of an app id, from whatever a caller had to hand.
@@ -40,14 +94,178 @@ pub fn canonical_id(app: &str) -> String {
     app.trim().to_lowercase().replace([' ', '-'], "_")
 }
 
-/// Whether `launch_app` will do anything with this id.
-///
-/// Checks the same two sources the dispatch does, in the same order: installed .desktop entries
-/// first, then the shell's own built-ins.
-pub fn is_known_app(app: &str, installed: &[crate::apps::DesktopEntry]) -> bool {
+/// What opening `app` does, if it is one of the shell's own.
+pub fn route(app: &str) -> Option<Launch> {
+    let id = canonical_id(app);
+    ROUTES.iter().find(|(names, _)| names.contains(&id.as_str())).map(|(_, launch)| *launch)
+}
+
+/// Every name the shell's own apps answer to.
+pub fn builtin_app_ids() -> impl Iterator<Item = &'static str> {
+    ROUTES.iter().flat_map(|(names, _)| names.iter().copied())
+}
+
+/// The .desktop entry a name refers to, matched the way the dispatch matches it.
+fn catalogue_entry<'a>(app: &str, installed: &'a [DesktopEntry]) -> Option<&'a DesktopEntry> {
     let lower = app.trim().to_lowercase();
-    installed.iter().any(|e| e.app_id == app || e.name.to_lowercase() == lower)
-        || BUILTIN_APP_IDS.contains(&canonical_id(app).as_str())
+    installed.iter().find(|e| e.app_id == app || e.name.to_lowercase() == lower)
+}
+
+/// Whether an app can be opened on this machine, as it is right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Availability {
+    /// Opening it opens it.
+    Ready,
+    /// The shell knows the app, but what it runs is not on this machine. Carries what is missing.
+    Missing(String),
+    /// Nothing answers to that name.
+    Unknown,
+}
+
+/// Whether opening `app` will actually open something.
+///
+/// "Known" was the only question anybody asked, and it is the wrong one. The Browser pin was
+/// known — it had an arm — and the arm ran `chromium`, which the installer does not put on the
+/// disk. So START showed Browser, `open_app browser` answered "launching", and a click did
+/// nothing but log ENOENT. Anything that lists an app or promises to open one asks this instead,
+/// which checks the same two sources the dispatch uses, in the same order, down to whether the
+/// program they would run exists.
+pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
+    if let Some(entry) = catalogue_entry(app, installed) {
+        if entry.exec != "__builtin__" {
+            return program_availability(&entry.exec);
+        }
+        // A built-in catalogue entry is launched by its route, like the dispatch does.
+    }
+    match route(app) {
+        None => Availability::Unknown,
+        Some(Launch::Program { bin, .. }) => match find_program(bin) {
+            Some(_) => Availability::Ready,
+            None => Availability::Missing(bin.to_string()),
+        },
+        Some(Launch::Browser) => match find_browser() {
+            Some(_) => Availability::Ready,
+            None => Availability::Missing(format!(
+                "a web browser (looked for {})",
+                BROWSERS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")
+            )),
+        },
+        Some(Launch::Screen(_) | Launch::SettingsSection(_) | Launch::Editor | Launch::Launchpad) => {
+            Availability::Ready
+        }
+    }
+}
+
+/// Whether the program an Exec line runs is on this machine.
+fn program_availability(exec: &str) -> Availability {
+    let Some(bin) = exec.split_whitespace().next() else {
+        return Availability::Missing("a program to run".to_string());
+    };
+    match find_program(bin) {
+        Some(_) => Availability::Ready,
+        None => Availability::Missing(bin.to_string()),
+    }
+}
+
+/// Whether the launch_app dispatch will do anything with this id.
+pub fn is_known_app(app: &str, installed: &[DesktopEntry]) -> bool {
+    availability(app, installed) != Availability::Unknown
+}
+
+/// Whether opening this app will open it.
+pub fn is_launchable(app: &str, installed: &[DesktopEntry]) -> bool {
+    availability(app, installed) == Availability::Ready
+}
+
+/// Whether a catalogue entry belongs in the launcher at all.
+///
+/// A tile is a promise that clicking it opens something. A .desktop file can outlive its package,
+/// and a built-in tile can name a screen nothing routes to — both were in the launcher, and both
+/// did nothing when clicked.
+pub fn entry_is_launchable(entry: &DesktopEntry) -> bool {
+    if entry.exec == "__builtin__" {
+        return route(&entry.app_id).is_some();
+    }
+    program_availability(&entry.exec) == Availability::Ready
+}
+
+/// The names of the apps that will open on this machine, for telling a caller what it can ask for.
+pub fn launchable_app_ids(installed: &[DesktopEntry]) -> Vec<&'static str> {
+    ROUTES
+        .iter()
+        .map(|(names, _)| names[0])
+        .filter(|id| is_launchable(id, installed))
+        .collect()
+}
+
+/// The web browsers the Browser pin will open, in order of preference, with what each needs.
+///
+/// Chromium first: it is what this OS installs, and the browser tools drive it. The flags keep
+/// what the old hardcoded launch had — native Wayland, no first-run wizard, no default-browser
+/// nag, and no GPU, which a VM does not have. The rest open as they are.
+///
+/// The profile is the browser's own. The visible browser used to run from
+/// `--user-data-dir=/tmp/chromium-visible`, because a headless instance might hold the default
+/// profile's lock; the browser tools now keep every profile under ~/.local/share/yantrik/browsers,
+/// so that reason is gone, and a /tmp profile forgot every login and bookmark at each reboot.
+const BROWSERS: &[(&str, &[&str])] = &[
+    ("chromium", CHROMIUM_FLAGS),
+    ("chromium-browser", CHROMIUM_FLAGS),
+    ("google-chrome-stable", CHROMIUM_FLAGS),
+    ("google-chrome", CHROMIUM_FLAGS),
+    ("firefox", &[]),
+    ("firefox-esr", &[]),
+    ("epiphany-browser", &[]),
+    ("epiphany", &[]),
+];
+
+const CHROMIUM_FLAGS: &[&str] = &[
+    "--ozone-platform=wayland",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-gpu",
+];
+
+/// The first browser from `BROWSERS` this machine has.
+pub fn find_browser() -> Option<(&'static str, &'static [&'static str])> {
+    BROWSERS.iter().copied().find(|(name, _)| find_program(name).is_some())
+}
+
+/// Where a program is, if it is anywhere it could be run from.
+///
+/// The shell is started from `/opt/yantrik/bin` (or a cargo target dir in development), and the
+/// apps are deployed beside it — but nothing puts that directory on PATH, so a bare
+/// `Command::new("yantrik-notes")` fails with ENOENT on a clean install. Prefer the shell's own
+/// directory, then the deploy path, then PATH.
+pub fn find_program(bin: &str) -> Option<PathBuf> {
+    if bin.is_empty() {
+        return None;
+    }
+    if bin.contains('/') {
+        let path = PathBuf::from(bin);
+        return is_executable(&path).then_some(path);
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
+        dirs.push(dir);
+    }
+    dirs.push(PathBuf::from("/opt/yantrik/bin"));
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    dirs.into_iter().map(|dir| dir.join(bin)).find(|p| is_executable(p))
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 /// Wire on_launch_app callback.
@@ -59,16 +277,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let app = app_id.to_string();
         tracing::info!(app = %app, "Launching app");
 
-        // Check installed .desktop apps first (skip built-in Yantrik apps)
+        // Installed .desktop apps first; a built-in entry falls through to its route.
+        //
+        // A pin or the Lens can name an app ("notes") that ALSO has a .desktop entry (Name=Notes);
+        // that entry matches first, so it must launch exactly like the routes below do — same
+        // resolution, same environment scrubbing.
         let installed = catalogue.get();
-        for entry in installed.iter() {
-            if entry.app_id == app || entry.name.to_lowercase() == app {
-                if entry.exec == "__builtin__" {
-                    break; // Fall through to built-in screen routing below
-                }
-                // A pin or the Lens can name an app ("notes") that ALSO has a .desktop entry
-                // (Name=Notes); this branch matches first, so it must launch exactly like the
-                // arms below do — same resolution, same environment scrubbing.
+        if let Some(entry) = catalogue_entry(&app, &installed) {
+            if entry.exec != "__builtin__" {
                 let parts: Vec<&str> = entry.exec.split_whitespace().collect();
                 if let Some((bin, args)) = parts.split_first() {
                     spawn_app_with_args(&app, bin, args);
@@ -77,250 +293,62 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             }
         }
 
-        // Fallback: hardcoded commands.
-        //
         // Matched on the canonical spelling, so an id taken from an app's control surface reaches
-        // the same arm as the dock's own. The .desktop scan above deliberately still uses the raw
-        // string: those entries carry real ids and names, and folding their punctuation would be
-        // guessing at somebody else's vocabulary rather than settling our own.
-        let cmd = match canonical_id(&app).as_str() {
-            "terminal" => {
-                spawn_app("terminal", "yantrik-terminal");
-                return;
+        // the same route as the dock's own. The .desktop lookup above deliberately still uses the
+        // raw string: those entries carry real ids and names, and folding their punctuation would
+        // be guessing at somebody else's vocabulary rather than settling our own.
+        let Some(launch) = route(&app) else {
+            tracing::warn!(app = %app, "Unknown app");
+            return;
+        };
+        let show = |screen: i32| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_current_screen(screen);
+                ui.invoke_navigate(screen);
             }
-            "browser" => {
-                // Launch visible Chromium with Wayland + separate user-data-dir
-                // (headless instance may be holding the default profile lock)
-                match std::process::Command::new("chromium")
-                    .args([
-                        "--ozone-platform=wayland",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                        "--disable-gpu",
-                        "--user-data-dir=/tmp/chromium-visible",
-                    ])
-                    .env("WAYLAND_DISPLAY", "wayland-0")
-                    .env("XDG_RUNTIME_DIR", "/run/user/1000")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                {
-                    Ok(mut child) => {
-                        let pid = child.id();
-                        tracing::info!(pid, "Browser launched (visible mode)");
-                        // Chromium is a window like any other, so the shell tracks it the same
-                        // way — otherwise "what is open" would silently omit the browser.
-                        crate::running::mark_launched("browser", pid, "chromium");
-                        std::thread::spawn(move || {
-                            let _ = child.wait();
-                            crate::running::mark_exited("browser", pid);
-                        });
-                    }
-                    Err(e) => tracing::error!(error = %e, "Failed to launch browser"),
-                }
-                return;
-            }
-            "files" => {
+        };
+        match launch {
+            Launch::Screen(screen) => show(screen),
+            Launch::SettingsSection(section) => {
                 if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(8);
-                    ui.invoke_navigate(8);
+                    ui.set_settings_category(section);
                 }
-                return;
+                show(7);
             }
-            "settings" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(7);
-                    ui.invoke_navigate(7);
-                }
-                return;
-            }
-            "notes" => {
-                spawn_app("notes", "yantrik-notes");
-                return;
-            }
-            // `text_editor` is the name the binary carries and the name a person would try;
-            // `editor` is what the arm has always been called. Both land on screen 12, which is
-            // the real implementation — the one `control_editor.rs` drives and the one that can
-            // actually open and save a file. The standalone yantrik-text-editor binary ships
-            // beside it and had no way to be launched at all.
-            "editor" | "text_editor" => {
+            Launch::Editor => {
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_editor_file_name("untitled".into());
                     ui.set_editor_file_content("".into());
                     ui.set_editor_is_modified(false);
                     ui.set_editor_is_readonly(false);
-                    ui.set_current_screen(12);
-                    ui.invoke_navigate(12);
                 }
-                return;
+                show(12);
             }
-            // The image viewer had no arm whatsoever, so neither `image-viewer` nor anything
-            // else reached it, while yantrik-image-viewer sat in /opt/yantrik/bin unreachable.
-            // Screen 11 is the shell's viewer, which is the one wired to the file browser's
-            // "open" and therefore the one that actually receives a picture.
-            "image_viewer" | "images" => {
+            Launch::Launchpad => {
+                show(1);
                 if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(11);
-                    ui.invoke_navigate(11);
-                }
-                return;
-            }
-            "bond" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(4);
-                    ui.invoke_navigate(4);
-                }
-                return;
-            }
-            "personality" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(5);
-                    ui.invoke_navigate(5);
-                }
-                return;
-            }
-            "memory" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(6);
-                    ui.invoke_navigate(6);
-                }
-                return;
-            }
-            "notifications" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(9);
-                    ui.invoke_navigate(9);
-                }
-                return;
-            }
-            "system" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(10);
-                    ui.invoke_navigate(10);
-                }
-                return;
-            }
-            "media" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(13);
-                    ui.invoke_navigate(13);
-                }
-                return;
-            }
-            "email" => {
-                spawn_app("email", "yantrik-email");
-                return;
-            }
-            "calendar" => {
-                spawn_app("calendar", "yantrik-calendar");
-                return;
-            }
-            "packages" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(21);
-                    ui.invoke_navigate(21);
-                }
-                return;
-            }
-            // `network_manager` is what the binary is called and therefore what a person or an
-            // agent types. It was accepted by the guard — a .desktop entry matched — and then
-            // reached no arm at all, so open_app answered "launching" and nothing happened. The
-            // same shape of bug as download-manager, found the same way: by photographing the
-            // result and seeing a different app.
-            "network" | "network_manager" => {
-                spawn_app("network", "yantrik-network-manager");
-                return;
-            }
-            "sysmonitor" | "system_monitor" => {
-                spawn_app("sysmonitor", "yantrik-system-monitor");
-                return;
-            }
-            "weather" => {
-                spawn_app("weather", "yantrik-weather");
-                return;
-            }
-            "music" | "music_player" => {
-                spawn_app("music", "yantrik-music-player");
-                return;
-            }
-            "downloads" | "download_manager" => {
-                spawn_app("downloads", "yantrik-download-manager");
-                return;
-            }
-            "snippets" | "snippet_manager" => {
-                spawn_app("snippets", "yantrik-snippet-manager");
-                return;
-            }
-            "containers" | "container_manager" => {
-                spawn_app("containers", "yantrik-container-manager");
-                return;
-            }
-            "devices" | "device_dashboard" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(27);
-                    ui.invoke_navigate(27);
-                }
-                return;
-            }
-            "permissions" | "permission_dashboard" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(28);
-                    ui.invoke_navigate(28);
-                }
-                return;
-            }
-            "spreadsheet" => {
-                spawn_app("spreadsheet", "yantrik-spreadsheet");
-                return;
-            }
-            "documents" | "document_editor" => {
-                spawn_app("documents", "yantrik-document-editor");
-                return;
-            }
-            "presentation" | "slides" => {
-                spawn_app("presentation", "yantrik-presentation");
-                return;
-            }
-            "launchpad" => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_current_screen(1);
-                    ui.invoke_navigate(1);
                     ui.set_app_grid_open(true);
                 }
-                return;
             }
-            _ => {
-                tracing::warn!(app = %app, "Unknown app");
-                return;
-            }
-        };
+            Launch::Program { id, bin } => spawn_app(id, bin),
+            // A browser is a window like any other, so it goes through the one launcher: the
+            // registry learns it is open, the reaper notices if it dies at once, and it gets the
+            // session's display environment. The old arm set WAYLAND_DISPLAY and XDG_RUNTIME_DIR
+            // by hand, for uid 1000 only.
+            Launch::Browser => match find_browser() {
+                Some((bin, args)) => spawn_app_with_args("browser", bin, args),
+                None => tracing::error!(
+                    "Cannot open the browser: none is installed (looked for {})",
+                    BROWSERS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")
+                ),
+            },
+        }
     });
 }
 
-/// Where an app binary lives when `bin` is a bare name.
-///
-/// The shell is started from `/opt/yantrik/bin` (or a cargo target dir in development), and the
-/// apps are deployed beside it — but nothing puts that directory on PATH, so a bare
-/// `Command::new("yantrik-notes")` fails with ENOENT on a clean install and the launcher logs
-/// "Failed to launch" for every app. Prefer the shell's own directory, then the deploy path, and
-/// only then whatever PATH says.
-pub fn resolve_app_binary(bin: &str) -> std::path::PathBuf {
-    use std::path::{Path, PathBuf};
-    if bin.contains('/') {
-        return PathBuf::from(bin);
-    }
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(bin));
-        }
-    }
-    candidates.push(Path::new("/opt/yantrik/bin").join(bin));
-    candidates
-        .into_iter()
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from(bin))
+/// Where an app binary lives, or the bare name for `Command` to look up if it is nowhere.
+pub fn resolve_app_binary(bin: &str) -> PathBuf {
+    find_program(bin).unwrap_or_else(|| PathBuf::from(bin))
 }
 
 /// Launch a standalone app binary. The app's own single-instance guard handles repeats.
@@ -479,8 +507,8 @@ mod tests {
                 "`{id}` publishes a control surface, so an agent will ask for it by that name"
             );
             assert!(
-                BUILTIN_APP_IDS.contains(&canonical_id(id).as_str()),
-                "`{id}` normalises to `{}`, which no arm answers to",
+                route(id).is_some(),
+                "`{id}` normalises to `{}`, which no route answers to",
                 canonical_id(id)
             );
         }
@@ -503,7 +531,7 @@ mod tests {
     fn every_app_we_ship_opens_by_the_name_of_its_binary() {
         for app in SHIPPED_APPS {
             assert!(
-                BUILTIN_APP_IDS.contains(&canonical_id(app).as_str()),
+                route(app).is_some(),
                 "apps/{app} ships a binary that `open_app name={app}` cannot launch"
             );
         }
@@ -528,6 +556,106 @@ mod tests {
             "sysmonitor", "devices", "permissions", "slides", "text_editor", "image_viewer",
         ] {
             assert!(is_known_app(id, &[]), "the dispatch launches `{id}` but the guard refuses it");
+        }
+    }
+
+    /// Every tile the launcher shows for the shell's own screens opens something.
+    ///
+    /// About and Skills were tiles with no route: a click logged "Unknown app", and `open_app`
+    /// answered "launching" because the catalogue entry made them look known.
+    #[test]
+    fn every_builtin_tile_has_somewhere_to_go() {
+        for entry in crate::apps::builtin_apps() {
+            assert!(
+                route(&entry.app_id).is_some(),
+                "the launcher shows `{}` ({}), and nothing opens it",
+                entry.name,
+                entry.app_id
+            );
+            assert!(entry_is_launchable(&entry));
+        }
+    }
+
+    /// A shell app whose program is not on the disk is known, and not launchable.
+    #[test]
+    fn a_missing_program_is_known_but_does_not_open() {
+        let there = PathBuf::from("/definitely/not/here/yantrik-notes");
+        assert!(find_program(there.to_str().unwrap()).is_none());
+        assert_eq!(
+            program_availability("/definitely/not/here/yantrik-notes --new"),
+            Availability::Missing("/definitely/not/here/yantrik-notes".to_string())
+        );
+        // Screens are compiled into the shell; they are always there.
+        assert_eq!(availability("files", &[]), Availability::Ready);
+        assert_eq!(availability("about", &[]), Availability::Ready);
+        assert_eq!(availability("skills", &[]), Availability::Ready);
+    }
+
+    /// A .desktop file whose program is gone is kept out of the launcher, and one whose program
+    /// is present is kept in it.
+    #[cfg(unix)]
+    #[test]
+    fn a_desktop_entry_is_listed_only_if_its_program_exists() {
+        let entry = |exec: &str| DesktopEntry {
+            name: "Thing".into(),
+            exec: exec.into(),
+            icon: String::new(),
+            categories: String::new(),
+            comment: String::new(),
+            app_id: "thing".into(),
+            icon_char: String::new(),
+        };
+        assert!(entry_is_launchable(&entry("/bin/sh -c true")));
+        assert!(entry_is_launchable(&entry("sh")), "a bare name is looked up on PATH");
+        assert!(!entry_is_launchable(&entry("/usr/bin/no-such-browser-anywhere %U")));
+        assert!(!entry_is_launchable(&entry("no-such-browser-anywhere")));
+
+        let gone = [entry("no-such-browser-anywhere")];
+        assert_eq!(
+            availability("thing", &gone),
+            Availability::Missing("no-such-browser-anywhere".to_string())
+        );
+        assert!(!is_launchable("thing", &gone));
+        assert!(is_known_app("thing", &gone), "known, so the caller hears 'not installed'");
+    }
+
+    /// A file that exists but cannot be executed is not a program.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_cannot_run_is_not_a_program() {
+        let dir = std::env::temp_dir().join(format!("yantrik-dock-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("not-executable");
+        std::fs::write(&file, "#!/bin/sh
+").unwrap();
+        assert!(find_program(file.to_str().unwrap()).is_none());
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(find_program(file.to_str().unwrap()).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The browser row is the Browser pin, whichever browser answers it.
+    #[test]
+    fn browser_is_one_route_with_several_programs() {
+        assert_eq!(route("browser"), Some(Launch::Browser));
+        assert!(BROWSERS.iter().any(|(name, _)| *name == "chromium"));
+        assert!(BROWSERS.iter().any(|(name, _)| name.starts_with("firefox")));
+        // Only the Chromium family gets Chromium's flags; Firefox would refuse to start on them.
+        for (name, flags) in BROWSERS {
+            let chromium = name.contains("chrom");
+            assert_eq!(!flags.is_empty(), chromium, "{name}");
+            assert!(!flags.iter().any(|f| f.contains("/tmp")), "{name}: a /tmp profile forgets everything");
+        }
+    }
+
+    /// No name is claimed by two routes: the first would always win, silently.
+    #[test]
+    fn every_name_routes_to_exactly_one_app() {
+        let mut seen = std::collections::HashSet::new();
+        for id in builtin_app_ids() {
+            assert!(seen.insert(id), "`{id}` appears in two routes");
+            assert_eq!(canonical_id(id), id, "`{id}` is not canonical, so it can never match");
         }
     }
 

@@ -139,6 +139,11 @@ pub fn publish(ui: &App, installed: &[DesktopEntry]) {
     let items: Vec<DockItem> = super::settings::pinned_apps()
         .iter()
         .filter(|id| is_pinnable(id))
+        // A pin is a promise that clicking it opens something. Browser was pinned by default on
+        // every machine and ran `chromium`, which the installer does not put on the disk, so
+        // START's second tile did nothing at all. The pin stays in settings — install a browser
+        // and it comes back — but a tile that cannot open is not shown.
+        .filter(|id| super::dock::is_launchable(id, installed))
         .map(|id| {
             let entry = installed
                 .iter()
@@ -204,7 +209,7 @@ mod tests {
     fn every_default_pin_launches() {
         for pin in DEFAULT_PINS {
             assert!(
-                super::super::dock::BUILTIN_APP_IDS.contains(pin),
+                super::super::dock::route(pin).is_some(),
                 "default pin `{pin}` is not an app the shell knows how to launch"
             );
         }

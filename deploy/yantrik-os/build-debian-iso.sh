@@ -216,8 +216,13 @@ apt-get install -y -qq \
     speech-dispatcher libspeechd2 \
     2>/dev/null || true
 
-# ── Browser (for API key setup during onboarding) ──
-apt-get install -y -qq epiphany-browser 2>/dev/null || true
+# ── The desktop's own runtime ──
+# What a machine built from cloud-init/user-data.yaml gets, because the same shell runs on both.
+# The ISO installed a handful of these and a different browser, so an installed machine had a
+# Browser pin that ran `chromium` and found nothing, no notification daemon, no portals, no
+# screenshots — each failing quietly. No `|| true`: a desktop missing its runtime is a failed
+# build, and the parity check after this step names anything user-data.yaml gains later.
+apt-get install -y -qq     seatd     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp     qemu-guest-agent     mako-notifier libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr     lxpolkit     udisks2     brightnessctl     bluez alsa-utils
 
 # ── Utilities (installer essentials) ──
 apt-get install -y -qq \
@@ -251,6 +256,24 @@ echo "Package installation complete"
 CHROOT_PACKAGES
 
 ok "All packages installed"
+
+# The ISO and a cloud-init machine run the same shell, so they need the same packages. The two
+# lists drifted — chromium, the notification daemon, the portals and a dozen more were only in
+# user-data.yaml — and nothing noticed until a person clicked Browser on an installed machine.
+# Every package cloud-init installs must be installed here.
+CLOUD_INIT_PACKAGES=$(awk '
+    /^packages:/ { inlist = 1; next }
+    inlist && /^[^ #]/ { inlist = 0 }
+    inlist && /^  - / { sub(/^  - /, ""); sub(/[ 	]*#.*/, ""); print }
+' "$SCRIPT_DIR/cloud-init/user-data.yaml")
+[ -n "$CLOUD_INIT_PACKAGES" ] || fail "read no packages from cloud-init/user-data.yaml"
+MISSING_PACKAGES=""
+for pkg in $CLOUD_INIT_PACKAGES; do
+    status=$(sudo chroot "$ROOTFS" dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)
+    [ "$status" = "installed" ] || MISSING_PACKAGES="$MISSING_PACKAGES $pkg"
+done
+[ -z "$MISSING_PACKAGES" ]     || fail "installed by cloud-init but not in the ISO:$MISSING_PACKAGES"
+ok "Every package cloud-init installs is in the image ($(echo $CLOUD_INIT_PACKAGES | wc -w))"
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 3: Create yantrik user + directory structure

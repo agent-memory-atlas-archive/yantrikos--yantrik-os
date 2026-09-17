@@ -37,6 +37,22 @@ const SETTINGS_SECTIONS: &[(&str, i32)] = &[
     ("harnesses", 8),
 ];
 
+/// Refuse, with a reason a caller can act on, to open or pin an app that will not open.
+fn check_launchable(name: &str, installed: &[crate::apps::DesktopEntry]) -> Result<(), String> {
+    use crate::wire::dock::{availability, launchable_app_ids, Availability};
+    match availability(name, installed) {
+        Availability::Ready => Ok(()),
+        Availability::Missing(what) => Err(format!(
+            "`{name}` is not installed on this machine: {what} was not found. It can open: {}",
+            launchable_app_ids(installed).join(", ")
+        )),
+        Availability::Unknown => Err(format!(
+            "no app `{name}` on this machine; it can open: {}",
+            launchable_app_ids(installed).join(", ")
+        )),
+    }
+}
+
 /// Name to `current-screen` id, and the ids are the ones `app.slint` actually renders.
 ///
 /// They were not. `("terminal", 16)` sent a caller to the ABOUT screen: 16 is about, terminal
@@ -413,14 +429,10 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                     return Err("`name` is empty".into());
                 }
                 // Checked before answering. The dispatch discovers an unknown id too, but only
-                // after this function has already reported the launch as under way.
+                // after this function has already reported the launch as under way — and a known
+                // app whose program is not installed used to be answered "launching" as well.
                 let catalogue = installed.get();
-                if !crate::wire::dock::is_known_app(&name, &catalogue) {
-                    return Err(format!(
-                        "no app `{name}` on this machine; it can launch: {}",
-                        crate::wire::dock::BUILTIN_APP_IDS.join(", ")
-                    ));
-                }
+                check_launchable(&name, &catalogue)?;
                 // The launcher's own path: it resolves the binary, enforces one window per app,
                 // and focuses the running one instead of starting a second.
                 ui.invoke_launch_app(name.clone().into());
@@ -456,8 +468,13 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 }
                 let installed = pin_catalogue.get();
                 // Checked, because a pin for something that cannot launch is a START tile that
-                // does nothing when clicked — the worst kind of shortcut.
-                if !crate::wire::dock::is_known_app(&name, &installed) {
+                // does nothing when clicked — the worst kind of shortcut. Unpinning is always
+                // allowed: it is how a person clears a pin for something they removed.
+                if want {
+                    check_launchable(&name, &installed)?;
+                } else if !crate::wire::dock::is_known_app(&name, &installed)
+                    && !crate::wire::pins::is_pinned(&name)
+                {
                     return Err(format!("no app `{name}` on this machine"));
                 }
                 if !crate::wire::pins::is_pinnable(&name) {

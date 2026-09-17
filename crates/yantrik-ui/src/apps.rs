@@ -56,8 +56,19 @@ impl Catalogue {
     /// The scan itself walks a handful of directories and parses small ini files; it is fast
     /// enough to run when the launcher opens, which is exactly when a person who has just
     /// installed something goes looking for it.
+    ///
+    /// Only what can actually open is kept. Every surface that lists apps reads this — the
+    /// launcher, the Lens, `open_app` — so an entry whose program is gone, or a built-in tile
+    /// nothing routes to, is left out here once rather than at each of them.
     pub fn refresh(&self) -> usize {
-        let scanned = Arc::new(scan());
+        let (kept, dropped): (Vec<DesktopEntry>, Vec<DesktopEntry>) =
+            scan().into_iter().partition(crate::wire::dock::entry_is_launchable);
+        if !dropped.is_empty() {
+            let names: Vec<String> =
+                dropped.iter().map(|e| format!("{} ({})", e.name, e.exec)).collect();
+            tracing::debug!(apps = ?names, "Left out of the launcher: nothing to run");
+        }
+        let scanned = Arc::new(kept);
         let count = scanned.len();
         match self.inner.write() {
             Ok(mut guard) => *guard = scanned,
