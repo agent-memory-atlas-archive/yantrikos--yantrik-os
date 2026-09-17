@@ -57,6 +57,12 @@ OUTPUT="yantrik-os-${YANTRIK_VERSION}.iso"
 # Set RELEASE_TARBALL to reuse a prebuilt artifact instead of repackaging.
 RELEASE_TARBALL="${RELEASE_TARBALL:-}"
 
+# The mind is its own bundle, built from the yantrik-mind repository by its
+# deploy/yantrik-os/package.sh, and installed BESIDE the OS (/opt/yantrik-mind), not
+# inside it. Required: an image without it boots a body with no mind, which is the
+# failure a fresh install exists to catch. YANTRIK_ISO_WITHOUT_MIND=1 builds one on purpose.
+MIND_TARBALL="${MIND_TARBALL:-}"
+
 INCLUDE_LLM=false
 INCLUDE_WHISPER=false
 # Embedder is ALWAYS included — essential for CognitiveRouter (Core Mode)
@@ -352,6 +358,51 @@ if [ -d "$PROJECT_ROOT/skills" ]; then
 fi
 
 ok "Installed $INSTALLED binaries ($(sudo du -sh "$ROOTFS/opt/yantrik/bin" | cut -f1))"
+
+# ── The mind, beside the OS ──
+#
+# Installed and enabled, never configured: the OS holds no model, endpoint or key for
+# it. Its user unit reads the mind's own settings file, and with no model in it the mind
+# asks for one in the desktop chat. Enabled globally (/etc/systemd/user), so it runs for
+# whichever user the installer creates, not only for `yantrik`.
+if [ "${YANTRIK_ISO_WITHOUT_MIND:-0}" = "1" ]; then
+    warn "Building WITHOUT a mind (YANTRIK_ISO_WITHOUT_MIND=1) — the desktop will have only its builtin companion"
+else
+    [ -n "$MIND_TARBALL" ] \
+        || fail "MIND_TARBALL is not set. Build one with yantrik-mind's deploy/yantrik-os/package.sh, or set YANTRIK_ISO_WITHOUT_MIND=1 to build a body without a mind on purpose"
+    [ -f "$MIND_TARBALL" ] || fail "MIND_TARBALL not found: $MIND_TARBALL"
+    MIND_UNPACK="$WORK_DIR/mind-unpack"
+    rm -rf "$MIND_UNPACK"; mkdir -p "$MIND_UNPACK"
+    tar --zstd -xf "$MIND_TARBALL" -C "$MIND_UNPACK" --strip-components=1 \
+        || fail "could not unpack $MIND_TARBALL"
+
+    sudo mkdir -p "$ROOTFS/opt/yantrik-mind/bin" "$ROOTFS/etc/systemd/user"
+    sudo cp -a "$MIND_UNPACK/bin/." "$ROOTFS/opt/yantrik-mind/bin/"
+    sudo chmod 755 "$ROOTFS/opt/yantrik-mind/bin/"*
+    if [ -f "$MIND_UNPACK/BUILD" ]; then
+        sudo cp "$MIND_UNPACK/BUILD" "$ROOTFS/opt/yantrik-mind/BUILD"
+    else
+        warn "mind bundle carries no BUILD manifest — the image will not be able to say which mind it carries"
+    fi
+    sudo cp "$MIND_UNPACK/systemd/user/"*.service "$ROOTFS/etc/systemd/user/"
+    # Owned by root: `cp -a` keeps the build user's uid, which on the installed machine is the
+    # person's own uid — leaving the mind's binaries writable by every process they run.
+    sudo chown -R root:root "$ROOTFS/opt/yantrik-mind"
+    sudo chown root:root "$ROOTFS/etc/systemd/user/yantrik-mind.service" "$ROOTFS/etc/systemd/user/yantrik-memory.service"
+    sudo chmod 644 "$ROOTFS/etc/systemd/user/yantrik-mind.service" "$ROOTFS/etc/systemd/user/yantrik-memory.service"
+    sudo chroot "$ROOTFS" systemctl --global enable yantrik-mind.service \
+        || fail "could not enable yantrik-mind.service for users"
+
+    for required in yantrik-mind yantrik-memory; do
+        [ -x "$ROOTFS/opt/yantrik-mind/bin/$required" ] \
+            || fail "$required missing from the image — the ISO would boot without its mind"
+    done
+    [ -L "$ROOTFS/etc/systemd/user/default.target.wants/yantrik-mind.service" ] \
+        || fail "yantrik-mind.service is not enabled in the image"
+    [ ! -e "$ROOTFS/etc/systemd/user/default.target.wants/yantrik-memory.service" ] \
+        || fail "yantrik-memory.service is enabled — it would fight the mind for the memory file"
+    ok "Yantrik Mind $(sed -n 's/^commit=//p' "$ROOTFS/opt/yantrik-mind/BUILD" 2>/dev/null) installed beside the OS, enabled for every user"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 5: Download AI models (baked into ISO)
