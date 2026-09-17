@@ -13,6 +13,26 @@ use crate::app_context::AppContext;
 use crate::bridge::CompanionBridge;
 use crate::{apps, lens, streaming, App};
 
+/// What the desktop tells a mind about where a turn came from: facts about the machine, as JSON.
+///
+/// A mind keeps its own clock but has no way to know where the computer is. Asked "what is the
+/// weather like right now?" on a fresh install, Yantrik Mind answered for London while this
+/// desktop had already worked out it was in Bentonville. These are facts about the machine,
+/// never configuration for the mind — the same things the status bar shows.
+pub(crate) fn desktop_context(place: &super::settings::Place) -> String {
+    let mut machine = serde_json::Map::new();
+    if !place.city.trim().is_empty() {
+        machine.insert(
+            "place".into(),
+            serde_json::json!({ "city": place.city, "region": place.region, "country": place.country }),
+        );
+    }
+    if !place.timezone.trim().is_empty() {
+        machine.insert("timezone".into(), place.timezone.clone().into());
+    }
+    serde_json::json!({ "machine": machine }).to_string()
+}
+
 /// Send what the person typed to whichever mind is actually driving.
 ///
 /// This is the join between the body and the mind, and until now it did not exist. `chat.rs`
@@ -44,7 +64,9 @@ fn dispatch(
 
     // An attached harness answers in Chunks. Adapt them to the token protocol the pump already
     // speaks, on a thread, because `Answer` is a blocking std channel and this is the UI thread.
-    let answer = host.send(yantrik_harness::Turn::new(text.to_string()));
+    let answer = host.send(
+        yantrik_harness::Turn::new(text.to_string()).with_context(desktop_context(&super::settings::place())),
+    );
     let (tx, rx) = crossbeam_channel::unbounded::<String>();
     std::thread::spawn(move || {
         // A closed channel is the end of the turn — that is the protocol, and it is why this
@@ -207,4 +229,27 @@ mod tests {
             "`dispatch` decides between the builtin and an attached harness by comparing the active id; without that comparison the builtin is simply whatever happens to run"
         );
     }
+    #[test]
+    fn a_turn_tells_the_mind_where_the_machine_is_and_nothing_more() {
+        let place = crate::wire::settings::Place {
+            city: "Bentonville".into(),
+            region: "Arkansas".into(),
+            country: "US".into(),
+            lat: 36.37,
+            lon: -94.2,
+            timezone: "America/Chicago".into(),
+            source: "detected".into(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&super::desktop_context(&place)).unwrap();
+        assert_eq!(v["machine"]["place"]["city"], "Bentonville");
+        assert_eq!(v["machine"]["timezone"], "America/Chicago");
+        // Coordinates and how the place was found stay on the machine.
+        assert!(v["machine"].get("lat").is_none() && v["machine"]["place"].get("lat").is_none());
+        assert!(v["machine"].get("source").is_none());
+
+        let unknown: serde_json::Value =
+            serde_json::from_str(&super::desktop_context(&Default::default())).unwrap();
+        assert_eq!(unknown, serde_json::json!({ "machine": {} }));
+    }
+
 }

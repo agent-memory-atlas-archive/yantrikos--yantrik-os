@@ -103,6 +103,10 @@ pub struct Attach {
 pub struct Assignment {
     pub turn_id: u64,
     pub text: String,
+    /// What the desktop knows about where the turn came from, as a JSON object in a string:
+    /// `{"machine": {"place": {"city", "region", "country"}, "timezone"}}`, each part present only
+    /// when known. Facts about the machine, never configuration for the harness. Optional, and
+    /// safe to ignore.
     #[serde(default)]
     pub context: Option<String>,
 }
