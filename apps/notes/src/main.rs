@@ -280,6 +280,32 @@ fn link_key(s: &str) -> String {
     s.trim().trim_end_matches(".md").to_lowercase()
 }
 
+/// `content` with its title set to `title`: the first `# ` heading rewritten, or one added at the
+/// top when the note has none. The heading is what names a note (see `title_of`), so this is the
+/// whole of renaming one.
+fn with_title(content: &str, title: &str) -> String {
+    let title = title.trim();
+    let mut replaced = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in content.lines() {
+        if !replaced && line.starts_with("# ") {
+            lines.push(format!("# {title}"));
+            replaced = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !replaced {
+        let body = content.trim_start_matches('\n');
+        return if body.is_empty() { format!("# {title}\n\n") } else { format!("# {title}\n\n{body}") };
+    }
+    let mut out = lines.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 /// The first `# ` heading names a note; the filename is only the fallback.
 fn title_of(content: &str, fname: &str) -> String {
     content
@@ -906,6 +932,7 @@ fn publish_control(app: &NotesApp, current_file: Rc<RefCell<String>>) {
     let new_ui = ui_for.clone();
     let save_ui = ui_for.clone();
     let append_ui = ui_for.clone();
+    let title_ui = ui_for.clone();
     let search_ui = ui_for.clone();
     let folder_ui = ui_for;
     let append_file = current_file;
@@ -925,11 +952,34 @@ fn publish_control(app: &NotesApp, current_file: Rc<RefCell<String>>) {
                 Ok(serde_json::json!({ "opened": filename, "title": ui.get_current_title().to_string() }))
             },
         )
+        // A title, because every note an agent made was "Untitled": new_note took no arguments
+        // and nothing could rename a note, so asked for "a note titled Groceries" a mind could
+        // write the list and never the name — and said so, truthfully, every time.
         .action(
-            Action::new("new_note", "Start a new note and open it for editing"),
-            move |_args| {
+            Action::new("new_note", "Start a new note and open it for editing")
+                .arg(Param::text("title").optional().describe("What to call the note; untitled if left out")),
+            move |args| {
                 let ui = new_ui()?;
                 ui.invoke_new_note();
+                if let Some(title) = args["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+                    retitle(&ui, title);
+                }
+                Ok(serde_json::json!({ "title": ui.get_current_title().to_string() }))
+            },
+        )
+        .action(
+            Action::new("set_title", "Rename the open note and save it")
+                .arg(Param::text("title").describe("The note's new title")),
+            move |args| {
+                let ui = title_ui()?;
+                if ui.get_current_title().is_empty() {
+                    return Err("no note is open; call new_note or open_note first".into());
+                }
+                let title = args["title"].as_str().map(str::trim).unwrap_or_default();
+                if title.is_empty() {
+                    return Err("`title` is empty".into());
+                }
+                retitle(&ui, title);
                 Ok(serde_json::json!({ "title": ui.get_current_title().to_string() }))
             },
         )
@@ -1595,6 +1645,17 @@ fn wire(app: &NotesApp) -> slint::Timer {
     watch
 }
 
+/// Rename the open note: its heading, the title the editor shows, then save and show the list with
+/// the new name in it.
+fn retitle(ui: &NotesApp, title: &str) {
+    let content = with_title(&ui.get_current_content().to_string(), title);
+    ui.set_current_content(content.into());
+    ui.set_current_title(title.into());
+    ui.set_is_modified(true);
+    ui.invoke_save_note();
+    refresh_list(ui, 0);
+}
+
 fn refresh_list(ui: &NotesApp, folder: i32) {
     let folder_str = folder_name(folder);
     let notes = list_via_service(folder_str).unwrap_or_else(|_| scan_notes_fs());
@@ -1628,6 +1689,21 @@ mod tests {
     fn links_resolve_regardless_of_case_or_extension() {
         assert_eq!(link_key("Build times"), link_key("build TIMES"));
         assert_eq!(link_key("build-times.md"), link_key("build-times"));
+    }
+
+    #[test]
+    fn a_title_rewrites_the_heading_and_keeps_the_body() {
+        assert_eq!(with_title("# Untitled\n\n", "Groceries"), "# Groceries\n\n");
+        assert_eq!(
+            with_title("# Untitled\n\n- milk\n- eggs\n", "Groceries"),
+            "# Groceries\n\n- milk\n- eggs\n"
+        );
+        // Only the first heading names the note; later ones are sections.
+        assert_eq!(with_title("# Old\n\n# Section\n", "New"), "# New\n\n# Section\n");
+        // A note with no heading gains one, and the result is what title_of reads back.
+        let added = with_title("just a line\n", "Groceries");
+        assert_eq!(added, "# Groceries\n\njust a line\n");
+        assert_eq!(title_of(&added, "x.md"), "Groceries");
     }
 
     #[test]
