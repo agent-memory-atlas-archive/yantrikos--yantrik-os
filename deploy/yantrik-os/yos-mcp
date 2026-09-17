@@ -34,8 +34,14 @@ TOOLS = [
     {
         "name": "os_apps",
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        # The first live drive: asked to open Notes, a model read this list, did not find
+        # Notes in it (it was not running) and invented an app called "os" to launch it from.
+        # So the description names the desktop itself and says where opening an app lives.
         "description": "What is running on this desktop right now — the apps and services "
-                       "that can be described and acted on.",
+                       "that can be described and acted on. The desktop itself is `shell` "
+                       "(listed as app-shell): describe it to open an app (open_app), switch "
+                       "windows, work with files or send a message. An app that is not running "
+                       "is not listed here; open it through `shell`.",
         "inputSchema": {"type": "object", "properties": {}},
         "argv": lambda a: ["ls"],
         "timeout": 15,
@@ -44,7 +50,9 @@ TOOLS = [
         "name": "os_describe",
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "description": "The current state of one app or service: what it is showing and "
-                       "which actions it offers. Takes a short name, e.g. 'notes', 'shell'.",
+                       "which actions it offers, with each action's exact name, arguments and "
+                       "permission grade. Describe an app before acting on it. Takes a short "
+                       "name, e.g. 'shell' (the desktop) or 'notes'.",
         "inputSchema": {
             "type": "object",
             "properties": {"app": {"type": "string", "description": "short app name"}},
@@ -58,10 +66,12 @@ TOOLS = [
         # Destructive actions are refused inside this tool by the permission guard, so what
         # it can actually reach is the routine surface. The grade still decides per call.
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
-        "description": "Perform an action on an app. The action name and its arguments come "
-                       "from os_describe. Returns whether the action settled and what the "
-                       "app looks like afterwards, so the effect can be checked rather than "
-                       "assumed.",
+        "description": "Perform an action an app lists in os_describe, using exactly the app "
+                       "name, action name and argument names it lists — never guessed ones; an "
+                       "action the app does not list is refused. To open an app: app 'shell', "
+                       "action 'open_app', args {\"name\": \"notes\"}. Returns whether the "
+                       "action settled and what the app looks like afterwards, so the effect can "
+                       "be checked rather than assumed.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -383,26 +393,31 @@ def guard_act(args):
 
 
 def run_tool(tool, args):
-    """Invoke yos and return its output as text, whatever the outcome.
+    """Invoke yos and return (text, is_error), whatever the outcome.
 
     A tool that raises loses the detail the mind needs to recover, so a failure comes
     back as content that says what failed. The distinction that matters downstream is
     "the machine answered and the answer was no" versus "nothing answered at all", and
     both are reported in words rather than as an empty string.
+
+    And flagged, not only worded. Every refusal and failure used to go back as ordinary
+    content, which a client cannot tell from success: on the first live drive a refused
+    action was reported to the person as "Done — refused: …". MCP marks a tool that ran
+    and failed with isError; that is what the flag is for.
     """
     if tool["name"] == "os_act":
         refusal = guard_act(args)
         if refusal is not None:
-            return "refused: " + refusal
+            return "refused: " + refusal, True
 
     refusal = taint_refusal(tool["name"], args)
     if refusal is not None:
-        return "refused: " + refusal
+        return "refused: " + refusal, True
 
     try:
         argv = [YOS] + tool["argv"](args)
     except ValueError as e:
-        return "refused: %s" % e
+        return "refused: %s" % e, True
     timeout = tool["timeout"]
     if callable(timeout):
         timeout = timeout(args)
@@ -416,10 +431,10 @@ def run_tool(tool, args):
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
-        return "timed out after %ss — the desktop did not answer. It may be busy rather " \
-               "than broken; nothing was rolled back." % timeout
+        return ("timed out after %ss — the desktop did not answer. It may be busy rather "
+                "than broken; nothing was rolled back." % timeout), True
     except FileNotFoundError:
-        return "%s is not installed on this machine, so the desktop cannot be reached." % YOS
+        return "%s is not installed on this machine, so the desktop cannot be reached." % YOS, True
 
     out = (p.stdout or "").strip()
     err = (p.stderr or "").strip()
@@ -428,14 +443,14 @@ def run_tool(tool, args):
             p.returncode,
             ("\n" + out) if out else "",
             ("\n" + err) if err else "",
-        )
+        ), True
     if tool["name"] in PRIVATE_READS and p.returncode == 0:
         # Recorded after the call, not before: a read that failed saw nothing.
         _SAW_PRIVATE.append(tool["name"])
 
     if not out:
-        return "(the command succeeded and printed nothing)" + (("\n" + err) if err else "")
-    return out + (("\n" + err) if err else "")
+        return "(the command succeeded and printed nothing)" + (("\n" + err) if err else ""), False
+    return out + (("\n" + err) if err else ""), False
 
 
 def reply(msg_id, result=None, error=None):
@@ -485,10 +500,10 @@ def main():
                                      "message": "no such tool: %s" % params.get("name")})
                 continue
             try:
-                text = run_tool(tool, params.get("arguments") or {})
+                text, is_error = run_tool(tool, params.get("arguments") or {})
             except Exception as e:  # a malformed argument must not take the server down
-                text = "could not run %s: %s" % (tool["name"], e)
-            reply(msg_id, {"content": [{"type": "text", "text": text}]})
+                text, is_error = "could not run %s: %s" % (tool["name"], e), True
+            reply(msg_id, {"content": [{"type": "text", "text": text}], "isError": is_error})
         elif msg_id is not None:
             reply(msg_id, error={"code": -32601, "message": "unknown method: %s" % method})
         # Notifications (no id) get no reply, per JSON-RPC.
