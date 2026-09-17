@@ -30,6 +30,24 @@ pub fn start_ai_stream(
     text: &str,
     timer_slot: &Rc<RefCell<Option<Timer>>>,
 ) {
+    stream_into(ui_weak, bridge.send_message(text.to_string()), text, timer_slot);
+}
+
+/// The same thing, from whatever is answering.
+///
+/// Split out because the body had the builtin companion welded into it: it called
+/// `bridge.send_message` itself, so every message anyone typed went to the builtin no matter
+/// which mind the picker said was driving. The harness host, the socket, the picker and the
+/// status-bar chip were all built and all correct, and the conversation walked straight past
+/// them. Selecting a mind changed a label.
+///
+/// Everything below this line is about putting words on a screen and is the same either way.
+pub fn stream_into(
+    ui_weak: slint::Weak<App>,
+    token_rx: crossbeam_channel::Receiver<String>,
+    text: &str,
+    timer_slot: &Rc<RefCell<Option<Timer>>>,
+) {
     // 1. Add user message + empty assistant bubble
     if let Some(ui) = ui_weak.upgrade() {
         let messages = ui.get_messages();
@@ -53,10 +71,19 @@ pub fn start_ai_stream(
         ui.set_is_thinking(true);
         ui.set_companion_status("thinking".into());
         ui.set_lens_chat_mode(true);
+        // Shown, not merely recorded.
+        //
+        // `lens_chat_mode` only says what the panel renders; `lens_open` is what decides whether
+        // the panel is on screen at all. For someone typing into the Lens that is already true,
+        // so this was never missed — but a question asked any other way (the shell's control
+        // surface, an agent, a proactive prompt that wants an answer read) pushed a question and
+        // an answer into a conversation nobody could see. Caught by asking the desktop something
+        // over `yos` and photographing a screen that said "Nothing is happening yet" while the
+        // mind's own log showed it answering.
+        ui.set_lens_open(true);
     }
 
-    // 2. Start streaming from companion
-    let token_rx = bridge.send_message(text.to_string());
+    // 2. Stream whatever is answering
     let timer_handle = timer_slot.clone();
     let ui_weak_stream = ui_weak.clone();
     let replace_next = Rc::new(RefCell::new(false));

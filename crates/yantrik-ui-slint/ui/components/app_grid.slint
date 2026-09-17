@@ -1,6 +1,8 @@
 // App Grid — the launcher. Everything installed lives here, behind the taskbar's Apps button.
 //
-// Search on top, categories down the left, a grid of everything on the right. The categories
+// Search on top, categories down the left, a grid of everything on the right. Every tile carries
+// a pin: this is the one place every app is listed, so it is the one place a pin can always be
+// made or undone, and what is pinned is what START shows. The categories
 // come straight from the freedesktop `Categories=` field the scanner already reads, so a new
 // .desktop file files itself. Icons are real where the icon theme has one and a stroke glyph
 // for the app's category where it does not — a labelled shape, never a letter in a box.
@@ -21,6 +23,8 @@ export struct AppGridItem {
     icon: image,         // resolved from the icon theme, when it could be
     has-icon: bool,
     category: string,    // development | office | network | audiovideo | graphics | game | system | settings | utility
+    pinned: bool,        // shown on the desktop's START row
+    pinnable: bool,      // false for the launcher itself, which already has a button
 }
 
 export struct CategoryItem {
@@ -39,6 +43,7 @@ export component AppGrid inherits Rectangle {
     callback close();
     callback search-changed(string);
     callback category-selected(string);
+    callback toggle-pin(string);
 
     width: 100%;
     height: 100%;
@@ -279,6 +284,56 @@ export component AppGrid inherits Rectangle {
                                         font-size: Theme.fs-caption;
                                         horizontal-alignment: center;
                                         overflow: elide;
+                                    }
+                                }
+
+                                // ── Pin ──
+                                //
+                                // A badge on the icon's corner, the way Windows marks a pinned tile and
+                                // macOS badges a Dock icon. Shown on hover so forty tiles are not forty
+                                // buttons, and always shown once pinned, so the grid answers "which of
+                                // these are on my desktop" at a glance.
+                                //
+                                // On the ICON, not the cell. It first sat at the cell's top-right, which
+                                // is 40px from the icon and 6px from the next tile — so Calendar's pin
+                                // read as belonging to Chromium, and Chromium's to Containers. A badge
+                                // that could be anybody's is not a badge.
+                                //
+                                // Placed from the cell's centre because the icon box is centred: the box
+                                // is 44px wide, so its right edge is centre + 22px, and a 22px badge
+                                // starting at centre + 12px straddles that corner. Vertically the tile's
+                                // content is centred in 96px, which puts the box's top edge at ~14px.
+                                //
+                                // Declared after the tile's content, so it sits on top and takes the
+                                // click: pinning must not also launch the app and close the grid.
+                                pin-hit := TouchArea {
+                                    x: parent.width / 2 + 12px;
+                                    y: 3px;
+                                    width: 22px;
+                                    height: 22px;
+                                    visible: app.pinnable && (cell.has-hover || app.pinned);
+                                    mouse-cursor: pointer;
+                                    clicked => { root.toggle-pin(app.app-id); }
+
+                                    Rectangle {
+                                        width: 100%; height: 100%;
+                                        border-radius: self.width / 2;
+                                        // Opaque, with an edge, so it reads as sitting ON the icon box
+                                        // rather than as a smudge beside it.
+                                        background: pin-hit.has-hover ? Theme.bg-elevated : Theme.bg-card;
+                                        border-width: 1px;
+                                        border-color: app.pinned ? Theme.accent.transparentize(40%)
+                                                    : Theme.border-strong;
+                                        Icon {
+                                            commands: Icons.pushpin;
+                                            size: 12px;
+                                            thickness: 1.7px;
+                                            tint: app.pinned ? Theme.accent
+                                                : pin-hit.has-hover ? Theme.text-primary
+                                                : Theme.text-dim;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
                                     }
                                 }
                             }

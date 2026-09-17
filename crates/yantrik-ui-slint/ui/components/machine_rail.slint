@@ -108,6 +108,9 @@ export component MachineRail inherits Rectangle {
     // Which mind is answering, and what it is running on. "Model" alone could not say that a
     // different harness had taken over the conversation.
     in property <string> mind-name: "";
+    // What the mind says it is running on. Only an attached harness has one — the built-in
+    // companion's model is `provider-label`, which is the shell's own configuration.
+    in property <string> mind-detail: "";
 
     // 302, not 318: the rail is inset from the screen edge now, and the 16px it gives up is
     // the gap the wallpaper shows through. The desktop still reserves 318 for the column, so
@@ -200,9 +203,17 @@ export component MachineRail inherits Rectangle {
             // that a harness can attach and take the conversation, is the more important half.
             KeyValue { key: "Mind";
                        value: root.mind-name != "" ? root.mind-name : "none attached"; }
+            // Whichever mind is ANSWERING, not whichever model this shell was configured with.
+            // They are the same thing only while the built-in is driving; with a harness attached
+            // this row read "qwen3.5:9b" — the shell's setting — while every word was being
+            // answered somewhere else entirely, on a different model. A status line that reports
+            // the configuration of something that is not doing the work is worse than no line.
             KeyValue { key: "Model";
-                       value: root.provider-label != "" ? root.provider-label : "not configured";
-                       value-color: root.provider-label != "" ? Theme.text-primary : Theme.text-dim; }
+                       value: root.mind-detail != "" ? root.mind-detail
+                            : root.provider-label != "" ? root.provider-label
+                            : "not configured";
+                       value-color: (root.mind-detail != "" || root.provider-label != "")
+                            ? Theme.text-primary : Theme.text-dim; }
             KeyValue { key: "Bond";  value: root.bond-level + " · " + Math.round(root.bond-score * 100) + "%"; }
             KeyValue { key: "Memories"; value: "" + root.memory-count; }
             KeyValue { key: "Suggestions"; value: "" + root.whisper-count;

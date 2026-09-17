@@ -98,6 +98,28 @@ fn list_of(names: &[&str]) -> String {
     }
 }
 
+/// How much of the conversation `describe` reports, newest last.
+///
+/// The desktop could be asked a question by an agent and then had no way to tell it what came
+/// back: the answer existed only as pixels, so confirming a reply meant screenshotting the shell
+/// and reading the bubble with a vision model — the exact thing this surface exists to replace.
+/// Six turns is enough to see a question and its answer with context around them, and short
+/// enough that `describe` stays a glance.
+const CONVERSATION_TAIL: usize = 6;
+
+/// How much of one message travels. A long answer is read in the window; this is for confirming
+/// what was said, not for moving a transcript through a control surface.
+const MESSAGE_CLIP: usize = 600;
+
+/// Cut to a length without splitting a character, and say that it was cut.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}… ({} characters total)", text.chars().count())
+}
+
 /// How many directory entries `describe` will list.
 ///
 /// A glance, not a transcript: a model reading 4,000 filenames has spent its context on
@@ -262,14 +284,39 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 })
                 .collect();
 
+            // What was said. Roles and text, newest last, so a caller that asked a question can
+            // read the answer instead of photographing it.
+            let conversation: Vec<serde_json::Value> = {
+                use slint::Model;
+                let messages = ui.get_messages();
+                let total = messages.row_count();
+                (total.saturating_sub(CONVERSATION_TAIL)..total)
+                    .filter_map(|i| messages.row_data(i))
+                    .map(|m| {
+                        serde_json::json!({
+                            "role": m.role.to_string(),
+                            "text": clip(m.content.as_str(), MESSAGE_CLIP),
+                            // Still arriving. A caller polling for an answer needs to know the
+                            // difference between "this is the reply" and "this is the reply so
+                            // far", and an empty streaming bubble is the normal first state.
+                            "streaming": m.is_streaming,
+                        })
+                    })
+                    .collect()
+            };
+
             View::new(summary)
                 .with("screen", screen_name(screen))
+                .with("conversation", serde_json::Value::Array(conversation))
                 .with("screen_id", screen)
                 .with("windows", serde_json::Value::Array(open))
                 .with("failed_launches", serde_json::Value::Array(failed))
                 // Which mind is answering, and what else could. An agent that can switch this
                 // has to be able to see it first, and without the list it would be guessing at
                 // ids for `use_harness`.
+                // What is on START, in order. The person's choice, so an agent can read it
+                // before proposing to change it.
+                .with("pinned", crate::wire::settings::pinned_apps())
                 .with(
                     "minds",
                     crate::wire::harness::host()
@@ -283,6 +330,12 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                                             "name": e.name,
                                             "answering": e.active,
                                             "builtin": e.builtin,
+                                            // What the mind said about itself when it attached:
+                                            // its backend, its memory, wherever it is running.
+                                            // The OS knows none of that on its own and does not
+                                            // want to — this is the harness's own account.
+                                            "detail": e.detail,
+                                            "tools": e.capabilities.tools,
                                         })
                                     })
                                     .collect(),
@@ -333,6 +386,9 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
     let screen_ui = ui_for.clone();
     let focus_ui = ui_for.clone();
     let dnd_ui = ui_for.clone();
+    let ask_ui = ui_for.clone();
+    let pin_ui = ui_for.clone();
+    let pin_catalogue = ctx.installed_apps.clone();
     let lock_ui = ui_for;
 
     let surface = ControlSurface::new("shell")
@@ -385,6 +441,77 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
             },
         )
         .action(
+            // Parity with the pin on every tile in All apps. Deciding what sits on START is a
+            // person's call, and an agent tidying a desktop on someone's behalf needs the same
+            // verb rather than a way to fake the click.
+            Action::new("pin_app", "Pin an app to START, or unpin it")
+                .arg(Param::text("name").describe("App id, e.g. notes, files, browser, chromium"))
+                .arg(Param::flag("pinned").describe("true to pin, false to unpin")),
+            move |args| {
+                let ui = pin_ui()?;
+                let name = args["name"].as_str().unwrap_or_default().trim().to_string();
+                let want = args["pinned"].as_bool().ok_or("`pinned` must be true or false")?;
+                if name.is_empty() {
+                    return Err("`name` is empty".into());
+                }
+                let installed = pin_catalogue.get();
+                // Checked, because a pin for something that cannot launch is a START tile that
+                // does nothing when clicked — the worst kind of shortcut.
+                if !crate::wire::dock::is_known_app(&name, &installed) {
+                    return Err(format!("no app `{name}` on this machine"));
+                }
+                if !crate::wire::pins::is_pinnable(&name) {
+                    return Err(format!(
+                        "`{name}` is the launcher, and its button is already on the taskbar"
+                    ));
+                }
+                if crate::wire::pins::is_pinned(&name) != want {
+                    crate::wire::pins::toggle(&name);
+                }
+                crate::wire::pins::publish(&ui, &installed);
+                Ok(serde_json::json!({
+                    "app": crate::wire::pins::pin_id(&name),
+                    "pinned": want,
+                    "start": crate::wire::settings::pinned_apps(),
+                }))
+            },
+        )
+        .action(
+            // Talking to the desktop, without a keyboard.
+            //
+            // Every other verb here moves the shell around; this one uses it. It existed only as
+            // a text field, so the one thing the desktop is FOR — asking it something — was the
+            // one thing this surface could not do, and proving the mind was reachable meant
+            // clicking at pixel coordinates and typing into whatever had focus. That test can
+            // fail in silence in four different ways before a single byte reaches a harness.
+            //
+            // Deferred, because the answer streams: this returns when the question has been
+            // asked, not when it has been answered. The answer arrives in `describe` under
+            // `conversation`, where a caller can watch `streaming` go false.
+            Action::new("send_message", "Ask the desktop something, as if typed into the Lens")
+                .arg(Param::text("text").describe("What to say"))
+                .defers(),
+            move |args| {
+                let ui = ask_ui()?;
+                let text = args["text"].as_str().unwrap_or_default().trim().to_string();
+                if text.is_empty() {
+                    return Err("`text` is empty".into());
+                }
+                // The shell's own callback, not a private path beside it: whatever a person
+                // typing gets — the mind picker, the bubbles, the streaming state — this gets
+                // too, because it is the same call.
+                ui.invoke_send_message(text.clone().into());
+                Ok(serde_json::json!({
+                    "asked": text,
+                    // Named here because it is the whole question this action tends to be
+                    // asked in service of: which mind is about to answer.
+                    "mind": crate::wire::harness::host()
+                        .map(|h| h.active_id())
+                        .unwrap_or_else(|| crate::wire::harness::BUILTIN_ID.to_string()),
+                }))
+            },
+        )
+        .action(
             // Parity, deliberately: anything a person can do on the Harnesses screen, an agent
             // can do here. A control surface that could not change which mind is answering would
             // be the one decision on this desktop reserved for the mouse.
@@ -398,6 +525,10 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 let host = crate::wire::harness::host()
                     .ok_or_else(|| "the harness host is not running".to_string())?;
                 host.set_active(&id)?;
+                // The same memory the Settings screen writes. A choice made here is a choice
+                // about the machine, and an agent that switches minds should not have its
+                // decision quietly undone by the next restart any more than a person should.
+                crate::wire::settings::set_preferred_mind(&id);
                 Ok(serde_json::json!({
                     "answering": id,
                     "tools": host.list().iter().find(|e| e.id == id).map(|e| e.capabilities.tools),

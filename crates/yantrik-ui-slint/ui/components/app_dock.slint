@@ -9,6 +9,12 @@ export struct DockItem {
     app-id: string,
     label: string,
     icon-char: string,
+    // What to draw for it. The shell's apps are keyed one way for launching (`download-manager`)
+    // and another for their glyph (`downloads`); an app the shell has no glyph for brings a real
+    // icon from the icon theme instead.
+    icon-id: string,
+    icon: image,
+    has-icon: bool,
     is-running: bool,
 }
 

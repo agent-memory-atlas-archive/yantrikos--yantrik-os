@@ -9,6 +9,7 @@
 // Dismiss: Escape or click outside.
 
 import { Theme } from "theme.slint";
+import { Icon, Icons } from "icon.slint";
 import { MessageData, MessageBubble } from "message_bubble.slint";
 import { ListView } from "std-widgets.slint";
 
@@ -38,6 +39,8 @@ export component IntentLens inherits Rectangle {
 
     // Chat mode (multi-turn conversation within the Lens)
     in property <bool> chat-mode: false;
+    /// The mind answering, shown in the chat header. A conversation should say who it is with.
+    in property <string> mind-name: "";
     in property <[MessageData]> messages: [];
     in property <bool> is-generating: false;
 
@@ -79,23 +82,46 @@ export component IntentLens inherits Rectangle {
         clicked => { root.close-lens(); }
     }
 
-    // The Lens panel — right-docked glassmorphic side panel
+    // The Lens panel — right-docked side panel, between the two bars
+    //
+    // It used to run the full height of the screen, and the shell draws the status bar and the
+    // taskbar OVER the desktop — so the top 32px of this panel lived under the status bar and
+    // the bottom 40px under the taskbar. The bottom 40px is the chat input: you could read an
+    // answer and had no way to reply, with only the corner of the mic button showing past the
+    // dock to hint that something was there. Nothing in the layout said "full height" on
+    // purpose; it simply never subtracted the chrome it was underneath.
     Rectangle {
         x: root.is-open ? root.width - Theme.chat-panel-width : root.width;
-        y: 0;
+        y: Theme.status-bar-height;
         width: Theme.chat-panel-width;
-        height: root.height;
+        height: root.height - Theme.status-bar-height - Theme.taskbar-height;
         border-radius: 0;
         clip: true;
         visible: root.is-open;
 
         animate x { duration: 200ms; easing: ease-out; }
 
-        // Glass background — semi-transparent for side panel
+        // Glass, but barely — this one holds prose.
+        //
+        // At 9-12% the machine rail behind it read straight through the answers: "Model
+        // ollama-local:qwen3.5:9b-8k" and a column of service names sat in the middle of a
+        // paragraph. The theme file already states the rule this broke — the rails are the
+        // transparent surfaces BECAUSE what they hold is labels and numbers, "which stay
+        // legible over a pre-blurred photograph in a way a paragraph would not". This panel
+        // holds paragraphs. It keeps a suggestion of glass at 3% and stops competing with
+        // itself for the reader's eye.
+        // Glass while it is a list of short rows; solid once it is holding paragraphs.
+        //
+        // This is the theme file's own rule applied honestly rather than uniformly: the rails
+        // are transparent BECAUSE what they hold is "labels and numbers, which stay legible over
+        // a pre-blurred photograph in a way a paragraph would not". Search results are labels.
+        // A conversation is paragraphs, and at 9% the machine rail behind this panel put
+        // "Model ollama-local:qwen3.5:9b-8k" and a column of service names inside the answer.
+        // Same panel, two jobs, two treatments.
         background: @linear-gradient(180deg,
-            Theme.bg-deep.transparentize(9%) 0%,
-            Theme.bg-deep.transparentize(12%) 50%,
-            Theme.bg-deep.transparentize(9%) 100%
+            Theme.bg-deep.transparentize(root.chat-mode ? 0% : 9%) 0%,
+            Theme.bg-deep.transparentize(root.chat-mode ? 0% : 12%) 50%,
+            Theme.bg-deep.transparentize(root.chat-mode ? 0% : 9%) 100%
         );
 
         // Left edge glow (panel border)
@@ -122,9 +148,82 @@ export component IntentLens inherits Rectangle {
         lens-content := VerticalLayout {
             padding: 0;
 
-            // ── Input area ──
-            Rectangle {
+            // ── Header (chat mode) ──
+            //
+            // In chat mode the search row below was still drawn, so the panel carried TWO text
+            // fields — one at the top that ran the app-launcher and one at the bottom that
+            // continued the conversation — and they did different things with the same Return
+            // key. Half the time the top one was hidden under the status bar, which is the only
+            // reason it had not been noticed. A conversation gets a header instead: who is
+            // answering, and a way out.
+            if root.chat-mode : Rectangle {
                 height: Theme.lens-input-height;
+                background: Theme.bg-surface;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 8px;
+                    spacing: 10px;
+
+                    Icon {
+                        commands: Icons.companion;
+                        size: 16px;
+                        tint: Theme.accent;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: root.mind-name != "" ? root.mind-name : "Conversation";
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-body;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    close-hit := TouchArea {
+                        width: 28px;
+                        height: 28px;
+                        y: (parent.height - 28px) / 2;
+                        mouse-cursor: pointer;
+                        clicked => { root.close-lens(); }
+
+                        Rectangle {
+                            width: 28px;
+                            height: 28px;
+                            border-radius: 6px;
+                            // Named rather than walked up to: `parent.parent` is not a thing
+                            // in Slint, and the id reads better anyway.
+                            background: close-hit.has-hover ? Theme.hover-fill : transparent;
+                            Icon {
+                                commands: Icons.close;
+                                size: 14px;
+                                tint: close-hit.has-hover ? Theme.text-primary : Theme.text-dim;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%;
+                    height: 1px;
+                    background: Theme.separator;
+                }
+            }
+
+            // ── Input area (search mode) ──
+            //
+            // Collapsed rather than removed: the component ends with
+            // `forward-focus: lens-input`, which is what puts the cursor in this field the
+            // moment the Lens opens. An element inside an `if` cannot be the target of that,
+            // so taking the row out of the tree would cost the Lens its typing focus — the
+            // primary interaction of this desktop — to tidy up a layout.
+            Rectangle {
+                height: root.chat-mode ? 0px : Theme.lens-input-height;
+                visible: !root.chat-mode;
+                clip: true;
                 background: Theme.bg-surface;
 
                 HorizontalLayout {

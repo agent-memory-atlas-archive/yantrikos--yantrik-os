@@ -146,6 +146,7 @@ export component DesktopScreen inherits Rectangle {
     in-out property <bool> app-grid-open: false;
     in property <[AppGridItem]> grid-apps: [];
     callback grid-launch-app(string);
+    callback grid-toggle-pin(string);
     callback grid-search-apps(string);
 
     // Window switcher
@@ -183,6 +184,7 @@ export component DesktopScreen inherits Rectangle {
 
     in property <string> active-harness-id: "";
     in property <string> active-harness-name: "";
+    in property <string> active-harness-detail: "";
     callback active-mind-clicked();
 
     // Callbacks
@@ -746,124 +748,185 @@ export component DesktopScreen inherits Rectangle {
                     }
                 }
 
-                // What is already open, so getting back to a window does not mean going to the
-                // taskbar and reading it.
-                if root.window-list.length > 0 : VerticalLayout {
+                // ── Pinned ──
+                //
+                // Your shortcuts, and only yours.
+                //
+                // This row showed every app the shell had a hardcoded label for — sixteen of them,
+                // including a tile for the Apps launcher whose button sits in the corner of this
+                // same screen — while the launcher showed them all again and the taskbar showed the
+                // first six a third time. It is now the pinned list: what you chose, in the order
+                // you chose it. Everything else is one click away under "All apps", which is also
+                // where pins are made.
+                //
+                // An OPEN section used to sit above this, listing the running windows. The taskbar
+                // lists exactly those, and is on screen everywhere this card is not; two lists of
+                // the same windows on one screen was the other half of the duplication.
+                VerticalLayout {
                     spacing: Theme.sp-2;
-                    Text {
-                        text: "OPEN";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        font-weight: Theme.fw-micro;
-                        letter-spacing: 1px;
-                    }
-                    for w in root.window-list : Rectangle {
-                        height: 40px;
-                        border-radius: Theme.r-md;
-                        background: win-ta.has-hover ? Theme.hover-fill : Theme.glass-card;
-                        border-width: 1px;
-                        border-color: Theme.border-subtle;
-                        win-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.switch-window(w.title); }
+
+                    HorizontalLayout {
+                        height: 22px;
+                        Text {
+                            text: "PINNED";
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-micro;
+                            font-weight: Theme.fw-micro;
+                            letter-spacing: 1px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                         }
-                        HorizontalLayout {
-                            padding-left: Theme.sp-3;
-                            padding-right: Theme.sp-3;
-                            spacing: Theme.sp-3;
-                            Text {
-                                text: w.title;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-body;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                                overflow: elide;
+                        all-apps := TouchArea {
+                            width: all-apps-row.preferred-width;
+                            mouse-cursor: pointer;
+                            clicked => { root.app-grid-open = true; }
+
+                            Rectangle {
+                                width: 100%; height: 100%;
+                                border-radius: Theme.r-sm;
+                                background: all-apps.has-hover ? Theme.hover-fill : transparent;
+
+                                all-apps-row := HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 6px;
+                                    spacing: 3px;
+                                    alignment: center;
+                                    Text {
+                                        text: "All apps";
+                                        color: all-apps.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: Theme.fs-caption;
+                                        vertical-alignment: center;
+                                    }
+                                    Icon {
+                                        commands: Icons.chevron-right;
+                                        size: 12px;
+                                        thickness: 1.7px;
+                                        tint: all-apps.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
                             }
                         }
                     }
-                }
 
-                // Apps, because agent mode hides the desktop icons and the only way left to
-                // start anything was the Apps button in the corner. A desktop you cannot open
-                // anything from is not a more advanced desktop.
-                if root.dock-items.length > 0 : VerticalLayout {
-                    spacing: Theme.sp-2;
-                    Text {
-                        text: "START";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        font-weight: Theme.fw-micro;
-                        letter-spacing: 1px;
-                    }
-                    start-card := Rectangle {
-                        height: 84px;
+                    pin-card := Rectangle {
+                        height: 96px;
                         border-radius: Theme.r-lg;
                         background: Theme.glass-card;
                         border-width: 1px;
                         border-color: Theme.border-subtle;
                         clip: true;
 
-                        // Tiles divide the row rather than each claiming a fixed 64px.
-                        //
-                        // A fixed width and a variable number of pinned apps is a guarantee
-                        // that some count slices the last tile down the middle at the card
-                        // edge, which is how it looked: nine apps in a row 626px wide. The
-                        // floor is what keeps a machine with thirty pins from producing
-                        // twenty-pixel icons; past that the row scrolls, which is the honest
-                        // answer, and it scrolls a whole tile at a time.
-                        // No gap between tiles: each already carries its own padding and its
-                        // own hover fill, so the spacing was 72px of nothing spent on a row
-                        // that had none to spare -- with ten pinned apps it was the difference
-                        // between fitting and slicing the tenth in half.
-                        property <int> tiles: Math.max(root.dock-items.length, 1);
-                        property <length> tile-w:
-                            Math.max(52px, (self.width - Theme.sp-3 * 2) / self.tiles);
+                        // A tile is a tile. The old row divided its width by however many apps it
+                        // held, so icons were a different size on every machine and shifted whenever
+                        // the list changed; a shortcut should stay where you left it.
+                        property <length> tile-w: 88px;
 
-                        Flickable {
+                        // Nothing pinned is a state a person can reach on purpose, so it says what
+                        // to do rather than drawing an empty card.
+                        if root.dock-items.length == 0 : HorizontalLayout {
+                            padding-left: Theme.sp-4;
+                            padding-right: Theme.sp-4;
+                            spacing: Theme.sp-3;
+                            Icon {
+                                commands: Icons.pushpin;
+                                size: 18px;
+                                tint: Theme.text-dim;
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: "Nothing pinned yet. Open All apps and pin what you use.";
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-caption;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        if root.dock-items.length > 0 : Flickable {
                             width: 100%;
                             height: 100%;
-                            viewport-width: start-card.tiles * start-card.tile-w
-                                          + Theme.sp-3 * 2;
+                            viewport-width: Math.max(self.width,
+                                root.dock-items.length * pin-card.tile-w + Theme.sp-3 * 2);
                             viewport-height: self.height;
-                        HorizontalLayout {
-                            padding: Theme.sp-3;
-                            spacing: 0px;
-                            alignment: start;
-                            for item[i] in root.dock-items : Rectangle {
-                                width: start-card.tile-w;
-                                border-radius: Theme.r-md;
-                                background: app-ta.has-hover ? Theme.hover-fill : transparent;
-                                app-ta := TouchArea {
+
+                            HorizontalLayout {
+                                padding: Theme.sp-3;
+                                spacing: 0px;
+                                alignment: start;
+
+                                for item in root.dock-items : tile := TouchArea {
+                                    width: pin-card.tile-w;
                                     mouse-cursor: pointer;
                                     clicked => { root.launch-app(item.app-id); }
-                                }
-                                VerticalLayout {
-                                    padding-top: 8px;
-                                    spacing: 4px;
-                                    alignment: start;
-                                    Icon {
-                                        commands: Icons.app-or-window(item.app-id);
-                                        size: 24px;
-                                        // The dimmest tint in the palette is for metadata, not
-                                        // for the only way to start a program -- and one tint
-                                        // across all of them means the row can only be read by
-                                        // its labels, which is a row of words with decoration.
-                                        tint: app-ta.has-hover
-                                            ? AppColor.for-app(item.app-id).brighter(30%)
-                                            : AppColor.for-app(item.app-id);
-                                        thickness: 1.6px;
-                                        x: (parent.width - self.width) / 2;
+                                    // Right-click unpins, as it does on every desktop that has pins.
+                                    // A convenience rather than the way in: the pin on each tile in
+                                    // All apps is the visible control, and it can undo this.
+                                    pointer-event(ev) => {
+                                        if ev.button == PointerEventButton.right
+                                            && ev.kind == PointerEventKind.up {
+                                            root.grid-toggle-pin(item.app-id);
+                                        }
                                     }
-                                    Text {
-                                        text: item.label;
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-micro;
-                                        horizontal-alignment: center;
-                                        overflow: elide;
+
+                                    Rectangle {
+                                        width: 100%; height: 100%;
+                                        border-radius: Theme.r-md;
+                                        background: tile.has-hover ? Theme.hover-fill : transparent;
+
+                                        VerticalLayout {
+                                            padding-top: 9px;
+                                            spacing: 6px;
+                                            alignment: start;
+
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 28px;
+                                                    height: 28px;
+                                                    if item.has-icon : Image {
+                                                        source: item.icon;
+                                                        width: 26px;
+                                                        height: 26px;
+                                                        x: (parent.width - self.width) / 2;
+                                                        y: (parent.height - self.height) / 2;
+                                                        image-fit: contain;
+                                                    }
+                                                    if !item.has-icon : Icon {
+                                                        commands: Icons.app-or-window(item.icon-id);
+                                                        size: 26px;
+                                                        thickness: 1.6px;
+                                                        tint: tile.has-hover
+                                                            ? AppColor.for-app(item.icon-id).brighter(30%)
+                                                            : AppColor.for-app(item.icon-id);
+                                                        x: (parent.width - self.width) / 2;
+                                                        y: (parent.height - self.height) / 2;
+                                                    }
+                                                }
+                                            }
+                                            Text {
+                                                text: item.label;
+                                                color: tile.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                                font-size: Theme.fs-caption;
+                                                horizontal-alignment: center;
+                                                overflow: elide;
+                                            }
+                                            // Running. The taskbar used to carry this mark under its
+                                            // pins; the pins live here now, so the mark does too.
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 12px;
+                                                    height: 3px;
+                                                    border-radius: 1.5px;
+                                                    background: item.is-running ? Theme.accent : transparent;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
                         }
                     }
                 }
@@ -887,7 +950,9 @@ export component DesktopScreen inherits Rectangle {
                             font-weight: Theme.fw-headline;
                         }
                         Text {
-                            text: "This desktop fills itself in as it learns what you are doing. Ask it something with Ctrl K, open an app below, and it will start keeping track of the work rather than the icons.";
+                            // No direction words. This said "open an app below" and the apps moved above it; copy
+                            // that points at a place on the screen is copy the layout will make wrong.
+                            text: "This desktop fills itself in as it learns what you are doing. Ask it something with Ctrl K or open one of your apps, and it will start keeping track of the work rather than the icons.";
                             color: Theme.text-secondary;
                             font-size: Theme.fs-body;
                             wrap: word-wrap;
@@ -955,6 +1020,7 @@ export component DesktopScreen inherits Rectangle {
         // ── Machine rail (right, hidden in focus mode) ──
         if root.agent-mode && !root.focus-mode : MachineRail {
             mind-name: root.active-harness-name;
+            mind-detail: root.active-harness-detail;
             x: parent.width - self.width - Theme.sp-4;
             y: Theme.sp-4;
             height-ceiling: parent.height - 40px - Theme.sp-4 * 2;
@@ -1017,6 +1083,7 @@ export component DesktopScreen inherits Rectangle {
         active-category: root.grid-active-category;
         category-selected(id) => { root.grid-category-selected(id); }
         launch-app(app-id) => { root.grid-launch-app(app-id); }
+        toggle-pin(app-id) => { root.grid-toggle-pin(app-id); }
         close => { root.app-grid-open = false; }
         search-changed(query) => { root.grid-search-apps(query); }
     }
@@ -1097,6 +1164,9 @@ export component DesktopScreen inherits Rectangle {
         companion-status: root.companion-status;
         companion-online: root.companion-online;
         chat-mode: root.lens-chat-mode;
+        // So the conversation header says who is answering — the same name the status bar
+        // chip and the machine rail carry, rather than a generic "Conversation".
+        mind-name: root.active-harness-name;
         messages: root.messages;
         is-generating: root.is-generating;
         suggestions: root.lens-suggestions;

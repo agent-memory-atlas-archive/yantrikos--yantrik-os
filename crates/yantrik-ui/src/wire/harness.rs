@@ -38,13 +38,18 @@ pub fn host() -> Option<&'static Host> {
 /// It is not reached over the protocol — it lives in this process and always has — so it is
 /// wrapped rather than ported. That is the whole reason [`Harness`] still exists as a trait: for
 /// the one mind that is compiled in. Everything else attaches.
+///
+/// Named once here so the chat path can ask "is the builtin driving?" without a string literal
+/// of its own drifting away from this one.
+pub const BUILTIN_ID: &str = "companion";
+
 struct Companion {
     bridge: Arc<CompanionBridge>,
 }
 
 impl Harness for Companion {
     fn id(&self) -> &str {
-        "companion"
+        BUILTIN_ID
     }
 
     fn name(&self) -> &str {
@@ -97,6 +102,12 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             match host.set_active(&id) {
                 Ok(()) => {
                     tracing::info!(harness = %id, "Now answering");
+                    // Remembered, because choosing a mind is a decision about the machine and
+                    // not about this run of the shell. It was not: the id lived in the host and
+                    // the host lives with the process, so every update, crash or reboot handed
+                    // the conversation back to the built-in without saying so — and the picker
+                    // still showed the right name until you looked.
+                    crate::wire::settings::set_preferred_mind(&id);
                     ui.set_harness_error("".into());
                 }
                 // Shown rather than logged: the person just clicked something and is owed an
@@ -115,11 +126,35 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let host = host.clone();
         timer.start(TimerMode::Repeated, REFRESH, move || {
             let Some(ui) = weak.upgrade() else { return };
+            restore_choice(&host);
             publish(&ui, &host);
         });
     }
     // Keep timer alive
     std::mem::forget(timer);
+}
+
+/// Give the conversation back to the mind the person chose, once it is there to take it.
+///
+/// Not at startup: at startup the only mind on this machine is the built-in one, because a
+/// harness exists by attaching and nothing has attached yet. A remembered choice therefore
+/// cannot be honoured when it is read — only when the thing it names turns up, which may be
+/// seconds after boot or minutes, and which is exactly what this timer is already watching for.
+///
+/// Silent when there is nothing to do, and it does not fight the person: choosing any mind
+/// saves that choice, so switching back to the built-in makes the built-in the preference.
+fn restore_choice(host: &Host) {
+    let want = crate::wire::settings::preferred_mind();
+    if want.is_empty() || host.active_id() == want {
+        return;
+    }
+    if !host.list().iter().any(|e| e.id == want) {
+        return;
+    }
+    match host.set_active(&want) {
+        Ok(()) => tracing::info!(harness = %want, "Answering again with the chosen mind"),
+        Err(e) => tracing::warn!(harness = %want, error = %e, "Could not restore the chosen mind"),
+    }
 }
 
 /// Put the current list of minds in front of the person.
@@ -159,6 +194,19 @@ fn publish(ui: &App, host: &Host) {
         .unwrap_or_else(|| "no mind".to_string());
     ui.set_active_harness_name(name.into());
     ui.set_active_harness_id(active.into());
+
+    // What the answering mind says it is running on — its model, its memory, wherever it lives.
+    // Only an attached one has this; the built-in's model is the shell's own configuration and
+    // the rail keeps showing that when there is nothing better. The two are not interchangeable:
+    // with a harness driving, the rail read "qwen3.5:9b" from a settings file while every answer
+    // came from a different model on a different machine.
+    let driving = entries.iter().find(|e| e.active && !e.builtin);
+    let detail = driving.and_then(|e| e.detail.clone()).unwrap_or_default();
+    ui.set_active_harness_detail(detail.into());
+    // Separate from the detail above, because a harness may attach without saying what it runs
+    // on. "Something else is answering" is true either way, and it is what the status bar needs
+    // in order to stop advertising the shell's own provider as the thing doing the work.
+    ui.set_harness_driving(driving.is_some());
 }
 
 /// Serve the `harness` socket for the life of the shell.

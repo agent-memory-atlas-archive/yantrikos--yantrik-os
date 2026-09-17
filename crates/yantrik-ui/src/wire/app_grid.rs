@@ -69,6 +69,34 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         });
     }
 
+    // Pin or unpin, from the launcher — the one place every app is listed, and so the one place
+    // a pin can always be made or undone.
+    {
+        let catalogue = catalogue.clone();
+        let query = query.clone();
+        let category = category.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_grid_toggle_pin(move |app_id| {
+            super::pins::toggle(&app_id);
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let apps = catalogue.get();
+            // Unpinning the last app while looking at "Pinned" would leave the filter selected
+            // with the category gone from the list beside it. Fall back to All, which is where a
+            // person would have to click next anyway.
+            if category.borrow().as_str() == "pinned"
+                && !apps.iter().any(|e| super::pins::is_pinned(&e.app_id))
+            {
+                *category.borrow_mut() = "all".to_string();
+                ui.set_grid_active_category("all".into());
+            }
+            ui.set_grid_categories(ModelRc::new(VecModel::from(categories_for(&apps))));
+            populate_grid(&ui, &apps, &query.borrow(), &category.borrow());
+            // START updates now, not on the next three-second poll — a pin that takes three
+            // seconds to appear reads as a click that did not work.
+            super::pins::publish(&ui, &apps);
+        });
+    }
+
     // Handle grid-launch-app — routes built-in apps to screens, external apps to processes
     let ui_weak = ui.as_weak();
     ui.on_grid_launch_app(move |app_id| {
@@ -128,6 +156,17 @@ fn categories_for(installed: &Arc<Vec<DesktopEntry>>) -> Vec<CategoryItem> {
         name: "All".into(),
         count: installed.len() as i32,
     }];
+    // Second, because it is the one a person curates. Only when it has something in it: an
+    // empty filter would open onto "Nothing matches — try another word", which is advice for a
+    // search, not for a list you have not started yet.
+    let pinned = installed.iter().filter(|e| super::pins::is_pinned(&e.app_id)).count();
+    if pinned > 0 {
+        out.push(CategoryItem {
+            id: "pinned".into(),
+            name: "Pinned".into(),
+            count: pinned as i32,
+        });
+    }
     for (_, id) in icons::CATEGORY_TABLE {
         let count = installed
             .iter()
@@ -153,7 +192,7 @@ fn categories_for(installed: &Arc<Vec<DesktopEntry>>) -> Vec<CategoryItem> {
 ///
 /// Anything not listed keeps its own id, so a third-party app is unaffected and a new app that
 /// happens to match an icon name works without an entry.
-fn icon_id_for(app_id: &str) -> String {
+pub(crate) fn icon_id_for(app_id: &str) -> String {
     let bare = app_id.strip_prefix("yantrik-").unwrap_or(app_id);
     let mapped = match bare {
         "container-manager" => "containers",
@@ -225,7 +264,11 @@ fn populate_grid(ui: &App, installed: &Arc<Vec<DesktopEntry>>, query: &str, cate
     let query_lower = query.to_lowercase();
     let apps: Vec<AppGridItem> = installed
         .iter()
-        .filter(|entry| category == "all" || icons::category_id(&entry.categories) == category)
+        .filter(|entry| match category {
+            "all" => true,
+            "pinned" => super::pins::is_pinned(&entry.app_id),
+            other => icons::category_id(&entry.categories) == other,
+        })
         .filter(|entry| {
             if query_lower.is_empty() {
                 return true;
@@ -245,6 +288,8 @@ fn populate_grid(ui: &App, installed: &Arc<Vec<DesktopEntry>>, query: &str, cate
                 has_icon: icon.is_some(),
                 icon: icon.unwrap_or_default(),
                 category: SharedString::from(icons::category_id(&entry.categories)),
+                pinned: super::pins::is_pinned(&entry.app_id),
+                pinnable: super::pins::is_pinnable(&entry.app_id),
             }
         })
         .collect();

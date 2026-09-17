@@ -33,6 +33,8 @@ export component StatusBar inherits Rectangle {
     // V61 — AI privacy indicator
     in property <string> ai-privacy-mode: "local";       // "local", "cloud", "hybrid"
     in property <string> ai-provider-label: "";
+    /// True when an attached mind is answering rather than the built-in companion.
+    in property <bool> harness-driving: false;
     in property <string> ai-fallback-banner: "";
     // V63 — AI context lane
     in property <string> ai-context-text: "";
@@ -232,7 +234,17 @@ export component StatusBar inherits Rectangle {
             }
 
             // AI privacy / model badge
-            TouchArea {
+            //
+            // Hidden while an attached mind is answering, because every part of it is a
+            // statement about the BUILT-IN companion: the lock icon is the shell's privacy
+            // mode, the text is the shell's configured provider, and the click opens the
+            // shell's provider switcher. With a harness driving, none of that is doing the
+            // work — the bar showed "qwen3.5:9b" from a settings file, one chip away from
+            // "Yantrik Mind", which was answering on a different model on a different machine.
+            // Two badges side by side disagreeing about the model is worse than one badge.
+            // The mind's own model is on the machine rail, where it says which mind it belongs
+            // to; the chip to the left of this goes to the Harnesses screen.
+            if !root.harness-driving : TouchArea {
                 width: ai-priv-row.preferred-width + Theme.sp-3;
                 height: Theme.status-bar-height;
                 mouse-cursor: pointer;

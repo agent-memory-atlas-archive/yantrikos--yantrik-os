@@ -90,9 +90,14 @@ pub fn wire(ui: &App, ctx: &AppContext, services: ServiceManager) {
         let elapsed = started.elapsed();
 
         // The desktop is the last thing, and the only one that can report on itself: it is ready
-        // when it has the things it draws. dock_items is the honest test — it is populated from
-        // the app catalogue, which is the scan the desktop cannot draw its START row without.
-        let desktop_drawn = ui.get_dock_items().row_count() > 0;
+        // when it has the things it draws.
+        //
+        // This read `dock_items`, on the stated grounds that it came from the app catalogue. It
+        // never did — it was a hardcoded list the system poll rebuilt — and it is now the
+        // person's pinned apps, which can legitimately be EMPTY. Someone who unpinned everything
+        // would have sat on this screen for the full 45-second deadline at every boot. The
+        // launcher's list is the one that really is the catalogue scan.
+        let desktop_drawn = ui.get_grid_apps().row_count() > 0;
         let desktop_ready =
             services_settled && companion_up && memory_ready && desktop_drawn && elapsed >= FLOOR;
         let flags = [services_settled, companion_up, memory_ready, desktop_ready];

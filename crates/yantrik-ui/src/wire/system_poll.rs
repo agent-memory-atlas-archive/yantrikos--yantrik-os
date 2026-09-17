@@ -11,7 +11,7 @@ use slint::{ComponentHandle, Timer, TimerMode};
 use slint::{ModelRc, VecModel};
 
 use crate::app_context::{self, AppContext};
-use crate::{cards, features, lock, system_context, windows, App, DockItem, ProcessData, Tr, WindowItem};
+use crate::{cards, features, lock, system_context, windows, App, ProcessData, WindowItem};
 
 /// Maximum number of data points in the chart history ring buffer.
 const CHART_HISTORY_LEN: usize = 60;
@@ -28,6 +28,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     let card_mgr = ctx.card_manager.clone();
     let notification_store = ctx.notification_store.clone();
     let event_bus = ctx.event_bus.clone();
+    let catalogue = ctx.installed_apps.clone();
 
     // Dedup cache: prevents recording the same system event to memory more than
     // once per 5 minutes. Key = event text, Value = last recorded time.
@@ -334,36 +335,13 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             {
                 let wins = windows::list_windows_throttled();
 
-                // Update dock items with running state (labels from Tr global for i18n)
-                let tr = ui.global::<Tr>();
-                let dock_defs: &[(&str, fn(&Tr) -> slint::SharedString, &str)] = &[
-                    ("terminal",      |t| t.get_dock_terminal(), ">_"),
-                    ("browser",       |t| t.get_dock_browser(),  "W"),
-                    ("files",         |t| t.get_dock_files(),    "F"),
-                    ("email",         |t| t.get_dock_email(),    "@"),
-                    ("notes",         |t| t.get_dock_notes(),    "\u{270E}"),
-                    ("editor",        |t| t.get_dock_editor(),   "\u{2261}"),
-                    ("memory",        |t| t.get_dock_memory(),   "\u{25C8}"),
-                    ("notifications", |t| t.get_dock_alerts(),   "N"),
-                    ("system",        |t| t.get_dock_system(),   "\u{25C9}"),
-                    ("media",         |t| t.get_dock_media(),    "\u{266A}"),
-                    ("calendar",      |t| t.get_dock_calendar(), "\u{25A6}"),
-                    ("launchpad",     |t| t.get_dock_apps(),     "\u{229E}"),
-                    ("spreadsheet",   |t| t.get_dock_ysheets(),  "YS"),
-                    ("documents",     |t| t.get_dock_ydoc(),     "YD"),
-                    ("presentation",  |t| t.get_dock_ypresent(), "YP"),
-                    ("settings",      |t| t.get_dock_settings(), "\u{2699}"),
-                ];
-                let dock: Vec<DockItem> = dock_defs
-                    .iter()
-                    .map(|(id, label_fn, icon)| DockItem {
-                        app_id: (*id).into(),
-                        label: label_fn(&tr),
-                        icon_char: (*icon).into(),
-                        is_running: wins.iter().any(|w| w.app_id == *id),
-                    })
-                    .collect();
-                ui.set_dock_items(ModelRc::new(VecModel::from(dock)));
+                // The pinned apps, with their running marks.
+                //
+                // This was a hardcoded list of sixteen built here every three seconds, and it was
+                // the whole of START — including `launchpad`, a tile for the Apps button sitting
+                // in the corner of the same screen. Which apps appear is now the person's pinned
+                // list; this only refreshes whether each is running.
+                super::pins::publish(&ui, &catalogue.get());
 
                 // Update window list for switcher (with contextual subtitles)
                 let win_items: Vec<WindowItem> = wins

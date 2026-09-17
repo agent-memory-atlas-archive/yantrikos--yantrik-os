@@ -40,6 +40,23 @@ pub struct UserSettings {
     /// otherwise, and a console is unusable to someone who did not build it.
     #[serde(default)]
     pub agent_mode: bool,
+    /// Where this machine is. Empty until something has worked it out or somebody has said.
+    #[serde(default)]
+    pub place: Place,
+    /// The apps pinned to START, in the order they are shown.
+    ///
+    /// The shell's ids for its own apps (`notes`, `files`) and the catalogue's ids for everything
+    /// else (`chromium`). An empty list is a choice and is kept as one — only a settings file
+    /// that has never heard of pins gets the defaults.
+    pub pinned_apps: Vec<String>,
+    /// Which mind the person last chose to answer for them.
+    ///
+    /// Empty means "whatever the shell starts with", which is the built-in companion. Kept here
+    /// rather than in the harness host because the host's list is LIVE — a harness exists only
+    /// while it is attached — and this is the opposite kind of fact: a preference that outlives
+    /// every process involved, including the mind it names.
+    #[serde(default)]
+    pub preferred_mind: String,
 }
 
 impl Default for UserSettings {
@@ -56,8 +73,110 @@ impl Default for UserSettings {
             user_name: String::new(),
             companion_name: String::new(),
             agent_mode: false,
+            place: Place::default(),
+            pinned_apps: super::pins::DEFAULT_PINS.iter().map(|s| s.to_string()).collect(),
+            preferred_mind: String::new(),
         }
     }
+}
+
+/// Where the machine is.
+///
+/// Written here rather than held in memory so a person can read it, correct it, and have the
+/// correction stick — which is the difference between a machine that detected something and a
+/// machine that decided something on your behalf.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Place {
+    pub city: String,
+    pub region: String,
+    pub country: String,
+    pub lat: f64,
+    pub lon: f64,
+    /// IANA name, e.g. `America/Chicago`.
+    pub timezone: String,
+    /// `detected` or `chosen`. A detected place may be re-detected; a chosen one never is.
+    pub source: String,
+}
+
+/// The live settings, so other wiring can persist one preference without keeping a second copy
+/// of the file. Set by [`wire`]; everything below tolerates it being unset.
+static LIVE: std::sync::OnceLock<SharedSettings> = std::sync::OnceLock::new();
+
+/// Where this machine is, as far as it knows.
+pub fn place() -> Place {
+    match LIVE.get().and_then(|s| s.lock().ok()) {
+        Some(settings) => settings.place.clone(),
+        None => load().place,
+    }
+}
+
+/// Record where this machine is.
+pub fn set_place(place: Place) {
+    if let Some(shared) = LIVE.get() {
+        if let Ok(mut settings) = shared.lock() {
+            settings.place = place;
+        }
+        persist(shared);
+        return;
+    }
+    let mut settings = load();
+    settings.place = place;
+    save(&settings);
+}
+
+/// The apps pinned to START, in order.
+pub fn pinned_apps() -> Vec<String> {
+    match LIVE.get().and_then(|s| s.lock().ok()) {
+        Some(settings) => settings.pinned_apps.clone(),
+        None => load().pinned_apps,
+    }
+}
+
+/// Replace the pinned list.
+pub fn set_pinned_apps(pins: Vec<String>) {
+    if let Some(shared) = LIVE.get() {
+        if let Ok(mut settings) = shared.lock() {
+            settings.pinned_apps = pins;
+        }
+        persist(shared);
+        return;
+    }
+    let mut settings = load();
+    settings.pinned_apps = pins;
+    save(&settings);
+}
+
+/// Which mind the person last chose. Empty if they never have.
+pub fn preferred_mind() -> String {
+    match LIVE.get().and_then(|s| s.lock().ok()) {
+        Some(settings) => settings.preferred_mind.clone(),
+        None => load().preferred_mind,
+    }
+}
+
+/// Remember which mind they chose.
+///
+/// Through the shared handle when there is one: a direct load-modify-save would be silently
+/// undone by the next `persist`, which writes the whole struct from memory and would know
+/// nothing about this field having changed on disk.
+pub fn set_preferred_mind(id: &str) {
+    if let Some(shared) = LIVE.get() {
+        if let Ok(mut settings) = shared.lock() {
+            if settings.preferred_mind == id {
+                return;
+            }
+            settings.preferred_mind = id.to_string();
+        }
+        persist(shared);
+        return;
+    }
+    let mut settings = load();
+    if settings.preferred_mind == id {
+        return;
+    }
+    settings.preferred_mind = id.to_string();
+    save(&settings);
 }
 
 /// Shared handle for persisting settings from callbacks.
@@ -141,6 +260,8 @@ pub fn accent_name_to_index(name: &str) -> i32 {
 /// Wire settings callbacks with persistence.
 pub fn wire(ui: &App, ctx: &AppContext) {
     let settings = Arc::new(Mutex::new(load()));
+    // Published before anything reads a preference out of it.
+    let _ = LIVE.set(settings.clone());
 
     // YANTRIK_AGENT_MODE wins over the file so an agent harness or a kiosk image can
     // force either face without rewriting a user's settings.

@@ -37,6 +37,8 @@ pub mod ai_assist;
 pub mod ai_onboarding;
 pub mod ai_provider;
 pub mod boot;
+pub mod location;
+pub mod pins;
 mod morning_brief;
 mod window_switcher;
 pub mod entity_bridge;
@@ -87,4 +89,9 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     installer::wire(ui, ctx);
     login::wire(ui, ctx);
     callbacks::wire(ui, ctx);
+
+    // Last, and on a thread of its own. It must come after `settings::wire`, which is what
+    // publishes the live settings this reads and writes; and it touches the network, so nothing
+    // above it should have to wait for it.
+    location::detect_in_background();
 }

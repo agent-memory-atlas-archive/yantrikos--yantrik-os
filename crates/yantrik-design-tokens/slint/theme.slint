@@ -313,6 +313,14 @@ export global Theme {
 
     // ─── Desktop layout sizes ─────────────────────────────────────
     out property <length> status-bar-height: 32px;
+    /// The bar along the bottom of the screen.
+    ///
+    /// Written as a bare `40px` in fifteen places — the taskbar itself and every maximised
+    /// window's height arithmetic — and NOT written at all in the one place that needed it
+    /// most: the Intent Lens ran the full height of the screen, so the taskbar covered its
+    /// chat input and the status bar covered its header. A chrome dimension that is not a
+    /// token is a dimension the next panel will forget to subtract.
+    out property <length> taskbar-height: 40px;
     out property <length> dock-height: 64px;
     out property <length> dock-icon-size: 32px;
     out property <length> dock-item-size: 48px;   // Hit area per dock icon
