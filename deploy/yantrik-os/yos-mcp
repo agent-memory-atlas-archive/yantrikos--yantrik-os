@@ -49,10 +49,16 @@ TOOLS = [
     {
         "name": "os_describe",
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
-        "description": "The current state of one app or service: what it is showing and "
-                       "which actions it offers, with each action's exact name, arguments and "
-                       "permission grade. Describe an app before acting on it. Takes a short "
-                       "name, e.g. 'shell' (the desktop) or 'notes'.",
+        # Named services, because a mind finds tools by the words in their descriptions: asked
+        # "how much memory and CPU is this machine using?", Yantrik Mind searched its tools
+        # three times, matched nothing here, and said it had no data.
+        "description": "The current state of one app or service on this computer: what it is "
+                       "showing and which actions it offers, with each action's exact name, "
+                       "arguments and permission grade. Describe an app before acting on it. "
+                       "Takes a short name: 'shell' (the desktop — windows, files, opening apps), "
+                       "'system-monitor' (this machine's CPU, memory, disk and processes), "
+                       "'weather' (local weather where this machine is), 'network' (connection "
+                       "and Wi-Fi), 'notifications', 'notes', 'calendar', 'email'.",
         "inputSchema": {
             "type": "object",
             "properties": {"app": {"type": "string", "description": "short app name"}},
