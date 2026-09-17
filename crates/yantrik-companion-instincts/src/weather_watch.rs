@@ -4,6 +4,20 @@
 //! weather is actionable: storms, extreme temperatures, rain expected, etc.
 //! Fetches weather once per check interval (default 2 hours) and analyzes
 //! conditions against alert thresholds.
+//!
+//! # The alert that fired on a clear day
+//!
+//! It did not do any of that. It asked wttr.in for `%C %t humidity:%h wind:%w` and then tested
+//! the WHOLE reply against a keyword list containing "wind" — so the word it had just asked the
+//! server to print back was the word it treated as evidence of a storm. Every check matched.
+//! On a machine reporting `Clear +87°F humidity:45% wind:↑9mph` the desktop said
+//! "Notable weather: Clear +87°F humidity:45% wind:↑9mph", which is not notable and is not
+//! even a sentence — it is the query echoed back with an adjective in front of it.
+//!
+//! A proactive surface that interrupts on nothing teaches people to ignore it, and this was the
+//! ONLY producer feeding the desktop's card region, so it was most of what that surface ever
+//! said. Two changes: the reply is parsed into fields before anything is matched, so a label can
+//! never be mistaken for a condition, and wind has to actually be strong.
 
 use std::sync::Mutex;
 
@@ -11,6 +25,10 @@ use crate::Instinct;
 use yantrik_companion_core::types::{CompanionState, UrgeSpec};
 
 /// Keywords that indicate actionable weather worth alerting about.
+///
+/// Matched against the CONDITION field alone — never the whole reply. "wind" belongs here
+/// because "Windy" is a condition; it stopped being safe only when it was tested against a
+/// string that carried the server's own field labels.
 const ALERT_CONDITIONS: &[&str] = &[
     "rain",
     "storm",
@@ -34,6 +52,50 @@ const ALERT_CONDITIONS: &[&str] = &[
 /// Temperature thresholds (Fahrenheit) that warrant a heads-up.
 const TEMP_HOT_F: f64 = 95.0;
 const TEMP_COLD_F: f64 = 32.0;
+
+/// Wind worth mentioning, in mph. Below this it is just weather.
+///
+/// 25 mph is roughly where loose objects start moving and an umbrella stops working — the point
+/// at which a person would change what they were about to do, which is the only test that makes
+/// something worth interrupting for.
+const WIND_ALERT_MPH: f64 = 25.0;
+
+/// What wttr.in is asked for: condition, temperature, humidity, wind — pipe separated.
+///
+/// Delimited deliberately. The previous format embedded `humidity:` and `wind:` as literal text
+/// in the reply, and the reply was then keyword-matched, so the format string and the alert list
+/// shared a namespace without anyone noticing.
+const WTTR_FORMAT: &str = "%C|%t|%h|%w";
+
+/// The four fields, as they came back.
+struct Reading {
+    condition: String,
+    temp: String,
+    wind: String,
+}
+
+/// Split the reply. `None` if it is not the shape we asked for — silence beats a false alarm.
+fn parse_reading(text: &str) -> Option<Reading> {
+    let parts: Vec<&str> = text.split('|').map(str::trim).collect();
+    if parts.len() < 4 || parts[0].is_empty() {
+        return None;
+    }
+    Some(Reading {
+        condition: parts[0].to_string(),
+        temp: parts[1].to_string(),
+        wind: parts[3].to_string(),
+    })
+}
+
+/// Wind speed in mph, whatever unit it came in.
+fn wind_mph(wind: &str) -> Option<f64> {
+    let lower = wind.to_lowercase();
+    let n = extract_number(&lower)?;
+    if lower.contains("km/h") || lower.contains("kmph") {
+        return Some(n * 0.621_371);
+    }
+    Some(n)
+}
 
 pub struct WeatherWatchInstinct {
     /// Seconds between weather checks. Default: 7200 (2 hours).
@@ -79,26 +141,33 @@ impl Instinct for WeatherWatchInstinct {
             None => return vec![],
         };
 
-        let lower = weather.to_lowercase();
+        let Some(reading) = parse_reading(&weather) else {
+            return vec![];
+        };
 
-        // Check for alert-worthy conditions
-        let is_alertable = ALERT_CONDITIONS.iter().any(|kw| lower.contains(kw));
-        let temp_alert = parse_temp_alert(&lower);
+        // Each field is tested on its own terms.
+        let condition_lower = reading.condition.to_lowercase();
+        let condition_alert = ALERT_CONDITIONS
+            .iter()
+            .any(|kw| condition_lower.contains(kw))
+            .then(|| reading.condition.clone());
+        let temp_alert = parse_temp_alert(&reading.temp.to_lowercase());
+        let wind_alert = wind_mph(&reading.wind)
+            .filter(|mph| *mph >= WIND_ALERT_MPH)
+            .map(|mph| format!("wind at {mph:.0} mph"));
 
-        if !is_alertable && temp_alert.is_none() {
+        // Nothing is happening. That is the normal answer and it is not a failure.
+        let mut parts: Vec<String> = Vec::new();
+        parts.extend(condition_alert);
+        parts.extend(temp_alert);
+        parts.extend(wind_alert);
+        if parts.is_empty() {
             return vec![];
         }
 
-        // Build the alert message
-        let alert = if let Some(temp_msg) = &temp_alert {
-            if is_alertable {
-                format!("{} and {}", weather.trim(), temp_msg)
-            } else {
-                temp_msg.clone()
-            }
-        } else {
-            weather.trim().to_string()
-        };
+        // Read as a sentence, not as a dump of the reply. What was said before was the raw
+        // query result with "Notable weather:" in front of it.
+        let alert = parts.join(", ");
 
         let mut context = serde_json::Map::new();
         context.insert(
@@ -122,7 +191,8 @@ impl Instinct for WeatherWatchInstinct {
 
 /// Fetch brief weather from wttr.in.
 fn fetch_weather() -> Option<String> {
-    let url = "https://wttr.in/?format=%C+%t+humidity:%h+wind:%w";
+    let url = format!("https://wttr.in/?format={WTTR_FORMAT}");
+    let url = url.as_str();
     let output = std::process::Command::new("curl")
         .args(["-fsSL", "--max-time", "5", "--connect-timeout", "3", url])
         .env("LANG", "en_US.UTF-8")
