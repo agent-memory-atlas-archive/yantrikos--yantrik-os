@@ -1,0 +1,522 @@
+{
+  "generated_at": "2026-09-18T00:34:04.031375+00:00",
+  "yos": "/opt/yantrik/bin/yos",
+  "check1_describe": {
+    "surfaces_checked": 13,
+    "surfaces_ok": 10,
+    "surfaces_failed": 3,
+    "actions_inspected": 57,
+    "actions_without_grade": [],
+    "records": [
+      {
+        "surface": "a11y",
+        "ok": false,
+        "failed": true,
+        "seconds": 0.066,
+        "error": "yos: a11y.app.describe refused: unknown method `app.describe`; this service serves a11y.windows, a11y.describe, a11y.act, a11y.status",
+        "action_count": 0,
+        "actions": [],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "app-calendar",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.062,
+        "error": null,
+        "action_count": 5,
+        "actions": [
+          {
+            "name": "select_day",
+            "grade_declared": true
+          },
+          {
+            "name": "show_month",
+            "grade_declared": true
+          },
+          {
+            "name": "go_to_today",
+            "grade_declared": true
+          },
+          {
+            "name": "add_event",
+            "grade_declared": true
+          },
+          {
+            "name": "set_view",
+            "grade_declared": true
+          }
+        ],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "app-download-manager",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.082,
+        "error": null,
+        "action_count": 10,
+        "actions": [
+          {
+            "name": "add",
+            "grade_declared": true
+          },
+          {
+            "name": "pause",
+            "grade_declared": true
+          },
+          {
+            "name": "resume",
+            "grade_declared": true
+          },
+          {
+            "name": "cancel",
+            "grade_declared": true
+          },
+          {
+            "name": "retry",
+            "grade_declared": true
+          },
+          {
+            "name": "verify",
+            "grade_declared": true
+          },
+          {
+            "name": "pause_all",
+            "grade_declared": true
+          },
+          {
+            "name": "resume_all",
+            "grade_declared": true
+          },
+          {
+            "name": "clear_completed",
+            "grade_declared": true
+          },
+          {
+            "name": "open_folder",
+            "grade_declared": true
+          }
+        ],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "app-email",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.075,
+        "error": null,
+        "action_count": 6,
+        "actions": [
+          {
+            "name": "open_message",
+            "grade_declared": true
+          },
+          {
+            "name": "select_folder",
+            "grade_declared": true
+          },
+          {
+            "name": "search",
+            "grade_declared": true
+          },
+          {
+            "name": "mark_read",
+            "grade_declared": true
+          },
+          {
+            "name": "flag",
+            "grade_declared": true
+          },
+          {
+            "name": "compose",
+            "grade_declared": true
+          }
+        ],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "app-notes",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.08,
+        "error": null,
+        "action_count": 7,
+        "actions": [
+          {
+            "name": "open_note",
+            "grade_declared": true
+          },
+          {
+            "name": "new_note",
+            "grade_declared": true
+          },
+          {
+            "name": "set_title",
+            "grade_declared": true
+          },
+          {
+            "name": "save",
+            "grade_declared": true
+          },
+          {
+            "name": "append",
+            "grade_declared": true
+          },
+          {
+            "name": "search",
+            "grade_declared": true
+          },
+          {
+            "name": "set_folder",
+            "grade_declared": true
+          }
+        ],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "app-shell",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.071,
+        "error": null,
+        "action_count": 23,
+        "actions": [
+          {
+            "name": "open_app",
+            "grade_declared": true
+          },
+          {
+            "name": "refresh_apps",
+            "grade_declared": true
+          },
+          {
+            "name": "pin_app",
+            "grade_declared": true
+          },
+          {
+            "name": "send_message",
+            "grade_declared": true
+          },
+          {
+            "name": "use_harness",
+            "grade_declared": true
+          },
+          {
+            "name": "show_screen",
+            "grade_declared": true
+          },
+          {
+            "name": "focus_window",
+            "grade_declared": true
+          },
+          {
+            "name": "set_do_not_disturb",
+            "grade_declared": true
+          },
+          {
+            "name": "lock",
+            "grade_declared": true
+          },
+          {
+            "name": "check_update",
+            "grade_declared": true
+          },
+          {
+            "name": "apply_update",
+            "grade_declared": true
+          },
+          {
+            "name": "files_go",
+            "grade_declared": true
+          },
+          {
+            "name": "files_enter",
+            "grade_declared": true
+          },
+          {
+            "name": "files_open",
+            "grade_declared": true
+          },
+          {
+            "name": "files_up",
+            "grade_declared": true
+          },
+          {
+            "name": "files_new_folder",
+            "grade_declared": true
+          },
+          {
+            "name": "files_new_file",
+            "grade_declared": true
+          },
+          {
+            "name": "files_delete",
+            "grade_declared": true
+          },
+          {
+            "name": "editor_new",
+            "grade_declared": true
+          },
+          {
+            "name": "editor_set_content",
+            "grade_declared": true
+          },
+          {
+            "name": "editor_append",
+            "grade_declared": true
+          },
+          {
+            "name": "editor_save",
+            "grade_declared": true
+          },
+          {
+            "name": "editor_save_as",
+            "grade_declared": true
+          }
+        ],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "app-terminal",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.064,
+        "error": null,
+        "action_count": 2,
+        "actions": [
+          {
+            "name": "clear",
+            "grade_declared": true
+          },
+          {
+            "name": "run",
+            "grade_declared": true
+          }
+        ],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "companion",
+        "ok": false,
+        "failed": true,
+        "seconds": 0.057,
+        "error": "yos: companion.app.describe refused: unknown method `app.describe`; this service serves companion.ask, companion.recall,                  companion.status, companion.tools, companion.tool, companion.submit,                  companion.await, companion.jobs, companion.cancel",
+        "action_count": 0,
+        "actions": [],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "harness",
+        "ok": false,
+        "failed": true,
+        "seconds": 0.056,
+        "error": "yos: harness.app.describe refused: unknown method `app.describe`; this service speaks: harness.attach, harness.poll, harness.chunk, harness.complete, harness.fail, harness.detach",
+        "action_count": 0,
+        "actions": [],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "network",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.058,
+        "error": null,
+        "action_count": 0,
+        "actions": [],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "notifications",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.067,
+        "error": null,
+        "action_count": 2,
+        "actions": [
+          {
+            "name": "dismiss",
+            "grade_declared": true
+          },
+          {
+            "name": "dismiss_all",
+            "grade_declared": true
+          }
+        ],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "system-monitor",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.08,
+        "error": null,
+        "action_count": 1,
+        "actions": [
+          {
+            "name": "kill_process",
+            "grade_declared": true
+          }
+        ],
+        "actions_without_grade": []
+      },
+      {
+        "surface": "weather",
+        "ok": true,
+        "failed": false,
+        "seconds": 0.052,
+        "error": null,
+        "action_count": 1,
+        "actions": [
+          {
+            "name": "set_location",
+            "grade_declared": true
+          }
+        ],
+        "actions_without_grade": []
+      }
+    ]
+  },
+  "check2_launch": {
+    "apps": 5,
+    "total": 15,
+    "passed": 15,
+    "failed": 0,
+    "records": [
+      {
+        "app": "notes",
+        "checks": {
+          "first_open": true,
+          "second_open": true,
+          "still_answering": true
+        },
+        "detail": {
+          "first_open_rc0": true,
+          "surface_up_after_first": true,
+          "second_open_rc0": true,
+          "still_answering": true
+        }
+      },
+      {
+        "app": "calendar",
+        "checks": {
+          "first_open": true,
+          "second_open": true,
+          "still_answering": true
+        },
+        "detail": {
+          "first_open_rc0": true,
+          "surface_up_after_first": true,
+          "second_open_rc0": true,
+          "still_answering": true
+        }
+      },
+      {
+        "app": "email",
+        "checks": {
+          "first_open": true,
+          "second_open": true,
+          "still_answering": true
+        },
+        "detail": {
+          "first_open_rc0": true,
+          "surface_up_after_first": true,
+          "second_open_rc0": true,
+          "still_answering": true
+        }
+      },
+      {
+        "app": "terminal",
+        "checks": {
+          "first_open": true,
+          "second_open": true,
+          "still_answering": true
+        },
+        "detail": {
+          "first_open_rc0": true,
+          "surface_up_after_first": true,
+          "second_open_rc0": true,
+          "still_answering": true
+        }
+      },
+      {
+        "app": "download-manager",
+        "checks": {
+          "first_open": true,
+          "second_open": true,
+          "still_answering": true
+        },
+        "detail": {
+          "first_open_rc0": true,
+          "surface_up_after_first": true,
+          "second_open_rc0": true,
+          "still_answering": true
+        }
+      }
+    ]
+  },
+  "check3_allowlist": {
+    "actions": 5,
+    "passed": 5,
+    "failed": 0,
+    "records": [
+      {
+        "app": "notes",
+        "action": "new_note",
+        "args": {
+          "title": "smoke test"
+        },
+        "ok": true,
+        "failed": false,
+        "seconds": 0.055,
+        "error": null
+      },
+      {
+        "app": "notes",
+        "action": "save",
+        "args": {},
+        "ok": true,
+        "failed": false,
+        "seconds": 0.083,
+        "error": null
+      },
+      {
+        "app": "notes",
+        "action": "search",
+        "args": {
+          "query": "smoke"
+        },
+        "ok": true,
+        "failed": false,
+        "seconds": 0.062,
+        "error": null
+      },
+      {
+        "app": "calendar",
+        "action": "go_to_today",
+        "args": {},
+        "ok": true,
+        "failed": false,
+        "seconds": 0.062,
+        "error": null
+      },
+      {
+        "app": "shell",
+        "action": "refresh_apps",
+        "args": {},
+        "ok": true,
+        "failed": false,
+        "seconds": 0.073,
+        "error": null
+      }
+    ]
+  },
+  "overall": {
+    "surfaces_checked": 13,
+    "actions_inspected": 57,
+    "launch_checks_passed": 15,
+    "launch_checks_failed": 0,
+    "allowlist_passed": 5,
+    "allowlist_failed": 0
+  }
+}
