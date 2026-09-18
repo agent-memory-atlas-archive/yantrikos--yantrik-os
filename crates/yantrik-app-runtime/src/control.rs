@@ -52,6 +52,23 @@
 //! the guard. Only the guard is atomic, and a caller that compares revisions itself and then
 //! calls `act` has rebuilt exactly the race this removes.
 //!
+//! # The ceiling
+//!
+//! Every action carries a grade — `safe < standard < sensitive < dangerous` — and the machine has
+//! a ceiling for programmatic callers, `tool_permission` in the shell's `settings.yaml`. The
+//! comparison used to happen only in the MCP bridge, which meant the OS's one real boundary was
+//! enforced by one of its callers: `os_act` refused a `dangerous` action while `yos act` — and
+//! every mind's own shell tool, and anything else that could open the socket — ran the same
+//! action untouched. The check lives here now, in the dispatch every `app.act` crosses regardless
+//! of who sent it, and the bridge keeps its copy as defence in depth and for the better message.
+//!
+//! A person at the keyboard is deliberately not a "programmatic caller". The shell's own buttons
+//! invoke the same callbacks the action handlers invoke, but they never pass through this module —
+//! there is no socket, no `app.act`, no dispatch. The ceiling binds the door minds come in by,
+//! not the window the person is sitting at, and no caller-identity scheme is needed to say so,
+//! because the two paths do not meet. (Who exactly *is* on the socket is issue #43; until then
+//! every socket caller gets the one machine-wide ceiling.)
+//!
 //! # Threading
 //!
 //! Both closures run on the UI thread, because that is the only thread allowed to touch a Slint
@@ -120,6 +137,56 @@ pub fn service_id_for(app_id: &str) -> String {
     format!("app-{app_id}")
 }
 
+// ── The ceiling ─────────────────────────────────────────────────────
+
+/// The grades an action can carry, lowest first. The same ladder the MCP bridge and the
+/// companion's `parse_permission` use; held as strings here because an [`Action`]'s own
+/// `permission` is a `&'static str` and this crate must not grow a dependency to compare it.
+pub const LADDER: [&str; 4] = ["safe", "standard", "sensitive", "dangerous"];
+
+/// Where a grade sits on [`LADDER`], or `None` if it is not a level this OS defines.
+fn grade(permission: &str) -> Option<usize> {
+    LADDER.iter().position(|g| *g == permission)
+}
+
+/// The ceiling used when `settings.yaml` is missing, unreadable, or says nothing usable —
+/// the same default the shell's own `UserSettings` carries, so a machine that has never
+/// opened Settings behaves the way Settings would show it.
+const DEFAULT_CEILING: &str = "sensitive";
+
+/// The machine's ceiling for programmatic callers, from the shell's settings file.
+///
+/// Read per call rather than cached at `serve()`: the whole point of the setting is that a
+/// person can tighten it while apps are running, and a boundary that only notices at launch
+/// is a boundary the Settings screen lies about. The file is a few hundred bytes and an
+/// `act` happens at human-or-model speed, so the read costs nothing that matters. It happens
+/// on the RPC thread — the dispatch closure runs where windows are painted, and file IO
+/// does not belong there.
+pub fn configured_ceiling() -> String {
+    let Ok(text) = std::fs::read_to_string(crate::theme::settings_path()) else {
+        return DEFAULT_CEILING.to_string();
+    };
+    ceiling_from(&text)
+}
+
+/// Pull `tool_permission` out of settings text. Only that key is parsed, for the same reason
+/// `theme::parse` only parses its two: the rest of the file is the shell's business.
+fn ceiling_from(text: &str) -> String {
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(':') else { continue };
+        if key.trim() != "tool_permission" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if grade(value).is_some() {
+            return value.to_string();
+        }
+        tracing::warn!(value = %value, "tool_permission is not a grade; using {DEFAULT_CEILING}");
+        return DEFAULT_CEILING.to_string();
+    }
+    DEFAULT_CEILING.to_string()
+}
+
 // ── What an app reports ─────────────────────────────────────────────
 //
 // The vocabulary itself — `View`, `Param`, `Action`, the action JSON schema and the
@@ -167,24 +234,60 @@ impl Registry {
         describe_json(&self.app_id, &view, &specs)
     }
 
-    /// Check the guard, dispatch, and read what came of it — without leaving the UI thread.
+    /// Check the ceiling, check the guard, dispatch, and read what came of it — without leaving
+    /// the UI thread.
     ///
-    /// The three steps are one function because they have to be one turn of the event loop. Split
+    /// These steps are one function because they have to be one turn of the event loop. Split
     /// across RPC calls, the gap between the check and the dispatch is a window in which the user
     /// can type, and the gap between the dispatch and the read is a window in which they can undo
     /// it. Here nothing runs in between, because there is no in between: this is the thread that
     /// would have to run it.
+    ///
+    /// `ceiling` arrives as an argument, already read from settings by the RPC thread (see
+    /// [`configured_ceiling`]), so the boundary is enforced in the dispatch itself — the one
+    /// function every `app.act` crosses, whoever sent it — while the file IO stays off the UI
+    /// thread and tests can pin the ceiling instead of inheriting the developer's.
     fn act(
         &self,
         name: &str,
         args: &serde_json::Value,
         expect_revision: Option<&str>,
         action_id: &str,
+        ceiling: &str,
     ) -> Result<serde_json::Value, String> {
         let Some((spec, run)) = self.actions.iter().find(|(a, _)| a.name == name) else {
             let known: Vec<&str> = self.actions.iter().map(|(a, _)| a.name.as_str()).collect();
             return Err(format!("unknown action `{name}`; this app offers: {}", known.join(", ")));
         };
+
+        // The ceiling, before anything else about this call is even looked at. It refuses on the
+        // grade alone — before the arguments are checked, before the revision guard, and long
+        // before the handler — because "may this caller use this action at all" is a question
+        // about the action, and answering any narrower question first would mean doing work for
+        // a call that was never allowed. An unrecognised ceiling falls back to the default rather
+        // than failing open: the same choice the companion's `parse_permission` makes.
+        let Some(level) = grade(spec.permission) else {
+            return Err(format!(
+                "CEILING: {}.{} is graded `{}`, which is not a level this OS defines ({}), \
+                 so it was not run.",
+                self.app_id,
+                name,
+                spec.permission,
+                LADDER.join(" < ")
+            ));
+        };
+        let cap = grade(ceiling).unwrap_or_else(|| grade(DEFAULT_CEILING).unwrap());
+        if level > cap {
+            return Err(format!(
+                "CEILING: {app}.{name} is graded `{perm}`, above this machine's `{ceiling}` \
+                 ceiling (`tool_permission` in ~/.config/yantrik/settings.yaml), so it was not \
+                 run. An action at that grade needs a person to authorise it directly — raise \
+                 the ceiling in Settings if that is the intent.",
+                app = self.app_id,
+                perm = spec.permission
+            ));
+        }
+
         // Checked here rather than in every handler: a missing argument is the most common way a
         // model gets a call wrong, and the error should name the argument, not panic in the app.
         for p in spec.params.iter().filter(|p| p.required) {
@@ -311,11 +414,15 @@ impl ServiceHandler for ControlRpc {
                     .map(str::to_string);
                 let action_id = next_action_id(&self.service_id);
 
-                tracing::info!(action = %action, id = %action_id, "app.act");
+                // Read on this thread, enforced on the UI one: the settings file is IO and the
+                // dispatch closure is a turn of the event loop.
+                let ceiling = configured_ceiling();
+                tracing::info!(action = %action, id = %action_id, ceiling = %ceiling, "app.act");
                 let id = action_id.clone();
-                let outcome =
-                    on_ui_thread(move |reg| reg.act(&action, &args, expect.as_deref(), &id))
-                        .map_err(|m| ServiceError { code: -32000, message: m })?;
+                let outcome = on_ui_thread(move |reg| {
+                    reg.act(&action, &args, expect.as_deref(), &id, &ceiling)
+                })
+                .map_err(|m| ServiceError { code: -32000, message: m })?;
 
                 match outcome {
                     Ok(answer) => Ok(answer),
@@ -438,6 +545,11 @@ pub fn running_apps() -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// A ceiling that binds nothing, for the tests that are about everything *except* the
+    /// ceiling. The boundary has its own tests below, with the ceiling pinned per case rather
+    /// than inherited from whatever `settings.yaml` the machine running them happens to have.
+    const OPEN: &str = "dangerous";
+
     #[test]
     fn service_ids_do_not_collide_with_services() {
         // notes-service owns `notes`; the Notes window must not bind the same socket.
@@ -500,7 +612,7 @@ mod tests {
             )],
         };
 
-        let err = reg.act("open_note", &serde_json::json!({}), None, "t#1").unwrap_err();
+        let err = reg.act("open_note", &serde_json::json!({}), None, "t#1", OPEN).unwrap_err();
         assert!(err.contains("title"), "the error must name the missing argument: {err}");
     }
 
@@ -518,7 +630,7 @@ mod tests {
         // The real call that exposed this: a title was passed to an action that does not take
         // one, the argument was dropped, and the caller was told the action succeeded.
         let err = reg
-            .act("open_note", &serde_json::json!({"title": "a", "colour": "red"}), None, "t#1")
+            .act("open_note", &serde_json::json!({"title": "a", "colour": "red"}), None, "t#1", OPEN)
             .unwrap_err();
         assert!(err.contains("colour"), "the error must name the argument it did not know: {err}");
         assert!(err.contains("title"), "and list what it does take: {err}");
@@ -538,13 +650,13 @@ mod tests {
         // This is verbatim the call made on the deployed VM. It used to answer accepted:true
         // and write a note called "Untitled".
         let err = reg
-            .act("new_note", &serde_json::json!({"title": "Handover"}), None, "t#1")
+            .act("new_note", &serde_json::json!({"title": "Handover"}), None, "t#1", OPEN)
             .unwrap_err();
         assert!(err.contains("takes no arguments"), "{err}");
         assert!(err.contains("title"), "{err}");
 
         // And the no-argument call it was always meant to accept still works.
-        assert!(reg.act("new_note", &serde_json::json!({}), None, "t#2").is_ok());
+        assert!(reg.act("new_note", &serde_json::json!({}), None, "t#2", OPEN).is_ok());
     }
 
     #[test]
@@ -558,7 +670,7 @@ mod tests {
             )],
         };
 
-        let err = reg.act("nope", &serde_json::json!({}), None, "t#1").unwrap_err();
+        let err = reg.act("nope", &serde_json::json!({}), None, "t#1", OPEN).unwrap_err();
         assert!(err.contains("open_note"), "a wrong guess should be correctable: {err}");
     }
 
@@ -602,7 +714,7 @@ mod tests {
     #[test]
     fn acting_never_answers_with_a_bare_success() {
         let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "Kernel answers" }), None, "notes#1")
+            .act("rename", &serde_json::json!({ "to": "Kernel answers" }), None, "notes#1", OPEN)
             .unwrap();
 
         // The three things a caller has to be able to tell apart.
@@ -628,7 +740,7 @@ mod tests {
             )],
         };
 
-        let answer = reg.act("build", &serde_json::json!({}), None, "builder#1").unwrap();
+        let answer = reg.act("build", &serde_json::json!({}), None, "builder#1", OPEN).unwrap();
         assert_eq!(answer["accepted"], true);
         assert_eq!(answer["settled"], false, "a dispatched build has not built anything yet");
 
@@ -649,7 +761,7 @@ mod tests {
         let stale = View::new("Notes \u{2014} Kernel asks").with("open_note", "Kernel asks").revision();
 
         let err = notes_at("Shopping list")
-            .act("rename", &serde_json::json!({ "to": "x" }), Some(&stale), "notes#1")
+            .act("rename", &serde_json::json!({ "to": "x" }), Some(&stale), "notes#1", OPEN)
             .unwrap_err();
 
         assert!(err.starts_with("STALE:"), "a caller has to be able to branch on this: {err}");
@@ -665,7 +777,7 @@ mod tests {
         let current = View::new("Notes \u{2014} Kernel asks").with("open_note", "Kernel asks").revision();
 
         let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), Some(&current), "notes#1")
+            .act("rename", &serde_json::json!({ "to": "ok" }), Some(&current), "notes#1", OPEN)
             .unwrap();
         assert_eq!(answer["accepted"], true);
         assert_eq!(answer["result"]["renamed_to"], "ok");
@@ -677,7 +789,7 @@ mod tests {
         // Requiring a revision would only teach callers to echo back whatever they last saw,
         // which is a guard that always passes.
         let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1")
+            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", OPEN)
             .unwrap();
         assert_eq!(answer["accepted"], true);
     }
@@ -699,9 +811,117 @@ mod tests {
             })],
         };
 
-        let err = reg.act("go", &serde_json::json!({}), Some("0000000000000000"), "n#1");
+        let err = reg.act("go", &serde_json::json!({}), Some("0000000000000000"), "n#1", OPEN);
         assert!(err.is_err());
         assert!(!ran.get(), "the handler must not have run");
+    }
+
+    // ── The ceiling ──
+
+    /// The shape the bug was measured in: `files_delete`, graded `dangerous`, on a machine
+    /// whose ceiling is `sensitive`. The bridge refused it; the dispatch waved it through, and
+    /// the file was gone. These tests live here, beside the dispatch, so the boundary fails
+    /// loudly if anyone moves the check back out to a caller.
+    fn delete_surface(ran: std::rc::Rc<std::cell::Cell<bool>>) -> Registry {
+        Registry {
+            app_id: "shell".into(),
+            describe: Some(Box::new(|| View::new("Shell \u{2014} Files"))),
+            actions: vec![(
+                Action::new("files_delete", "Delete a file").risk("dangerous").arg(Param::text("name")),
+                Box::new(move |args| {
+                    ran.set(true);
+                    Ok(serde_json::json!({ "deleted": args["name"].clone() }))
+                }),
+            )],
+        }
+    }
+
+    #[test]
+    fn an_action_above_the_ceiling_is_refused_by_the_dispatch_itself() {
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let reg = delete_surface(ran.clone());
+
+        let err = reg
+            .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", "sensitive")
+            .unwrap_err();
+
+        assert!(err.starts_with("CEILING:"), "a caller has to be able to branch on this: {err}");
+        assert!(err.contains("dangerous"), "the refusal names the grade: {err}");
+        assert!(err.contains("sensitive"), "and the ceiling it was over: {err}");
+        assert!(err.contains("tool_permission"), "and where that ceiling is set: {err}");
+        assert!(!ran.get(), "the handler must not have run");
+    }
+
+    #[test]
+    fn the_ceiling_refuses_on_the_grade_alone_before_anything_is_checked() {
+        // The measured MCP behaviour, now the dispatch's too: it refused `files_delete {"name":
+        // "x"}` on grade before even establishing whether `x` existed. A caller over the ceiling
+        // gets one answer regardless of what else is wrong with its call — otherwise fixing the
+        // smaller mistake looks like progress toward a call that was never going to run.
+        let reg = delete_surface(std::rc::Rc::new(std::cell::Cell::new(false)));
+
+        let err = reg.act("files_delete", &serde_json::json!({}), None, "shell#1", "sensitive").unwrap_err();
+        assert!(err.starts_with("CEILING:"), "not the missing-argument error: {err}");
+        assert!(!err.contains("needs argument"), "{err}");
+    }
+
+    #[test]
+    fn an_action_at_or_below_the_ceiling_runs() {
+        // "At or below" is the whole contract; the ceiling is not a blanket refusal.
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let reg = delete_surface(ran.clone());
+        let answer = reg
+            .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", "dangerous")
+            .unwrap();
+        assert_eq!(answer["accepted"], true);
+        assert!(ran.get());
+
+        // And the everyday case: a `standard` action under the shipped `sensitive` default.
+        let answer = notes_at("Kernel asks")
+            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", "sensitive")
+            .unwrap();
+        assert_eq!(answer["accepted"], true);
+    }
+
+    #[test]
+    fn a_ceiling_tightened_to_safe_binds_the_default_actions_too() {
+        // The setting has to actually tighten, not only refuse the graded-dangerous few: every
+        // action floors at `standard`, so `safe` closes the door to programmatic callers entirely.
+        let err = notes_at("Kernel asks")
+            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", "safe")
+            .unwrap_err();
+        assert!(err.starts_with("CEILING:"), "{err}");
+        assert!(err.contains("standard"), "the refusal names the action's own grade: {err}");
+    }
+
+    #[test]
+    fn an_action_graded_off_the_ladder_is_refused_not_waved_through() {
+        // The mirror of the bridge's rule: an ungradeable action is not "safe". A typo in a
+        // `.risk(...)` must fail closed, or the typo silently becomes an exemption.
+        let reg = Registry {
+            app_id: "notes".into(),
+            describe: None,
+            actions: vec![(
+                Action::new("nuke", "Typo'd grade").risk("catastrophic"),
+                Box::new(|_| Ok(serde_json::json!("never reached"))),
+            )],
+        };
+
+        let err = reg.act("nuke", &serde_json::json!({}), None, "notes#1", OPEN).unwrap_err();
+        assert!(err.starts_with("CEILING:"), "{err}");
+        assert!(err.contains("not a level this OS defines"), "{err}");
+    }
+
+    #[test]
+    fn the_ceiling_comes_from_the_settings_file() {
+        // Same file, same key, same default as the shell's Settings screen — a boundary that
+        // reads a different source than the one a person can see is a boundary nobody can
+        // predict. Missing or unrecognised falls back to the shipped default, never open.
+        assert_eq!(ceiling_from("dark_mode: true\ntool_permission: standard\n"), "standard");
+        assert_eq!(ceiling_from("tool_permission: \"safe\"\n"), "safe");
+        assert_eq!(ceiling_from("dark_mode: true\n"), DEFAULT_CEILING, "absent key");
+        assert_eq!(ceiling_from(""), DEFAULT_CEILING, "empty file");
+        assert_eq!(ceiling_from("tool_permission: whenever-i-feel_like_it\n"), DEFAULT_CEILING);
     }
 
     #[test]
