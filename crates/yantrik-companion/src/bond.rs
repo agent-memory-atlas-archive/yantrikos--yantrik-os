@@ -109,8 +109,20 @@ impl BondTracker {
             )
             .unwrap_or((0.0, 1, 0, 0, 0, 0, 0, 0, 0, 0, None));
 
+        // Calendar days on the same UTC clock the streak uses, counting the day
+        // the two met as day one. This used to be elapsed 24-hour blocks off
+        // SystemTime — a different clock and a different counting rule — so it
+        // read 0 for the entire first day while the streak counter beside it
+        // on the Bond screen read 1 from the first interaction.
         let days_together = first
-            .map(|f| (now_ts() - f) / 86400.0)
+            .and_then(|f| chrono::DateTime::from_timestamp(f as i64, 0))
+            .map(|first_dt| {
+                // from_timestamp yields UTC, the zone the streak dates are in.
+                let days = (chrono::Utc::now().date_naive() - first_dt.date_naive()).num_days();
+                // max(0): a clock that jumped (NTP sync after the first
+                // interaction was stamped) must not read as negative days.
+                days.max(0) as f64 + 1.0
+            })
             .unwrap_or(0.0);
 
         BondState {
@@ -339,4 +351,78 @@ fn now_ts() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bond database whose only history is one first interaction at `first`.
+    fn conn_with_first_interaction(first: Option<f64>) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        BondTracker::ensure_tables(&conn);
+        if let Some(ts) = first {
+            conn.execute(
+                "UPDATE bond_state SET first_interaction_at = ?1 WHERE id = 1",
+                params![ts],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    /// Midnight UTC `days` calendar days ago, as a UNIX timestamp.
+    fn midnight_utc_days_ago(days: i64) -> f64 {
+        (chrono::Utc::now().date_naive() - chrono::Duration::days(days))
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp() as f64
+    }
+
+    #[test]
+    fn the_day_you_meet_is_day_one() {
+        // The screen showed "0 days together" beside "1 days streak" because
+        // days_together counted elapsed 24-hour blocks (zero until a full day
+        // passed) while the streak counts calendar days from the first
+        // interaction (one, immediately).
+        let conn = conn_with_first_interaction(Some(midnight_utc_days_ago(0)));
+        // What score_interaction records on that first interaction:
+        conn.execute(
+            "UPDATE bond_state SET current_streak_days = 1, last_interaction_date = ?1 WHERE id = 1",
+            params![chrono::Utc::now().format("%Y-%m-%d").to_string()],
+        )
+        .unwrap();
+        let state = BondTracker::get_state(&conn);
+        assert_eq!(state.current_streak_days, 1);
+        assert!(
+            state.days_together >= 1.0,
+            "a live streak must not outcount the days together"
+        );
+    }
+
+    #[test]
+    fn days_together_counts_calendar_days_from_first_interaction() {
+        let conn = conn_with_first_interaction(Some(midnight_utc_days_ago(1)));
+        assert_eq!(BondTracker::get_state(&conn).days_together, 2.0);
+
+        let conn = conn_with_first_interaction(Some(midnight_utc_days_ago(2)));
+        assert_eq!(BondTracker::get_state(&conn).days_together, 3.0);
+    }
+
+    #[test]
+    fn no_first_interaction_means_no_days_together() {
+        let conn = conn_with_first_interaction(None);
+        assert_eq!(BondTracker::get_state(&conn).days_together, 0.0);
+    }
+
+    #[test]
+    fn a_clock_jump_cannot_make_the_days_negative() {
+        // first_interaction_at stamped into the future (NTP correction after
+        // the interaction was recorded) still reads as day one, never zero —
+        // zero beside a streak of one is the contradiction being fixed.
+        let future = (chrono::Utc::now() + chrono::Duration::hours(6)).timestamp() as f64;
+        let conn = conn_with_first_interaction(Some(future));
+        assert_eq!(BondTracker::get_state(&conn).days_together, 1.0);
+    }
 }

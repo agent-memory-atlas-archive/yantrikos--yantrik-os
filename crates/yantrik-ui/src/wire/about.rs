@@ -1,6 +1,7 @@
-//! About screen wiring — populates system info fields once at startup.
+//! About screen wiring — populates system info fields at startup and keeps
+//! the one field that moves (uptime) fresh for as long as the shell runs.
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Timer, TimerMode};
 
 use crate::app_context::AppContext;
 use crate::App;
@@ -8,6 +9,20 @@ use crate::App;
 pub fn wire(ui: &App, _ctx: &AppContext) {
     let ui_weak = ui.as_weak();
     populate_about_info(&ui_weak);
+
+    // Kernel, CPU, RAM and disk are facts about the machine that a startup read
+    // states correctly for the whole session. Uptime is not: the shell starts at
+    // boot, so the one-time read said "0m" and the screen repeated it on a
+    // machine up for hours. Refresh just that field, finer than the minutes it
+    // displays.
+    let weak = ui.as_weak();
+    let uptime_timer = Timer::default();
+    uptime_timer.start(TimerMode::Repeated, std::time::Duration::from_secs(30), move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_about_uptime(read_uptime().into());
+        }
+    });
+    std::mem::forget(uptime_timer);
 }
 
 fn populate_about_info(ui_weak: &slint::Weak<App>) {
@@ -101,29 +116,8 @@ fn populate_about_info(ui_weak: &slint::Weak<App>) {
         .unwrap_or_else(|| "unknown".to_string());
     ui.set_about_disk(disk.into());
 
-    // Uptime from /proc/uptime
-    let uptime = std::fs::read_to_string("/proc/uptime")
-        .ok()
-        .and_then(|u| {
-            u.split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<f64>().ok())
-                .map(|secs| {
-                    let total_secs = secs as u64;
-                    let days = total_secs / 86400;
-                    let hours = (total_secs % 86400) / 3600;
-                    let mins = (total_secs % 3600) / 60;
-                    if days > 0 {
-                        format!("{}d {}h {}m", days, hours, mins)
-                    } else if hours > 0 {
-                        format!("{}h {}m", hours, mins)
-                    } else {
-                        format!("{}m", mins)
-                    }
-                })
-        })
-        .unwrap_or_else(|| "\u{2014}".to_string());
-    ui.set_about_uptime(uptime.into());
+    // Uptime from /proc/uptime — also re-read on a timer, see wire()
+    ui.set_about_uptime(read_uptime().into());
 
     // Version from Cargo.toml + git hash
     let version = match option_env!("GIT_HASH") {
@@ -135,4 +129,62 @@ fn populate_about_info(ui_weak: &slint::Weak<App>) {
     // Build date from build.rs
     let build_date = option_env!("BUILD_DATE").unwrap_or("unknown");
     ui.set_about_build_date(build_date.into());
+}
+
+/// The uptime field: /proc/uptime, formatted for display.
+fn read_uptime() -> String {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|u| parse_uptime_secs(&u))
+        .map(format_uptime)
+        .unwrap_or_else(|| "\u{2014}".to_string())
+}
+
+/// The first field of /proc/uptime is seconds since boot.
+fn parse_uptime_secs(proc_uptime: &str) -> Option<u64> {
+    proc_uptime
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|secs| secs as u64)
+}
+
+fn format_uptime(total_secs: u64) -> String {
+    let days = total_secs / 86400;
+    let hours = (total_secs % 86400) / 3600;
+    let mins = (total_secs % 3600) / 60;
+    if days > 0 {
+        format!("{}d {}h {}m", days, hours, mins)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m", mins)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_first_field_of_proc_uptime() {
+        // The real file: seconds since boot, then idle seconds. This sample
+        // was captured from the live machine while its About screen claimed
+        // "0m" — it had been up 9h49m.
+        assert_eq!(parse_uptime_secs("35374.59 70597.24\n"), Some(35374));
+        assert_eq!(parse_uptime_secs("0.19 0.08\n"), Some(0));
+        assert_eq!(parse_uptime_secs(""), None);
+        assert_eq!(parse_uptime_secs("garbage 1.0"), None);
+    }
+
+    #[test]
+    fn formats_known_durations() {
+        assert_eq!(format_uptime(0), "0m");
+        assert_eq!(format_uptime(59), "0m");
+        assert_eq!(format_uptime(60), "1m");
+        assert_eq!(format_uptime(3599), "59m");
+        assert_eq!(format_uptime(3600), "1h 0m");
+        assert_eq!(format_uptime(35374), "9h 49m");
+        assert_eq!(format_uptime(90061), "1d 1h 1m");
+    }
 }

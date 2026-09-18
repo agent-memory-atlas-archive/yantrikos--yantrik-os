@@ -16,6 +16,11 @@ use crate::{cards, features, lock, system_context, windows, App, ProcessData, Wi
 /// Maximum number of data points in the chart history ring buffer.
 const CHART_HISTORY_LEN: usize = 60;
 
+/// How often the WiFi flag is re-derived from the network service. The service
+/// answers from live interface state; 15s matches the observer's own network
+/// poll cadence and keeps an RPC out of most 3s ticks.
+const WIFI_REFRESH: Duration = Duration::from_secs(15);
+
 /// Wire the system poll timer.
 pub fn wire(ui: &App, ctx: &AppContext) {
     let ui_weak = ui.as_weak();
@@ -34,6 +39,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     // once per 5 minutes. Key = event text, Value = last recorded time.
     let event_dedup: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
     const DEDUP_WINDOW: Duration = Duration::from_secs(300); // 5 minutes
+
+    // WiFi flag cache: when the network service was last asked, and its answer.
+    let wifi_cache: RefCell<Option<(Instant, bool)>> = RefCell::new(None);
 
     let timer = Timer::default();
     timer.start(TimerMode::Repeated, Duration::from_secs(3), move || {
@@ -177,7 +185,27 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             ui.set_battery_available(snap.battery_available);
             ui.set_battery_level(snap.battery_level as i32);
             ui.set_battery_charging(snap.battery_charging);
-            ui.set_wifi_connected(snap.network_connected);
+            // The dashboard's WiFi row is a claim about wireless specifically,
+            // but the observer only ever reports that *some* interface is up —
+            // a wired machine with no wireless hardware still sets
+            // network_connected, and the shell repeated that as "WiFi". The
+            // network service is the component that knows the connection type,
+            // so the flag is taken from its answer, re-asked at the service's
+            // own cadence rather than every tick.
+            // Read the cache out before the refresh arm can write to it — a
+            // borrow guard held across the match would make borrow_mut panic.
+            let cached = wifi_cache
+                .borrow()
+                .and_then(|(asked, flag)| (asked.elapsed() < WIFI_REFRESH).then_some(flag));
+            let wifi = match cached {
+                Some(flag) => flag,
+                None => {
+                    let flag = wifi_from_network_service(snap.network_connected);
+                    *wifi_cache.borrow_mut() = Some((Instant::now(), flag));
+                    flag
+                }
+            };
+            ui.set_wifi_connected(wifi);
             if snap.network_connected {
                 if let Some(ssid) = &snap.network_ssid {
                     ui.set_sys_wifi_ssid(slint::SharedString::from(ssid.as_str()));
@@ -260,46 +288,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         if let Some(ui) = ui_weak.upgrade() {
             if ui.get_current_screen() == 10 {
                 ui.set_sys_cpu_usage(snap.cpu_usage_percent);
-                ui.set_sys_memory_usage(snap.memory_usage_percent());
-
-                let total = snap.memory_total_bytes;
-                let used = snap.memory_used_bytes;
-                let cached = snap.memory_cached_bytes;
-                let free = snap.memory_free_bytes;
-
-                // Overall memory text (used / total)
-                let mem_text = format!(
-                    "{} / {}",
-                    format_bytes(used),
-                    format_bytes(total)
-                );
-                ui.set_sys_memory_text(mem_text.into());
-
-                // Memory breakdown percentages
-                if total > 0 {
-                    let used_pct = (used as f64 / total as f64 * 100.0) as f32;
-                    let cached_pct = (cached as f64 / total as f64 * 100.0) as f32;
-                    ui.set_sys_memory_used_percent(used_pct);
-                    ui.set_sys_memory_cached_percent(cached_pct);
-                }
-                ui.set_sys_memory_used_text(format_bytes(used).into());
-                ui.set_sys_memory_cached_text(format_bytes(cached).into());
-                // "Free" label shows the actual free (not cached) memory
-                ui.set_sys_memory_total_text(format_bytes(free).into());
-
-                // Swap
-                let swap_total = snap.swap_total_bytes;
-                let swap_used = snap.swap_used_bytes;
-                if swap_total > 0 {
-                    let swap_pct = (swap_used as f64 / swap_total as f64 * 100.0) as f32;
-                    ui.set_sys_swap_usage(swap_pct);
-                    ui.set_sys_swap_text(
-                        format!("{} / {}", format_bytes(swap_used), format_bytes(swap_total)).into(),
-                    );
-                } else {
-                    ui.set_sys_swap_usage(0.0);
-                    ui.set_sys_swap_text("N/A".into());
-                }
+                update_memory_readouts(&ui, &snap);
 
                 ui.set_sys_wifi_ssid(
                     snap.network_ssid.clone().unwrap_or_default().into(),
@@ -537,5 +526,103 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.0} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// Push the snapshot's memory and swap figures into the System Dashboard's
+/// readouts. Shared by the live update above and the on-entry population in
+/// navigate.rs: the dashboard's "Used / Cached / Free" rows once rendered as
+/// bare labels because the entry path set only the headline figure, and one
+/// function feeding both paths is what keeps them from drifting apart again.
+pub(crate) fn update_memory_readouts(ui: &App, snap: &yantrik_os::SystemSnapshot) {
+    ui.set_sys_memory_usage(snap.memory_usage_percent());
+
+    let total = snap.memory_total_bytes;
+    let used = snap.memory_used_bytes;
+    let cached = snap.memory_cached_bytes;
+    let free = snap.memory_free_bytes;
+
+    // Overall memory text (used / total)
+    ui.set_sys_memory_text(format!("{} / {}", format_bytes(used), format_bytes(total)).into());
+
+    // Memory breakdown percentages
+    if total > 0 {
+        ui.set_sys_memory_used_percent((used as f64 / total as f64 * 100.0) as f32);
+        ui.set_sys_memory_cached_percent((cached as f64 / total as f64 * 100.0) as f32);
+    }
+    ui.set_sys_memory_used_text(format_bytes(used).into());
+    ui.set_sys_memory_cached_text(format_bytes(cached).into());
+    // "Free" label shows the actual free (not cached) memory
+    ui.set_sys_memory_total_text(format_bytes(free).into());
+
+    // Swap
+    let swap_total = snap.swap_total_bytes;
+    let swap_used = snap.swap_used_bytes;
+    if swap_total > 0 {
+        ui.set_sys_swap_usage((swap_used as f64 / swap_total as f64 * 100.0) as f32);
+        ui.set_sys_swap_text(
+            format!("{} / {}", format_bytes(swap_used), format_bytes(swap_total)).into(),
+        );
+    } else {
+        ui.set_sys_swap_usage(0.0);
+        ui.set_sys_swap_text("N/A".into());
+    }
+}
+
+/// Ask the network service whether the connection that is up is a wireless one.
+/// Offline is never wifi, so `connected` gates the question. If the service
+/// cannot be reached the answer is false — an unverifiable "WiFi" claim is
+/// exactly the falsehood this replaced.
+fn wifi_from_network_service(connected: bool) -> bool {
+    if !connected {
+        return false;
+    }
+    yantrik_ipc_transport::SyncRpcClient::for_service("network")
+        .call("network.status", serde_json::json!({}))
+        .ok()
+        .map(|status| {
+            is_wifi(
+                status["connected"].as_bool().unwrap_or(false),
+                status["type"].as_str().unwrap_or(""),
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// The shell's wifi flag, derived from the network service's answer.
+fn is_wifi(connected: bool, conn_type: &str) -> bool {
+    connected && conn_type == "wifi"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wired_connection_is_not_wifi() {
+        // The live machine: network.status answers connected=true,
+        // type="ethernet", ssid=null — and the System screen used to say
+        // "WiFi: Connected" anyway, because the flag came from "some
+        // interface is up".
+        assert!(!is_wifi(true, "ethernet"));
+        assert!(!is_wifi(false, "none"));
+        // A reply missing the type is not a licence to claim wireless.
+        assert!(!is_wifi(true, ""));
+    }
+
+    #[test]
+    fn a_wireless_connection_is_wifi() {
+        assert!(is_wifi(true, "wifi"));
+        // The other connection types the service reports are not wifi either.
+        assert!(!is_wifi(true, "vpn"));
+        assert!(!is_wifi(true, "bridge"));
+    }
+
+    #[test]
+    fn formats_byte_counts() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(2 * 1024 * 1024), "2 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 }

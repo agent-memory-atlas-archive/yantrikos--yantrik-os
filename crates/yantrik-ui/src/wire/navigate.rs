@@ -179,8 +179,12 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 let snap = system_snapshot.borrow();
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_sys_cpu_usage(snap.cpu_usage_percent);
-                    ui.set_sys_memory_usage(snap.memory_usage_percent());
-                    ui.set_sys_memory_text(format_memory(snap.memory_used_bytes, snap.memory_total_bytes).into());
+                    // The breakdown rows (Used / Cached / Free, swap) come from
+                    // the same function the live poll feeds them through. This
+                    // entry path used to set only the headline figure, so the
+                    // labels rendered with nothing beside them until an
+                    // observer event happened to arrive.
+                    super::system_poll::update_memory_readouts(&ui, &snap);
                     ui.set_sys_wifi_ssid(snap.network_ssid.clone().unwrap_or_default().into());
                     ui.set_sys_wifi_signal(snap.network_signal.unwrap_or(0) as i32);
                     ui.set_sys_uptime_text(format_uptime().into());
@@ -216,21 +220,6 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             _ => {}
         }
     });
-}
-
-/// Format memory as human-readable text.
-fn format_memory(used_bytes: u64, total_bytes: u64) -> String {
-    let used_mb = used_bytes / (1024 * 1024);
-    let total_mb = total_bytes / (1024 * 1024);
-    if total_mb >= 1024 {
-        format!(
-            "{:.1} / {:.1} GB",
-            used_mb as f64 / 1024.0,
-            total_mb as f64 / 1024.0
-        )
-    } else {
-        format!("{} / {} MB", used_mb, total_mb)
-    }
 }
 
 /// Read /proc/uptime and format as human-readable text.
