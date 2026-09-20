@@ -37,12 +37,18 @@ fn main() {
     app.global::<ThemeMode>().set_dark(theme.dark);
     app.global::<AccentPreset>().set_index(theme.accent_index);
 
+    // Reads the saved list before the window is shown, so the first `describe` and the first
+    // paint both see what actually survived the last run.
     let engine = Engine::new();
     // Held for the life of the window: a dropped Slint timer stops.
     let _refresh_timer = wire(&app, engine.clone());
-    publish_control(&app, engine);
+    publish_control(&app, engine.clone());
 
     app.run().unwrap();
+
+    // The window has closed but the process is still here. Stop the writers and put the list down:
+    // anything that was mid-transfer is recorded as such and reconciled on the way back in.
+    engine.shutdown();
 }
 
 // ── One code path per command ───────────────────────────────────────
@@ -65,6 +71,10 @@ fn settle<T>(
         Ok(_) => ui.set_error_text("".into()),
         Err(reason) => ui.set_error_text(reason.as_str().into()),
     }
+    // Whatever the state file had to say, the person has had it on screen and has now done
+    // something else. Leaving it to be re-raised by the next timer tick would make a banner
+    // about the last restart impossible to get past. `describe` keeps reporting it.
+    engine.acknowledge_notice();
     refresh(ui, engine);
     result
 }
@@ -202,9 +212,47 @@ fn wire(app: &DownloadManagerApp, engine: Engine) -> Timer {
 
     // ── AI assist ──
     //
-    // Still unimplemented — this app has no companion connection — but dismiss at least closes the
-    // panel it opens, which it never did.
-    app.on_ai_explain_pressed(|| tracing::info!("AI explain requested (not wired in standalone mode)"));
+    // The companion lives in the shell, so this is an ordinary RPC and not a stub: the button
+    // hands over the rows as rows and shows whatever comes back. Run on its own, with no shell,
+    // it says that instead of spinning — a control that cannot work has to say why.
+    {
+        let weak = app.as_weak();
+        let engine = engine.clone();
+        app.on_ai_explain_pressed(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if !companion::is_online() {
+                ui.set_ai_is_working(false);
+                ui.set_ai_response(companion::OFFLINE_HINT.into());
+                return;
+            }
+            // The list, handed over as the list. Describing it in prose first and asking the model
+            // to re-derive the numbers is how an app starts reporting sizes nobody measured.
+            let prompt = format!(
+                "These are the downloads on my machine right now:\n{}\nIn at most three short \
+                 lines say what is worth my attention and what to do about it. Use only these \
+                 rows; do not guess at causes you cannot see.",
+                ai_facts(&engine)
+            );
+            ui.set_ai_is_working(true);
+            ui.set_ai_response("".into());
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&prompt);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_ai_is_working(false);
+                    // A failure goes in the same panel the answer would have: the button was
+                    // pressed, so something has to appear there.
+                    ui.set_ai_response(
+                        match outcome {
+                            Ok(text) => text,
+                            Err(reason) => format!("The companion did not answer — {reason}"),
+                        }
+                        .into(),
+                    );
+                });
+            });
+        });
+    }
     {
         let weak = app.as_weak();
         app.on_ai_dismiss(move || {
@@ -277,7 +325,12 @@ fn refresh(ui: &DownloadManagerApp, engine: &Engine) {
     // A download that failed while nobody was looking still has to say why. It yields to a live
     // command's own message, which `settle` has already put there.
     if ui.get_error_text().is_empty() {
-        if let Some(failed) = items
+        // The state file leads. A list that could not be read or written, or one that came back
+        // changed, outlives any one transfer, and it is the thing that explains why the window
+        // looks different from the way the person left it.
+        if let Some(notice) = engine.unseen_notice() {
+            ui.set_error_text(notice.as_str().into());
+        } else if let Some(failed) = items
             .iter()
             .rev()
             .find(|d| d.status == Status::Failed && !d.error.is_empty())
@@ -285,6 +338,42 @@ fn refresh(ui: &DownloadManagerApp, engine: &Engine) {
             ui.set_error_text(format!("{} — {}", failed.filename, failed.error).into());
         }
     }
+}
+
+/// The list as lines a model can read, capped the same way `describe` is.
+///
+/// One line a download, with the words the surface already publishes. A row that is restored or
+/// interrupted says so, because "this has been sitting paused since your last session" is exactly
+/// the kind of thing worth being told and nothing else in the prompt would reveal it.
+fn ai_facts(engine: &Engine) -> String {
+    let items = engine.snapshot();
+    if items.is_empty() {
+        return "(nothing queued)".to_string();
+    }
+    let mut lines: Vec<String> = items
+        .iter()
+        .rev()
+        .take(LISTING_CAP)
+        .map(|d| {
+            let mut line = format!("- {} — {}, {}", d.filename, d.status.as_str(), d.size_text());
+            if d.interrupted {
+                line.push_str(", interrupted by the last shutdown");
+            } else if d.restored {
+                line.push_str(", from a previous session");
+            }
+            if d.checksum_status == "fail" {
+                line.push_str(", checksum does not match");
+            }
+            if !d.error.is_empty() {
+                line.push_str(&format!(", error: {}", d.error));
+            }
+            line
+        })
+        .collect();
+    if items.len() > LISTING_CAP {
+        lines.push(format!("- (and {} more not listed)", items.len() - LISTING_CAP));
+    }
+    lines.join("\n")
 }
 
 fn to_row(download: &Download) -> DownloadItem {
@@ -332,6 +421,16 @@ fn summary(items: &[Download], totals: engine::Totals) -> String {
             totals.failed, failed.filename, reason, totals.active
         );
     }
+    // A file that was fetched and is now gone outranks everything below: it is the one state the
+    // person cannot discover by looking at the window's progress bars.
+    if totals.missing > 0 {
+        let gone = items.iter().find(|d| d.status == Status::Missing);
+        return format!(
+            "Downloads — {} finished file(s) no longer on disk{}",
+            totals.missing,
+            gone.map(|d| format!(" ({})", d.filename)).unwrap_or_default()
+        );
+    }
     if let Some(mismatch) = items.iter().find(|d| d.checksum_status == "fail") {
         return format!("Downloads — {} downloaded but its checksum does not match", mismatch.filename);
     }
@@ -354,7 +453,15 @@ fn summary(items: &[Download], totals: engine::Totals) -> String {
         );
     }
     if totals.paused > 0 {
-        return format!("Downloads — {} paused, {} finished", totals.paused, totals.completed);
+        // "Paused" and "was running when the app died" are the same row to the engine and very
+        // different news to whoever left it running.
+        let interrupted = items.iter().filter(|d| d.interrupted).count();
+        let held = if interrupted > 0 {
+            format!("{} paused ({interrupted} interrupted by a restart)", totals.paused)
+        } else {
+            format!("{} paused", totals.paused)
+        };
+        return format!("Downloads — {held}, {} finished", totals.completed);
     }
     format!("Downloads — {} finished, nothing running", totals.completed)
 }
@@ -377,6 +484,15 @@ fn row_json(download: &Download) -> serde_json::Value {
         if let Some(eta) = download.eta_secs {
             map.insert("eta".into(), engine::format_duration(eta).into());
         }
+    }
+    // Only said when true, so a caller reading a row can take their presence as the claim. A mind
+    // coming back to a machine it left needs to tell "paused because I paused it" from "paused
+    // because the process died under it", and only the second one is news.
+    if download.interrupted {
+        map.insert("interrupted".into(), true.into());
+    }
+    if download.restored {
+        map.insert("restored".into(), true.into());
     }
     if !download.file_hash.is_empty() {
         map.insert("sha256".into(), download.file_hash.clone().into());
@@ -407,6 +523,13 @@ fn publish_control(app: &DownloadManagerApp, engine: Engine) {
                 .with("paused", totals.paused as i64)
                 .with("completed", totals.completed as i64)
                 .with("failed", totals.failed as i64)
+                .with("missing", totals.missing as i64)
+                // How much of this list survived a restart, and where it survived in. A caller
+                // that finds `restored` rows knows the window is not starting from nothing, and
+                // `state_file` is where to look when it disagrees with what it expected.
+                .with("restored", totals.restored as i64)
+                .with("state_file", engine.state_path().to_string_lossy().to_string())
+                .with("notice", engine.notice())
                 .with("speed", format!("{}/s", engine::format_bytes(totals.speed_bps as u64)))
                 .with("save_dir", engine.default_dir().to_string_lossy().to_string())
         }

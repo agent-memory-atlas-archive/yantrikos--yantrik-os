@@ -31,6 +31,23 @@
 //! complete. So a `200` to a ranged request truncates and starts over, and `resume_supported`
 //! records which answer came back so the window can stop promising something this server will not
 //! do.
+//!
+//! # Keeping the list
+//!
+//! Until now the list lived only in this process, so closing the window lost every record and left
+//! every partial transfer on disk as a file nobody could explain or continue. A mind that started a
+//! 4 GB image and came back after a restart found nothing. The list is now written to
+//! `~/.local/share/yantrik/downloads/state.json` on every transition worth noticing, and read back
+//! at start.
+//!
+//! The file is a record of intent, not a measurement, and it is never trusted as one. On the way
+//! back in every record is reconciled against what is actually on the filesystem: the byte count
+//! comes from the partial file itself, a download that was still running when the process died
+//! comes back **paused and interrupted** rather than silently restarted, and a completed file that
+//! is no longer where it was recorded comes back as [`Status::Missing`] rather than as a success
+//! the person cannot open. Nothing on disk is deleted by reconciliation — a stray partial file
+//! whose record is gone is left exactly where it is, because it is the person's data and a
+//! forgotten record is not permission to remove it.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -40,6 +57,7 @@ use std::sync::atomic::{AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Read size per loop turn. Also the granularity at which a pause is noticed, which is why it is
@@ -49,6 +67,18 @@ const CHUNK: usize = 64 * 1024;
 /// How often speed and ETA are recomputed. Shorter than this and the number jitters with every
 /// TCP window; longer and it lags behind a transfer that has actually stalled.
 const SPEED_WINDOW: Duration = Duration::from_millis(500);
+
+/// The shape of `state.json`. A file carrying any other number is not guessed at.
+const STATE_VERSION: u32 = 1;
+
+/// How often a *running* transfer's byte count reaches the disk.
+///
+/// Every transition a person or a mind would notice is written immediately; progress is not. At a
+/// 500 ms speed window a fast download would otherwise rewrite the whole list twice a second for
+/// the sake of one integer. Nothing is lost by writing it every few seconds, because the byte
+/// count in the file is never the one that is believed on the way back in — reconciliation
+/// measures the partial file itself.
+const PROGRESS_SAVE_INTERVAL: Duration = Duration::from_secs(5);
 
 // ── Status ──────────────────────────────────────────────────────────
 
@@ -64,6 +94,13 @@ pub enum Status {
     Paused,
     Completed,
     Failed,
+    /// It finished once and the file is not there now.
+    ///
+    /// Its own word rather than `failed`, because the two call for different things: a failed
+    /// transfer never arrived, while this one did and then the file was moved, renamed or deleted
+    /// after the fact. Showing it as `completed` would point the person at a path that holds
+    /// nothing, which is the confident lie the surface rules exist to prevent.
+    Missing,
 }
 
 impl Status {
@@ -74,7 +111,25 @@ impl Status {
             Status::Paused => "paused",
             Status::Completed => "completed",
             Status::Failed => "failed",
+            Status::Missing => "missing",
         }
+    }
+
+    /// The inverse of [`Status::as_str`], for reading a record back off disk.
+    ///
+    /// `None` rather than a default: a status this build does not recognise means the file was
+    /// written by something else, and guessing at it is how a record ends up pointing the wrong
+    /// command at a real file.
+    pub fn parse(word: &str) -> Option<Status> {
+        Some(match word {
+            "queued" => Status::Queued,
+            "downloading" => Status::Downloading,
+            "paused" => Status::Paused,
+            "completed" => Status::Completed,
+            "failed" => Status::Failed,
+            "missing" => Status::Missing,
+            _ => return None,
+        })
     }
 
     /// Whether this download is still going to move on its own.
@@ -119,6 +174,17 @@ pub struct Download {
     pub error: String,
     pub resume_supported: bool,
     pub selected: bool,
+    /// Read back from the state file at start rather than queued in this session.
+    ///
+    /// Not itself stored — it is a fact about *this* run, and a caller asking "is anything here
+    /// left over from before?" needs it to mean that and not "was ever restored".
+    pub restored: bool,
+    /// Was still running when the process last stopped.
+    ///
+    /// It is paused now, holding whatever reached the disk; nothing was resumed on its behalf.
+    /// Cleared the moment someone resumes or retries it, because from then on it is an ordinary
+    /// transfer again.
+    pub interrupted: bool,
 }
 
 impl Download {
@@ -175,21 +241,87 @@ pub struct Engine {
     next_id: Arc<AtomicI32>,
     revision: Arc<AtomicU64>,
     default_dir: PathBuf,
+    /// Where the list is kept between runs.
+    store_path: PathBuf,
+    /// What went wrong reading or writing that file, or what changed about the list while nobody
+    /// was looking — said on screen and in `describe`. An app that cannot keep its list has to
+    /// admit it; silently forgetting is the fault this whole section exists to fix.
+    notice: Arc<Mutex<String>>,
+    /// Whether the current notice has already been put in front of the person.
+    ///
+    /// `describe` keeps reporting the notice for as long as it is true, because a mind may ask
+    /// long after it happened. The window does not: a banner the person has already read and
+    /// then acted past must not come back on the next timer tick, or nothing they do can ever
+    /// clear it. A new notice raises it again.
+    notice_seen: Arc<std::sync::atomic::AtomicBool>,
+    /// When the list was last written. Read only by the progress throttle.
+    last_save: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Engine {
+    /// The engine a window gets: the real store, loaded.
     pub fn new() -> Self {
-        Self {
+        Self::open(state_dir())
+    }
+
+    /// The same engine pointed at a directory of the caller's choosing.
+    ///
+    /// The seam [`Engine::new`] goes through, and the one the tests use: persistence that can only
+    /// be exercised against the person's own `~/.local/share` is persistence nobody checks.
+    pub fn open(state_dir: PathBuf) -> Self {
+        let engine = Self {
             state: Arc::new(Mutex::new(State::default())),
             next_id: Arc::new(AtomicI32::new(1)),
             revision: Arc::new(AtomicU64::new(0)),
             default_dir: default_download_dir(),
-        }
+            store_path: state_dir.join("state.json"),
+            notice: Arc::new(Mutex::new(String::new())),
+            notice_seen: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            last_save: Arc::new(Mutex::new(None)),
+        };
+        engine.load();
+        engine
     }
 
     /// Where downloads land when the caller does not choose.
     pub fn default_dir(&self) -> &Path {
         &self.default_dir
+    }
+
+    /// The file the list is kept in, so `describe` can name it.
+    pub fn state_path(&self) -> &Path {
+        &self.store_path
+    }
+
+    /// What went wrong with the state file, or what it had to change on the way in. Empty when
+    /// there is nothing to say.
+    pub fn notice(&self) -> String {
+        self.notice.lock().map(|n| n.clone()).unwrap_or_default()
+    }
+
+    /// The notice, if the window has not shown it yet. For the banner, not for `describe`.
+    pub fn unseen_notice(&self) -> Option<String> {
+        if self.notice_seen.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.notice()).filter(|n| !n.is_empty())
+    }
+
+    /// The person has seen it and done something since. The notice itself stands.
+    pub fn acknowledge_notice(&self) {
+        self.notice_seen.store(true, Ordering::Relaxed);
+    }
+
+    fn set_notice(&self, text: impl Into<String>) {
+        let text = text.into();
+        let raise = !text.is_empty();
+        if let Ok(mut notice) = self.notice.lock() {
+            *notice = text;
+        }
+        if raise {
+            self.notice_seen.store(false, Ordering::Relaxed);
+        }
+        self.touch();
     }
 
     /// Bumped on every change. The window redraws when this moves and not otherwise.
@@ -233,6 +365,134 @@ impl Engine {
         self.state.lock().ok()?.controls.get(&id).cloned()
     }
 
+    // ── Keeping the list ────────────────────────────────────────────
+
+    /// Read the saved list and reconcile it with the filesystem.
+    ///
+    /// Called once, from [`Engine::open`]. Every way this can go wrong ends with a working app
+    /// holding an empty list and a notice saying what happened, because a downloads window that
+    /// refuses to start is worse than one that has forgotten.
+    fn load(&self) {
+        let raw = match std::fs::read_to_string(&self.store_path) {
+            Ok(raw) => raw,
+            // Nothing saved yet is the ordinary first run, not a fault worth a notice.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                self.set_notice(format!("cannot read {}: {e}", self.store_path.display()));
+                return;
+            }
+        };
+
+        let (items, next_id) = match decode(&raw) {
+            Ok(loaded) => loaded,
+            Err(reason) => {
+                self.keep_aside(&reason);
+                return;
+            }
+        };
+
+        let interrupted = items.iter().filter(|d| d.interrupted).count();
+        let missing = items.iter().filter(|d| d.status == Status::Missing).count();
+        if let Ok(mut state) = self.state.lock() {
+            for item in &items {
+                // A restored download has no worker, but pause, resume and cancel still have to
+                // reach it, and they all go through this map.
+                state.controls.insert(item.id, Arc::new(AtomicU8::new(control::RUN)));
+            }
+            state.items = items;
+        }
+        self.next_id.store(next_id, Ordering::Relaxed);
+        self.touch();
+
+        if interrupted > 0 || missing > 0 {
+            // Said out loud rather than left for someone to notice in the list: these are the two
+            // states where what is on screen differs from what the person last saw.
+            let mut parts = Vec::new();
+            if interrupted > 0 {
+                parts.push(format!("{interrupted} interrupted by the last shutdown, now paused"));
+            }
+            if missing > 0 {
+                parts.push(format!("{missing} finished file(s) no longer on disk"));
+            }
+            self.set_notice(format!("Restored the download list — {}", parts.join("; ")));
+        }
+    }
+
+    /// Move an unusable state file out of the way and say so.
+    ///
+    /// It is kept rather than deleted: it is the only record of what the person had, and a human
+    /// or a mind can read it even when this build cannot. The app then starts empty, which is
+    /// honest — it really does not know what was there.
+    fn keep_aside(&self, reason: &str) {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let kept = self.store_path.with_file_name(format!(
+            "{}.corrupt-{stamp}",
+            self.store_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "state.json".into())
+        ));
+        match std::fs::rename(&self.store_path, &kept) {
+            Ok(()) => self.set_notice(format!(
+                "The saved download list could not be read ({reason}). It has been kept as {} and \
+                 the list is starting empty.",
+                kept.display()
+            )),
+            // The rename failing is worse than the parse failing: the next save will write over
+            // the only copy. Say exactly that, rather than reporting a rescue that did not happen.
+            Err(e) => self.set_notice(format!(
+                "The saved download list could not be read ({reason}) and could not be moved aside \
+                 ({e}). {} will be overwritten by the next change.",
+                self.store_path.display()
+            )),
+        }
+    }
+
+    /// Write the list now.
+    ///
+    /// Called from every transition a person or a mind would notice — added, paused, resumed,
+    /// completed, failed, cancelled, cleared, verified — and never from the read paths, so nothing
+    /// here can be reached while the state lock is held.
+    fn save(&self) {
+        if let Ok(mut last) = self.last_save.lock() {
+            *last = Some(Instant::now());
+        }
+        let items = self.snapshot();
+        let next_id = self.next_id.load(Ordering::Relaxed);
+        if let Err(e) = write_atomically(&self.store_path, &encode(&items, next_id)) {
+            self.set_notice(format!("cannot save the download list to {}: {e}", self.store_path.display()));
+        } else if self.notice().starts_with("cannot save") {
+            // The disk came back. Leaving the old complaint up would have the window reporting a
+            // failure that is no longer true.
+            self.set_notice("");
+        }
+    }
+
+    /// Write the list, but no more often than [`PROGRESS_SAVE_INTERVAL`].
+    ///
+    /// The only caller is the transfer loop's speed window, whose one changing field is a byte
+    /// count that reconciliation re-measures anyway.
+    fn save_progress(&self) {
+        let due = match self.last_save.lock() {
+            Ok(last) => last.map(|t| t.elapsed() >= PROGRESS_SAVE_INTERVAL).unwrap_or(true),
+            Err(_) => false,
+        };
+        if due {
+            self.save();
+        }
+    }
+
+    /// The window is closing: stop every writer and put the list down.
+    ///
+    /// The workers are not waited for. One blocked on a socket read can take the whole connect
+    /// timeout to reach its next chunk boundary, and holding the window open for that is worse
+    /// than what happens instead: the record goes to disk still saying `downloading`, and the next
+    /// start reconciles it against the partial file, which is exact.
+    pub fn shutdown(&self) {
+        self.pause_all();
+        self.save();
+    }
+
     /// Counts and combined speed, for the header line.
     pub fn totals(&self) -> Totals {
         let items = self.snapshot();
@@ -241,6 +501,8 @@ impl Engine {
             paused: items.iter().filter(|d| d.status == Status::Paused).count(),
             completed: items.iter().filter(|d| d.status == Status::Completed).count(),
             failed: items.iter().filter(|d| d.status == Status::Failed).count(),
+            missing: items.iter().filter(|d| d.status == Status::Missing).count(),
+            restored: items.iter().filter(|d| d.restored).count(),
             speed_bps: items
                 .iter()
                 .filter(|d| d.status == Status::Downloading)
@@ -300,6 +562,8 @@ impl Engine {
             error: String::new(),
             resume_supported: false,
             selected: false,
+            restored: false,
+            interrupted: false,
         };
 
         {
@@ -308,6 +572,9 @@ impl Engine {
             state.controls.insert(id, Arc::new(AtomicU8::new(control::RUN)));
         }
         self.touch();
+        // Written before the thread starts. A crash one second into a 4 GB transfer must still
+        // leave a record naming the URL, or the partial file beside it means nothing.
+        self.save();
         self.spawn(id, 0);
         Ok(id)
     }
@@ -339,7 +606,9 @@ impl Engine {
             d.status = Status::Queued;
             d.error.clear();
             d.downloaded = have;
+            d.interrupted = false;
         });
+        self.save();
         self.spawn(id, have);
         Ok(())
     }
@@ -363,7 +632,9 @@ impl Engine {
                 d.ended_at = now_stamp();
                 d.speed_bps = 0.0;
                 d.eta_secs = None;
+                d.interrupted = false;
             });
+            self.save();
         }
         Ok(())
     }
@@ -386,7 +657,9 @@ impl Engine {
             d.checksum_status = "none".into();
             d.ended_at.clear();
             d.started_at = now_stamp();
+            d.interrupted = false;
         });
+        self.save();
         self.spawn(id, 0);
         Ok(())
     }
@@ -408,6 +681,9 @@ impl Engine {
             self.edit(id, |d| d.checksum_expected = expected);
         }
         self.edit(id, |d| d.checksum_status = "verifying".into());
+        // An expected hash the caller has just supplied is worth keeping even if the hashing
+        // thread never gets to run.
+        self.save();
 
         let engine = self.clone();
         std::thread::Builder::new()
@@ -418,6 +694,10 @@ impl Engine {
     }
 
     /// Drop finished downloads from the list. The files stay where they are.
+    ///
+    /// Only `completed` goes. A `missing` row is not cleared by this: it is the record of a file
+    /// that was fetched and is now gone, which is the one thing in the list the person may still
+    /// need to be told.
     pub fn clear_completed(&self) -> usize {
         let removed = match self.state.lock() {
             Ok(mut state) => {
@@ -438,6 +718,7 @@ impl Engine {
         };
         if removed > 0 {
             self.touch();
+            self.save();
         }
         removed
     }
@@ -487,7 +768,9 @@ impl Engine {
             d.speed_bps = 0.0;
             d.eta_secs = None;
             d.ended_at = now_stamp();
+            d.interrupted = false;
         });
+        self.save();
     }
 
     /// One transfer, start to finish, on its own thread.
@@ -551,7 +834,11 @@ impl Engine {
             d.content_type = content_type;
             d.resume_supported = resume_supported;
             d.error.clear();
+            d.interrupted = false;
         });
+        // The size and whether this server honours a range are the two things a later resume
+        // depends on, and both are known only now.
+        self.save();
 
         let mut reader = response.into_reader();
         let mut buffer = vec![0u8; CHUNK];
@@ -565,9 +852,13 @@ impl Engine {
                     let _ = file.flush();
                     self.edit(id, |d| {
                         d.status = Status::Paused;
+                        d.downloaded = written;
                         d.speed_bps = 0.0;
                         d.eta_secs = None;
                     });
+                    // Always saved, never throttled: a pause is the state most likely to be the
+                    // last thing that happens before the process goes away.
+                    self.save();
                     return;
                 }
                 control::CANCEL => {
@@ -580,6 +871,7 @@ impl Engine {
                         d.eta_secs = None;
                         d.ended_at = now_stamp();
                     });
+                    self.save();
                     return;
                 }
                 _ => {}
@@ -616,6 +908,7 @@ impl Engine {
                     d.speed_bps = speed;
                     d.eta_secs = eta;
                 });
+                self.save_progress();
                 window_start = Instant::now();
                 window_bytes = 0;
             }
@@ -646,10 +939,12 @@ impl Engine {
             d.speed_bps = 0.0;
             d.eta_secs = None;
             d.ended_at = now_stamp();
+            d.interrupted = false;
             if !d.checksum_expected.is_empty() {
                 d.checksum_status = "verifying".into();
             }
         });
+        self.save();
         self.hash_and_compare(id);
     }
 
@@ -666,6 +961,7 @@ impl Engine {
                     d.checksum_status = if d.checksum_expected.is_empty() { "none".into() } else { "fail".into() };
                     d.error = format!("cannot hash the file: {e}");
                 });
+                self.save();
                 return;
             }
         };
@@ -679,6 +975,9 @@ impl Engine {
                 "fail".into()
             };
         });
+        // The digest is the answer an agent came for, and recomputing it on the next start would
+        // mean re-reading a file that may be gigabytes.
+        self.save();
     }
 }
 
@@ -695,7 +994,247 @@ pub struct Totals {
     pub paused: usize,
     pub completed: usize,
     pub failed: usize,
+    /// Finished once, and the file is not where it was recorded.
+    pub missing: usize,
+    /// How many of these rows came back from the last run rather than being queued in this one.
+    pub restored: usize,
     pub speed_bps: f64,
+}
+
+// ── The state file ──────────────────────────────────────────────────
+
+/// The whole file. `version` comes first so a reader that does not understand this shape can find
+/// that out without having to parse the rest.
+#[derive(Serialize, Deserialize)]
+struct StoredState {
+    version: u32,
+    /// Kept so a restart does not hand a new download an id the list already used — the id is
+    /// what every caller and every button refers to.
+    next_id: i32,
+    downloads: Vec<StoredDownload>,
+}
+
+/// One download as it goes to disk.
+///
+/// Only the durable half. Speed, ETA and the selection checkbox are facts about a moment and
+/// writing them would be recording a measurement that is false by the time it is read.
+#[derive(Serialize, Deserialize)]
+struct StoredDownload {
+    id: i32,
+    url: String,
+    filename: String,
+    save_dir: String,
+    status: String,
+    // The rest default rather than refuse: a record that still names a file and a URL is worth
+    // keeping even if a field was added since it was written. Identity is not optional, because a
+    // record with no id or no path cannot be acted on at all.
+    #[serde(default)]
+    downloaded: u64,
+    #[serde(default)]
+    total: Option<u64>,
+    #[serde(default)]
+    checksum_expected: String,
+    #[serde(default)]
+    checksum_status: String,
+    #[serde(default)]
+    file_hash: String,
+    #[serde(default)]
+    content_type: String,
+    #[serde(default)]
+    started_at: String,
+    #[serde(default)]
+    ended_at: String,
+    #[serde(default)]
+    error: String,
+    #[serde(default)]
+    resume_supported: bool,
+}
+
+/// Where the list lives between runs.
+///
+/// `~/.local/share/yantrik/downloads`, beside every other app's store, and overridable by
+/// `YANTRIK_DOWNLOADS_DIR` the way Notes takes `YANTRIK_NOTES_DIR` — the conformance probe needs
+/// somewhere to work that is not the person's real list.
+pub fn state_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("YANTRIK_DOWNLOADS_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    Path::new(&home).join(".local/share/yantrik/downloads")
+}
+
+/// The list as JSON.
+///
+/// Pretty-printed on purpose: this is a file a person or a mind may have to read by hand on the
+/// day the app will not start, and it is a few hundred bytes a download.
+fn encode(items: &[Download], next_id: i32) -> String {
+    let stored = StoredState {
+        version: STATE_VERSION,
+        next_id,
+        downloads: items
+            .iter()
+            .map(|d| StoredDownload {
+                id: d.id,
+                url: d.url.clone(),
+                filename: d.filename.clone(),
+                save_dir: d.save_dir.to_string_lossy().to_string(),
+                status: d.status.as_str().to_string(),
+                downloaded: d.downloaded,
+                total: d.total,
+                checksum_expected: d.checksum_expected.clone(),
+                checksum_status: d.checksum_status.clone(),
+                file_hash: d.file_hash.clone(),
+                content_type: d.content_type.clone(),
+                started_at: d.started_at.clone(),
+                ended_at: d.ended_at.clone(),
+                error: d.error.clone(),
+                resume_supported: d.resume_supported,
+            })
+            .collect(),
+    };
+    // A serializer failing on a struct of owned strings and integers is not a thing that happens,
+    // but the fallback is still a valid empty file rather than a panic in a save path.
+    serde_json::to_string_pretty(&stored)
+        .unwrap_or_else(|_| format!("{{\"version\":{STATE_VERSION},\"next_id\":1,\"downloads\":[]}}"))
+}
+
+/// Read a saved list and reconcile it with what is actually on the filesystem.
+///
+/// The returned records are what the app will show, not what the file said. Three rules, and all
+/// three exist because trusting the file would mean showing the person something that is not true:
+///
+/// - A download that was still running when the process died comes back **paused and interrupted**
+///   with the byte count measured off its partial file. It is not restarted: a transfer resuming
+///   by itself because a window opened is a surprise, and on a metered connection an expensive
+///   one. `resume` continues it from exactly those bytes.
+/// - A download recorded as **completed** whose file is no longer there comes back as
+///   [`Status::Missing`], because the whole value of a completed row is the path it points at.
+/// - A paused or failed record's byte count is re-measured too — the partial file may have been
+///   deleted or truncated by something else between runs.
+///
+/// Nothing is written and nothing is removed. The directory is never scanned either, so a stray
+/// partial file whose record has gone is simply left alone; a forgotten record is not permission
+/// to delete somebody's data.
+///
+/// `Err` means the file cannot be used at all and should be kept aside.
+fn decode(raw: &str) -> Result<(Vec<Download>, i32), String> {
+    let stored: StoredState =
+        serde_json::from_str(raw).map_err(|e| format!("it is not valid state JSON: {e}"))?;
+    if stored.version != STATE_VERSION {
+        return Err(format!(
+            "it is version {}, and this build reads version {STATE_VERSION}",
+            stored.version
+        ));
+    }
+
+    let mut items = Vec::with_capacity(stored.downloads.len());
+    for record in stored.downloads {
+        let Some(status) = Status::parse(&record.status) else {
+            // One unreadable row is not a reason to lose the other nineteen. It is dropped rather
+            // than guessed at, and the count the caller sees is of what actually loaded.
+            continue;
+        };
+        let mut download = Download {
+            id: record.id,
+            url: record.url,
+            filename: record.filename,
+            save_dir: PathBuf::from(record.save_dir),
+            status,
+            downloaded: record.downloaded,
+            total: record.total,
+            speed_bps: 0.0,
+            eta_secs: None,
+            checksum_expected: record.checksum_expected,
+            checksum_status: if record.checksum_status.is_empty() {
+                "none".to_string()
+            } else {
+                record.checksum_status
+            },
+            file_hash: record.file_hash,
+            content_type: record.content_type,
+            started_at: record.started_at,
+            ended_at: record.ended_at,
+            error: record.error,
+            resume_supported: record.resume_supported,
+            selected: false,
+            restored: true,
+            interrupted: false,
+        };
+
+        let on_disk = std::fs::metadata(download.path()).map(|m| m.len()).ok();
+        match status {
+            Status::Queued | Status::Downloading => {
+                download.status = Status::Paused;
+                download.interrupted = true;
+                download.downloaded = on_disk.unwrap_or(0);
+            }
+            Status::Paused | Status::Failed => {
+                download.downloaded = on_disk.unwrap_or(0);
+            }
+            Status::Completed => {
+                if on_disk.is_none() {
+                    download.status = Status::Missing;
+                    download.error =
+                        format!("the file is no longer at {}", download.path().display());
+                }
+            }
+            Status::Missing => {
+                // A file that was put back is completed again. The alternative — a row that says
+                // `missing` over a file that is plainly there — is the same class of lie pointing
+                // the other way.
+                if on_disk.is_some() {
+                    download.status = Status::Completed;
+                    download.error.clear();
+                }
+            }
+        }
+        // A `verifying` row belongs to a hashing thread that no longer exists. What is true now is
+        // that nothing has been checked since.
+        if download.checksum_status == "verifying" {
+            download.checksum_status = "none".into();
+        }
+        items.push(download);
+    }
+
+    let highest = items.iter().map(|d| d.id).max().unwrap_or(0);
+    let next_id = stored.next_id.max(highest + 1).max(1);
+    Ok((items, next_id))
+}
+
+/// Replace a file in one step, or leave the old one exactly as it was.
+///
+/// Writing over the live file would mean a power cut mid-write leaves a half-written list, which
+/// is precisely the unreadable file the corrupt path then has to rescue. The temp name carries the
+/// pid so two processes cannot scribble over each other's half-written copy, and it sits in the
+/// same directory so the rename stays on one filesystem — a rename across devices is a copy, and a
+/// copy is not atomic.
+fn write_atomically(path: &Path, body: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let temp = dir.join(format!(
+        "{}.tmp-{}",
+        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "state.json".into()),
+        std::process::id()
+    ));
+    let write = (|| -> std::io::Result<()> {
+        let mut file = File::create(&temp)?;
+        file.write_all(body.as_bytes())?;
+        // The rename is only atomic with respect to a file whose bytes have landed.
+        file.sync_all()
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&temp, path) {
+        // Leaving the temp file behind would have the next start find a directory full of
+        // half-written lists and no way to tell which is which.
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 // ── Plain functions ─────────────────────────────────────────────────
@@ -715,7 +1254,9 @@ pub fn visible_rows(items: &[Download], filter: i32, query: &str, sort: i32) -> 
         .filter(|d| match filter {
             1 => d.status.is_active() || d.status == Status::Paused,
             2 => d.status == Status::Completed,
-            3 => d.status == Status::Failed,
+            // The "Failed" tab is where a person goes to find what went wrong, and a file that
+            // finished and then vanished belongs there rather than nowhere.
+            3 => d.status == Status::Failed || d.status == Status::Missing,
             _ => true,
         })
         .filter(|d| {
@@ -864,6 +1405,85 @@ fn now_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    static NEXT_STORE: AtomicUsize = AtomicUsize::new(0);
+
+    /// A state directory of this test's own.
+    ///
+    /// Every test that builds an [`Engine`] goes through one: an engine made with `new()` would
+    /// read and then write the person's real download list, and a test that can damage the
+    /// machine it runs on is not a test anybody will keep running.
+    struct Store(PathBuf);
+
+    impl Store {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "yantrik-dl-state-{}-{}",
+                std::process::id(),
+                NEXT_STORE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn state_file(&self) -> PathBuf {
+            self.0.join("state.json")
+        }
+
+        fn engine(&self) -> Engine {
+            Engine::open(self.0.clone())
+        }
+
+        /// Put a file of `bytes` zeroes where a download of that name would have written it.
+        fn part(&self, name: &str, bytes: usize) {
+            std::fs::write(self.0.join(name), vec![0u8; bytes]).unwrap();
+        }
+
+        /// Names in the directory, sorted, so an assertion can be about the whole directory.
+        fn entries(&self) -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(&self.0)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl Drop for Store {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// One record as it would be after a real transfer, saving into `dir`.
+    fn saved(id: i32, filename: &str, status: Status, dir: &Path, downloaded: u64, total: u64) -> Download {
+        Download {
+            id,
+            url: format!("https://example.com/{filename}"),
+            filename: filename.into(),
+            save_dir: dir.to_path_buf(),
+            status,
+            downloaded,
+            total: Some(total),
+            speed_bps: 0.0,
+            eta_secs: None,
+            checksum_expected: String::new(),
+            checksum_status: "none".into(),
+            file_hash: String::new(),
+            content_type: "application/octet-stream".into(),
+            started_at: "2026-09-20 10:00:00".into(),
+            ended_at: String::new(),
+            error: String::new(),
+            resume_supported: true,
+            selected: false,
+            restored: false,
+            interrupted: false,
+        }
+    }
 
     #[test]
     fn names_a_file_after_the_last_path_segment() {
@@ -906,7 +1526,8 @@ mod tests {
 
     #[test]
     fn refuses_what_is_not_a_web_url() {
-        let engine = Engine::new();
+        let store = Store::new();
+        let engine = store.engine();
         assert!(engine.add("", "", None).is_err());
         assert!(engine.add("/etc/passwd", "", None).unwrap_err().contains("not an http"));
         assert!(engine.add("file:///etc/passwd", "", None).is_err());
@@ -915,7 +1536,8 @@ mod tests {
 
     #[test]
     fn names_the_download_a_command_could_not_find() {
-        let engine = Engine::new();
+        let store = Store::new();
+        let engine = store.engine();
         assert!(engine.pause(99).unwrap_err().contains("no download 99"));
         assert!(engine.resume(99).is_err());
         assert!(engine.cancel(99).is_err());
@@ -955,6 +1577,8 @@ mod tests {
             error: String::new(),
             resume_supported: false,
             selected: false,
+            restored: false,
+            interrupted: false,
         };
         assert_eq!(download.progress(), 0.0);
         assert_eq!(download.size_text(), "4.0 KB");
@@ -985,6 +1609,8 @@ mod tests {
             error: String::new(),
             resume_supported: false,
             selected: false,
+            restored: false,
+            interrupted: false,
         }
     }
 
@@ -1041,5 +1667,251 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    // ── Keeping the list ────────────────────────────────────────────
+
+    #[test]
+    fn the_list_comes_back_the_way_it_went_out() {
+        let store = Store::new();
+        store.part("done.iso", 400);
+        store.part("held.bin", 120);
+
+        let mut finished = saved(3, "done.iso", Status::Completed, &store.0, 400, 400);
+        finished.checksum_expected = "abc".into();
+        finished.checksum_status = "fail".into();
+        finished.file_hash = "def".into();
+        finished.ended_at = "2026-09-20 10:04:00".into();
+        let held = saved(7, "held.bin", Status::Paused, &store.0, 120, 999);
+
+        std::fs::write(store.state_file(), encode(&[finished.clone(), held.clone()], 8)).unwrap();
+
+        let engine = store.engine();
+        let back = engine.snapshot();
+        assert_eq!(back.len(), 2);
+        // Everything a later command needs: which URL, where it went, how far it got, what was
+        // expected of it and what it actually hashed to.
+        assert_eq!(back[0].url, finished.url);
+        assert_eq!(back[0].status, Status::Completed);
+        assert_eq!(back[0].downloaded, 400);
+        assert_eq!(back[0].total, Some(400));
+        assert_eq!(back[0].checksum_expected, "abc");
+        assert_eq!(back[0].checksum_status, "fail");
+        assert_eq!(back[0].file_hash, "def");
+        assert_eq!(back[0].content_type, "application/octet-stream");
+        assert_eq!(back[0].started_at, "2026-09-20 10:00:00");
+        assert_eq!(back[0].ended_at, "2026-09-20 10:04:00");
+        assert!(back[0].resume_supported);
+        assert_eq!(back[1].id, 7);
+        assert_eq!(back[1].status, Status::Paused);
+        assert_eq!(back[1].downloaded, 120);
+        assert_eq!(back[1].total, Some(999));
+        // Both came from the file, and neither was running when the process last stopped.
+        assert!(back.iter().all(|d| d.restored && !d.interrupted));
+        assert_eq!(engine.totals().restored, 2);
+    }
+
+    #[test]
+    fn a_transfer_that_was_running_comes_back_paused_at_the_bytes_on_disk() {
+        let store = Store::new();
+        // 90 bytes landed; the record was last written when 40 had.
+        store.part("big.iso", 90);
+        let running = saved(1, "big.iso", Status::Downloading, &store.0, 40, 1000);
+        std::fs::write(store.state_file(), encode(&[running], 2)).unwrap();
+
+        let engine = store.engine();
+        let back = engine.snapshot();
+        assert_eq!(back[0].status, Status::Paused, "a dead transfer must not resume by itself");
+        assert!(back[0].interrupted, "and the caller has to be able to tell it apart from a pause");
+        // The file is the measurement, not the record. Resume sends `Range: bytes=90-`; believing
+        // the record's 40 would append the same 50 bytes twice and corrupt the result.
+        assert_eq!(back[0].downloaded, 90);
+        assert!(!engine.notice().is_empty(), "a changed row is said out loud, not left to be noticed");
+
+        // And the restored row is a real download: the commands reach it.
+        assert!(engine.pause(1).unwrap_err().contains("not running"));
+        assert!(engine.get(1).is_some());
+    }
+
+    #[test]
+    fn a_queued_transfer_whose_file_never_appeared_comes_back_at_zero() {
+        let store = Store::new();
+        let queued = saved(1, "never-started.iso", Status::Queued, &store.0, 0, 1000);
+        std::fs::write(store.state_file(), encode(&[queued], 2)).unwrap();
+
+        let back = store.engine().snapshot();
+        assert_eq!(back[0].status, Status::Paused);
+        assert!(back[0].interrupted);
+        assert_eq!(back[0].downloaded, 0);
+    }
+
+    #[test]
+    fn a_finished_file_that_is_gone_is_missing_rather_than_completed() {
+        let store = Store::new();
+        // No file written: the person moved or deleted it between runs.
+        let finished = saved(4, "moved.iso", Status::Completed, &store.0, 400, 400);
+        std::fs::write(store.state_file(), encode(&[finished], 5)).unwrap();
+
+        let engine = store.engine();
+        let back = engine.snapshot();
+        assert_eq!(back[0].status, Status::Missing);
+        assert!(back[0].error.contains("no longer at"), "and it says where it looked");
+        assert_eq!(engine.totals().missing, 1);
+        assert_eq!(engine.totals().completed, 0);
+        // A missing row is a problem, so it is where a person looks for problems.
+        assert_eq!(visible_rows(&back, 3, "", 0).len(), 1);
+        assert_eq!(visible_rows(&back, 2, "", 0).len(), 0);
+        // Clearing finished downloads does not sweep it away with them.
+        assert_eq!(engine.clear_completed(), 0);
+        assert_eq!(engine.snapshot().len(), 1);
+        // Nothing finished means nothing to verify, and it says which state it is in.
+        assert!(engine.verify(4, None).unwrap_err().contains("missing"));
+
+        // Put the file back and the next start says completed again.
+        store.part("moved.iso", 400);
+        assert_eq!(store.engine().snapshot()[0].status, Status::Completed);
+    }
+
+    #[test]
+    fn a_state_file_it_cannot_read_is_kept_aside_and_the_app_still_starts() {
+        let store = Store::new();
+        std::fs::write(store.state_file(), "{ this is not json").unwrap();
+
+        let engine = store.engine();
+        assert!(engine.snapshot().is_empty(), "an unreadable list starts empty, not broken");
+        let notice = engine.notice();
+        assert!(notice.contains("could not be read"), "and the app says so: {notice}");
+
+        let kept: Vec<String> = store
+            .entries()
+            .into_iter()
+            .filter(|name| name.starts_with("state.json.corrupt-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "the only copy of what the person had is not deleted");
+        assert!(!store.state_file().exists(), "and it is out of the way of the next save");
+        assert_eq!(
+            std::fs::read_to_string(store.0.join(&kept[0])).unwrap(),
+            "{ this is not json"
+        );
+    }
+
+    #[test]
+    fn the_file_carries_a_version_and_one_it_does_not_know_is_not_guessed_at() {
+        let store = Store::new();
+        let written = encode(&[saved(1, "a.iso", Status::Completed, &store.0, 1, 1)], 2);
+        assert!(written.contains("\"version\""), "every file says which shape it is");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&written).unwrap()["version"],
+            serde_json::json!(STATE_VERSION)
+        );
+
+        // A file from a build that comes after this one is refused rather than half-read: its
+        // records may mean something else, and acting on a misread record touches a real file.
+        let ahead = written.replace("\"version\": 1", "\"version\": 99");
+        assert!(decode(&ahead).unwrap_err().contains("version 99"));
+        std::fs::write(store.state_file(), ahead).unwrap();
+        let engine = store.engine();
+        assert!(engine.snapshot().is_empty());
+        assert!(engine.notice().contains("version 99"));
+    }
+
+    #[test]
+    fn a_row_it_cannot_read_does_not_cost_the_rows_it_can() {
+        let store = Store::new();
+        store.part("good.iso", 10);
+        let written = encode(
+            &[
+                saved(1, "odd.iso", Status::Completed, &store.0, 10, 10),
+                saved(2, "good.iso", Status::Completed, &store.0, 10, 10),
+            ],
+            3,
+        );
+        // A status word this build does not know: the row is dropped rather than guessed at, and
+        // the nineteen good rows beside it are not lost with it.
+        let damaged = written.replacen("\"status\": \"completed\"", "\"status\": \"elsewhere\"", 1);
+        std::fs::write(store.state_file(), damaged).unwrap();
+
+        let items = store.engine().snapshot();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].filename, "good.iso");
+    }
+
+    #[test]
+    fn saving_replaces_the_file_in_one_step_and_leaves_no_temp_behind() {
+        let store = Store::new();
+        store.part("held.bin", 64);
+        std::fs::write(
+            store.state_file(),
+            encode(&[saved(1, "held.bin", Status::Paused, &store.0, 64, 512)], 2),
+        )
+        .unwrap();
+
+        let engine = store.engine();
+        engine.shutdown();
+        assert_eq!(
+            store.entries(),
+            vec!["held.bin".to_string(), "state.json".to_string()],
+            "a half-written list under another name is the next start's corrupt file"
+        );
+        // And what it wrote is what the next start reads.
+        let reopened = store.engine().snapshot();
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].status, Status::Paused);
+        assert_eq!(reopened[0].downloaded, 64);
+    }
+
+    #[test]
+    fn a_partial_file_whose_record_is_gone_is_left_where_it_is() {
+        let store = Store::new();
+        // Someone cleared this row from the list; the bytes on disk are still the person's.
+        store.part("orphan.iso", 2048);
+        std::fs::write(store.state_file(), encode(&[], 1)).unwrap();
+
+        let engine = store.engine();
+        engine.shutdown();
+        assert!(store.0.join("orphan.iso").exists(), "the app never deletes what it no longer knows about");
+        assert_eq!(std::fs::metadata(store.0.join("orphan.iso")).unwrap().len(), 2048);
+    }
+
+    #[test]
+    fn a_new_download_never_takes_an_id_the_restored_list_is_using() {
+        let store = Store::new();
+        store.part("a.iso", 1);
+        // `next_id` behind the ids in the file — what a crash between the two writes would leave.
+        std::fs::write(
+            store.state_file(),
+            encode(&[saved(12, "a.iso", Status::Completed, &store.0, 1, 1)], 2),
+        )
+        .unwrap();
+
+        let engine = store.engine();
+        // An id collision would point pause, cancel and retry at the wrong row, and cancel deletes
+        // a file. The next id is past everything restored, whatever the file claimed.
+        assert!(engine.next_id.load(Ordering::Relaxed) > 12);
+    }
+
+    #[test]
+    fn a_notice_is_raised_once_and_stays_readable_afterwards() {
+        let store = Store::new();
+        std::fs::write(store.state_file(), "{ not json").unwrap();
+
+        let engine = store.engine();
+        assert!(engine.unseen_notice().is_some(), "the window is told");
+        engine.acknowledge_notice();
+        // Otherwise the redraw timer puts it straight back and nothing the person does clears it.
+        assert!(engine.unseen_notice().is_none(), "and not told again every quarter second");
+        // `describe` still carries it: a mind may ask about this long after the person clicked
+        // past the banner, and the state file is still the one that could not be read.
+        assert!(engine.notice().contains("could not be read"));
+    }
+
+    #[test]
+    fn nothing_is_saved_until_there_is_something_to_say() {
+        let store = Store::new();
+        // A first run writes no file at all, so a machine that never downloads anything has no
+        // stray state to explain — and no notice, because a missing file is not a fault.
+        let engine = store.engine();
+        assert!(engine.notice().is_empty());
+        assert!(store.entries().is_empty());
     }
 }

@@ -18,7 +18,7 @@ export struct DownloadItem {
     progress: float,       // 0.0 to 1.0
     speed-text: string,    // "2.4 MB/s"
     size-text: string,     // "45.2 / 128.0 MB"
-    status: string,        // "downloading", "paused", "completed", "failed", "queued"
+    status: string,        // "downloading", "paused", "completed", "failed", "queued", "missing"
     eta-text: string,      // "2m 30s"
     is-selected: bool,
     // Checksum fields
@@ -628,6 +628,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                       : dl.status == "paused" ? Theme.amber
                                       : dl.status == "completed" ? Theme.color-success
                                       : dl.status == "failed" ? Theme.color-emotional
+                                      : dl.status == "missing" ? Theme.color-emotional
                                       : Theme.text-dim;  // queued
                                 }
 
@@ -734,6 +735,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                       : dl.status == "paused" ? Theme.amber-glow
                                       : dl.status == "completed" ? Theme.color-success-dim
                                       : dl.status == "failed" ? Theme.color-danger-dim
+                                      : dl.status == "missing" ? Theme.color-danger-dim
                                       : Theme.hover-fill;
 
                                     Text {
@@ -741,6 +743,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                             : dl.status == "paused" ? "Paused"
                                             : dl.status == "completed" ? "Completed"
                                             : dl.status == "failed" ? "Failed"
+                                            : dl.status == "missing" ? "File gone"
                                             : "Queued";
                                         font-size: Theme.fs-micro;
                                         font-weight: 500;
@@ -749,6 +752,7 @@ export component DownloadManagerScreen inherits Rectangle {
                                           : dl.status == "paused" ? Theme.amber
                                           : dl.status == "completed" ? Theme.color-success
                                           : dl.status == "failed" ? Theme.color-emotional
+                                          : dl.status == "missing" ? Theme.color-emotional
                                           : Theme.text-dim;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -795,8 +799,9 @@ export component DownloadManagerScreen inherits Rectangle {
                                     }
                                 }
 
-                                // Action: Retry (for failed)
-                                if dl.status == "failed" : Rectangle {
+                                // Action: Retry (for failed, and for a finished file that is
+                                // no longer on disk — fetching it again is the whole remedy)
+                                if dl.status == "failed" || dl.status == "missing" : Rectangle {
                                     width: 28px;
                                     height: 28px;
                                     background: retry-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
@@ -905,8 +910,9 @@ export component DownloadManagerScreen inherits Rectangle {
                                 }
                             }
 
-                            // Row 3: Progress bar (only for non-completed states)
-                            if dl.status != "completed" && dl.status != "failed" : Rectangle {
+                            // Row 3: Progress bar (only for states that still have progress —
+                            // a file that arrived and then vanished has none to show)
+                            if dl.status != "completed" && dl.status != "failed" && dl.status != "missing" : Rectangle {
                                 height: 4px;
                                 border-radius: 2px;
                                 background: Theme.bg-deep;
@@ -930,8 +936,8 @@ export component DownloadManagerScreen inherits Rectangle {
                                 background: Theme.color-success;
                             }
 
-                            // Failed: red bar
-                            if dl.status == "failed" : Rectangle {
+                            // Failed, or finished and since gone: red bar
+                            if dl.status == "failed" || dl.status == "missing" : Rectangle {
                                 height: 4px;
                                 border-radius: 2px;
                                 background: Theme.color-emotional;
