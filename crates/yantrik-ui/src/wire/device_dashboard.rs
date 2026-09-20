@@ -10,7 +10,9 @@ use std::time::Duration;
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
 use crate::app_context::AppContext;
-use crate::{App, DisplayDeviceData, InputDeviceData, PciDeviceData, StorageDeviceData, UsbDeviceData};
+use crate::{
+    App, DisplayDeviceData, InputDeviceData, PciDeviceData, StorageDeviceData, UsbDeviceData,
+};
 
 // ═══════════════════════════════════════════════════════════════════════
 // State
@@ -69,6 +71,7 @@ struct DeviceState {
     gpu_info: String,
     dirty: bool,
     scanning: bool,
+    refreshing: bool,
     search_filter: String,
     /// Previous total device count for hotplug detection.
     prev_device_count: usize,
@@ -89,6 +92,7 @@ impl DeviceState {
             gpu_info: String::new(),
             dirty: true,
             scanning: true,
+            refreshing: false,
             search_filter: String::new(),
             prev_device_count: 0,
             hotplug_notification: String::new(),
@@ -128,7 +132,9 @@ fn matches_filter(filter: &str, fields: &[&str]) -> bool {
         return true;
     }
     let filter_lower = filter.to_lowercase();
-    fields.iter().any(|f| f.to_lowercase().contains(&filter_lower))
+    fields
+        .iter()
+        .any(|f| f.to_lowercase().contains(&filter_lower))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -151,11 +157,7 @@ fn parse_lsusb() -> Vec<UsbDevice> {
         }
 
         // Parse "Bus XXX Device YYY: ID VVVV:PPPP Description..."
-        let bus = line
-            .get(4..7)
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let bus = line.get(4..7).unwrap_or("").trim().to_string();
 
         let device_id = line
             .find("Device ")
@@ -262,13 +264,14 @@ fn parse_lspci() -> Vec<PciDevice> {
 
 /// Map PCI class names to colors.
 fn pci_class_color(class_lower: &str) -> slint::Color {
-    if class_lower.contains("vga")
-        || class_lower.contains("display")
-        || class_lower.contains("3d")
+    if class_lower.contains("vga") || class_lower.contains("display") || class_lower.contains("3d")
     {
         // GPU = green
         slint::Color::from_argb_u8(255, 108, 212, 128)
-    } else if class_lower.contains("network") || class_lower.contains("ethernet") || class_lower.contains("wifi") {
+    } else if class_lower.contains("network")
+        || class_lower.contains("ethernet")
+        || class_lower.contains("wifi")
+    {
         // Network = blue
         slint::Color::from_argb_u8(255, 74, 184, 240)
     } else if class_lower.contains("storage")
@@ -285,7 +288,10 @@ fn pci_class_color(class_lower: &str) -> slint::Color {
     } else if class_lower.contains("audio") || class_lower.contains("multimedia") {
         // Audio = purple
         slint::Color::from_argb_u8(255, 196, 139, 212)
-    } else if class_lower.contains("bridge") || class_lower.contains("isa") || class_lower.contains("host") {
+    } else if class_lower.contains("bridge")
+        || class_lower.contains("isa")
+        || class_lower.contains("host")
+    {
         // Bridge/Host = dim
         slint::Color::from_argb_u8(255, 122, 132, 148)
     } else {
@@ -354,11 +360,17 @@ fn classify_input_device(name: &str, handlers: &str) -> String {
     let name_lower = name.to_lowercase();
     let handler_lower = handlers.to_lowercase();
 
-    if name_lower.contains("keyboard") || name_lower.contains("kbd") || handler_lower.contains("kbd") {
+    if name_lower.contains("keyboard")
+        || name_lower.contains("kbd")
+        || handler_lower.contains("kbd")
+    {
         "keyboard".to_string()
     } else if name_lower.contains("touchpad") || name_lower.contains("trackpad") {
         "touchpad".to_string()
-    } else if name_lower.contains("mouse") || name_lower.contains("trackball") || handler_lower.contains("mouse") {
+    } else if name_lower.contains("mouse")
+        || name_lower.contains("trackball")
+        || handler_lower.contains("mouse")
+    {
         "mouse".to_string()
     } else {
         "other".to_string()
@@ -367,7 +379,10 @@ fn classify_input_device(name: &str, handlers: &str) -> String {
 
 /// Parse `lsblk --json` for storage devices.
 fn parse_lsblk() -> Vec<StorageDevice> {
-    let output = cmd_output("lsblk", &["--json", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE"]);
+    let output = cmd_output(
+        "lsblk",
+        &["--json", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE"],
+    );
     if output.is_empty() {
         return parse_lsblk_fallback();
     }
@@ -546,7 +561,10 @@ fn statvfs_usage(path: &str) -> Option<(u64, u64)> {
 
 /// Fallback: parse plain `lsblk` output if --json is not available.
 fn parse_lsblk_fallback() -> Vec<StorageDevice> {
-    let output = cmd_output("lsblk", &["-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE", "--noheadings"]);
+    let output = cmd_output(
+        "lsblk",
+        &["-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE", "--noheadings"],
+    );
     if output.is_empty() {
         return Vec::new();
     }
@@ -558,7 +576,9 @@ fn parse_lsblk_fallback() -> Vec<StorageDevice> {
             continue;
         }
 
-        let name = parts[0].trim_start_matches(['-', '`', '|', ' ']).to_string();
+        let name = parts[0]
+            .trim_start_matches(['-', '`', '|', ' '])
+            .to_string();
         let size = parts.get(1).unwrap_or(&"").to_string();
         let dtype = parts.get(2).unwrap_or(&"").to_string();
         let mount = parts.get(3).unwrap_or(&"").to_string();
@@ -673,6 +693,14 @@ fn parse_display_devices() -> (Vec<DisplayDevice>, String) {
 
 /// Refresh all device data.
 fn refresh_all(state: &Arc<Mutex<DeviceState>>) {
+    {
+        let Ok(mut state) = state.lock() else { return };
+        if state.refreshing {
+            return;
+        }
+        state.refreshing = true;
+    }
+
     if let Ok(mut s) = state.lock() {
         s.scanning = true;
         s.dirty = true;
@@ -692,6 +720,7 @@ fn refresh_all(state: &Arc<Mutex<DeviceState>>) {
         s.display_devices = display;
         s.gpu_info = gpu;
         s.scanning = false;
+        s.refreshing = false;
         s.dirty = true;
 
         // Hotplug detection: compare total device count
@@ -741,9 +770,15 @@ fn export_devices(state: &Arc<Mutex<DeviceState>>) -> Result<String, String> {
     for (i, d) in s.pci_devices.iter().enumerate() {
         json.push_str(&format!(
             "    {{\"slot\": \"{}\", \"class\": \"{}\", \"vendor\": \"{}\", \"device\": \"{}\"}}{}",
-            escape_json(&d.slot), escape_json(&d.class_name),
-            escape_json(&d.vendor), escape_json(&d.device_name),
-            if i + 1 < s.pci_devices.len() { ",\n" } else { "\n" }
+            escape_json(&d.slot),
+            escape_json(&d.class_name),
+            escape_json(&d.vendor),
+            escape_json(&d.device_name),
+            if i + 1 < s.pci_devices.len() {
+                ",\n"
+            } else {
+                "\n"
+            }
         ));
     }
     json.push_str("  ],\n");
@@ -753,9 +788,15 @@ fn export_devices(state: &Arc<Mutex<DeviceState>>) -> Result<String, String> {
     for (i, d) in s.input_devices.iter().enumerate() {
         json.push_str(&format!(
             "    {{\"name\": \"{}\", \"handler\": \"{}\", \"type\": \"{}\", \"phys\": \"{}\"}}{}",
-            escape_json(&d.name), escape_json(&d.handler),
-            escape_json(&d.device_type), escape_json(&d.phys),
-            if i + 1 < s.input_devices.len() { ",\n" } else { "\n" }
+            escape_json(&d.name),
+            escape_json(&d.handler),
+            escape_json(&d.device_type),
+            escape_json(&d.phys),
+            if i + 1 < s.input_devices.len() {
+                ",\n"
+            } else {
+                "\n"
+            }
         ));
     }
     json.push_str("  ],\n");
@@ -787,7 +828,10 @@ fn export_devices(state: &Arc<Mutex<DeviceState>>) -> Result<String, String> {
     json.push_str("  ],\n");
 
     // GPU info
-    json.push_str(&format!("  \"gpu_info\": \"{}\"\n", escape_json(&s.gpu_info)));
+    json.push_str(&format!(
+        "  \"gpu_info\": \"{}\"\n",
+        escape_json(&s.gpu_info)
+    ));
     json.push_str("}\n");
 
     // Write to ~/devices.json
@@ -811,10 +855,7 @@ fn escape_json(s: &str) -> String {
 fn generate_usb_detail(dev: &UsbDevice) -> String {
     let bus_num = dev.bus.trim_start_matches("Bus ").trim();
     let dev_num = dev.device_id.trim();
-    let verbose = cmd_output(
-        "lsusb",
-        &["-v", "-s", &format!("{}:{}", bus_num, dev_num)],
-    );
+    let verbose = cmd_output("lsusb", &["-v", "-s", &format!("{}:{}", bus_num, dev_num)]);
     if verbose.is_empty() {
         format!(
             "Name: {}\nBus: {}\nDevice: {}\nID: {}\nStatus: Connected",
@@ -829,11 +870,16 @@ fn generate_usb_detail(dev: &UsbDevice) -> String {
         // Extract driver/module info
         for line in verbose.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("bcdUSB") || trimmed.starts_with("bDeviceClass")
-                || trimmed.starts_with("bDeviceSubClass") || trimmed.starts_with("bDeviceProtocol")
-                || trimmed.starts_with("idVendor") || trimmed.starts_with("idProduct")
-                || trimmed.starts_with("iManufacturer") || trimmed.starts_with("iProduct")
-                || trimmed.starts_with("iSerial") || trimmed.starts_with("bMaxPower")
+            if trimmed.starts_with("bcdUSB")
+                || trimmed.starts_with("bDeviceClass")
+                || trimmed.starts_with("bDeviceSubClass")
+                || trimmed.starts_with("bDeviceProtocol")
+                || trimmed.starts_with("idVendor")
+                || trimmed.starts_with("idProduct")
+                || trimmed.starts_with("iManufacturer")
+                || trimmed.starts_with("iProduct")
+                || trimmed.starts_with("iSerial")
+                || trimmed.starts_with("bMaxPower")
             {
                 detail.push_str(&format!("{}\n", trimmed));
             }
@@ -858,10 +904,14 @@ fn generate_pci_detail(dev: &PciDevice) -> String {
         // Extract driver, memory regions, IRQ
         for line in verbose.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("Kernel driver") || trimmed.starts_with("Kernel modules")
-                || trimmed.starts_with("Subsystem") || trimmed.starts_with("Flags")
-                || trimmed.starts_with("Memory") || trimmed.starts_with("I/O ports")
-                || trimmed.starts_with("IRQ") || trimmed.starts_with("Capabilities")
+            if trimmed.starts_with("Kernel driver")
+                || trimmed.starts_with("Kernel modules")
+                || trimmed.starts_with("Subsystem")
+                || trimmed.starts_with("Flags")
+                || trimmed.starts_with("Memory")
+                || trimmed.starts_with("I/O ports")
+                || trimmed.starts_with("IRQ")
+                || trimmed.starts_with("Capabilities")
             {
                 detail.push_str(&format!("{}\n", trimmed));
             }
@@ -954,7 +1004,12 @@ fn sync_to_ui(ui: &App, state: &Arc<Mutex<DeviceState>>) {
     let storage_data: Vec<StorageDeviceData> = s
         .storage_devices
         .iter()
-        .filter(|d| matches_filter(filter, &[&d.name, &d.device_type, &d.mountpoint, &d.filesystem]))
+        .filter(|d| {
+            matches_filter(
+                filter,
+                &[&d.name, &d.device_type, &d.mountpoint, &d.filesystem],
+            )
+        })
         .map(|d| StorageDeviceData {
             name: d.name.clone().into(),
             size_text: d.size_text.clone().into(),
@@ -1024,13 +1079,7 @@ struct DeviceSnapshot {
 pub fn wire(ui: &App, ctx: &AppContext) {
     let state = Arc::new(Mutex::new(DeviceState::new()));
 
-    // Initial refresh in background
-    {
-        let state_clone = state.clone();
-        std::thread::spawn(move || {
-            refresh_all(&state_clone);
-        });
-    }
+    // Inventory is loaded on first visit, then refreshed only while visible.
 
     // 10-second refresh timer
     let refresh_timer = Timer::default();
@@ -1056,13 +1105,22 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     }
     std::mem::forget(refresh_timer);
 
-    // Initial sync after short delay
+    // Publish asynchronous results promptly while the dashboard is visible.
     {
         let state_clone = state.clone();
         let ui_weak = ui.as_weak();
+        let was_visible = std::cell::Cell::new(false);
         let init_timer = Timer::default();
         init_timer.start(TimerMode::Repeated, Duration::from_millis(500), move || {
             if let Some(ui) = ui_weak.upgrade() {
+                if ui.get_current_screen() != 27 {
+                    was_visible.set(false);
+                    return;
+                }
+                if !was_visible.replace(true) {
+                    let state_bg = state_clone.clone();
+                    std::thread::spawn(move || refresh_all(&state_bg));
+                }
                 sync_to_ui(&ui, &state_clone);
             }
         });
@@ -1109,7 +1167,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                         .usb_devices
                         .iter()
                         .enumerate()
-                        .filter(|(_, d)| matches_filter(filter, &[&d.bus, &d.vendor_product, &d.description]))
+                        .filter(|(_, d)| {
+                            matches_filter(filter, &[&d.bus, &d.vendor_product, &d.description])
+                        })
                         .map(|(i, d)| UsbDeviceData {
                             bus: d.bus.clone().into(),
                             device_id: d.device_id.clone().into(),
@@ -1256,7 +1316,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
         let context = format!(
             "GPU: {}\nSelected device details:\n{}",
-            if gpu.is_empty() { "none detected" } else { &gpu },
+            if gpu.is_empty() {
+                "none detected"
+            } else {
+                &gpu
+            },
             detail_text
         );
         let prompt = super::ai_assist::device_analysis_prompt(&context);

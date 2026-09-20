@@ -1,0 +1,144 @@
+{
+  "vm": 520,
+  "binary_sha256": "8f82fc5093643d5f3569d0bf68789163fadef114de247054bc002d0d55f9396d",
+  "memory_unit": "KiB PSS",
+  "cpu_unit": "percent of one core",
+  "runs": [
+    {
+      "name": "before",
+      "pid": 127770,
+      "samples": [
+        {
+          "screen": "settings",
+          "seconds": 20.000128654006403,
+          "cpu_percent": 6.95,
+          "pss_kib": 456304,
+          "rss_kib": 499212
+        },
+        {
+          "screen": "desktop",
+          "seconds": 20.00013547099661,
+          "cpu_percent": 4.35,
+          "pss_kib": 463180,
+          "rss_kib": 506088
+        },
+        {
+          "screen": "files",
+          "seconds": 20.000201999995625,
+          "cpu_percent": 2.45,
+          "pss_kib": 403808,
+          "rss_kib": 446716
+        },
+        {
+          "screen": "settings",
+          "seconds": 20.000199545000214,
+          "cpu_percent": 5.85,
+          "pss_kib": 458000,
+          "rss_kib": 500908
+        }
+      ]
+    },
+    {
+      "name": "software",
+      "pid": 129695,
+      "samples": [
+        {
+          "screen": "settings",
+          "seconds": 20.000248817988904,
+          "cpu_percent": 11.35,
+          "pss_kib": 248244,
+          "rss_kib": 258492
+        },
+        {
+          "screen": "desktop",
+          "seconds": 20.000148741994053,
+          "cpu_percent": 8.75,
+          "pss_kib": 265864,
+          "rss_kib": 276112
+        },
+        {
+          "screen": "files",
+          "seconds": 20.00032489199657,
+          "cpu_percent": 2.4,
+          "pss_kib": 197612,
+          "rss_kib": 207860
+        },
+        {
+          "screen": "settings",
+          "seconds": 20.00023617199622,
+          "cpu_percent": 2.8,
+          "pss_kib": 258944,
+          "rss_kib": 269192
+        }
+      ]
+    },
+    {
+      "name": "after",
+      "pid": 131674,
+      "samples": [
+        {
+          "screen": "settings",
+          "seconds": 20.00013483199291,
+          "cpu_percent": 14.95,
+          "pss_kib": 196237,
+          "rss_kib": 206500
+        },
+        {
+          "screen": "desktop",
+          "seconds": 20.00025726199965,
+          "cpu_percent": 5.7,
+          "pss_kib": 216221,
+          "rss_kib": 226484
+        },
+        {
+          "screen": "files",
+          "seconds": 20.000197550994926,
+          "cpu_percent": 1.65,
+          "pss_kib": 199577,
+          "rss_kib": 209840
+        },
+        {
+          "screen": "settings",
+          "seconds": 20.000160896001034,
+          "cpu_percent": 2.35,
+          "pss_kib": 200169,
+          "rss_kib": 210432
+        }
+      ]
+    },
+    {
+      "name": "settled",
+      "pid": 131674,
+      "samples": [
+        {
+          "screen": "settings",
+          "seconds": 20.00016861599579,
+          "cpu_percent": 1.8,
+          "pss_kib": 207973,
+          "rss_kib": 218236
+        },
+        {
+          "screen": "desktop",
+          "seconds": 20.000207311008126,
+          "cpu_percent": 1.5,
+          "pss_kib": 228221,
+          "rss_kib": 238484
+        },
+        {
+          "screen": "files",
+          "seconds": 20.000143345998367,
+          "cpu_percent": 1.1,
+          "pss_kib": 207973,
+          "rss_kib": 218236
+        },
+        {
+          "screen": "settings",
+          "seconds": 20.000158111011842,
+          "cpu_percent": 1.45,
+          "pss_kib": 207973,
+          "rss_kib": 218236
+        }
+      ]
+    }
+  ]
+}

@@ -5,7 +5,7 @@
 
 use crossbeam_channel::Sender;
 use std::collections::HashMap;
-use sysinfo::{Disks, System};
+use sysinfo::{Disks, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::events::SystemEvent;
 
@@ -29,11 +29,15 @@ fn is_thread(process: &sysinfo::Process) -> bool {
 /// Main loop for the process/resource monitor thread.
 /// Polls every `process_secs` for process changes, every `resource_secs` for CPU/RAM/disk.
 pub fn run_process_monitor(tx: Sender<SystemEvent>, process_secs: u64, resource_secs: u64) {
-    let mut sys = System::new_all();
+    let mut sys = System::new();
     let mut known_pids: HashMap<u32, String> = HashMap::new();
 
     // Initial snapshot — record all currently running processes
-    sys.refresh_all();
+    // We only consume PID, name, thread kind and CPU, never command lines,
+    // environments, executable links, per-process memory or disk I/O.
+    let process_fields = ProcessRefreshKind::nothing().with_cpu();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_fields);
+    sys.refresh_cpu_usage();
     for (pid, process) in sys.processes() {
         if is_thread(process) {
             continue;
@@ -50,7 +54,7 @@ pub fn run_process_monitor(tx: Sender<SystemEvent>, process_secs: u64, resource_
 
         // Process diff
         if tick % process_secs == 0 {
-            sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_fields);
 
             let mut current_pids: HashMap<u32, String> = HashMap::new();
             for (pid, process) in sys.processes() {
@@ -88,7 +92,7 @@ pub fn run_process_monitor(tx: Sender<SystemEvent>, process_secs: u64, resource_
 
         // Resource pressure
         if tick % resource_secs == 0 {
-            sys.refresh_cpu_all();
+            sys.refresh_cpu_usage();
             sys.refresh_memory();
 
             // CPU
@@ -132,5 +136,9 @@ pub fn run_process_monitor(tx: Sender<SystemEvent>, process_secs: u64, resource_
 
 /// Greatest common divisor (for computing the sleep interval).
 fn gcd(a: u64, b: u64) -> u64 {
-    if b == 0 { a } else { gcd(b, a % b) }
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
 }

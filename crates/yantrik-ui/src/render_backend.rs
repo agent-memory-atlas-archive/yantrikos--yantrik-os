@@ -46,12 +46,15 @@ struct Verdict {
 /// Decide the renderer and export the environment Slint reads.
 ///
 /// Must be called before the first Slint call — `App::new()` reads `SLINT_BACKEND` and never looks
-/// again. An explicit `SLINT_BACKEND` from the environment always wins, so a launch script or a
+/// again. An explicit renderer in `SLINT_BACKEND` always wins. A backend-only `winit` value
+/// still needs a renderer decision, so a launch script or a
 /// developer debugging a rendering problem can still force either renderer.
 pub fn select() -> Renderer {
     if let Ok(existing) = std::env::var("SLINT_BACKEND") {
-        tracing::info!(backend = %existing, "Renderer set explicitly; leaving it alone");
-        return Renderer::from_backend(&existing);
+        if has_explicit_renderer(&existing) {
+            tracing::info!(backend = %existing, "Renderer set explicitly; leaving it alone");
+            return Renderer::from_backend(&existing);
+        }
     }
 
     let v = decide();
@@ -67,6 +70,12 @@ pub fn select() -> Renderer {
     std::env::set_var("SLINT_BACKEND", v.backend);
     tracing::info!(backend = v.backend, reason = v.reason, "Renderer selected");
     Renderer::from_backend(v.backend)
+}
+
+// `winit` selects a window backend, not a renderer. Leaving it alone lets Slint
+// choose OpenGL even on a VM, while our animation policy incorrectly assumes CPU.
+fn has_explicit_renderer(backend: &str) -> bool {
+    !matches!(backend.trim(), "" | "winit")
 }
 
 /// Which drawing path the shell ended up on — the thing callers actually want to branch on.
@@ -131,6 +140,13 @@ impl Renderer {
 
 /// The decision itself, kept free of side effects so it can be reasoned about and tested.
 fn decide() -> Verdict {
+    if std::env::var("LIBGL_ALWAYS_SOFTWARE").as_deref() == Ok("1") {
+        return Verdict {
+            backend: "winit-software",
+            gallium: None,
+            reason: "software graphics requested; avoid software OpenGL",
+        };
+    }
     // WSL2: the GPU is behind /dev/dxg, and Mesa reaches it through the d3d12 Gallium driver only
     // when told to. The presence of the node plus the driver is sufficient evidence.
     if Path::new("/dev/dxg").exists() && has_gallium_driver("d3d12") {
@@ -188,7 +204,11 @@ fn has_gallium_driver(name: &str) -> bool {
 /// This is the question that matters. The node's existence is not evidence of acceleration:
 /// virtio-pci, vmwgfx, qxl, bochs-drm, simpledrm and the mgag200/ast BMC chips all publish one.
 fn render_node_driver() -> Option<String> {
-    for entry in std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten() {
+    for entry in std::fs::read_dir("/sys/class/drm")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         if !entry.file_name().to_string_lossy().starts_with("renderD") {
             continue;
         }
@@ -208,7 +228,16 @@ fn render_node_driver() -> Option<String> {
 fn accelerates(driver: &str) -> bool {
     matches!(
         driver,
-        "amdgpu" | "radeon" | "i915" | "xe" | "nouveau" | "nvidia" | "nvidia-drm" | "msm" | "panfrost" | "v3d"
+        "amdgpu"
+            | "radeon"
+            | "i915"
+            | "xe"
+            | "nouveau"
+            | "nvidia"
+            | "nvidia-drm"
+            | "msm"
+            | "panfrost"
+            | "v3d"
     )
 }
 
@@ -230,6 +259,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn backend_only_setting_does_not_bypass_renderer_detection() {
+        assert!(!has_explicit_renderer("winit"));
+        assert!(!has_explicit_renderer(""));
+        assert!(has_explicit_renderer("winit-software"));
+        assert!(has_explicit_renderer("winit-femtovg"));
+        assert!(has_explicit_renderer("winit-skia"));
+        assert!(has_explicit_renderer("qt"));
+    }
+
+    #[test]
     fn a_machine_with_no_gpu_gets_the_software_rasteriser() {
         // The decision on this builder reflects whatever hardware it has, but the invariant holds
         // either way: femtovg is never chosen without a positive hardware finding.
@@ -242,7 +281,10 @@ mod tests {
         } else {
             assert_eq!(v.backend, "winit-software");
         }
-        assert!(!v.reason.is_empty(), "every verdict explains itself in the log");
+        assert!(
+            !v.reason.is_empty(),
+            "every verdict explains itself in the log"
+        );
     }
 
     #[test]
@@ -262,7 +304,11 @@ mod tests {
         if std::env::var("YANTRIK_AMBIENT_MS").is_ok() {
             return;
         }
-        assert_eq!(Renderer::Gpu.ambient_interval_ms(), 16, "60fps where frames are free");
+        assert_eq!(
+            Renderer::Gpu.ambient_interval_ms(),
+            16,
+            "60fps where frames are free"
+        );
         assert_eq!(
             Renderer::Cpu.ambient_interval_ms(),
             0,

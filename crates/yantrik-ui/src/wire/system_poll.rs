@@ -342,7 +342,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                         subtitle: w.subtitle.clone().into(),
                     })
                     .collect();
-                ui.set_window_list(ModelRc::new(VecModel::from(win_items)));
+                if let Some(model) = crate::models::changed(ui.get_window_list(), win_items) {
+        ui.set_window_list(model);
+    }
             }
         }
 

@@ -66,6 +66,7 @@ struct PermState {
     filtered_suid: Vec<PermFileInfo>,
     filtered_ww: Vec<PermFileInfo>,
     scanning: bool,
+    refreshing: bool,
     dirty: bool,
     scan_path: String,
     scan_status: String,
@@ -87,6 +88,7 @@ impl PermState {
             filtered_suid: Vec::new(),
             filtered_ww: Vec::new(),
             scanning: false,
+            refreshing: false,
             dirty: true,
             scan_path: "/".to_string(),
             scan_status: String::new(),
@@ -181,7 +183,9 @@ fn parse_users() -> Vec<UserInfo> {
             gid,
             home: parts[5].to_string(),
             shell: parts[6].to_string(),
-            is_system: uid < 1000 && uid != 0 || parts[6].contains("nologin") || parts[6].contains("false"),
+            is_system: uid < 1000 && uid != 0
+                || parts[6].contains("nologin")
+                || parts[6].contains("false"),
         });
     }
 
@@ -543,6 +547,14 @@ fn shell_escape(s: &str) -> String {
 
 /// Refresh all permission data.
 fn refresh_all(state: &Arc<Mutex<PermState>>) {
+    {
+        let Ok(mut state) = state.lock() else { return };
+        if state.refreshing {
+            return;
+        }
+        state.refreshing = true;
+    }
+
     let scan_path = state
         .lock()
         .map(|s| s.scan_path.clone())
@@ -566,6 +578,7 @@ fn refresh_all(state: &Arc<Mutex<PermState>>) {
 
     if let Ok(mut s) = state.lock() {
         s.scanning = false;
+        s.refreshing = false;
         let total = s.suid_files.len() + s.world_writable.len();
         s.scan_status = format!("Done: {} files scanned", total);
         s.dirty = true;
@@ -700,13 +713,7 @@ struct PermSnapshot {
 pub fn wire(ui: &crate::App, ctx: &crate::app_context::AppContext) {
     let state = Arc::new(Mutex::new(PermState::new()));
 
-    // Initial refresh in background
-    {
-        let state_clone = state.clone();
-        std::thread::spawn(move || {
-            refresh_all(&state_clone);
-        });
-    }
+    // Inventory is loaded on first visit, then refreshed only while visible.
 
     // 30-second refresh timer
     let refresh_timer = Timer::default();
@@ -719,6 +726,9 @@ pub fn wire(ui: &crate::App, ctx: &crate::app_context::AppContext) {
             move || {
                 // Sync to UI on timer tick
                 if let Some(ui) = ui_weak.upgrade() {
+                    if ui.get_current_screen() != 28 {
+                        return;
+                    }
                     sync_to_ui(&ui, &state_clone);
                 }
 
@@ -732,16 +742,25 @@ pub fn wire(ui: &crate::App, ctx: &crate::app_context::AppContext) {
     }
     std::mem::forget(refresh_timer);
 
-    // Fast initial sync timer (200ms repeated to catch first data)
+    // Publish asynchronous results promptly only while the dashboard is visible.
     {
         let state_clone = state.clone();
         let ui_weak = ui.as_weak();
+        let was_visible = std::cell::Cell::new(false);
         let init_timer = Timer::default();
         init_timer.start(
             TimerMode::Repeated,
             std::time::Duration::from_millis(200),
             move || {
                 if let Some(ui) = ui_weak.upgrade() {
+                    if ui.get_current_screen() != 28 {
+                        was_visible.set(false);
+                        return;
+                    }
+                    if !was_visible.replace(true) {
+                        let state_bg = state_clone.clone();
+                        std::thread::spawn(move || refresh_all(&state_bg));
+                    }
                     sync_to_ui(&ui, &state_clone);
                 }
             },
@@ -990,7 +1009,10 @@ pub fn wire(ui: &crate::App, ctx: &crate::app_context::AppContext) {
             std::thread::spawn(move || {
                 let output = cmd_output("getfacl", &[&path_str]);
                 let result = if output.is_empty() {
-                    format!("No ACL data for {}\n(getfacl may not be installed)", path_str)
+                    format!(
+                        "No ACL data for {}\n(getfacl may not be installed)",
+                        path_str
+                    )
                 } else {
                     output
                 };
@@ -1051,7 +1073,9 @@ pub fn wire(ui: &crate::App, ctx: &crate::app_context::AppContext) {
 
         let mut context = format!(
             "Users: {} total\nSUID files: {} found\nWorld-writable files: {} found\n",
-            users.row_count(), suid.row_count(), world_w.row_count()
+            users.row_count(),
+            suid.row_count(),
+            world_w.row_count()
         );
 
         // List a few SUID files

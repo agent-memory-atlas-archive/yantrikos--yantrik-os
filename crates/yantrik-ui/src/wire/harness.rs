@@ -182,7 +182,9 @@ fn publish(ui: &App, host: &Host) {
         })
         .collect();
 
-    ui.set_harnesses(ModelRc::new(VecModel::from(rows)));
+    if let Some(model) = crate::models::changed(ui.get_harnesses(), rows) {
+        ui.set_harnesses(model);
+    }
     ui.set_harness_count(entries.len() as i32);
 
     // The status bar shows the NAME, not the id: it is read at a glance by a person, and `mind`

@@ -51,5 +51,7 @@ fn push(ui: &App, mgr: &ServiceManager) {
         .collect();
     // Stable order so a service does not jump rows when its state changes.
     items.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
-    ui.set_services(ModelRc::new(VecModel::from(items)));
+    if let Some(model) = crate::models::changed(ui.get_services(), items) {
+        ui.set_services(model);
+    }
 }

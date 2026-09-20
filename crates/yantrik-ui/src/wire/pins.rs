@@ -173,7 +173,9 @@ pub fn publish(ui: &App, installed: &[DesktopEntry]) {
         })
         .collect();
 
-    ui.set_dock_items(ModelRc::new(VecModel::from(items)));
+    if let Some(model) = crate::models::changed(ui.get_dock_items(), items) {
+        ui.set_dock_items(model);
+    }
 }
 
 #[cfg(test)]
