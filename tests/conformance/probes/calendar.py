@@ -735,12 +735,29 @@ def run():
             evidence={"before": store.listing(), "after": store.listing(store.after),
                       "differences": store.differences() or "none"})
 
+        # Put the service back if it was up when this probe started. It stops the service to
+        # prove that a calendar which cannot reach its store says so, and until the companion's
+        # tools began starting it at shell start the service was never up beforehand, so stopped
+        # WAS as found. It is not any more, and leaving a machine with its calendar service down
+        # because a test ran is the thing leave-as-found exists to prevent.
+        def programs(listing):
+            return sorted({line.split(None, 1)[1] if " " in line else line for line in listing})
+
+        was_up = any(SERVICE_BIN in line for line in probe.notes["processes_before"])
+        if was_up and not lib.running(SERVICE_BIN):
+            restarted = lib.act("shell", "start_service", name="calendar")
+            lib.wait_until(lambda: bool(lib.running(SERVICE_BIN)), timeout=5,
+                           what="the calendar service to come back up")
+            probe.note("service_restored", {"asked_the_shell": restarted.get("result")
+                                            or restarted.get("refused")})
+
         leftover = lib.running(APP_BIN) + lib.running(SERVICE_BIN)
         probe.note("processes_after", leftover)
         probe.note("windows_after", lib.toplevels())
+        # Which programs, not which pids: a service stopped and started again is as found.
         probe.check(
-            "no calendar process is left running that was not running before",
-            leftover == probe.notes["processes_before"],
+            "the calendar's processes are as they were found: the same programs running, no more and no fewer",
+            programs(leftover) == programs(probe.notes["processes_before"]),
             contract="leave-as-found",
             evidence={"before": probe.notes["processes_before"], "after": leftover})
 

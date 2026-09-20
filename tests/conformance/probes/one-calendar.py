@@ -151,6 +151,21 @@ def app_shows(title):
 
 def run():
     with lib.Probe("one-calendar", ONE_JOB) as probe:
+        # The companion runs one thing at a time, and on every shell start it spends minutes
+        # composing a brief. A tool asked for in that window waits its turn, so this probe, run
+        # forty seconds after a restart, failed seven checks with "the companion did not finish
+        # the tool in time" on code that passed sixteen of sixteen ten minutes later. Waiting for
+        # it to be idle measures the calendar instead of the queue. That a mind's tool call can
+        # sit behind a brief for minutes is a finding about the companion, recorded here rather
+        # than hidden: the wait and how long it took are in the report.
+        def companion_idle():
+            state = lib.state("shell") or {}
+            return state.get("companion_status") == "idle" and not state.get("thinking")
+
+        waited = lib.wait_until(companion_idle, timeout=300,
+                                what="the companion to finish what it was doing")
+        probe.note("waited_for_companion", waited.evidence())
+
         probe.note("processes_before", lib.running(APP_BIN) + lib.running(SERVICE_BIN))
         probe.note("store_dir", str(STORE))
         service_was_running = bool(lib.running(SERVICE_BIN))
