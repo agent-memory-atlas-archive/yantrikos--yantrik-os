@@ -85,6 +85,13 @@ export component SnippetManagerScreen inherits Rectangle {
     // Copy feedback
     in property <bool> copy-feedback-visible: false;
 
+    // What went wrong, in words, for the person at the keyboard.
+    //
+    // Empty is the ordinary state and draws nothing. The same sentence goes into the control
+    // surface's `notice`, because contract point 4 is that a failure is said twice: once on
+    // screen and once where a mind can read it.
+    in property <string> notice: "";
+
     // Language dropdown state
     in-out property <bool> lang-dropdown-open: false;
 
@@ -107,26 +114,25 @@ export component SnippetManagerScreen inherits Rectangle {
     callback collection-rename(int, string);
     callback collection-delete(int);
 
-    // Import/Export callbacks
+    // Export. There is no Import button any more: importing needs somebody to name a file, this
+    // screen has no file dialog, and a button that cannot name a file cannot import one. The
+    // capability is still here — `yantrik-snippet-manager <file>` and the surface's `import`
+    // action both take a path — and a file dialog on this screen would bring the button back.
     callback snip-export-all();
-    callback snip-import();
 
     // Language select
     callback snip-set-language(string);
 
-    // Version history
-    in property <[string]> snip-version-list: [];
-    in-out property <bool> snip-version-panel-open: false;
-    in property <string> snip-version-content: "";
-    callback snip-view-version(int);
-    callback snip-restore-version(int);
+    // Version history is gone: the list, the panel and the two callbacks were a drawing with no
+    // store behind them, and "Restore" over a list that is always empty is worse than no button.
+    // Keeping previous bodies per snippet in the store is what would bring it back.
 
-    // AI Assist
-    in property <bool> ai-is-working: false;
-    in property <string> ai-response: "";
-    in-out property <bool> ai-panel-open: false;
+    // AI Assist.
+    //
+    // The answer lands in the shared AgentProposalCard above, the way Weather and System Monitor
+    // put theirs: one place an app's machine-written text appears. The panel this screen used to
+    // draw for itself was a second one, fed by two `in` properties nothing ever set.
     callback ai-explain-pressed();
-    callback ai-dismiss();
 
     // -- Header --
     //
@@ -144,8 +150,8 @@ export component SnippetManagerScreen inherits Rectangle {
         // list, which is where it belongs -- it filters that list. Turning on the frame's as
         // well gave the window two identical "Search snippets" boxes side by side.
         actions: [
-            { id: "ai",  icon: Icons.spark, label: root.ai-is-working ? "Working" : "AI",
-              emphasis: 1, loading: root.ai-is-working },
+            { id: "ai",  icon: Icons.spark, label: root.proposal-working ? "Working" : "AI",
+              emphasis: 1, loading: root.proposal-working },
             { id: "new", icon: Icons.plus,  label: "New Snippet", emphasis: 2 },
         ];
         action(id) => {
@@ -162,11 +168,13 @@ export component SnippetManagerScreen inherits Rectangle {
     }
 
     HorizontalLayout {
-        // Between the header at the top and the status bar drawn over the bottom 28px.
+        // Between the header at the top and the status bar drawn over the bottom 28px, minus the
+        // notice strip when there is one. The panes shrink for it rather than being drawn over:
+        // a failure that hides the thing it is about is half a message.
         x: 0;
         y: Theme.h-app-header;
         width: parent.width;
-        height: parent.height - 28px - Theme.h-app-header;
+        height: parent.height - 28px - Theme.h-app-header - (root.notice != "" ? 28px : 0px);
         // ── Collections Sidebar ──
         Rectangle {
             width: 180px;
@@ -294,7 +302,7 @@ export component SnippetManagerScreen inherits Rectangle {
                 // Separator
                 Rectangle { height: 1px; background: Theme.separator; }
 
-                // Import/Export buttons
+                // Export button. Its Import twin is gone — see the callback declarations above.
                 HorizontalLayout {
                     spacing: 6px;
                     height: 32px;
@@ -329,33 +337,6 @@ export component SnippetManagerScreen inherits Rectangle {
                         }
                     }
 
-                    // Import button
-                    TouchArea {
-                        horizontal-stretch: 1;
-                        height: 28px;
-                        clicked => { root.snip-import(); }
-                        Rectangle {
-                            width: 100%; height: 28px;
-                            border-radius: 8px;
-                            background: parent.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
-                            HorizontalLayout {
-                                alignment: center;
-                                spacing: 4px;
-                                Icon {
-                                    commands: Icons.download;
-                                    size: 12px;
-                                    tint: Theme.text-secondary;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                                Text {
-                                    text: "Import";
-                                    font-size: Theme.font-small;
-                                    color: Theme.text-secondary;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
                 }
 
                 // Delete collection button (only for custom collections)
@@ -964,14 +945,13 @@ export component SnippetManagerScreen inherits Rectangle {
                         height: 38px;
                         clicked => {
                             root.ai-explain-pressed();
-                            root.ai-panel-open = true;
                         }
                         Rectangle {
                             width: 90px; height: 38px;
                             border-radius: Theme.radius-pill;
-                            background: root.ai-is-working ? AppIdentity.accent
+                            background: root.proposal-working ? AppIdentity.accent
                                 : (parent.has-hover ? Theme.hover-fill-strong : Theme.hover-fill);
-                            border-width: root.ai-is-working ? 0px : 1px;
+                            border-width: root.proposal-working ? 0px : 1px;
                             border-color: Theme.border-subtle;
                             HorizontalLayout {
                                 padding-left: 8px;
@@ -985,8 +965,8 @@ export component SnippetManagerScreen inherits Rectangle {
                                     y: (parent.height - self.height) / 2;
                                 }
                                 Text {
-                                    text: root.ai-is-working ? "..." : "AI Explain";
-                                    color: root.ai-is-working ? Theme.text-on-accent : Theme.text-secondary;
+                                    text: root.proposal-working ? "..." : "AI Explain";
+                                    color: root.proposal-working ? Theme.text-on-accent : Theme.text-secondary;
                                     font-size: Theme.font-body;
                                     font-weight: 500;
                                     vertical-alignment: center;
@@ -995,42 +975,7 @@ export component SnippetManagerScreen inherits Rectangle {
                         }
                     }
 
-                    // Version History button
-                    Rectangle {
-                        width: 110px;
-                        height: 38px;
-                        background: ver-ta.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
-                        border-radius: Theme.radius-pill;
-                        border-width: 1px;
-                        border-color: root.snip-version-panel-open ? Theme.accent-dim : Theme.border-subtle;
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            spacing: 4px;
-                            alignment: center;
-
-                            Icon {
-                                commands: Icons.doc;
-                                size: 12px;
-                                tint: Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-                            Text {
-                                text: "Versions";
-                                color: root.snip-version-panel-open ? AppIdentity.accent : Theme.text-secondary;
-                                font-size: Theme.font-body;
-                                font-weight: 500;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        ver-ta := TouchArea {
-                            clicked => {
-                                root.snip-version-panel-open = !root.snip-version-panel-open;
-                            }
-                        }
-                    }
+                    // The Versions button stood here and opened an always-empty panel.
 
                     // Spacer
                     Rectangle { horizontal-stretch: 1; }
@@ -1136,216 +1081,45 @@ export component SnippetManagerScreen inherits Rectangle {
         }
     }
 
-    // ── AI Response Panel ──
-    Rectangle {
-        visible: root.ai-panel-open && root.ai-response != "";
-        height: min(180px, ai-snip-resp.preferred-height + 16px);
+    // The AI Response Panel and the Version History Panel stood here.
+    //
+    // The first was a second place for machine-written text, fed by `ai-response` and
+    // `ai-is-working`, neither of which anything ever set; the AgentProposalCard above now
+    // carries the answer, as it does in Weather and System Monitor. The second listed
+    // versions this app has never kept.
+
+    // ── Notice ──
+    //
+    // A strip above the status bar, drawn only when there is something to say. It is the
+    // person-facing half of contract point 4; the machine-facing half is `notice` in the
+    // control surface's describe, and both are set from the same string in Rust.
+    if root.notice != "" : Rectangle {
+        x: 0;
+        y: parent.height - 28px - self.height;
         width: 100%;
-        background: Theme.bg-surface;
-        border-width: 1px;
-        border-color: Theme.accent.transparentize(70%);
+        height: 28px;
+        background: Theme.color-danger-dim;
 
-        Flickable {
-            viewport-height: ai-snip-resp.preferred-height + 16px;
-
-            ai-snip-resp := VerticalLayout {
-                alignment: start;
-                padding: 12px;
-                spacing: 8px;
-
-                HorizontalLayout {
-                    spacing: 6px;
-                    Icon {
-                        commands: Icons.spark;
-                        size: 12px;
-                        tint: Theme.text-secondary;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    Text {
-                        text: "AI Explanation";
-                        color: Theme.accent;
-                        font-size: Theme.fs-caption;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-
-                    // Dismiss button
-                    TouchArea {
-                        width: 24px;
-                        height: 24px;
-                        clicked => {
-                            root.ai-panel-open = false;
-                            root.ai-dismiss();
-                        }
-                        Rectangle {
-                            width: 24px; height: 24px;
-                            border-radius: 12px;
-                            background: parent.has-hover ? Theme.hover-fill : transparent;
-                            Icon {
-                                commands: Icons.close;
-                                size: 12px;
-                                tint: Theme.text-dim;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-                }
-
-                Text {
-                    text: root.ai-response;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-caption;
-                    wrap: word-wrap;
-                }
-            }
-        }
-    }
-
-    // ── Version History Panel (right side overlay) ──
-    if root.snip-version-panel-open : Rectangle {
-        x: parent.width - 280px;
-        y: 8px;
-        width: 270px;
-        height: parent.height - 44px;
-        background: Theme.bg-card;
-        border-radius: Theme.radius-card;
-        border-width: 1px;
-        border-color: Theme.accent.transparentize(70%);
-
-        VerticalLayout {
-            padding: 12px;
+        HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
             spacing: 8px;
+            alignment: start;
 
-            // Header
-            HorizontalLayout {
-                height: 28px;
-                spacing: 8px;
-
-                Text {
-                    text: "Version History";
-                    font-size: Theme.font-body;
-                    font-weight: 600;
-                    color: Theme.text-primary;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-
-                TouchArea {
-                    width: 24px;
-                    height: 24px;
-                    clicked => { root.snip-version-panel-open = false; }
-                    Rectangle {
-                        width: 24px; height: 24px;
-                        border-radius: 12px;
-                        background: parent.has-hover ? Theme.hover-fill-strong : transparent;
-
-                        Icon {
-                            commands: Icons.close;
-                            size: 12px;
-                            tint: Theme.text-dim;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                        }
-                    }
-                }
+            Icon {
+                commands: Icons.warning;
+                size: 12px;
+                tint: Theme.color-danger;
+                y: (parent.height - self.height) / 2;
             }
 
-            // Version list
-            Flickable {
-                viewport-height: ver-list-col.preferred-height;
-
-                ver-list-col := VerticalLayout {
-                    alignment: start;
-                    spacing: 4px;
-
-                    if root.snip-version-list.length == 0 : Text {
-                        text: "No previous versions.";
-                        font-size: Theme.font-small;
-                        color: Theme.text-dim;
-                        horizontal-alignment: center;
-                    }
-
-                    for ver[idx] in root.snip-version-list : Rectangle {
-                        height: 44px;
-                        background: ver-item-ta.has-hover ? Theme.hover-fill : transparent;
-                        border-radius: 8px;
-
-                        ver-item-ta := TouchArea {
-                            clicked => { root.snip-view-version(idx); }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 8px;
-                            spacing: 6px;
-
-                            VerticalLayout {
-                                spacing: 2px;
-                                horizontal-stretch: 1;
-                                alignment: center;
-
-                                Text {
-                                    text: "v" + (root.snip-version-list.length - idx);
-                                    font-size: Theme.font-body;
-                                    font-weight: 500;
-                                    color: Theme.text-primary;
-                                }
-
-                                Text {
-                                    text: ver;
-                                    font-size: Theme.fs-micro;
-                                    color: Theme.text-dim;
-                                }
-                            }
-
-                            // Restore button
-                            TouchArea {
-                                width: 56px;
-                                height: 24px;
-                                clicked => { root.snip-restore-version(idx); }
-
-                                Rectangle {
-                                    width: 56px; height: 24px;
-                                    border-radius: 12px;
-                                    background: parent.has-hover ? Theme.accent-dim : Theme.hover-fill;
-                                    border-width: 1px;
-                                    border-color: Theme.border-subtle;
-
-                                    Text {
-                                        text: "Restore";
-                                        font-size: Theme.fs-micro;
-                                        color: Theme.text-secondary;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Version content preview
-            if root.snip-version-content != "" : Rectangle {
-                background: Theme.bg-deep;
-                border-radius: 8px;
-                height: 120px;
-
-                Flickable {
-                    viewport-height: ver-preview-txt.preferred-height + 16px;
-
-                    ver-preview-txt := Text {
-                        x: 8px;
-                        width: parent.width - 16px;
-                        text: root.snip-version-content;
-                        font-size: Theme.fs-micro;
-                        font-family: Theme.font-mono;
-                        color: Theme.text-secondary;
-                        wrap: word-wrap;
-                    }
-                }
+            Text {
+                text: root.notice;
+                font-size: Theme.font-small;
+                color: Theme.text-primary;
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
             }
         }
     }

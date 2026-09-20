@@ -65,22 +65,16 @@ export component SnippetManagerApp inherits Window {
     // Copy feedback
     in property <bool> copy-feedback-visible <=> inner.copy-feedback-visible;
 
+    // What went wrong, in words. Empty draws nothing; the same sentence goes to the control
+    // surface, so a failure is said once on screen and once where a mind can read it.
+    in property <string> notice <=> inner.notice;
+
     // Language dropdown
     in-out property <bool> lang-dropdown-open <=> inner.lang-dropdown-open;
 
     // Rename mode
     in-out property <bool> rename-mode <=> inner.rename-mode;
     in-out property <string> rename-text <=> inner.rename-text;
-
-    // Version history
-    in property <[string]> snip-version-list <=> inner.snip-version-list;
-    in-out property <bool> snip-version-panel-open <=> inner.snip-version-panel-open;
-    in property <string> snip-version-content <=> inner.snip-version-content;
-
-    // AI Assist
-    in property <bool> ai-is-working <=> inner.ai-is-working;
-    in property <string> ai-response <=> inner.ai-response;
-    in-out property <bool> ai-panel-open <=> inner.ai-panel-open;
 
     // Snippet callbacks
     callback snip-search <=> inner.snip-search;
@@ -98,20 +92,15 @@ export component SnippetManagerApp inherits Window {
     callback collection-rename <=> inner.collection-rename;
     callback collection-delete <=> inner.collection-delete;
 
-    // Import/export
+    // Export. Import has no button: it needs a path, and this screen has no file dialog. The
+    // command line and the surface's `import` action are where a path can be named.
     callback snip-export-all <=> inner.snip-export-all;
-    callback snip-import <=> inner.snip-import;
 
     // Language
     callback snip-set-language <=> inner.snip-set-language;
 
-    // Version history
-    callback snip-view-version <=> inner.snip-view-version;
-    callback snip-restore-version <=> inner.snip-restore-version;
-
-    // AI
+    // AI. The answer lands in the shared proposal card above the panes.
     callback ai-explain-pressed <=> inner.ai-explain-pressed;
-    callback ai-dismiss <=> inner.ai-dismiss;
 
     inner := SnippetManagerScreen {
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).
