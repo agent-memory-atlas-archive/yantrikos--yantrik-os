@@ -56,10 +56,43 @@ export component IntentLens inherits Rectangle {
     in-out property <string> input-text: "";
     in-out property <int> selected-index: 0;   // keyboard-navigable cursor
 
+    /// Move the highlight through the result feed, stepping over divider rows.
+    ///
+    /// A function rather than a block inside one key handler, because two places need it now:
+    /// the text field, which is where the cursor actually is while you are typing, and the
+    /// keyboard scope below.
+    function move-selection(delta: int) {
+        if (root.results.length > 0) {
+            root.selected-index = clamp(root.selected-index + delta, 0, root.results.length - 1);
+            if (root.results[root.selected-index].result-type == "divider") {
+                root.selected-index = clamp(root.selected-index + delta, 0, root.results.length - 1);
+            }
+        }
+    }
+
     // Right-side panel — no full-screen overlay, desktop stays visible
     width: 100%;
     height: 100%;
     background: transparent;
+
+    // Put the cursor in the field when the Lens opens.
+    //
+    // `forward-focus: lens-input` at the foot of this file only redirects focus that arrives AT
+    // this component, and nothing sent it any: every way of opening the Lens — the ask bar, the
+    // orb, the taskbar anchor, the palette's AI rows — sets `lens-open` and stops. So the panel
+    // slid in with an empty field, a blinking-less caret and no way to type into it without
+    // clicking the field first. One handler on the state change covers all of those openers at
+    // once, which is why it lives here and not in each of them.
+    //
+    // Chat mode has its own field and collapses the search row to zero height behind it; Slint
+    // cannot focus an element with no size, so this handler covers the search field and the chat
+    // panel focuses its own (it is inside an `if`, and an id in a conditional cannot be named
+    // from out here — see the `changed lens-open` beside `chat-input`).
+    changed is-open => {
+        if (root.is-open && !root.chat-mode) {
+            lens-input.focus();
+        }
+    }
 
     // Holographic scan phase
     property <float> lens-glow-phase: 0;
@@ -267,12 +300,45 @@ export component IntentLens inherits Rectangle {
                     Rectangle {
                         horizontal-stretch: 1;
                         height: Theme.lens-input-height;
+                        // The field below is now as wide as its own text, so without a minimum
+                        // of its own this box would ask the row for that width and a long
+                        // question would push the Escape hint off the panel. One pixel, the same
+                        // floor Slint's own LineEditBase sets, and for the same second reason it
+                        // gives: a TextInput narrower than a pixel cannot be focused.
+                        min-width: 1px;
                         forward-focus: lens-input;
                         clip: true;
 
                         lens-input := TextInput {
+                            // ── Long questions scroll instead of vanishing ──────────────────
+                            //
+                            // This was `width: parent.width` inside a clipping box, which is the
+                            // one combination that cannot scroll: the text is laid out at the
+                            // width of the field, so everything past the edge — around 32
+                            // characters at this font size — was drawn outside and clipped away,
+                            // caret included. You went on typing with no idea what you had
+                            // written, and could not see the end of your own question before
+                            // pressing Enter on it. The ask bar is the primary interaction of
+                            // this desktop and it could not hold a sentence.
+                            //
+                            // The fix is Slint's own, lifted from `LineEditBase` in the widget
+                            // set (i-slint-compiler/widgets/common/lineedit-base.slint): let the
+                            // field be as wide as its text, keep a private offset, and move that
+                            // offset just far enough to keep the caret inside the visible box
+                            // whenever it moves. `min`/`max` pin it so the text never scrolls
+                            // past either end.
+                            property <length> computed-x;
+                            x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.computed-x));
+                            width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                            cursor-position-changed(cursor-position) => {
+                                if (cursor-position.x + self.computed-x < 0px) {
+                                    self.computed-x = -cursor-position.x;
+                                } else if (cursor-position.x + self.computed-x > parent.width - self.text-cursor-width) {
+                                    self.computed-x = parent.width - cursor-position.x - self.text-cursor-width;
+                                }
+                            }
+
                             y: (parent.height - self.preferred-height) / 2;
-                            width: parent.width;
                             color: Theme.text-primary;
                             font-size: Theme.fs-title-1;
                             // single-line: true is REQUIRED for `accepted` to fire.
@@ -282,6 +348,32 @@ export component IntentLens inherits Rectangle {
                             // to submit with Enter.
                             single-line: true;
                             text <=> root.input-text;
+
+                            // Escape and the arrows, handled where the focus actually is.
+                            //
+                            // `key-handler` at the foot of this file has held this logic for as
+                            // long as it has existed and has never run: it is a 0x0 FocusScope
+                            // beside the panel, so it is neither focused nor an ancestor of
+                            // anything that is, and a key event reaches neither. Now that the
+                            // field takes the cursor when the Lens opens, that matters — Escape
+                            // has to close the panel from inside the field, or the Lens is a trap
+                            // you can only leave with the mouse.
+                            key-pressed(event) => {
+                                if (event.text == Key.Escape) {
+                                    root.close-lens();
+                                    return accept;
+                                }
+                                if (event.text == Key.DownArrow) {
+                                    root.move-selection(1);
+                                    return accept;
+                                }
+                                if (event.text == Key.UpArrow) {
+                                    root.move-selection(-1);
+                                    return accept;
+                                }
+                                return reject;
+                            }
+
                             accepted => {
                                 if root.input-text != "" {
                                     // Active search: Enter selects the highlighted result.
@@ -880,6 +972,21 @@ export component IntentLens inherits Rectangle {
 
             // ── Chat mode (multi-turn conversation) ──
             if root.chat-mode : VerticalLayout {
+                // The cursor goes in the reply box when the Lens opens in chat mode — which is
+                // most of the time, because the Lens restores chat mode whenever the
+                // conversation has messages in it.
+                //
+                // The obvious place for this is the `changed is-open` handler on the component
+                // root, beside the one that focuses the search field. It cannot go there:
+                // `chat-input` is inside this `if`, and Slint will not let an id inside a
+                // conditional be named from outside it. Mirroring `is-open` onto a property of
+                // this element puts the change where the field is visible, which is the same
+                // handler in the only scope that can write it.
+                property <bool> lens-open: root.is-open;
+                changed lens-open => {
+                    if (self.lens-open) { chat-input.focus(); }
+                }
+
                 // Messages — fills available panel height
                 ListView {
                     vertical-stretch: 1;
@@ -984,6 +1091,16 @@ export component IntentLens inherits Rectangle {
                                 wrap: word-wrap;
                                 single-line: false;
                                 text <=> chat-text;
+                                // The same reason as the search field: this one takes the cursor
+                                // when the Lens opens in chat mode, and a panel you cannot close
+                                // from the keyboard once you are typing in it is a trap.
+                                key-pressed(event) => {
+                                    if (event.text == Key.Escape) {
+                                        root.close-lens();
+                                        return accept;
+                                    }
+                                    return reject;
+                                }
                                 accepted => {
                                     if chat-text != "" {
                                         root.send-message(chat-text);
@@ -1039,36 +1156,22 @@ export component IntentLens inherits Rectangle {
     changed results => { root.selected-index = 0; }
 
     // Keyboard navigation — Up/Down/Tab move selection, Escape closes.
-    // Skips divider rows automatically.
+    //
+    // Kept, and no longer the only copy. This is a 0x0 FocusScope standing beside the panel: it
+    // is not focused and it is not an ancestor of the field that is, so Slint has never had a
+    // path to deliver a key to it, and Escape and the arrows did nothing for as long as the Lens
+    // has existed. The field carries the same three keys now (see `lens-input.key-pressed`);
+    // this stays for the case where something else inside the panel has focus and rejects a key,
+    // which does reach it by bubbling.
     key-handler := FocusScope {
         width: 0; height: 0;
         key-pressed(event) => {
             if event.text == Key.DownArrow || event.text == Key.Tab {
-                if root.results.length > 0 {
-                    root.selected-index = clamp(
-                        root.selected-index + 1, 0, root.results.length - 1
-                    );
-                    // Skip divider
-                    if root.results[root.selected-index].result-type == "divider" {
-                        root.selected-index = clamp(
-                            root.selected-index + 1, 0, root.results.length - 1
-                        );
-                    }
-                }
+                root.move-selection(1);
                 return accept;
             }
             if event.text == Key.UpArrow {
-                if root.results.length > 0 {
-                    root.selected-index = clamp(
-                        root.selected-index - 1, 0, root.results.length - 1
-                    );
-                    // Skip divider
-                    if root.results[root.selected-index].result-type == "divider" {
-                        root.selected-index = clamp(
-                            root.selected-index - 1, 0, root.results.length - 1
-                        );
-                    }
-                }
+                root.move-selection(-1);
                 return accept;
             }
             if event.text == Key.Escape {

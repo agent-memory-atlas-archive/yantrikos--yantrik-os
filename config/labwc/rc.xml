@@ -147,6 +147,27 @@
       </action>
     </keybind>
 
+    <!--
+      The ask bar, from anywhere.
+
+      The shell handles Ctrl+K itself (app.slint, `global-keys`), and that is the binding the
+      desktop advertises — but it only works while the shell window has the keyboard. labwc gives
+      the keyboard to the focused toplevel, so with Notes or a terminal in front, Ctrl+K is that
+      app's key and the shell never sees it. A compositor binding is the only thing that works
+      from inside another window.
+
+      Super+K rather than Ctrl+K, deliberately. A compositor binding is a global grab: binding
+      Ctrl+K here would take it away from every application on the machine for good, and Ctrl+K
+      is kill-to-end-of-line in a shell and a real shortcut in most editors. Super is the key
+      this desktop reserves for itself — the same reason Super+E and Super+L are here — so this
+      adds a way in without taking one away.
+    -->
+    <keybind key="W-k">
+      <action name="Execute">
+        <command>/opt/yantrik/bin/yos act shell open_lens</command>
+      </action>
+    </keybind>
+
     <!-- ── Screenshots ────────────────────────────────────────────────────────────────── -->
     <!--
       Into ~/Pictures with a sortable name, which is what every desktop does. `slurp` draws the

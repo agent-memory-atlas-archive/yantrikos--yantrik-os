@@ -23,38 +23,26 @@ fn build_commands() -> Vec<CommandItem> {
     let mut cmds = Vec::with_capacity(80);
 
     // ── Navigation ──
+    //
+    // Only the screens `app.slint` draws. Sixteen rows stood here and nine of them went nowhere:
+    // Terminal (14), Notes (15), Email (17), Calendar (18), Weather (19), Network (22), System
+    // Monitor (23), Document Editor (30) and Presentation (31) all became their own app binaries,
+    // their `if current-screen == N` branches went with them, and the palette rows stayed —
+    // so choosing "Go to Terminal" set `current-screen` to a number nothing renders and left the
+    // person looking at a blank screen with a taskbar on it, from which the only way back was
+    // knowing to press the desktop key.
+    //
+    // They are gone rather than repointed: opening those apps is what the Lens and the launcher
+    // are for, and a palette row is a promise about a place in the shell.
+    // `every_navigation_command_names_a_screen_the_shell_has` below reads app.slint and fails if
+    // one comes back.
     nav(&mut cmds, "Go to Desktop", "1", "⌂", "nav:1");
     nav(&mut cmds, "Go to Files", "8", "F", "nav:8");
     nav(&mut cmds, "Go to Settings", "7", "⚙", "nav:7");
-    nav(&mut cmds, "Go to Terminal", "14", ">_", "nav:14");
-    nav(&mut cmds, "Go to Notes", "15", "✎", "nav:15");
-    nav(&mut cmds, "Go to Email", "17", "@", "nav:17");
-    nav(&mut cmds, "Go to Calendar", "18", "▦", "nav:18");
-    nav(&mut cmds, "Go to Weather", "19", "W", "nav:19");
     nav(&mut cmds, "Go to Packages", "21", "P", "nav:21");
-    nav(&mut cmds, "Go to Network", "22", "N", "nav:22");
-    nav(&mut cmds, "Go to System Monitor", "23", "◉", "nav:23");
     nav(&mut cmds, "Go to Image Viewer", "11", "I", "nav:11");
     nav(&mut cmds, "Go to Text Editor", "12", "≡", "nav:12");
     nav(&mut cmds, "Go to Media Player", "13", "▶", "nav:13");
-    nav(&mut cmds, "Go to Document Editor", "30", "YD", "nav:30");
-    nav(&mut cmds, "Go to Presentation", "31", "YP", "nav:31");
-
-    // ── Email ──
-    cmd(&mut cmds, "Compose New Email", "Email", "@", "email:compose", "");
-    cmd(&mut cmds, "Check Mail", "Email", "@", "email:check", "");
-    cmd(&mut cmds, "Search Email", "Email", "@", "email:search", "");
-
-    // ── Calendar ──
-    cmd(&mut cmds, "New Calendar Event", "Calendar", "▦", "calendar:new", "");
-    cmd(&mut cmds, "Today's Events", "Calendar", "▦", "calendar:today", "");
-
-    // ── Notes ──
-    cmd(&mut cmds, "New Note", "Notes", "✎", "notes:new", "");
-    cmd(&mut cmds, "Search Notes", "Notes", "✎", "notes:search", "");
-
-    // ── Terminal ──
-    cmd(&mut cmds, "New Terminal Tab", "Terminal", ">_", "terminal:new-tab", "Ctrl+T");
 
     // ── Text Editor ──
     cmd(&mut cmds, "New Editor Tab", "Editor", "≡", "editor:new-tab", "");
@@ -64,12 +52,14 @@ fn build_commands() -> Vec<CommandItem> {
     // "Go to Spreadsheet", "New Spreadsheet" and "Import CSV" were here; see
     // wire::dock::SHELVED for why, and put them back with the apps.
     //
-    // ── Document ──
-    cmd(&mut cmds, "New Document", "Document", "YD", "document:new", "");
-
-    // ── Presentation ──
-    cmd(&mut cmds, "New Presentation", "Slides", "YP", "presentation:new", "");
-
+    // Email, Calendar, Notes, Terminal, Document and Presentation had rows here too — "Compose
+    // New Email", "New Calendar Event", "New Note", "New Terminal Tab" (advertising Ctrl+T),
+    // "New Document", "New Presentation" and three searches. Every one of them dispatched to a
+    // screen id in the dead range above, so all ten did the same nothing the nav rows did. They
+    // are not repointed at the apps either, because none of those binaries takes an instruction
+    // on its command line: launching Notes and calling that "New Note" would be a second, quieter
+    // version of the same broken promise.
+    //
     // ── System ──
     cmd(&mut cmds, "Lock Screen", "System", "L", "system:lock", "");
     cmd(&mut cmds, "Take Screenshot", "System", "S", "system:screenshot", "");
@@ -91,6 +81,28 @@ fn build_commands() -> Vec<CommandItem> {
     cmd(&mut cmds, "Search Memory", "Search", "◈", "search:memory", "");
 
     cmds
+}
+
+/// The screen a command lands on, for every command that is a navigation — whether or not it is
+/// spelled `nav:`.
+///
+/// A function rather than arms inside the dispatch closure, because the closure needs a live
+/// `App` and therefore cannot be called from a test, and the mapping is exactly what was wrong:
+/// ten commands carried screen ids that `app.slint` stopped rendering when those apps became
+/// their own binaries. `every_navigation_command_names_a_screen_the_shell_has` reads this and
+/// app.slint together, so the next id to go stale fails the build instead of showing a blank
+/// screen.
+fn screen_for(action: &str) -> Option<i32> {
+    if let Some(id) = action.strip_prefix("nav:") {
+        return id.parse().ok();
+    }
+    match action {
+        "system:notifications" => Some(9),
+        "system:about" => Some(16),
+        // The editor is still a screen of the shell as well as a binary.
+        a if a.starts_with("editor:") => Some(12),
+        _ => None,
+    }
 }
 
 /// Filter commands by query (fuzzy case-insensitive match on label + category).
@@ -168,11 +180,12 @@ fn wire_selected(ui: &App, ctx: &AppContext) {
         // Close palette
         ui.set_command_palette_open(false);
 
-        if action.starts_with("nav:") {
-            if let Ok(screen) = action[4..].parse::<i32>() {
-                ui.set_current_screen(screen);
-                ui.invoke_navigate(screen);
-            }
+        // Navigation first, from the one table a test can read. It used to be a chain of `else
+        // if` arms holding screen ids inline — which is how ten of them came to point at screens
+        // app.slint no longer draws without anything noticing.
+        if let Some(screen) = screen_for(&action) {
+            ui.set_current_screen(screen);
+            ui.invoke_navigate(screen);
         } else if action == "system:lock" {
             ui.invoke_lock_screen();
         } else if action == "system:quick-settings" {
@@ -181,38 +194,16 @@ fn wire_selected(ui: &App, ctx: &AppContext) {
             ui.invoke_toggle_dnd_mode();
         } else if action == "system:power" {
             ui.set_power_menu_open(true);
-        } else if action == "system:notifications" {
-            ui.set_current_screen(9);
-            ui.invoke_navigate(9);
-        } else if action == "system:about" {
-            ui.set_current_screen(16);
-            ui.invoke_navigate(16);
-        } else if action.starts_with("email:") {
-            ui.set_current_screen(17);
-            ui.invoke_navigate(17);
-        } else if action.starts_with("calendar:") {
-            ui.set_current_screen(18);
-            ui.invoke_navigate(18);
-        } else if action.starts_with("notes:") {
-            ui.set_current_screen(15);
-            ui.invoke_navigate(15);
-        } else if action.starts_with("terminal:") {
-            ui.set_current_screen(14);
-            ui.invoke_navigate(14);
-        } else if action.starts_with("editor:") {
-            ui.set_current_screen(12);
-            ui.invoke_navigate(12);
-        } else if action.starts_with("document:") {
-            ui.set_current_screen(30);
-            ui.invoke_navigate(30);
-        } else if action.starts_with("presentation:") {
-            ui.set_current_screen(31);
-            ui.invoke_navigate(31);
-        } else if action.starts_with("ai:") {
-            // Open lens in chat mode for AI queries
-            ui.set_lens_open(true);
-            ui.invoke_open_lens();
-        } else if action.starts_with("search:") {
+        } else if action.starts_with("ai:") || action.starts_with("search:") {
+            // The Lens, which the desktop screen draws and no other screen does. Six rows set
+            // `lens-open` and stopped there, so choosing "Ask AI" or "Search Files" from any
+            // screen but the desktop flipped a property behind a screen that does not render the
+            // panel: the palette closed and nothing else happened. Same two lines the ask bar,
+            // the orb and Ctrl+K use.
+            if ui.get_current_screen() != 1 {
+                ui.set_current_screen(1);
+                ui.invoke_navigate(1);
+            }
             ui.set_lens_open(true);
             ui.invoke_open_lens();
         } else if action == "system:screenshot" {
@@ -292,17 +283,69 @@ mod tests {
         }
     }
 
+    /// The screen ids `app.slint` actually draws, read off the file.
+    ///
+    /// The same source of truth `control::screen_table_tests` reads, for the same reason: a
+    /// number means whatever that file says it means, and any list of ids kept by hand beside it
+    /// goes stale without anyone touching it.
+    fn rendered_screens() -> Vec<i32> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../yantrik-ui-slint/ui/app.slint");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        src.lines()
+            .filter_map(|line| line.trim().strip_prefix("if current-screen == "))
+            .filter_map(|rest| {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse::<i32>().ok()
+            })
+            .collect()
+    }
+
     /// Every command goes somewhere. A palette row that navigates to a screen nothing renders is
     /// the same broken promise as a tile that opens nothing.
+    ///
+    /// This used to assert that no row named screen 20 or 29 and called the rest "older debt".
+    /// The older debt was nine nav rows and ten app commands pointing at 14, 15, 17, 18, 19, 22,
+    /// 23, 30 and 31 — every one of which had stopped being drawn when those apps became their
+    /// own binaries. The check now reads app.slint instead of naming the two ids somebody
+    /// happened to have looked at.
     #[test]
     fn every_navigation_command_names_a_screen_the_shell_has() {
-        // Screens the shell renders, from the `if current-screen == N` branches in app.slint.
-        // Checked here for the rows this change touched; the rest of the list is older debt.
+        let rendered = rendered_screens();
+        assert!(!rendered.is_empty(), "app.slint has no screen branches; the reader is broken");
+
+        let dead: Vec<String> = build_commands()
+            .iter()
+            .filter_map(|item| {
+                let screen = screen_for(item.action_id.as_str())?;
+                (!rendered.contains(&screen))
+                    .then(|| format!("{} -> screen {screen}", item.label))
+            })
+            .collect();
+
+        assert!(
+            dead.is_empty(),
+            "these palette rows navigate to screens app.slint does not draw, so choosing one \
+             leaves a blank screen:\n  {}\n\n\
+             Either the screen went away (drop the row) or the id is wrong. The ids are defined \
+             by app.slint, not by this file.",
+            dead.join("\n  ")
+        );
+    }
+
+    /// A `nav:` row carries a number, not a name. Parsing it in the dispatch and silently doing
+    /// nothing when it fails is how a typo becomes a row that looks fine and is not.
+    #[test]
+    fn every_nav_row_carries_a_screen_id_that_parses() {
         for item in build_commands() {
             let action = item.action_id.to_string();
-            if let Some(n) = action.strip_prefix("nav:") {
-                let screen: i32 = n.parse().expect("a nav command carries a screen id");
-                assert!(screen != 20 && screen != 29, "`{}` opens a blank screen", item.label);
+            if action.starts_with("nav:") {
+                assert!(
+                    screen_for(&action).is_some(),
+                    "`{}` is a nav row whose action `{action}` has no screen id",
+                    item.label
+                );
             }
         }
     }

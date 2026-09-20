@@ -98,6 +98,9 @@ export component DesktopScreen inherits Rectangle {
 
     // Intent Lens state
     in-out property <bool> lens-open: false;
+    /// What is typed in the Lens. Carried up to the App so the shell's control surface can
+    /// prefill the ask bar and report back what is actually in it.
+    in-out property <string> lens-input-text: "";
     in property <[LensResult]> lens-results: [];
     in property <bool> lens-chat-mode: false;
     in property <[LensResult]> lens-suggestions: [];
@@ -1025,6 +1028,7 @@ export component DesktopScreen inherits Rectangle {
     // ── Layer 3: Intent Lens overlay ──
     IntentLens {
         is-open: root.lens-open;
+        input-text <=> root.lens-input-text;
         is-thinking: root.is-thinking;
         results: root.lens-results;
         companion-status: root.companion-status;

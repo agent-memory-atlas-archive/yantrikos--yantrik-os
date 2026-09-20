@@ -170,6 +170,20 @@ fn main() {
     // are stubs: the model, the memory and the bond all live in this process.
     companion_rpc::serve(ctx.bridge.handle());
 
+    // Adopt the windows that were already open.
+    //
+    // The shell learns of a window by starting it, and that knowledge lives in a HashMap in this
+    // process — so it is empty every time this process starts. Restart the shell while the
+    // compositor keeps running (a crash, an update, `systemctl restart`) and the apps stay on
+    // screen while the shell believes nothing is open: `describe shell` answered "0 windows
+    // open" with four windows in front of the person reading it, and every dock tile was dark.
+    //
+    // The compositor is the one thing in the session that outlived us, so it is asked once here,
+    // before anything publishes anything. After this the taskbar refresh keeps it current on its
+    // own cadence; this call is only about the first answer being right rather than the fourth.
+    let adopted = windows::refresh_compositor_windows();
+    tracing::info!(adopted, "Windows already open when the shell started");
+
     // And publish the desktop itself, the same way every app does. Without it, "what is on my
     // desktop right now" was answerable only by photographing a status bar we wrote ourselves.
     control::publish(&ui, &ctx, service_manager.clone());
@@ -182,6 +196,15 @@ fn main() {
             ui.invoke_navigate(screen);
         }
     }
+
+    // Give the shell's shortcut scope the keyboard.
+    //
+    // Slint delivers a key press to the focused element and walks up from there; with nothing
+    // focused there is no chain and the event is dropped before any handler — capture included —
+    // is consulted. A shell that has just started and is sitting on the desktop has nothing
+    // focused, so the first Ctrl+K after boot would have gone nowhere. See `focus-global-keys`
+    // in app.slint.
+    ui.invoke_focus_global_keys();
 
     // Run
     tracing::info!("Starting Yantrik OS desktop shell");

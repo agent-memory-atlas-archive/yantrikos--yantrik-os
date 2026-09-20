@@ -123,6 +123,13 @@ export component App inherits Window {
 
     // Intent Lens state
     in-out property <bool> lens-open: false;
+    /// What is typed in the Lens, readable and writable from outside the window.
+    ///
+    /// The Lens owned this string privately, so the shell's control surface could open the ask
+    /// bar and then had no way to put a question in it or to report what was in it — `open_lens
+    /// text=…` would have had to answer "accepted" and hope. It is plumbed up through
+    /// DesktopScreen to here so `describe` can read the field and an agent can prefill it.
+    in-out property <string> lens-input-text: "";
     in property <[LensResult]> lens-results: [];
     in property <bool> lens-chat-mode: false;
     in property <[LensResult]> lens-suggestions: [];
@@ -1039,9 +1046,58 @@ export component App inherits Window {
         width: 100%;
         height: 100%;
 
-        // Global hotkey: Super+Space for voice activation
+        // ── The shell's own keyboard shortcuts ────────────────────────────────────────────
+        //
+        // This was a 0x0 FocusScope sitting BESIDE the screens, holding a Ctrl+Space handler,
+        // and it had never once run. Slint delivers a key event to the focused element and then
+        // walks UP its parent chain; nothing in this window ever called `focus()` on this scope,
+        // and even when something else had focus, this scope is not an ancestor of anything, so
+        // a rejected key had no path to it. Two shortcuts were advertised on the desktop — "Ctrl
+        // K" on the ask bar and again in the day-one card — against a handler that could not
+        // fire and a Ctrl+K arm that was never written.
+        //
+        // So it wraps the window instead of standing next to it, which puts it on the parent
+        // chain of every focused element in the shell, and:
+        //
+        //   • `capture-key-pressed` runs on the way DOWN, before the focused element sees the
+        //     key. Ctrl+K is here because the Lens's own text field is a legitimate focus target
+        //     and a shortcut that stops working once you have clicked in a field is not a
+        //     shortcut. Only keys this shell reserves belong in capture; everything else must
+        //     reject, or typing stops working.
+        //   • `key-pressed` runs on the way back UP, after the focused element has declined the
+        //     key. Ctrl+Space stays here: it is a hotkey, not something to take away from a text
+        //     field that wants it.
+        //
+        // `focus-global-keys()` below is called once at startup. Slint drops a key event
+        // entirely when NOTHING has focus — there is no chain to walk, so not even capture runs
+        // — and on a freshly started shell sitting on the desktop, nothing does.
+        //
+        // This only covers the case where the compositor is giving this window the keys. labwc
+        // hands keyboard focus to the focused toplevel, so while Notes is in front, Ctrl+K is
+        // Notes' key and never reaches us. That case is the compositor's to answer: see the
+        // Super+K binding in config/labwc/rc.xml, which calls `yos act shell open_lens`.
         global-keys := FocusScope {
-            width: 0; height: 0;
+            width: 100%; height: 100%;
+            // Tab belongs to whatever is on screen; this scope is not a stop on the tour.
+            focus-on-tab-navigation: false;
+
+            capture-key-pressed(event) => {
+                // Ctrl+K — the ask bar, advertised on the desktop in two places and until now
+                // wired to nothing at all. The Lens lives on the desktop screen, so summoning it
+                // from elsewhere goes there first; opening it any other way (the ask bar, the
+                // orb, the taskbar anchor) does exactly these two lines.
+                if event.modifiers.control && (event.text == "k" || event.text == "K") {
+                    if root.current-screen != 1 {
+                        root.current-screen = 1;
+                        root.navigate(1);
+                    }
+                    root.lens-open = true;
+                    root.open-lens();
+                    return accept;
+                }
+                return reject;
+            }
+
             key-pressed(event) => {
                 // Ctrl+Space as voice hotkey (more reliable than Super across platforms)
                 if event.modifiers.control && event.text == " " {
@@ -1050,7 +1106,6 @@ export component App inherits Window {
                 }
                 return reject;
             }
-        }
 
         // Boot screen
         if current-screen == 0 : BootScreen {
@@ -1223,6 +1278,7 @@ export component App inherits Window {
             active-project: root.active-project;
             // Intent Lens
             lens-open <=> root.lens-open;
+            lens-input-text <=> root.lens-input-text;
             lens-results: root.lens-results;
             lens-chat-mode: root.lens-chat-mode;
             lens-suggestions: root.lens-suggestions;
@@ -2634,8 +2690,31 @@ export component App inherits Window {
             toast-dismissed(id) => { root.toast-dismissed(id); }
         }
 
-        // Debug: navigate to screen from Rust
-        // Set debug-target-screen from Rust, then call debug-navigate()
-        // to switch to that screen (useful for automated screenshots).
+            // Debug: navigate to screen from Rust
+            // Set debug-target-screen from Rust, then call debug-navigate()
+            // to switch to that screen (useful for automated screenshots).
+        }   // global-keys — every screen above is inside it, which is what puts it on the
+            // parent chain of whatever has focus. See its comment at the top of this block.
+    }
+
+    /// Take the keyboard back when the Lens closes.
+    ///
+    /// The Lens puts the cursor in its own field when it opens, and that field is inside a panel
+    /// whose `visible` follows `lens-open`. Slint drops the focus item the moment it becomes
+    /// invisible and focuses nothing in its place — so without this, closing the Lens once left
+    /// the window with no focus at all, and the next Ctrl+K had no chain to be delivered along.
+    /// A `changed` handler rather than a line in each close path, because the Lens is closed from
+    /// five places, one of which is Rust setting the property directly.
+    changed lens-open => {
+        if (!root.lens-open) { global-keys.focus(); }
+    }
+
+    /// Give the shell's shortcut scope the keyboard, so there is a focus chain to deliver to.
+    ///
+    /// Called from `main` once the window exists. Without it the first key press after startup
+    /// is dropped before any handler is consulted, because Slint has nothing focused to deliver
+    /// to and therefore nothing to walk up from.
+    public function focus-global-keys() {
+        global-keys.focus();
     }
 }

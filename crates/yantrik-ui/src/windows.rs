@@ -2,6 +2,9 @@
 //! Compositor discovery is cached so surviving windows remain available after a
 //! shell restart without spawning a helper on every taskbar refresh.
 
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 /// The title the shell's own window carries, from `title:` in yantrik-ui-slint/ui/app.slint.
 ///
 /// Kept here so the one place that has to exclude it says why, rather than a bare string buried
@@ -17,49 +20,110 @@ pub struct WindowEntry {
     pub subtitle: String,
 }
 
-/// The windows the shell has open.
+/// How long one reading of the compositor's window list is trusted.
 ///
-/// From the launch registry first — the authoritative account of what the shell started and what
-/// is still alive. Only if that is empty (nothing launched through the shell) does it fall back
-/// to asking the compositor, so a development session where apps are started by hand still shows
-/// something rather than nothing.
-pub fn list_windows() -> Vec<WindowEntry> {
-    merge_windows(shell_windows(), wlrctl_windows())
-}
+/// Nine seconds, which is three turns of the system poll. Long enough that the taskbar refresh
+/// never spawns a process on its own cadence, short enough that a window closed by hand leaves
+/// the strip while the person is still looking at it.
+const COMPOSITOR_TTL: Duration = Duration::from_secs(9);
 
-/// Cache compositor discovery for nine seconds. Always merge it with our launch
-/// registry: windows that survived a shell restart must stay in the taskbar when
-/// a newly launched Editor adds the first entry to the fresh registry.
-pub fn list_windows_throttled() -> Vec<WindowEntry> {
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-    static CACHE: Mutex<Option<(Instant, Vec<WindowEntry>)>> = Mutex::new(None);
-    let Ok(mut cache) = CACHE.lock() else { return list_windows(); };
-    if cache.as_ref().is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(9)) {
-        *cache = Some((Instant::now(), wlrctl_windows()));
+/// The last reading of `wlrctl toplevel list`, and when it was taken.
+///
+/// Process-wide, because every surface that asks "what is open" has to get the same answer, and
+/// because the one caller that must never spawn a subprocess — `shell_windows`, which runs inside
+/// the `describe` closure on the UI thread — reads it without refreshing it.
+static COMPOSITOR: Mutex<Option<(Instant, Vec<WindowEntry>)>> = Mutex::new(None);
+
+/// Read the compositor's window list now and keep it. Returns how many windows it found.
+///
+/// Called once at startup (see `main`) and then by the taskbar refresh. The startup call is the
+/// point of this whole mechanism: see `shell_windows` below.
+pub fn refresh_compositor_windows() -> usize {
+    let found = wlrctl_windows();
+    let count = found.len();
+    if let Ok(mut cache) = COMPOSITOR.lock() {
+        *cache = Some((Instant::now(), found));
     }
-    merge_windows(shell_windows(), cache.as_ref().unwrap().1.clone())
+    count
 }
 
+/// The last reading, without taking a new one. Empty until something has refreshed it.
+fn compositor_snapshot() -> Vec<WindowEntry> {
+    COMPOSITOR.lock().ok().and_then(|c| c.as_ref().map(|(_, w)| w.clone())).unwrap_or_default()
+}
+
+/// Take a new reading if the one we have has aged out.
+fn refresh_compositor_if_stale() {
+    let stale = match COMPOSITOR.lock() {
+        Ok(cache) => cache.as_ref().is_none_or(|(at, _)| at.elapsed() >= COMPOSITOR_TTL),
+        Err(_) => return,
+    };
+    if stale {
+        refresh_compositor_windows();
+    }
+}
+
+/// The windows the shell has open, after taking a fresh reading of the compositor.
+///
+/// For the callers that are about to put the list in front of somebody — the window switcher
+/// opening on a hotkey — where a list up to nine seconds stale is a list with a window in it that
+/// has just been closed.
+pub fn list_windows() -> Vec<WindowEntry> {
+    refresh_compositor_windows();
+    shell_windows()
+}
+
+/// The same list, for callers on a timer: the compositor is only asked again once the last answer
+/// has aged out. The taskbar refresh runs every three seconds and must not spawn a process each
+/// time it does.
+pub fn list_windows_throttled() -> Vec<WindowEntry> {
+    refresh_compositor_if_stale();
+    shell_windows()
+}
+
+/// The launch registry, plus everything the compositor saw that the registry does not know about.
+///
+/// A window is the same window if the id matches, not only if the title does. The registry names
+/// a window by its app id and titles it `display_name(id)`; the compositor gives back whatever
+/// the window is actually called at this moment. Those agree today — `app_names_agree_everywhere`
+/// holds every app's `title:` to its APP_NAMES entry — but the day one of them puts a filename in
+/// its title bar, matching on the title as well would have listed the same window twice: once as
+/// the shell remembers launching it and once as the compositor sees it.
+///
+/// Our own apps are single-instance (see `running::mark_launched`), so one id is one window.
 fn merge_windows(mut launched: Vec<WindowEntry>, discovered: Vec<WindowEntry>) -> Vec<WindowEntry> {
     for window in discovered {
-        if !launched.iter().any(|known| known.title == window.title && known.app_id == window.app_id) {
+        if !launched.iter().any(|known| known.app_id == window.app_id) {
             launched.push(window);
         }
     }
     launched
 }
 
-/// The windows the shell itself has open, from the launch registry only — never a subprocess.
+/// The windows the shell has open: what it launched, plus what the compositor says is on screen.
 ///
-/// This is what `describe shell` reports, so it has to be two things the full `list_windows` is
-/// not required to be: cheap, because it runs on the UI thread inside the describe closure under
-/// a few-second budget, and correct on every screen, because an app stays open when the shell
-/// navigates away from the desktop and a describe from the files screen must still see it. The
-/// `wlrctl` fallback exists for the taskbar in a bare development session; it has no place on the
-/// answer to "what is open".
+/// This is what `describe shell` reports and what the dock reads its running marks from, so it
+/// has to be cheap — it runs on the UI thread inside the describe closure — and correct on every
+/// screen, because an app stays open when the shell navigates away from the desktop. Cheap is why
+/// it reads the cached compositor snapshot rather than taking one: no subprocess on this thread.
+///
+/// It used to be the launch registry ALONE, on the reasoning that the shell started its own
+/// children and therefore knew them better than any query could. True, and it misses the case
+/// that matters: the registry is an in-process `HashMap`, so it is empty every time this process
+/// starts. Restart the shell under a compositor that keeps running — which is what a crash, an
+/// update or `systemctl restart` does — and four apps are still on screen while `describe shell`
+/// says "0 windows open" and the dock shows none of them running. The shell only ever learned of
+/// a window by watching itself create it, and it had not watched these.
+///
+/// The compositor did watch them, and it is the only thing in the session that outlives us. So it
+/// is asked, and what it says is merged in. The old objection to asking it — that the title
+/// heuristic collapsed every Yantrik window onto one id — is answered by `app_id_for_title`:
+/// our windows carry titles that are exactly the `APP_NAMES` entries, an invariant
+/// `app_names_agree_everywhere` already enforces against the .desktop files and the app sources,
+/// so the id comes from a lookup rather than a guess. `wlrctl` being absent costs us only what it
+/// cost before: the registry answer, which is what this returned in the first place.
 pub fn shell_windows() -> Vec<WindowEntry> {
-    crate::running::running()
+    let launched: Vec<WindowEntry> = crate::running::running()
         .into_iter()
         .map(|app| {
             let app_id = app.app_id;
@@ -70,7 +134,8 @@ pub fn shell_windows() -> Vec<WindowEntry> {
                 app_id,
             }
         })
-        .collect()
+        .collect();
+    merge_windows(launched, compositor_snapshot())
 }
 
 /// The name one of our app ids goes by on screen.
@@ -134,9 +199,12 @@ fn display_name(app_id: &str) -> String {
         })
 }
 
-/// Ask the compositor directly. The fallback path, used only when the shell has launched nothing
-/// itself. Parses `wlrctl toplevel list` and guesses an app id from each title — the old,
-/// unreliable behaviour, kept for development sessions and nothing more.
+/// Ask the compositor what is on screen, through `wlrctl toplevel list`.
+///
+/// The only account of a window this process did not start — an app a person launched from a
+/// terminal, and, the case this exists for, an app that was open before the shell restarted.
+/// Never called from the UI thread: `refresh_compositor_windows` is what runs it, and everything
+/// else reads the cache it fills.
 fn wlrctl_windows() -> Vec<WindowEntry> {
     let output = match std::process::Command::new("wlrctl")
         .args(["toplevel", "list"])
@@ -185,14 +253,32 @@ fn split_toplevel_line(line: &str) -> (String, String) {
         _ => ("", line.trim()),
     };
     let title = title.to_string();
-    // Prefer what the window calls itself; fall back to guessing from the title, which is all
-    // there is for our own windows until Slint gives them an app_id.
-    let app_id = if declared_id.is_empty() {
-        derive_app_id(&title)
-    } else {
+    // Prefer what the window calls itself. Our own windows call themselves nothing — Slint gives
+    // them no Wayland app_id — so the title is matched against APP_NAMES next, which is a lookup
+    // rather than a guess: those strings ARE the window titles our apps declare, and
+    // `app_names_agree_everywhere` fails the build if one drifts.
+    //
+    // Guessing was the whole problem. `derive_app_id` takes the first word, so the System Monitor
+    // window came back as `system`, Downloads as `download`, yDoc as `ydoc` and Images as
+    // `images` — none of which is the id the dock keys its running mark by, so after a shell
+    // restart those four tiles stayed dark with the apps plainly open on screen. Guessing is now
+    // the last resort, for windows that are neither ours nor self-identifying.
+    let app_id = if !declared_id.is_empty() {
         declared_id.to_lowercase()
+    } else if let Some(id) = app_id_for_title(&title) {
+        id.to_string()
+    } else {
+        derive_app_id(&title)
     };
     (title, app_id)
+}
+
+/// The app id whose window is titled exactly this, if it is one of ours.
+///
+/// Exactly, not loosely: "Notes" is Notes and "Notes: Handover" is a note open in it, and a
+/// substring match would make the second one a second copy of the first in every window list.
+fn app_id_for_title(title: &str) -> Option<&'static str> {
+    APP_NAMES.iter().find(|(_, name)| *name == title).map(|(id, _)| *id)
 }
 
 /// Derive a normalized app_id from a window title (fallback path only).
@@ -286,6 +372,54 @@ mod tests {
         assert_eq!(merged.iter().map(|w|w.app_id.as_str()).collect::<Vec<_>>(),["editor","terminal","notes"]);
     }
 
+
+    /// The case the shell used to get wrong: the launch registry is empty because this process
+    /// has just started, and four apps are on screen because the compositor did not restart.
+    ///
+    /// `describe shell` said "0 windows open" and the dock showed nothing running. The merge is
+    /// what answers it — with an empty registry the compositor's list IS the list.
+    #[test]
+    fn a_shell_that_has_just_started_still_sees_the_windows_already_open() {
+        let restarted_into: Vec<WindowEntry> = ["notes: Notes", ": Terminal", ": Editor", "firefox: Mozilla Firefox"]
+            .iter()
+            .map(|line| {
+                let (title, app_id) = split_toplevel_line(line);
+                WindowEntry { title, app_id, icon_char: String::new(), subtitle: String::new() }
+            })
+            .collect();
+        let merged = merge_windows(Vec::new(), restarted_into);
+        assert_eq!(merged.len(), 4, "every window the compositor still holds is open");
+        assert_eq!(
+            merged.iter().map(|w| w.app_id.as_str()).collect::<Vec<_>>(),
+            ["notes", "terminal", "editor", "firefox"]
+        );
+    }
+
+    /// Every name in APP_NAMES is a window title the compositor can hand back, and it has to come
+    /// back as the id the dock keys its running mark by — otherwise the app is open and its tile
+    /// is dark. Five of these used to land on something else entirely.
+    #[test]
+    fn our_own_window_titles_resolve_to_the_id_the_dock_uses() {
+        for (id, name) in APP_NAMES {
+            // What labwc reports for a Slint window: no app_id, then the title.
+            let (_, resolved) = split_toplevel_line(&format!(": {name}"));
+            assert_eq!(&resolved, id, "the window titled {name:?} must be `{id}`");
+        }
+    }
+
+    /// The five the first-word guess got wrong, named so the regression is readable.
+    #[test]
+    fn the_windows_the_first_word_guess_misnamed() {
+        for (title, want) in [
+            ("System Monitor", "sysmonitor"),
+            ("Downloads", "downloads"),
+            ("Images", "image"),
+            ("yDoc", "documents"),
+            ("yPresent", "presentation"),
+        ] {
+            assert_eq!(split_toplevel_line(&format!(": {title}")).1, want);
+        }
+    }
 
     #[test]
     fn a_window_with_no_app_id_is_named_without_the_separator() {

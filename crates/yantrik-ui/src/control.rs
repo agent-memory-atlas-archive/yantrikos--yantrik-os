@@ -424,6 +424,16 @@ pub fn publish(
                     },
                 )
                 .with("do_not_disturb", ui.get_dnd_mode())
+                // The ask bar, so "is the Lens up, and what is in it" is a read rather than a
+                // screenshot. `open_lens` answers from these same two properties.
+                .with(
+                    "lens",
+                    serde_json::json!({
+                        "open": ui.get_lens_open(),
+                        "text": ui.get_lens_input_text().to_string(),
+                        "chat": ui.get_lens_chat_mode(),
+                    }),
+                )
                 .with("incognito", ui.get_settings_incognito_mode())
                 .with("settings", serde_json::json!({"category":ui.get_settings_category(),"query":ui.get_settings_query().to_string(),"dark":ui.get_settings_dark_mode(),"accent":ui.get_settings_accent_color().to_string(),"wallpaper":ui.get_wallpaper_path().to_string(),"save_error":ui.get_settings_save_error(),"save_status":ui.get_settings_save_status().to_string(),"auto_lock_secs":ui.get_settings_auto_lock_secs()}))
         }
@@ -437,6 +447,7 @@ pub fn publish(
     let focus_ui = ui_for.clone();
     let dnd_ui = ui_for.clone();
     let ask_ui = ui_for.clone();
+    let lens_ui = ui_for.clone();
     let pin_ui = ui_for.clone();
     let pin_catalogue = ctx.installed_apps.clone();
     let lock_ui = ui_for;
@@ -590,6 +601,59 @@ pub fn publish(
                     "mind": crate::wire::harness::host()
                         .map(|h| h.active_id())
                         .unwrap_or_else(|| crate::wire::harness::BUILTIN_ID.to_string()),
+                }))
+            },
+        )
+        .action(
+            // Opening the ask bar, without asking it anything.
+            //
+            // `send_message` already puts a question to the desktop, but it asks it and is done —
+            // there was no way to leave the Lens standing open in front of a person with a draft
+            // in it, which is what "here, have a look at this" is. The desktop advertises Ctrl+K
+            // in two places for exactly this, and a compositor keybind needs a verb to call:
+            // config/labwc/rc.xml binds Super+K to this action, because that is the only route
+            // that works while another app holds the keyboard.
+            //
+            // `safe`: it shows a panel. Nothing is sent, nothing is spawned, nothing is written.
+            //
+            // The answer is the OBSERVED state, read back off the shell after the calls, not an
+            // `accepted: true` — which was the point of the exercise. The Lens is drawn by the
+            // desktop screen and nowhere else, so opening it means going to the desktop first;
+            // if that did not take, `lens_open` comes back false and the caller knows.
+            Action::new("open_lens", "Open the ask bar (the Lens) and put the cursor in it")
+                .risk("safe")
+                .arg(
+                    Param::text("text")
+                        .optional()
+                        .describe("Put this in the field, ready to edit. It is NOT submitted — use send_message to ask"),
+                ),
+            move |args| {
+                let ui = lens_ui()?;
+                let text = args["text"].as_str().unwrap_or_default().to_string();
+
+                // The Lens lives on the desktop screen. Set-then-invoke, the pair every caller
+                // in the shell uses: the property shows the screen, `navigate` loads it.
+                if ui.get_current_screen() != 1 {
+                    ui.set_current_screen(1);
+                    ui.invoke_navigate(1);
+                }
+
+                // Prefilled before the panel opens, so the results the Lens builds on open are
+                // the results for this text rather than for an empty field.
+                if !text.is_empty() {
+                    ui.set_lens_input_text(text.clone().into());
+                    // What typing it would have done. `lens_query` is the as-you-type search,
+                    // not the submit — the field is left for a person to edit or send.
+                    ui.invoke_lens_query(text.clone().into());
+                }
+
+                ui.set_lens_open(true);
+                ui.invoke_open_lens();
+
+                Ok(serde_json::json!({
+                    "lens_open": ui.get_lens_open(),
+                    "screen": screen_name(ui.get_current_screen()),
+                    "text": ui.get_lens_input_text().to_string(),
                 }))
             },
         )
