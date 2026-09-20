@@ -376,6 +376,15 @@ export component ContainerManagerScreen inherits Rectangle {
     // Runtime info
     in property <string> runtime-name: "docker";  // "docker" or "podman"
 
+    /// What went wrong with the last thing the person asked for, in their words.
+    ///
+    /// Empty when nothing has, so a screen that embeds this component without setting it looks
+    /// exactly as it did. Every mutation in this app used to throw the runtime's answer away:
+    /// a `docker rm` the daemon refused left the row on screen and said nothing at all, and on
+    /// a machine with no docker the list was simply empty. This strip is the person's half of
+    /// that answer; `describe`'s `notice` is the mind's.
+    in property <string> notice: "";
+
     // Input fields
     in-out property <string> run-image-input: "";
     in-out property <string> pull-image-input: "";
@@ -434,6 +443,33 @@ export component ContainerManagerScreen inherits Rectangle {
                     else if (root.log-text != "") { root.ai-summarize-logs(); root.ai-panel-open = true; }
                 }
                 else if (id == "refresh") { root.ct-refresh(); }
+            }
+        }
+
+        // What could not be done, full width under the header.
+        //
+        // Above the tabs rather than inside one of them, because the failure is not about the
+        // tab you happen to be on: a volume that could not be removed is worth reading while
+        // you are looking at the container list.
+        if root.notice != "" : Rectangle {
+            height: notice-text.preferred-height + Theme.sp-4;
+            background: Theme.color-danger-dim;
+
+            Rectangle {
+                x: 0;
+                width: 2px;
+                height: 100%;
+                background: Theme.color-danger;
+            }
+
+            notice-text := Text {
+                x: Theme.sp-4;
+                width: parent.width - Theme.sp-4 * 2;
+                y: Theme.sp-2;
+                text: root.notice;
+                color: Theme.text-primary;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
             }
         }
 

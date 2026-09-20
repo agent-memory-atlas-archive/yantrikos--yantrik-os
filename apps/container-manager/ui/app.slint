@@ -63,6 +63,9 @@ export component ContainerManagerApp inherits Window {
     // Runtime info
     in property <string> runtime-name <=> inner.runtime-name;
 
+    // What could not be done. Set on failure, cleared on success, and carried in describe.
+    in property <string> notice <=> inner.notice;
+
     // Input fields
     in-out property <string> run-image-input <=> inner.run-image-input;
     in-out property <string> pull-image-input <=> inner.pull-image-input;
