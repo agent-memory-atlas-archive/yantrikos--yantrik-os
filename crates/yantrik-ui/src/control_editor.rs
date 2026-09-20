@@ -72,8 +72,6 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let ui = up(&for_new)?;
                 ensure_editor_screen(&ui);
                 ui.invoke_editor_new_tab();
-                ui.set_editor_file_content(Default::default());
-                ui.set_editor_is_modified(false);
                 Ok(serde_json::json!({ "editor": state(&ui) }))
             },
         )
@@ -85,7 +83,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let text = args["text"].as_str().unwrap_or_default().to_string();
                 ensure_editor_screen(&ui);
                 ui.set_editor_file_content(text.clone().into());
-                ui.set_editor_is_modified(true);
+                ui.invoke_editor_content_changed(ui.get_editor_file_content());
                 Ok(serde_json::json!({ "editor": state(&ui) }))
             },
         )
@@ -99,7 +97,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let mut content = ui.get_editor_file_content().to_string();
                 content.push_str(add);
                 ui.set_editor_file_content(content.into());
-                ui.set_editor_is_modified(true);
+                ui.invoke_editor_content_changed(ui.get_editor_file_content());
                 Ok(serde_json::json!({ "editor": state(&ui) }))
             },
         )
@@ -111,6 +109,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             move |_| {
                 let ui = up(&for_save)?;
                 ui.invoke_editor_save();
+                if !ui.get_editor_save_error().is_empty() { return Err(ui.get_editor_save_error().to_string()); }
                 if ui.get_editor_show_save_dialog() {
                     // Untitled: the UI is now asking for a name. Close it and tell the caller how.
                     ui.set_editor_show_save_dialog(false);

@@ -215,6 +215,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let mut tabs = tabs_ct.borrow_mut();
         let mut act = active_ct.borrow_mut();
 
+        if idx < tabs.len() && (tabs[idx].is_modified || (idx == *act && ui.get_editor_is_modified())) {
+            ui.set_editor_save_error("Save this document before closing its tab.".into());
+            ui.set_editor_show_save_dialog(true);
+            return;
+        }
         if tabs.len() <= 1 {
             // Don't close the last tab — reset it to untitled
             tabs[0] = TabState::new_untitled();
@@ -264,7 +269,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             return;
         }
 
-        save_to_path(&ui, &tabs[act].path);
+        if !save_to_path(&ui, &tabs[act].path) { return; }
         tabs[act].is_modified = false;
         let act_idx = act;
         sync_tabs_to_ui(&ui, &tabs, act_idx);
@@ -302,7 +307,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         }
 
         let path_str = path.display().to_string();
-        save_to_path(&ui, &path_str);
+        if path.exists() {
+            ui.set_editor_save_error("File already exists. Choose a new name.".into());
+            return;
+        }
+        if !save_to_path(&ui, &path_str) { return; }
 
         let mut tabs = tabs_sa.borrow_mut();
         let act = *active_sa.borrow();
@@ -383,7 +392,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let file_name = ui.get_editor_file_name().to_string();
 
         let context_preview = if content.len() > 2000 {
-            format!("{}...", &content[..2000])
+            format!("{}...", content.chars().take(2000).collect::<String>())
         } else {
             content
         };
@@ -498,8 +507,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             let mut matches = Vec::new();
 
             if !query.is_empty() {
-                let query_lower = query.to_lowercase();
-                let content_lower = content.to_lowercase();
+                let query_lower = query.clone();
+                let content_lower = content.clone();
                 let mut start = 0;
                 while let Some(pos) = content_lower[start..].find(&query_lower) {
                     matches.push(start + pos);
@@ -590,8 +599,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         if query.is_empty() { return; }
         let content = ui.get_editor_file_content().to_string();
 
-        let query_lower = query.to_lowercase();
-        let content_lower = content.to_lowercase();
+        let query_lower = query.clone();
+        let content_lower = content.clone();
         let mut result = String::with_capacity(content.len());
         let mut last_end = 0;
         let mut count = 0;
@@ -658,34 +667,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         tracing::info!(visible = !visible, "Editor minimap toggled");
     });
 
-    // ── Autosave timer (every 30s, save if modified and has path) ──
-    let ui_weak = ui.as_weak();
-    let tabs_auto = tabs.clone();
-    let active_auto = active.clone();
-    let autosave_timer = Timer::default();
-    autosave_timer.start(TimerMode::Repeated, Duration::from_secs(30), move || {
-        let Some(ui) = ui_weak.upgrade() else { return };
-        let mut tabs = tabs_auto.borrow_mut();
-        let act = *active_auto.borrow();
-        if act >= tabs.len() { return; }
+    // Legacy automation never silently overwrites files. Native Editor owns draft recovery.
 
-        // Sync current content
-        tabs[act].content = ui.get_editor_file_content().to_string();
-        tabs[act].is_modified = ui.get_editor_is_modified();
-
-        if tabs[act].is_modified && !tabs[act].path.is_empty() && !tabs[act].is_readonly {
-            save_to_path(&ui, &tabs[act].path);
-            tabs[act].is_modified = false;
-
-            // Update saved time display
-            ui.set_editor_last_saved_time(crate::app_context::current_time_hhmm().into());
-
-            sync_tabs_to_ui(&ui, &tabs, act);
-            tracing::debug!("Autosaved tab {}", act);
-        }
-    });
-    // Keep timer alive
-    std::mem::forget(autosave_timer);
 }
 
 /// Sync tab list model to UI.
@@ -739,17 +722,20 @@ fn sync_active_tab(ui: &App, tabs: &[TabState], active: usize) {
 }
 
 /// Save the editor content to the given path.
-fn save_to_path(ui: &App, path_str: &str) {
+fn save_to_path(ui: &App, path_str: &str) -> bool {
+    ui.set_editor_save_error("".into());
     let content = ui.get_editor_file_content().to_string();
     let path = PathBuf::from(path_str);
     match std::fs::write(&path, &content) {
         Ok(()) => {
             tracing::info!(path = %path.display(), "File saved");
             ui.set_editor_is_modified(false);
+            true
         }
         Err(e) => {
             tracing::error!(path = %path.display(), error = %e, "Failed to save file");
             ui.set_editor_save_error(format!("Save failed: {}", e).into());
+            false
         }
     }
 }
@@ -805,10 +791,7 @@ pub fn load_file(
             sync_tabs_to_ui(ui, &tabs, new_idx);
             sync_active_tab(ui, &tabs, new_idx);
         } else {
-            // Max tabs — replace current
-            tabs[current] = TabState::from_file(path);
-            sync_tabs_to_ui(ui, &tabs, current);
-            sync_active_tab(ui, &tabs, current);
+            ui.set_editor_save_error("Close a tab before opening another file.".into());
         }
     } else {
         // Fallback: no tab state yet — direct load (shouldn't happen after wire())

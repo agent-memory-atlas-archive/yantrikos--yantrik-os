@@ -2,7 +2,7 @@
 name = "yantrik-notes"
 version = "0.1.0"
 edition = "2021"
-description = "Yantrik Notes — AI-native markdown notes with semantic search"
+description = "Yantrik Notes - native Markdown workspace"
 
 [[bin]]
 name = "yantrik-notes"
@@ -20,6 +20,12 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid7 = { workspace = true }
 chrono = { workspace = true }
+
+libc = "0.2"
+pulldown-cmark = { version = "0.13.1", default-features = false }
+
+[dev-dependencies]
+png = "0.18"
 
 [build-dependencies]
 slint-build = "1.17"

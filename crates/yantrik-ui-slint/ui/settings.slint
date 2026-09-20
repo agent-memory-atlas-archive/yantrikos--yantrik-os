@@ -2,6 +2,7 @@
 // Screen 7. Two-pane layout: 240px sidebar + fluid content.
 // Data-driven sidebar with search. AI & Intelligence flagship page.
 
+import { AppHeader } from "components/app_header.slint";
 import { Theme, AccentPreset } from "theme.slint";
 import { AppIdentity } from "components/app_color.slint";
 import { SkillStore, SkillData } from "skill_store.slint";
@@ -71,10 +72,105 @@ export struct AIStatusData {
     fallback-model: string,
 }
 
+
+component WallpaperChoice inherits Rectangle {
+    in property <string> label;
+    in property <image> image-source;
+    in property <bool> selected;
+    callback chosen();
+    forward-focus: focus;
+    accessible-role: button; accessible-label: root.label;
+    accessible-action-default => { root.chosen(); }
+    border-radius: 10px; background: Theme.bg-elevated;
+    border-width: root.selected || focus.has-focus ? 2px : 1px;
+    border-color: root.selected || focus.has-focus ? Theme.accent : Theme.border-subtle;
+    Rectangle {
+        x: 5px; y: 5px; width: parent.width - 10px; height: parent.height - 36px;
+        clip: true; border-radius: 6px; background: Theme.bg-deep;
+        Image { width: 100%; height: 100%; source: root.image-source; image-fit: cover; }
+    }
+    Text {
+        x: 10px; y: parent.height - 28px; width: parent.width - 20px; height: 24px;
+        text: root.label; color: Theme.text-primary; font-size: 12px;
+        font-weight: root.selected ? 600 : 400; vertical-alignment: center; overflow: elide;
+    }
+    focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\n" || e.text == " ") && !e.repeat { root.chosen(); return accept; }
+            return reject;
+        }
+    }
+    TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.chosen(); } }
+}
+
+component ThemeChoice inherits Rectangle {
+    in property <bool> dark;
+    in property <bool> selected;
+    callback chosen();
+    forward-focus: focus;
+    accessible-role: button; accessible-label: root.dark ? "Dark appearance" : "Light appearance";
+    accessible-action-default => { root.chosen(); }
+    border-radius: 12px; background: Theme.bg-card;
+    border-width: root.selected || focus.has-focus ? 2px : 1px;
+    border-color: root.selected || focus.has-focus ? Theme.accent : Theme.border-default;
+    Rectangle {
+        x: 12px; y: 12px; width: parent.width - 24px; height: 100px;
+        border-radius: 6px; clip: true;
+        background: root.dark ? #182533 : #dce8ed;
+        Rectangle {
+            x: 18px; y: 15px; width: parent.width - 36px; height: 84px;
+            border-radius: 6px; background: root.dark ? #252d38 : #ffffff;
+            Rectangle { x: 10px; y: 10px; width: 28px; height: 5px; border-radius: 2px; background: Theme.accent; }
+            Rectangle { x: 10px; y: 28px; width: 32px; height: 44px; border-radius: 3px; background: root.dark ? #354253 : #e5ebf0; }
+            Rectangle { x: 54px; y: 30px; width: parent.width - 68px; height: 5px; border-radius: 2px; background: root.dark ? #a5afbf : #667283; }
+            Rectangle { x: 54px; y: 44px; width: (parent.width - 68px) * 0.8; height: 4px; border-radius: 2px; background: root.dark ? #5b6777 : #c3ced7; }
+            Rectangle { x: 54px; y: 57px; width: (parent.width - 68px) * 0.6; height: 4px; border-radius: 2px; background: root.dark ? #5b6777 : #c3ced7; }
+        }
+    }
+    Text { x: 16px; y: 122px; text: root.dark ? "Dark" : "Light"; color: Theme.text-primary; font-size: 15px; font-weight: 600; }
+    if root.selected : Icon { x: parent.width - 34px; y: 122px; commands: Icons.check; size: 18px; tint: Theme.accent; }
+    focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\n" || e.text == " ") && !e.repeat { root.chosen(); return accept; }
+            return reject;
+        }
+    }
+    TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.chosen(); } }
+}
+
+component SettingRow inherits Rectangle {
+    in property <string> label;
+    in property <string> description;
+    in property <string> value;
+    in property <bool> interactive:true;
+    callback activated();
+    background:Theme.bg-card;border-radius:10px;border-width:1px;border-color:Theme.border-subtle;
+    height:max(88px,details.preferred-height+32px);
+    HorizontalLayout {padding:16px;spacing:18px;
+        details:=VerticalLayout {spacing:6px;alignment:center;horizontal-stretch:1;
+            Text{text:root.label;color:Theme.text-primary;font-size:14px;font-weight:600;wrap:word-wrap;}
+            Text{text:root.description;color:Theme.text-secondary;font-size:12px;wrap:word-wrap;}
+        }
+        if root.interactive : YButton {label:root.value;variant:1;size:0;clicked=>{root.activated();}}
+        if !root.interactive : Text {text:root.value;color:Theme.text-secondary;font-size:13px;vertical-alignment:center;overflow:elide;max-width:220px;}
+    }
+}
+component AccentChoice inherits Rectangle {
+    in property <color> swatch;
+    in property <string> label;
+    in property <bool> selected;
+    callback chosen();
+    width:38px;height:38px;border-radius:19px;background:transparent;
+    border-width:root.selected||focus.has-focus?2px:0px;border-color:Theme.text-primary;
+    accessible-role:button;accessible-label:root.label;accessible-action-default=>{root.chosen();}forward-focus:focus;
+    Rectangle{x:6px;y:6px;width:26px;height:26px;border-radius:13px;background:root.swatch;}
+    focus:=FocusScope{key-pressed(e)=>{if(e.text==" "||e.text=="\n"){root.chosen();return accept;}return reject;}}
+    TouchArea{mouse-cursor:pointer;clicked=>{focus.focus();root.chosen();}}
+}
+
 export component SettingsScreen inherits Rectangle {
-    // This screen draws its own header rather than AppHeader, so it has to say what
-    // it is: AppIdentity is otherwise left holding whichever app was opened before it.
-    init => { AppIdentity.id = "settings"; }
+    // Apply settings identity to every category and its child panels.
+    init => { AppIdentity.id = "settings"; keys.focus(); }
 
     background: Theme.bg-deep;
 
@@ -119,7 +215,15 @@ export component SettingsScreen inherits Rectangle {
     in-out property <bool> dark-mode: true;
     in-out property <string> accent-color: "cyan";
     callback toggle-dark-mode();
+    in property <bool> agent-mode: false;
+    callback set-agent-mode(bool);
     callback cycle-accent-color();
+    callback choose-accent(string);
+    in property <string> save-status:"Preferences are saved automatically";
+    in property <bool> save-error;
+    in property <bool> save-can-retry:true;
+    callback retry-save();
+    callback open-network();
 
     // Wallpaper
     in-out property <string> wallpaper-path: "";
@@ -244,54 +348,25 @@ export component SettingsScreen inherits Rectangle {
     in-out property <string> search-query: "";
     callback settings-search(string);
 
-    // Ambient glow phase
-    property <float> glow-phase: 0;
-    Timer {
-        interval: 16ms;
-        running: true;
-        triggered => {
-            glow-phase = mod(glow-phase + 0.0015, 1.0);
-        }
+    public function focus-search(){settings-search-field.focus();}
+    keys:=FocusScope {width:root.width;height:root.height;
+    key-pressed(e)=>{
+        if(e.modifiers.control&&e.text=="f"){settings-search-field.focus();return accept;}
+        if(e.text==Key.Escape&&root.search-query!=""){root.search-query="";root.settings-search("");return accept;}
+        return reject;
     }
-
     VerticalLayout {
-        spacing: 0px;
+        height:root.height - 38px;spacing: 0px;
 
-        // Header
-        Rectangle {
-            height: Theme.sp-9;
-            background: Theme.bg-surface;
-
-            // Bottom divider
-            Rectangle {
-                y: parent.height - 1px;
-                width: 100%;
-                height: 1px;
-                background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                padding-left: Theme.sp-3;
-                padding-right: Theme.sp-3;
-                alignment: start;
-                spacing: Theme.sp-3;
-
-                YIconButton {
-                    icon-path: Icons.arrow-left;
-                    variant: 2;
-                    clicked => { root.back-pressed(); }
-                }
-
-                Text {
-                    text: "Settings";
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-title-2;
-                    font-weight: Theme.fw-title-2;
-                    vertical-alignment: center;
-                }
-            }
+        AppHeader {
+            app-id: "settings"; icon: Icons.settings; title: "Settings";
+            subtitle: "Make Yantrik yours"; show-back: true;
+            back => { root.back-pressed(); }
         }
 
+        if root.save-error : Rectangle {height:save-message.preferred-height+24px;background:Theme.bg-elevated;
+            save-message:=Text{x:24px;y:12px;width:parent.width - 48px;text:root.save-status;color:Theme.amber;font-size:13px;wrap:word-wrap;}
+        }
         // Main content: sidebar + panel
         HorizontalLayout {
             vertical-stretch: 1;
@@ -299,7 +374,7 @@ export component SettingsScreen inherits Rectangle {
 
             // ===== LEFT SIDEBAR (240px, data-driven) =====
             Rectangle {
-                width: 240px;
+                width: root.width < 900px ? 224px : 252px;
                 background: Theme.bg-surface;
 
                 // Right edge separator
@@ -310,78 +385,97 @@ export component SettingsScreen inherits Rectangle {
                     background: Theme.separator;
                 }
 
-                VerticalLayout {
-                    padding-top: Theme.sp-3;
-                    padding-bottom: Theme.sp-4;
-                    spacing: 0px;
-                    alignment: start;
+                Flickable {
+                    width: 100%; height: 100%; viewport-width: self.width;
+                    viewport-height: category-list.preferred-height;
+                    category-list := VerticalLayout {
+                        padding-top: Theme.sp-3;
+                        padding-bottom: Theme.sp-4;
+                        spacing: 0px;
+                        alignment: start;
 
-                    // ── Search bar ──
-                    Rectangle {
-                        height: Theme.touch-target;
+                        // ── Search bar ──
+                        Rectangle {
+                            height: Theme.touch-target;
 
-                        HorizontalLayout {
-                            padding-left: Theme.sp-3;
-                            padding-right: Theme.sp-3;
+                            HorizontalLayout {
+                                padding-left: Theme.sp-3;
+                                padding-right: Theme.sp-3;
 
-                            YInput {
-                                mode: 1;
-                                placeholder: "Search settings...";
-                                value <=> root.search-query;
-                                edited(text) => { root.settings-search(text); }
-                                accepted(text) => { root.settings-search(text); }
+                                settings-search-field:=YInput {
+                                    mode: 1;
+                                    placeholder: "Find a setting";
+                                    value <=> root.search-query;
+                                    edited(text) => { root.settings-search(text); }
+                                    accepted(text) => { root.settings-search(text); if(root.categories.length>0){root.active-category=root.categories[0].id;} }
+                                    cleared=>{root.settings-search("");}
+                                }
                             }
                         }
-                    }
 
-                    // ── Spacer ──
-                    Rectangle { height: Theme.sp-2; }
+                        // ── Spacer ──
+                        Rectangle { height: Theme.sp-2; }
 
-                    // ── Category list (data-driven) ──
-                    for cat[idx] in root.categories : Rectangle {
-                        property <bool> is-active: root.active-category == cat.id;
-                        property <bool> hovered: cat-ta.has-hover;
-
-                        height: Theme.touch-target;
-                        background: is-active ? AppIdentity.tint
-                                  : hovered ? Theme.hover-fill
-                                  : transparent;
-
-                        animate background { duration: Theme.dur-fast; }
-
-                        // Left accent bar (active indicator)
-                        if is-active : Rectangle {
-                            x: 0;
-                            width: 3px;
-                            height: 20px;
-                            y: (parent.height - 20px) / 2;
-                            border-radius: 2px;
-                            background: Theme.accent;
-                        }
-
-                        cat-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.active-category = cat.id; }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: Theme.sp-4;
-                            padding-right: Theme.sp-3;
-                            spacing: Theme.sp-3;
-                            alignment: start;
-
-                            Icon {
-                                commands: root.category-icon(cat.id);
-                                size: 15px;
-                                tint: cat.id == root.active-category ? AppIdentity.accent : Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
+                        if root.categories.length==0 : Text {text:"No matching settings.\nTry theme, lock, model or Wi-Fi.";color:Theme.text-dim;font-size:12px;wrap:word-wrap;horizontal-alignment:center;height:90px;}
+                        // ── Category list (data-driven) ──
+                        for cat[idx] in root.categories : Rectangle {
+                            property <bool> is-active: root.active-category == cat.id;
+                            property <bool> hovered: cat-ta.has-hover;
+                            forward-focus: category-focus;
+                            accessible-role: button; accessible-label: cat.label;
+                            accessible-action-default => { root.active-category = cat.id; }
+                            border-width: category-focus.has-focus ? 1px : 0px;
+                            border-color: Theme.accent;
+                            category-focus := FocusScope {
+                                key-pressed(e) => {
+                                    if (e.text == "\n" || e.text == " ") && !e.repeat {
+                                        root.active-category = cat.id; return accept;
+                                    }
+                                    return reject;
+                                }
                             }
-                            Text {
-                                text: cat.label;
-                                color: is-active ? Theme.text-primary : Theme.text-secondary;
-                                font-size: Theme.fs-body;
-                                font-weight: is-active ? Theme.fw-body-strong : Theme.fw-body;
-                                vertical-alignment: center;
+
+                            height: Theme.touch-target;
+                            background: is-active ? AppIdentity.tint
+                                      : hovered ? Theme.hover-fill
+                                      : transparent;
+
+                            animate background { duration: Theme.dur-fast; }
+
+                            // Left accent bar (active indicator)
+                            if is-active : Rectangle {
+                                x: 0;
+                                width: 3px;
+                                height: 20px;
+                                y: (parent.height - 20px) / 2;
+                                border-radius: 2px;
+                                background: Theme.accent;
+                            }
+
+                            cat-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { category-focus.focus(); root.active-category = cat.id; }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: Theme.sp-4;
+                                padding-right: Theme.sp-3;
+                                spacing: Theme.sp-3;
+                                alignment: start;
+
+                                Icon {
+                                    commands: root.category-icon(cat.id);
+                                    size: 15px;
+                                    tint: cat.id == root.active-category ? AppIdentity.accent : Theme.text-secondary;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                                Text {
+                                    text: cat.label;
+                                    color: is-active ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: Theme.fs-body;
+                                    font-weight: is-active ? Theme.fw-body-strong : Theme.fw-body;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
                     }
@@ -395,115 +489,23 @@ export component SettingsScreen inherits Rectangle {
 
                 // ===== CATEGORY 0: APPEARANCE =====
                 if root.active-category == 0 : Flickable {
-                    width: 100%;
-                    height: 100%;
+                    width: 100%; height: 100%; viewport-width: self.width;
+                    viewport-height: appearance-body.preferred-height;
 
-                    VerticalLayout {
-                        padding: Theme.sp-6;
-                        spacing: Theme.sp-4;
-                        alignment: start;
+                    appearance-body := VerticalLayout {
+                        padding: 28px; spacing: 20px; alignment: start;
 
-                        // Section header
+                        Text { text: "Appearance"; color: Theme.text-primary; font-size: 28px; font-weight: 600; }
+                        Text { text: "A workspace that feels like you. Native apps pick up appearance changes when reopened."; color: Theme.text-secondary; font-size: 13px; wrap:word-wrap; }
                         HorizontalLayout {
-                            spacing: Theme.sp-2;
-                            Rectangle {
-                                width: 3px;
-                                height: 14px;
-                                y: 0;
-                                border-radius: 1.5px;
-                                background: Theme.accent;
-                                drop-shadow-blur: 4px;
-                                drop-shadow-color: Theme.accent-glow;
+                            spacing: 16px; height: 164px;
+                            ThemeChoice {
+                                dark: true; selected: root.dark-mode;
+                                chosen => { if !root.dark-mode { root.toggle-dark-mode(); } }
                             }
-                            Text {
-                                text: "APPEARANCE";
-                                color: Theme.accent;
-                                font-size: Theme.fs-caption;
-                                font-weight: 600;
-                                letter-spacing: 3px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        // Dark / Light mode toggle
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 52px;
-
-                            HorizontalLayout {
-                                padding-left: Theme.sp-4;
-                                padding-right: Theme.sp-4;
-
-                                Text {
-                                    text: "Theme";
-                                    color: Theme.text-secondary;
-                                    font-size: Theme.fs-body;
-                                    horizontal-stretch: 1;
-                                    vertical-alignment: center;
-                                }
-
-                                // Pill toggle: Dark / Light — holographic
-                                TouchArea {
-                                    width: 110px;
-                                    height: 36px;
-                                    clicked => { root.toggle-dark-mode(); }
-
-                                    Rectangle {
-                                        width: 110px;
-                                        height: 32px;
-                                        y: (parent.height - self.height) / 2;
-                                        border-radius: 16px;
-                                        background: Theme.bg-elevated;
-                                        border-width: 1px;
-                                        border-color: root.dark-mode ? Theme.accent-dim : Theme.amber-dim;
-
-                                        // Sliding pill indicator
-                                        Rectangle {
-                                            x: root.dark-mode ? 2px : 56px;
-                                            y: 2px;
-                                            width: 52px;
-                                            height: 28px;
-                                            border-radius: 14px;
-                                            background: root.dark-mode ? Theme.accent-dim : Theme.amber-dim;
-                                            drop-shadow-blur: 6px;
-                                            drop-shadow-color: root.dark-mode ? Theme.accent-glow : Theme.amber-glow;
-
-                                            animate x { duration: Theme.dur-fast; easing: ease-out; }
-                                            animate background { duration: Theme.dur-fast; }
-                                            animate drop-shadow-color { duration: Theme.dur-fast; }
-                                        }
-
-                                        HorizontalLayout {
-                                            Rectangle {
-                                                width: 55px;
-                                                Text {
-                                                    text: "Dark";
-                                                    color: root.dark-mode ? AppIdentity.accent : Theme.text-dim;
-                                                    font-size: Theme.fs-micro;
-                                                    font-weight: root.dark-mode ? 600 : 400;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                    animate color { duration: Theme.dur-fast; }
-                                                }
-                                            }
-                                            Rectangle {
-                                                width: 55px;
-                                                Text {
-                                                    text: "Light";
-                                                    color: root.dark-mode ? Theme.text-dim : Theme.amber;
-                                                    font-size: Theme.fs-micro;
-                                                    font-weight: root.dark-mode ? 400 : 600;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                    animate color { duration: Theme.dur-fast; }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                            ThemeChoice {
+                                dark: false; selected: !root.dark-mode;
+                                chosen => { if root.dark-mode { root.toggle-dark-mode(); } }
                             }
                         }
 
@@ -527,52 +529,14 @@ export component SettingsScreen inherits Rectangle {
                                     vertical-alignment: center;
                                 }
 
-                                accent-ta := TouchArea {
-                                    width: accent-pill.preferred-width + 8px;
-                                    height: 36px;
-                                    clicked => { root.cycle-accent-color(); }
+                                for accent in [
+                                    {id:"cyan",label:"Cyan",color:#4cc9c0},
+                                    {id:"amber",label:"Amber",color:#ddb66f},
+                                    {id:"purple",label:"Purple",color:#ad91ed},
+                                    {id:"green",label:"Green",color:#7fbd87},
+                                    {id:"pink",label:"Pink",color:#e28caf}
+                                ] : AccentChoice {swatch:accent.color;label:accent.label;selected:root.accent-color==accent.id;chosen=>{root.choose-accent(accent.id);}}
 
-                                    accent-pill := Rectangle {
-                                        width: accent-swatch.width + accent-label.preferred-width + 20px;
-                                        height: 28px;
-                                        y: (parent.height - self.height) / 2;
-                                        border-radius: 14px;
-                                        background: accent-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
-                                        border-width: 1px;
-                                        border-color: AccentPreset.accent-dim;
-                                        drop-shadow-blur: 4px;
-                                        drop-shadow-color: AccentPreset.accent-glow;
-
-                                        HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 10px;
-                                            spacing: Theme.sp-2;
-                                            alignment: center;
-
-                                            // Color swatch dot
-                                            accent-swatch := Rectangle {
-                                                width: 12px;
-                                                height: 12px;
-                                                y: (parent.height - 12px) / 2;
-                                                border-radius: Theme.r-sm;
-                                                background: AccentPreset.accent;
-                                                drop-shadow-blur: 4px;
-                                                drop-shadow-color: AccentPreset.accent-glow;
-                                            }
-
-                                            accent-label := Text {
-                                                text: AccentPreset.label;
-                                                color: AccentPreset.accent;
-                                                font-size: Theme.fs-micro;
-                                                font-weight: 600;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-
-                                        animate border-color { duration: Theme.dur-normal; }
-                                        animate drop-shadow-color { duration: Theme.dur-normal; }
-                                    }
-                                }
                             }
                         }
 
@@ -594,195 +558,30 @@ export component SettingsScreen inherits Rectangle {
                                     font-size: Theme.fs-body;
                                 }
 
-                                // Preset thumbnail row
-                                HorizontalLayout {
-                                    spacing: Theme.sp-3;
-
-                                    // None (solid dark)
-                                    wp-none-ta := TouchArea {
-                                        width: 60px; height: 40px;
-                                        clicked => {
-                                            root.wallpaper-path = "";
+                                // Real wallpaper previews, sized to the available pane.
+                                wallpaper-grid := Rectangle {
+                                    property <int> columns: max(1, floor(self.width / 140px));
+                                    height: ceil(8 / self.columns) * 114px;
+                                    for preset[idx] in [
+                                        { id: "serenity", label: "Serenity", image: @image-url("wallpapers/previews/serenity.png") },
+                                        { id: "first-light", label: "First light", image: @image-url("wallpapers/previews/first-light.png") },
+                                        { id: "nightfall", label: "Nightfall", image: @image-url("wallpapers/previews/nightfall.png") },
+                                        { id: "aurora", label: "Aurora", image: @image-url("wallpapers/previews/aurora.png") },
+                                        { id: "sunset", label: "Sunset", image: @image-url("wallpapers/previews/sunset.png") },
+                                        { id: "ocean", label: "Ocean", image: @image-url("wallpapers/previews/ocean.png") },
+                                        { id: "nebula", label: "Nebula", image: @image-url("wallpapers/previews/nebula.png") },
+                                        { id: "", label: "Solid color", image: @image-url("") }
+                                    ] : WallpaperChoice {
+                                        x: mod(idx, wallpaper-grid.columns) * (wallpaper-grid.width / wallpaper-grid.columns);
+                                        y: floor(idx / wallpaper-grid.columns) * 114px;
+                                        width: wallpaper-grid.width / wallpaper-grid.columns - 12px;
+                                        height: 102px;
+                                        label: preset.label; image-source: preset.image;
+                                        selected: root.wallpaper-path == preset.id;
+                                        chosen => {
+                                            root.wallpaper-path = preset.id;
                                             root.custom-input-visible = false;
-                                            root.wallpaper-changed("");
-                                        }
-                                        Rectangle {
-                                            width: 60px; height: 40px;
-                                            border-radius: Theme.r-sm;
-                                            background: @radial-gradient(circle, #0a0a1c 0%, #050510 50%, #020206 100%);
-                                            border-width: root.wallpaper-path == "" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "" ? AppIdentity.accent : (wp-none-ta.has-hover ? Theme.border-default : Theme.border-subtle);
-                                            drop-shadow-blur: root.wallpaper-path == "" ? 4px : 0px;
-                                            drop-shadow-color: root.wallpaper-path == "" ? Theme.accent-glow : transparent;
-
-                                            Text {
-                                                text: "None";
-                                                color: root.wallpaper-path == "" ? AppIdentity.accent : Theme.text-dim;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-
-                                            animate border-color { duration: Theme.dur-fast; }
-                                            animate border-width { duration: Theme.dur-fast; }
-                                        }
-                                    }
-
-                                    // Aurora (green/purple)
-                                    wp-aurora-ta := TouchArea {
-                                        width: 60px; height: 40px;
-                                        clicked => {
-                                            root.wallpaper-path = "aurora";
-                                            root.custom-input-visible = false;
-                                            root.wallpaper-changed("aurora");
-                                        }
-                                        Rectangle {
-                                            width: 60px; height: 40px;
-                                            border-radius: Theme.r-sm;
-                                            clip: true;
-                                            background: @linear-gradient(135deg, #0d2818 0%, #1a0a2e 50%, #0a3020 100%);
-                                            border-width: root.wallpaper-path == "aurora" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "aurora" ? AppIdentity.accent : (wp-aurora-ta.has-hover ? Theme.border-default : Theme.border-subtle);
-                                            drop-shadow-blur: root.wallpaper-path == "aurora" ? 4px : 0px;
-                                            drop-shadow-color: root.wallpaper-path == "aurora" ? Theme.accent-glow : transparent;
-
-                                            // Mini glow accent
-                                            Rectangle {
-                                                x: 5px; y: 5px;
-                                                width: 30px; height: 20px;
-                                                border-radius: 10px;
-                                                background: @radial-gradient(circle, #30e87830 0%, transparent 70%);
-                                            }
-
-                                            Text {
-                                                y: parent.height - 12px;
-                                                text: "Aurora";
-                                                color: root.wallpaper-path == "aurora" ? AppIdentity.accent : Theme.text-dim;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                width: 100%;
-                                            }
-
-                                            animate border-color { duration: Theme.dur-fast; }
-                                            animate border-width { duration: Theme.dur-fast; }
-                                        }
-                                    }
-
-                                    // Sunset (orange/pink)
-                                    wp-sunset-ta := TouchArea {
-                                        width: 60px; height: 40px;
-                                        clicked => {
-                                            root.wallpaper-path = "sunset";
-                                            root.custom-input-visible = false;
-                                            root.wallpaper-changed("sunset");
-                                        }
-                                        Rectangle {
-                                            width: 60px; height: 40px;
-                                            border-radius: Theme.r-sm;
-                                            clip: true;
-                                            background: @linear-gradient(180deg, #3d1020 0%, #d4503a 50%, #e88c30 100%);
-                                            border-width: root.wallpaper-path == "sunset" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "sunset" ? AppIdentity.accent : (wp-sunset-ta.has-hover ? Theme.border-default : Theme.border-subtle);
-                                            drop-shadow-blur: root.wallpaper-path == "sunset" ? 4px : 0px;
-                                            drop-shadow-color: root.wallpaper-path == "sunset" ? Theme.accent-glow : transparent;
-
-                                            Text {
-                                                y: parent.height - 12px;
-                                                text: "Sunset";
-                                                color: root.wallpaper-path == "sunset" ? #ffd6b0 : Theme.text-dim;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                width: 100%;
-                                            }
-
-                                            animate border-color { duration: Theme.dur-fast; }
-                                            animate border-width { duration: Theme.dur-fast; }
-                                        }
-                                    }
-
-                                    // Ocean (blue/teal)
-                                    wp-ocean-ta := TouchArea {
-                                        width: 60px; height: 40px;
-                                        clicked => {
-                                            root.wallpaper-path = "ocean";
-                                            root.custom-input-visible = false;
-                                            root.wallpaper-changed("ocean");
-                                        }
-                                        Rectangle {
-                                            width: 60px; height: 40px;
-                                            border-radius: Theme.r-sm;
-                                            clip: true;
-                                            background: @linear-gradient(180deg, #041830 0%, #063050 50%, #0a4868 100%);
-                                            border-width: root.wallpaper-path == "ocean" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "ocean" ? AppIdentity.accent : (wp-ocean-ta.has-hover ? Theme.border-default : Theme.border-subtle);
-                                            drop-shadow-blur: root.wallpaper-path == "ocean" ? 4px : 0px;
-                                            drop-shadow-color: root.wallpaper-path == "ocean" ? Theme.accent-glow : transparent;
-
-                                            // Mini wave accent
-                                            Rectangle {
-                                                x: 10px; y: 15px;
-                                                width: 40px; height: 15px;
-                                                border-radius: Theme.r-md;
-                                                background: @radial-gradient(circle, #06b6d418 0%, transparent 70%);
-                                            }
-
-                                            Text {
-                                                y: parent.height - 12px;
-                                                text: "Ocean";
-                                                color: root.wallpaper-path == "ocean" ? #b0e0ff : Theme.text-dim;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                width: 100%;
-                                            }
-
-                                            animate border-color { duration: Theme.dur-fast; }
-                                            animate border-width { duration: Theme.dur-fast; }
-                                        }
-                                    }
-
-                                    // Nebula (purple/cyan)
-                                    wp-nebula-ta := TouchArea {
-                                        width: 60px; height: 40px;
-                                        clicked => {
-                                            root.wallpaper-path = "nebula";
-                                            root.custom-input-visible = false;
-                                            root.wallpaper-changed("nebula");
-                                        }
-                                        Rectangle {
-                                            width: 60px; height: 40px;
-                                            border-radius: Theme.r-sm;
-                                            clip: true;
-                                            background: @linear-gradient(135deg, #1a0838 0%, #2e0e58 50%, #0a0828 100%);
-                                            border-width: root.wallpaper-path == "nebula" ? 2px : 1px;
-                                            border-color: root.wallpaper-path == "nebula" ? AppIdentity.accent : (wp-nebula-ta.has-hover ? Theme.border-default : Theme.border-subtle);
-                                            drop-shadow-blur: root.wallpaper-path == "nebula" ? 4px : 0px;
-                                            drop-shadow-color: root.wallpaper-path == "nebula" ? Theme.accent-glow : transparent;
-
-                                            // Mini nebula accent
-                                            Rectangle {
-                                                x: 15px; y: 8px;
-                                                width: 30px; height: 20px;
-                                                border-radius: 10px;
-                                                background: @radial-gradient(circle, #a855f728 0%, transparent 70%);
-                                            }
-                                            Rectangle {
-                                                x: 25px; y: 15px;
-                                                width: 25px; height: 18px;
-                                                border-radius: 9px;
-                                                background: @radial-gradient(circle, #06b6d420 0%, transparent 70%);
-                                            }
-
-                                            Text {
-                                                y: parent.height - 12px;
-                                                text: "Nebula";
-                                                color: root.wallpaper-path == "nebula" ? #d0b0ff : Theme.text-dim;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                width: 100%;
-                                            }
-
-                                            animate border-color { duration: Theme.dur-fast; }
-                                            animate border-width { duration: Theme.dur-fast; }
+                                            root.wallpaper-changed(preset.id);
                                         }
                                     }
                                 }
@@ -816,7 +615,7 @@ export component SettingsScreen inherits Rectangle {
                                     }
 
                                     // Show active wallpaper label
-                                    if root.wallpaper-path != "" && root.wallpaper-path != "aurora" && root.wallpaper-path != "sunset" && root.wallpaper-path != "ocean" && root.wallpaper-path != "nebula" : Text {
+                                    if root.wallpaper-path != "" && root.wallpaper-path != "serenity" && root.wallpaper-path != "first-light" && root.wallpaper-path != "nightfall" && root.wallpaper-path != "aurora" && root.wallpaper-path != "sunset" && root.wallpaper-path != "ocean" && root.wallpaper-path != "nebula" : Text {
                                         text: root.wallpaper-path;
                                         color: Theme.text-dim;
                                         font-size: Theme.fs-micro;
@@ -2878,7 +2677,7 @@ export component SettingsScreen inherits Rectangle {
                                         height: 36px;
                                         clicked => {
                                             root.save-provider(prov-name-input.text, "custom", prov-url-input.text, prov-key-input.text, "bearer");
-                                            root.provider-panel-open = false;
+                                            if(!root.save-error){root.provider-panel-open = false;}
                                         }
                                         Rectangle {
                                             border-radius: Theme.r-md;
@@ -2904,1225 +2703,80 @@ export component SettingsScreen inherits Rectangle {
 
                 // ===== CATEGORY 2: DESKTOP =====
                 if root.active-category == 2 : Flickable {
-                    width: 100%;
-                    height: 100%;
+                    width:100%;height:100%;viewport-width:self.width;viewport-height:page2.preferred-height;
+                    page2:=VerticalLayout {padding:28px;spacing:18px;alignment:start;
+                        Text{text:"Desktop";color:Theme.text-primary;font-size:28px;font-weight:600;}
+                        Text{text:"Make space for the way you work.";color:Theme.text-secondary;font-size:13px;wrap:word-wrap;}
 
-                    VerticalLayout {
-                        padding: Theme.sp-6;
-                        spacing: Theme.sp-4;
-                        alignment: start;
+SettingRow{label:"Your workspace";description:"Everyday keeps the desktop calm. Overview shows active work and system information.";value:root.agent-mode?"Overview":"Everyday";activated=>{root.set-agent-mode(!root.agent-mode);}}
+SettingRow{label:"Wallpaper and appearance";description:"Choose a scene, a light or dark appearance, and your accent color.";value:"Personalize";activated=>{root.active-category=0;}}
+SettingRow{label:"Find a setting";description:"Search by category or by controls such as wallpaper, Wi-Fi, or notifications.";value:"Ctrl + F";interactive:false;}
+SettingRow{label:"Clear search";description:"Return to the complete settings list.";value:"Escape";interactive:false;}
 
-                        // Section header
-                        HorizontalLayout {
-                            spacing: Theme.sp-2;
-                            Rectangle {
-                                width: 3px; height: 14px;
-                                border-radius: 1.5px;
-                                background: Theme.holo-blue;
-                                drop-shadow-blur: 4px;
-                                drop-shadow-color: Theme.holo-blue-glow;
-                            }
-                            Text {
-                                text: "DESKTOP";
-                                color: Theme.holo-blue;
-                                font-size: Theme.fs-caption;
-                                font-weight: 600;
-                                letter-spacing: 3px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        // Wallpaper configuration placeholder — will be moved from Appearance
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: desktop-layout.preferred-height;
-
-                            desktop-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: Theme.sp-3;
-
-                                HorizontalLayout {
-                                    Text {
-                                        text: "Window Management";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-body;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Text {
-                                        text: "labwc / Wayland";
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-body;
-                                    }
-                                }
-
-                                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                                HorizontalLayout {
-                                    Text {
-                                        text: "Compositor";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-body;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Text {
-                                        text: "wlroots";
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-body;
-                                    }
-                                }
-
-                                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                                HorizontalLayout {
-                                    Text {
-                                        text: "Display";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-body;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Text {
-                                        text: root.display-resolution != "" ? root.display-resolution : "auto";
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-body;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Keyboard Shortcuts card
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: keys-layout.preferred-height;
-
-                            keys-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: Theme.sp-2;
-
-                                Text {
-                                    text: "Keyboard Shortcuts";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-body;
-                                    font-weight: 600;
-                                }
-
-                                HorizontalLayout {
-                                    Text { text: "Alt + Tab"; color: Theme.accent; font-size: Theme.fs-caption; width: 120px; }
-                                    Text { text: "Switch windows"; color: Theme.text-secondary; font-size: Theme.fs-caption; }
-                                }
-                                HorizontalLayout {
-                                    Text { text: "Win + T"; color: Theme.accent; font-size: Theme.fs-caption; width: 120px; }
-                                    Text { text: "Open terminal"; color: Theme.text-secondary; font-size: Theme.fs-caption; }
-                                }
-                                HorizontalLayout {
-                                    Text { text: "Win + Left/Right"; color: Theme.accent; font-size: Theme.fs-caption; width: 120px; }
-                                    Text { text: "Snap window"; color: Theme.text-secondary; font-size: Theme.fs-caption; }
-                                }
-                                HorizontalLayout {
-                                    Text { text: "Print Screen"; color: Theme.accent; font-size: Theme.fs-caption; width: 120px; }
-                                    Text { text: "Screenshot"; color: Theme.text-secondary; font-size: Theme.fs-caption; }
-                                }
-                            }
-                        }
-
-                        // Bottom spacer
-                        Rectangle { height: 40px; }
+                        Rectangle{height:24px;}
                     }
                 }
 
                 // ===== CATEGORY 3: NETWORK =====
                 if root.active-category == 3 : Flickable {
-                    width: 100%;
-                    height: 100%;
+                    width:100%;height:100%;viewport-width:self.width;viewport-height:page3.preferred-height;
+                    page3:=VerticalLayout {padding:28px;spacing:18px;alignment:start;
+                        Text{text:"Network";color:Theme.text-primary;font-size:28px;font-weight:600;}
+                        Text{text:"Connection information from this device.";color:Theme.text-secondary;font-size:13px;wrap:word-wrap;}
 
-                    VerticalLayout {
-                        padding: Theme.sp-6;
-                        spacing: Theme.sp-4;
-                        alignment: start;
+SettingRow{label:root.wifi-ssid!=""?"Wi-Fi":"Connection";description:root.wifi-ssid!=""?root.wifi-ssid:"Wired and virtual adapters may not report a Wi-Fi name.";value:root.wifi-connected?"Connected":root.ip-address!=""?"Address assigned":"Not reported";interactive:false;}
+SettingRow{label:"IP address";description:"The address reported by the system monitor.";value:root.ip-address!=""?root.ip-address:"Not available";interactive:false;}
+SettingRow{label:"Network manager";description:"Open the native app to inspect and manage connections.";value:"Open";activated=>{root.open-network();}}
 
-                        // Section header
-                        HorizontalLayout {
-                            spacing: Theme.sp-2;
-                            Rectangle {
-                                width: 3px; height: 14px;
-                                border-radius: 1.5px;
-                                background: Theme.accent;
-                                drop-shadow-blur: 4px;
-                                drop-shadow-color: Theme.accent-glow;
-                            }
-                            Text {
-                                text: "NETWORK";
-                                color: Theme.accent;
-                                font-size: Theme.fs-caption;
-                                font-weight: 600;
-                                letter-spacing: 3px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: net-layout.preferred-height;
-
-                            net-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: Theme.sp-3;
-
-                                HorizontalLayout {
-                                    Text {
-                                        text: "WiFi";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-body;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Text {
-                                        text: root.wifi-connected
-                                            ? (root.wifi-ssid != "" ? root.wifi-ssid : "Connected")
-                                            : "Disconnected";
-                                        color: root.wifi-connected ? AppIdentity.accent : Theme.text-dim;
-                                        font-size: Theme.fs-body;
-                                    }
-                                }
-
-                                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                                HorizontalLayout {
-                                    Text {
-                                        text: "IP address";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-body;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Text {
-                                        text: root.ip-address != "" ? root.ip-address : "\u{2014}";
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-body;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Bottom spacer
-                        Rectangle { height: 40px; }
+                        Rectangle{height:24px;}
                     }
                 }
 
                 // ===== CATEGORY 5: PRIVACY & SECURITY =====
                 if root.active-category == 5 : Flickable {
-                    width: 100%;
-                    height: 100%;
+                    width:100%;height:100%;viewport-width:self.width;viewport-height:page5.preferred-height;
+                    page5:=VerticalLayout {padding:28px;spacing:18px;alignment:start;
+                        Text{text:"Privacy & security";color:Theme.text-primary;font-size:28px;font-weight:600;}
+                        Text{text:"Clear controls, with their scope explained.";color:Theme.text-secondary;font-size:13px;wrap:word-wrap;}
 
-                    VerticalLayout {
-                        padding: Theme.sp-6;
-                        spacing: Theme.sp-4;
-                        alignment: start;
+SettingRow{label:"Incognito";description:"Pause new built-in companion memories for this session. Existing memories remain. Resets when the shell restarts.";value:root.incognito-mode?"On":"Off";activated=>{root.toggle-incognito-mode();}}
+SettingRow{label:"Do Not Disturb";description:"Mute shell notification interruptions. This preference stays after a restart.";value:root.dnd-mode?"On":"Off";activated=>{root.toggle-dnd-mode();}}
+SettingRow{label:"Shell idle screen";description:"Show the shell lock view after inactivity on the desktop. This does not lock other native windows.";value:root.auto-lock-secs==0?"Never":root.auto-lock-secs<60?"30 seconds":"\{root.auto-lock-secs/60} minutes";activated=>{root.cycle-auto-lock();}}
+SettingRow{label:"Permissions";description:"Review the shell's tool permissions and outstanding requests.";value:"Review";activated=>{root.navigate-to(28);}}
 
-                        // Section header
-                        HorizontalLayout {
-                            spacing: Theme.sp-2;
-                            Rectangle {
-                                width: 3px; height: 14px;
-                                border-radius: 1.5px;
-                                background: Theme.color-emotional;
-                                drop-shadow-blur: 4px;
-                                drop-shadow-color: Theme.color-danger-dim;
-                            }
-                            Text {
-                                text: "SECURITY & PRIVACY";
-                                color: Theme.color-emotional;
-                                font-size: Theme.fs-caption;
-                                font-weight: 600;
-                                letter-spacing: 3px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: sec-layout.preferred-height;
-
-                            sec-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: Theme.sp-3;
-
-                                lock-ta := TouchArea {
-                                    height: 24px;
-                                    clicked => { root.cycle-auto-lock(); }
-
-                                    HorizontalLayout {
-                                        Text {
-                                            text: "Auto-lock";
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-body;
-                                            horizontal-stretch: 1;
-                                        }
-                                        Rectangle {
-                                            width: lock-tag.preferred-width + 16px;
-                                            height: 24px;
-                                            border-radius: Theme.r-lg;
-                                            background: lock-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
-                                            border-width: 1px;
-                                            border-color: Theme.border-subtle;
-
-                                            lock-tag := Text {
-                                                text: root.auto-lock-secs == 0 ? "Never"
-                                                    : (root.auto-lock-secs >= 60
-                                                        ? Math.floor(root.auto-lock-secs / 60) + " min"
-                                                        : root.auto-lock-secs + " sec");
-                                                color: Theme.text-primary;
-                                                font-size: Theme.fs-micro;
-                                                font-weight: 500;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                                HorizontalLayout {
-                                    Text {
-                                        text: "PIN lock";
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-body;
-                                        horizontal-stretch: 1;
-                                    }
-                                    // Active indicator with glow
-                                    Rectangle {
-                                        width: 8px; height: 8px;
-                                        y: (parent.height - 8px) / 2;
-                                        border-radius: 4px;
-                                        background: Theme.color-reminder;
-                                        drop-shadow-blur: 4px;
-                                        drop-shadow-color: Theme.color-success-dim;
-                                    }
-                                    Text {
-                                        text: " Enabled";
-                                        color: Theme.color-reminder;
-                                        font-size: Theme.fs-body;
-                                    }
-                                }
-
-                                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                                incognito-ta := TouchArea {
-                                    height: 24px;
-                                    clicked => { root.toggle-incognito-mode(); }
-
-                                    HorizontalLayout {
-                                        Text {
-                                            text: "Incognito";
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-body;
-                                            horizontal-stretch: 1;
-                                        }
-                                        Rectangle {
-                                            width: incognito-tag.preferred-width + 16px;
-                                            height: 24px;
-                                            border-radius: Theme.r-lg;
-                                            background: root.incognito-mode ? Theme.color-emotional : (incognito-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill);
-                                            border-width: 1px;
-                                            border-color: root.incognito-mode ? Theme.color-emotional : Theme.border-subtle;
-                                            drop-shadow-blur: root.incognito-mode ? 6px : 0;
-                                            drop-shadow-color: root.incognito-mode ? Theme.color-danger-dim : transparent;
-
-                                            incognito-tag := Text {
-                                                text: root.incognito-mode ? "ON" : "OFF";
-                                                color: root.incognito-mode ? Theme.text-on-accent : Theme.text-primary;
-                                                font-size: Theme.fs-micro;
-                                                font-weight: 600;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                                dnd-ta := TouchArea {
-                                    height: 24px;
-                                    clicked => { root.toggle-dnd-mode(); }
-
-                                    HorizontalLayout {
-                                        Text {
-                                            text: "Do Not Disturb";
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-body;
-                                            horizontal-stretch: 1;
-                                        }
-                                        Rectangle {
-                                            width: dnd-tag.preferred-width + 16px;
-                                            height: 24px;
-                                            border-radius: Theme.r-lg;
-                                            background: root.dnd-mode ? Theme.amber : (dnd-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill);
-                                            border-width: 1px;
-                                            border-color: root.dnd-mode ? Theme.amber : Theme.border-subtle;
-                                            drop-shadow-blur: root.dnd-mode ? 6px : 0;
-                                            drop-shadow-color: root.dnd-mode ? Theme.amber-glow : transparent;
-
-                                            dnd-tag := Text {
-                                                text: root.dnd-mode ? "ON" : "OFF";
-                                                color: root.dnd-mode ? Theme.bg-deep : Theme.text-primary;
-                                                font-size: Theme.fs-micro;
-                                                font-weight: 600;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Bottom spacer
-                        Rectangle { height: 40px; }
+                        Rectangle{height:24px;}
                     }
                 }
 
                 // ===== CATEGORY 6: SYSTEM =====
                 if root.active-category == 6 : Flickable {
-                    width: 100%;
-                    height: 100%;
+                    width:100%;height:100%;viewport-width:self.width;viewport-height:page6.preferred-height;
+                    page6:=VerticalLayout {padding:28px;spacing:18px;alignment:start;
+                        Text{text:"System";color:Theme.text-primary;font-size:28px;font-weight:600;}
+                        Text{text:"Your device, apps, and system information.";color:Theme.text-secondary;font-size:13px;wrap:word-wrap;}
 
-                    VerticalLayout {
-                        padding: Theme.sp-6;
-                        spacing: Theme.sp-4;
-                        alignment: start;
+SettingRow{label:"Yantrik OS";description:"Native desktop workspace";value:"Version "+root.version-text;interactive:false;}
+SettingRow{label:"Display";description:"Current display resolution reported by the shell.";value:root.display-resolution!=""?root.display-resolution:"Automatic";interactive:false;}
+SettingRow{label:"System monitor";description:"Inspect processor, memory, storage and running processes.";value:"Open";activated=>{root.navigate-to(10);}}
+SettingRow{label:"Notifications";description:"Review notifications and requests in one place.";value:"Open";activated=>{root.navigate-to(9);}}
+SettingRow{label:"About this device";description:"Detailed information about this installation.";value:"About";activated=>{root.navigate-to(16);}}
 
-                        // Section header
-                        HorizontalLayout {
-                            spacing: Theme.sp-2;
-                            Rectangle {
-                                width: 3px; height: 14px;
-                                border-radius: 1.5px;
-                                background: Theme.color-follow-up;
-                                drop-shadow-blur: 4px;
-                                drop-shadow-color: Theme.accent-glow;
-                            }
-                            Text {
-                                text: "SYSTEM";
-                                color: Theme.color-follow-up;
-                                font-size: Theme.fs-caption;
-                                font-weight: 600;
-                                letter-spacing: 3px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        // Version info card
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: about-layout.preferred-height;
-
-                            about-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: Theme.sp-3;
-
-                                HorizontalLayout {
-                                    // Logo text with glow
-                                    Text {
-                                        text: "Yantrik OS";
-                                        color: Theme.amber;
-                                        font-size: Theme.fs-body;
-                                        font-weight: 700;
-                                        letter-spacing: 1px;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Rectangle {
-                                        width: ver-text.preferred-width + 14px;
-                                        height: 22px;
-                                        border-radius: 11px;
-                                        background: Theme.tint-cyan;
-                                        border-width: 1px;
-                                        border-color: Theme.accent-dim;
-
-                                        ver-text := Text {
-                                            text: "v" + root.version-text;
-                                            color: Theme.accent;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 600;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                                Text {
-                                    text: "AI-native desktop shell. The AI IS the shell.";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-
-                        // Notifications link
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 52px;
-
-                            TouchArea {
-                                clicked => { root.navigate-to(9); }
-                            }
-
-                            HorizontalLayout {
-                                padding-left: Theme.sp-4;
-                                padding-right: Theme.sp-4;
-
-                                Text {
-                                    text: "Notifications";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-body;
-                                    horizontal-stretch: 1;
-                                    vertical-alignment: center;
-                                }
-                                if root.notification-count > 0 : Rectangle {
-                                    width: max(22px, notif-count-text.preferred-width + 12px);
-                                    height: 20px;
-                                    y: (parent.height - 20px) / 2;
-                                    border-radius: 10px;
-                                    background: Theme.amber-dim;
-                                    drop-shadow-blur: 4px;
-                                    drop-shadow-color: Theme.amber-glow;
-
-                                    notif-count-text := Text {
-                                        text: root.notification-count;
-                                        color: Theme.bg-deep;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: 700;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                Icon {
-                                    commands: Icons.arrow-right;
-                                    size: 16px;
-                                    tint: Theme.accent-dim;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                            }
-                        }
-
-                        // System Dashboard link
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 52px;
-
-                            TouchArea {
-                                clicked => { root.navigate-to(10); }
-                            }
-
-                            HorizontalLayout {
-                                padding-left: Theme.sp-4;
-                                padding-right: Theme.sp-4;
-
-                                Text {
-                                    text: "System Monitor";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-body;
-                                    horizontal-stretch: 1;
-                                    vertical-alignment: center;
-                                }
-                                Icon {
-                                    commands: Icons.arrow-right;
-                                    size: 16px;
-                                    tint: Theme.accent-dim;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                            }
-                        }
-
-                        // About Yantrik OS — detailed system info
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: 52px;
-
-                            TouchArea {
-                                clicked => { root.navigate-to(16); }
-                            }
-
-                            HorizontalLayout {
-                                padding-left: Theme.sp-4;
-                                padding-right: Theme.sp-4;
-
-                                Text {
-                                    text: "About Yantrik OS";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-body;
-                                    horizontal-stretch: 1;
-                                    vertical-alignment: center;
-                                }
-                                Icon {
-                                    commands: Icons.arrow-right;
-                                    size: 16px;
-                                    tint: Theme.accent-dim;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                            }
-                        }
-
-                        // Bottom spacer
-                        Rectangle { height: 40px; }
+                        Rectangle{height:24px;}
                     }
                 }
 
                 // ===== CATEGORY 4: ACCOUNTS & SERVICES =====
                 if root.active-category == 4 : Flickable {
-                    width: 100%;
-                    height: 100%;
-
-                    VerticalLayout {
-                        padding: Theme.sp-6;
-                        spacing: Theme.sp-4;
-                        alignment: start;
-
-                        // Section header
-                        HorizontalLayout {
-                            spacing: Theme.sp-2;
-                            Rectangle {
-                                width: 3px; height: 14px;
-                                border-radius: 1.5px;
-                                background: Theme.accent;
-                                drop-shadow-blur: 4px;
-                                drop-shadow-color: Theme.accent-glow;
-                            }
-                            Text {
-                                text: "ACCOUNTS & SERVICES";
-                                color: Theme.accent;
-                                font-size: Theme.fs-caption;
-                                font-weight: 600;
-                                letter-spacing: 3px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        // Description
-                        Text {
-                            text: "Connect external services to enrich Yantrik's knowledge about you — contacts, calendar, music taste, social graph.";
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-caption;
-                            wrap: word-wrap;
-                        }
-
-                        // ── Google ──
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: root.conn-google-status == "connected" ? Theme.color-success-dim : Theme.border-subtle;
-                            height: google-layout.preferred-height;
-
-                            google-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: Theme.sp-3;
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-3;
-
-                                    // Icon
-                                    Rectangle {
-                                        width: 36px; height: 36px;
-                                        border-radius: Theme.r-md;
-                                        background: Theme.tint-accent;
-
-                                        Text {
-                                            text: "G";
-                                            color: Theme.accent;
-                                            font-size: Theme.fs-headline;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        spacing: 2px;
-
-                                        Text {
-                                            text: "Google";
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                            font-weight: 600;
-                                        }
-                                        Text {
-                                            text: "Contacts, Calendar, Gmail";
-                                            color: Theme.text-dim;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-
-                                    // Status badge
-                                    Rectangle {
-                                        width: google-status-text.preferred-width + 16px;
-                                        height: 24px;
-                                        border-radius: Theme.r-lg;
-                                        background: root.conn-google-status == "connected" ? Theme.color-success-dim :
-                                                    root.conn-google-status == "connecting" ? Theme.color-warning-dim : Theme.border-subtle;
-                                        border-width: 1px;
-                                        border-color: root.conn-google-status == "connected" ? Theme.color-success-dim :
-                                                      root.conn-google-status == "connecting" ? Theme.color-warning-dim : Theme.border-subtle;
-
-                                        google-status-text := Text {
-                                            text: root.conn-google-status == "connected" ? "Connected" :
-                                                  root.conn-google-status == "connecting" ? "Connecting..." : "Not Connected";
-                                            color: root.conn-google-status == "connected" ? Theme.color-success :
-                                                   root.conn-google-status == "connecting" ? Theme.color-warning : Theme.text-dim;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 600;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                // Detail text (last sync, etc)
-                                if root.conn-google-detail != "" : Text {
-                                    text: root.conn-google-detail;
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                }
-
-                                // Action buttons
-                                HorizontalLayout {
-                                    spacing: Theme.sp-2;
-                                    alignment: end;
-
-                                    if root.conn-google-status == "connected" : TouchArea {
-                                        width: sync-google-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.sync-service("google"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.hover-fill : Theme.hover-fill;
-                                            border-width: 1px;
-                                            border-color: Theme.border-subtle;
-
-                                            sync-google-text := Text {
-                                                text: "Sync";
-                                                color: Theme.text-secondary;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-
-                                    if root.conn-google-status == "connected" : TouchArea {
-                                        width: disc-google-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.disconnect-service("google"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.color-danger-dim : transparent;
-                                            border-width: 1px;
-                                            border-color: Theme.color-danger-dim;
-
-                                            disc-google-text := Text {
-                                                text: "Disconnect";
-                                                color: Theme.color-danger;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-
-                                    if root.conn-google-status == "disconnected" : TouchArea {
-                                        width: connect-google-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.connect-service("google"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.accent-dim : Theme.tint-accent;
-                                            border-width: 1px;
-                                            border-color: Theme.accent-dim;
-
-                                            connect-google-text := Text {
-                                                text: "Connect";
-                                                color: Theme.accent;
-                                                font-size: Theme.fs-micro;
-                                                font-weight: 600;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // ── Spotify ──
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: root.conn-spotify-status == "connected" ? Theme.color-success-dim : Theme.border-subtle;
-                            height: spotify-layout.preferred-height;
-
-                            spotify-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: Theme.sp-3;
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-3;
-
-                                    Rectangle {
-                                        width: 36px; height: 36px;
-                                        border-radius: Theme.r-md;
-                                        background: Theme.color-success-dim;
-
-                                        Icon {
-                                            commands: Icons.music;
-                                            size: 16px;
-                                            tint: Theme.color-success;
-                                            x: (parent.width - self.width) / 2;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        spacing: 2px;
-
-                                        Text {
-                                            text: "Spotify";
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                            font-weight: 600;
-                                        }
-                                        Text {
-                                            text: "Top artists, genres, listening history";
-                                            color: Theme.text-dim;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        width: spotify-status-text.preferred-width + 16px;
-                                        height: 24px;
-                                        border-radius: Theme.r-lg;
-                                        background: root.conn-spotify-status == "connected" ? Theme.color-success-dim :
-                                                    root.conn-spotify-status == "connecting" ? Theme.color-warning-dim : Theme.border-subtle;
-                                        border-width: 1px;
-                                        border-color: root.conn-spotify-status == "connected" ? Theme.color-success-dim :
-                                                      root.conn-spotify-status == "connecting" ? Theme.color-warning-dim : Theme.border-subtle;
-
-                                        spotify-status-text := Text {
-                                            text: root.conn-spotify-status == "connected" ? "Connected" :
-                                                  root.conn-spotify-status == "connecting" ? "Connecting..." : "Not Connected";
-                                            color: root.conn-spotify-status == "connected" ? Theme.color-success :
-                                                   root.conn-spotify-status == "connecting" ? Theme.color-warning : Theme.text-dim;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 600;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                if root.conn-spotify-detail != "" : Text {
-                                    text: root.conn-spotify-detail;
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                }
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-2;
-                                    alignment: end;
-
-                                    if root.conn-spotify-status == "connected" : TouchArea {
-                                        width: sync-spot-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.sync-service("spotify"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.hover-fill : Theme.hover-fill;
-                                            border-width: 1px;
-                                            border-color: Theme.border-subtle;
-
-                                            sync-spot-text := Text {
-                                                text: "Sync";
-                                                color: Theme.text-secondary;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-
-                                    if root.conn-spotify-status == "connected" : TouchArea {
-                                        width: disc-spot-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.disconnect-service("spotify"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.color-danger-dim : transparent;
-                                            border-width: 1px;
-                                            border-color: Theme.color-danger-dim;
-
-                                            disc-spot-text := Text {
-                                                text: "Disconnect";
-                                                color: Theme.color-danger;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-
-                                    if root.conn-spotify-status == "disconnected" : TouchArea {
-                                        width: connect-spot-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.connect-service("spotify"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.color-success-dim : Theme.color-success-dim;
-                                            border-width: 1px;
-                                            border-color: Theme.color-success-dim;
-
-                                            connect-spot-text := Text {
-                                                text: "Connect";
-                                                color: Theme.color-success;
-                                                font-size: Theme.fs-micro;
-                                                font-weight: 600;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // ── Facebook ──
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: root.conn-facebook-status == "connected" ? Theme.accent-dim : Theme.border-subtle;
-                            height: fb-layout.preferred-height;
-
-                            fb-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: Theme.sp-3;
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-3;
-
-                                    Rectangle {
-                                        width: 36px; height: 36px;
-                                        border-radius: Theme.r-md;
-                                        background: Theme.tint-accent;
-
-                                        Text {
-                                            text: "f";
-                                            color: Theme.accent;
-                                            font-size: Theme.fs-headline;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        spacing: 2px;
-
-                                        Text {
-                                            text: "Facebook";
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                            font-weight: 600;
-                                        }
-                                        Text {
-                                            text: "Friends, events, interests";
-                                            color: Theme.text-dim;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        width: fb-status-text.preferred-width + 16px;
-                                        height: 24px;
-                                        border-radius: Theme.r-lg;
-                                        background: root.conn-facebook-status == "connected" ? AppIdentity.tint :
-                                                    root.conn-facebook-status == "connecting" ? Theme.color-warning-dim : Theme.border-subtle;
-                                        border-width: 1px;
-                                        border-color: root.conn-facebook-status == "connected" ? Theme.accent-dim :
-                                                      root.conn-facebook-status == "connecting" ? Theme.color-warning-dim : Theme.border-subtle;
-
-                                        fb-status-text := Text {
-                                            text: root.conn-facebook-status == "connected" ? "Connected" :
-                                                  root.conn-facebook-status == "connecting" ? "Connecting..." : "Not Connected";
-                                            color: root.conn-facebook-status == "connected" ? AppIdentity.accent :
-                                                   root.conn-facebook-status == "connecting" ? Theme.color-warning : Theme.text-dim;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 600;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                if root.conn-facebook-detail != "" : Text {
-                                    text: root.conn-facebook-detail;
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                }
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-2;
-                                    alignment: end;
-
-                                    if root.conn-facebook-status == "connected" : TouchArea {
-                                        width: sync-fb-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.sync-service("facebook"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.hover-fill : Theme.hover-fill;
-                                            border-width: 1px;
-                                            border-color: Theme.border-subtle;
-
-                                            sync-fb-text := Text {
-                                                text: "Sync";
-                                                color: Theme.text-secondary;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-
-                                    if root.conn-facebook-status == "connected" : TouchArea {
-                                        width: disc-fb-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.disconnect-service("facebook"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.color-danger-dim : transparent;
-                                            border-width: 1px;
-                                            border-color: Theme.color-danger-dim;
-
-                                            disc-fb-text := Text {
-                                                text: "Disconnect";
-                                                color: Theme.color-danger;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-
-                                    if root.conn-facebook-status == "disconnected" : TouchArea {
-                                        width: connect-fb-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.connect-service("facebook"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.accent-dim : Theme.tint-accent;
-                                            border-width: 1px;
-                                            border-color: Theme.accent-dim;
-
-                                            connect-fb-text := Text {
-                                                text: "Connect";
-                                                color: Theme.accent;
-                                                font-size: Theme.fs-micro;
-                                                font-weight: 600;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // ── Instagram ──
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: root.conn-instagram-status == "connected" ? Theme.color-danger-dim : Theme.border-subtle;
-                            height: ig-layout.preferred-height;
-
-                            ig-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: Theme.sp-3;
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-3;
-
-                                    Rectangle {
-                                        width: 36px; height: 36px;
-                                        border-radius: Theme.r-md;
-                                        background: Theme.color-danger-dim;
-
-                                        Icon {
-                                            commands: Icons.image;
-                                            size: 16px;
-                                            tint: Theme.color-emotional;
-                                            x: (parent.width - self.width) / 2;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        horizontal-stretch: 1;
-                                        spacing: 2px;
-
-                                        Text {
-                                            text: "Instagram";
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                            font-weight: 600;
-                                        }
-                                        Text {
-                                            text: "Profile, interests, hashtags";
-                                            color: Theme.text-dim;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        width: ig-status-text.preferred-width + 16px;
-                                        height: 24px;
-                                        border-radius: Theme.r-lg;
-                                        background: root.conn-instagram-status == "connected" ? Theme.color-danger-dim :
-                                                    root.conn-instagram-status == "connecting" ? Theme.color-warning-dim : Theme.border-subtle;
-                                        border-width: 1px;
-                                        border-color: root.conn-instagram-status == "connected" ? Theme.color-danger-dim :
-                                                      root.conn-instagram-status == "connecting" ? Theme.color-warning-dim : Theme.border-subtle;
-
-                                        ig-status-text := Text {
-                                            text: root.conn-instagram-status == "connected" ? "Connected" :
-                                                  root.conn-instagram-status == "connecting" ? "Connecting..." : "Not Connected";
-                                            color: root.conn-instagram-status == "connected" ? Theme.color-emotional :
-                                                   root.conn-instagram-status == "connecting" ? Theme.color-warning : Theme.text-dim;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 600;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                if root.conn-instagram-detail != "" : Text {
-                                    text: root.conn-instagram-detail;
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                }
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-2;
-                                    alignment: end;
-
-                                    if root.conn-instagram-status == "connected" : TouchArea {
-                                        width: sync-ig-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.sync-service("instagram"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.hover-fill : Theme.hover-fill;
-                                            border-width: 1px;
-                                            border-color: Theme.border-subtle;
-
-                                            sync-ig-text := Text {
-                                                text: "Sync";
-                                                color: Theme.text-secondary;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-
-                                    if root.conn-instagram-status == "connected" : TouchArea {
-                                        width: disc-ig-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.disconnect-service("instagram"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.color-danger-dim : transparent;
-                                            border-width: 1px;
-                                            border-color: Theme.color-danger-dim;
-
-                                            disc-ig-text := Text {
-                                                text: "Disconnect";
-                                                color: Theme.color-danger;
-                                                font-size: Theme.fs-micro;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-
-                                    if root.conn-instagram-status == "disconnected" : TouchArea {
-                                        width: connect-ig-text.preferred-width + 20px;
-                                        height: 30px;
-                                        clicked => { root.connect-service("instagram"); }
-
-                                        Rectangle {
-                                            border-radius: Theme.r-sm;
-                                            background: parent.has-hover ? Theme.color-danger-dim : Theme.color-danger-dim;
-                                            border-width: 1px;
-                                            border-color: Theme.color-danger-dim;
-
-                                            connect-ig-text := Text {
-                                                text: "Connect";
-                                                color: Theme.color-emotional;
-                                                font-size: Theme.fs-micro;
-                                                font-weight: 600;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Bottom spacer
-                        Rectangle { height: 40px; }
+                    width:100%;height:100%;viewport-width:self.width;viewport-height:page4.preferred-height;
+                    page4:=VerticalLayout {padding:28px;spacing:18px;alignment:start;
+                        Text{text:"Accounts";color:Theme.text-primary;font-size:28px;font-weight:600;}
+                        Text{text:"Account integrations available in this build.";color:Theme.text-secondary;font-size:13px;wrap:word-wrap;}
+
+Text{text:"These connection adapters are not installed. No accounts are connected or synced from this page.";color:Theme.text-secondary;font-size:14px;wrap:word-wrap;}
+for account in ["Google","Spotify","Facebook","Instagram"] : SettingRow{label:account;description:"Account connection requires an integration adapter.";value:"Unavailable";interactive:false;}
+SettingRow{label:"AI providers";description:"Manage the model providers that are supported by this installation.";value:"Configure";activated=>{root.active-category=1;}}
+
+                        Rectangle{height:24px;}
                     }
                 }
 
@@ -4306,5 +2960,13 @@ export component SettingsScreen inherits Rectangle {
                 }
             }
         }
+    }
+    Rectangle {x:0px;y:root.height - 38px;width:root.width;height:38px;background:Theme.bg-surface;
+        HorizontalLayout {padding-left:18px;padding-right:12px;spacing:12px;
+            Text{text:root.save-status;color:root.save-error?Theme.amber:Theme.text-dim;font-size:12px;overflow:elide;vertical-alignment:center;horizontal-stretch:1;}
+            if root.save-error && root.save-can-retry : YButton{label:"Retry save";variant:2;size:0;clicked=>{root.retry-save();}}
+            Text{text:"Ctrl+F  Search";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
+        }
+    }
     }
 }

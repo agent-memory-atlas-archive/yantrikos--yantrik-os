@@ -210,6 +210,7 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                             "dir": e.is_dir,
                             "size": e.size_text.to_string(),
                             "modified": e.modified_text.to_string(),
+                            "selected": e.selected,
                         })
                     })
                     .collect();
@@ -229,6 +230,17 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                     "total": total,
                     "selected": selected,
                     "selection_count": ui.get_file_selection_count(),
+                    "loading": ui.get_file_browser_loading(),
+                    "notice": ui.get_file_notice().to_string(),
+                    "operation_busy": ui.get_file_operation_busy(),
+                    "operation": ui.get_file_operation_text().to_string(),
+                    "operation_progress": ui.get_file_operation_progress(),
+                    "trash": ui.get_file_trash_mode(),
+                    "can_undo": ui.get_file_can_undo(),
+                    "has_clipboard": ui.get_file_has_clipboard(),
+                    "preview_open": ui.get_file_quick_look_open(),
+                    "preview_name": ui.get_file_quick_look_name().to_string(),
+                    "tabs": ui.get_file_tabs().row_count(),
                     "free_space": ui.get_file_free_space_text().to_string(),
                 })
             } else {
@@ -392,6 +404,7 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 )
                 .with("do_not_disturb", ui.get_dnd_mode())
                 .with("incognito", ui.get_settings_incognito_mode())
+                .with("settings", serde_json::json!({"category":ui.get_settings_category(),"query":ui.get_settings_query().to_string(),"dark":ui.get_settings_dark_mode(),"accent":ui.get_settings_accent_color().to_string(),"wallpaper":ui.get_wallpaper_path().to_string(),"save_error":ui.get_settings_save_error(),"save_status":ui.get_settings_save_status().to_string(),"auto_lock_secs":ui.get_settings_auto_lock_secs()}))
         }
     };
 
@@ -646,7 +659,7 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
             move |args| {
                 let ui = dnd_ui()?;
                 let on = args["on"].as_bool().ok_or("`on` must be true or false")?;
-                ui.set_dnd_mode(on);
+                if ui.get_dnd_mode()!=on { ui.invoke_toggle_dnd_mode(); }
                 Ok(serde_json::json!({ "do_not_disturb": on }))
             },
         )

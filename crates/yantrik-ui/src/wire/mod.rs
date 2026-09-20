@@ -10,6 +10,7 @@ mod about;
 mod app_grid;
 pub mod dep_check;
 mod callbacks;
+mod files;
 mod chat;
 mod clipboard;
 pub mod dock;

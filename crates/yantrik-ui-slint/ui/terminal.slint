@@ -598,25 +598,17 @@ export component TerminalScreen inherits Rectangle {
                             wrap: no-wrap;
                         }
 
-                        // Blinking cursor
+                        // Steady cursor: no perpetual animation/repaint loop while idle.
                         Rectangle {
-                            property <float> blink-opacity: 1.0;
                             x: root.cursor-col * root.char-width + root.term-padding;
                             y: root.cursor-row * root.line-height + root.term-padding;
                             width: root.char-width;
                             height: root.line-height;
                             background: Theme.accent;
-                            opacity: blink-opacity * 0.7;
+                            opacity: fs.has-focus ? 0.7 : 0.25;
                             border-radius: 1px;
 
-                            animate blink-opacity {
-                                duration: 600ms;
-                                iteration-count: -1;
-                                easing: ease-in-out;
-                            }
 
-                            // Keep blinking by toggling
-                            init => { self.blink-opacity = 0.0; }
                         }
 
                         // Ghost autocomplete suggestion

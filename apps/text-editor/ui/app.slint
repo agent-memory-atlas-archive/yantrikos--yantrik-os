@@ -1,127 +1,224 @@
-// Yantrik Text Editor — standalone app window.
-// Wraps the shared TextEditorScreen component in its own Window.
-
-import { Theme } from "theme.slint";
-import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
-import { AgentProposal } from "components/agent_proposal.slint";
+import { Theme, ThemeMode, AccentPreset } from "theme.slint";
 import { AppIdentity } from "app_color.slint";
-import { TextEditorScreen, EditorTabData } from "text_editor.slint";
-
-export { EditorTabData }
-export { AgentContextItem, AgentSuggestion, AgentProposal }
-
+import { AppHeader } from "app_header.slint";
+import { YButton, YIconButton } from "y_button.slint";
+import { YInput } from "y_input.slint";
+import { Icon, Icons } from "icon.slint";
+import { ScrollView } from "std-widgets.slint";
+export { ThemeMode, AccentPreset }
+export struct DocumentTab { title: string, active: bool, modified: bool }
 export component TextEditorApp inherits Window {
-    // ── The agent layer ──
-    in property <[AgentContextItem]> agent-context <=> editor.agent-context;
-    in property <[AgentSuggestion]> agent-suggestions <=> editor.agent-suggestions;
-    in property <string> agent-unavailable <=> editor.agent-unavailable;
-    callback agent-context-activated <=> editor.agent-context-activated;
-    callback agent-suggestion-activated <=> editor.agent-suggestion-activated;
-    in property <AgentProposal> proposal <=> editor.proposal;
-    in property <bool> proposal-working <=> editor.proposal-working;
-    callback proposal-applied <=> editor.proposal-applied;
-    callback proposal-dismissed <=> editor.proposal-dismissed;
-    
-    // What app this window is.
-    //
-    // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
-    // the screens that have one, and Email's account-setup screen has none -- so the app that
-    // most needs to look like itself on first run was the one screen still drawing the house
-    // teal. The window is the only element every screen of an app is inside.
-    init => { AppIdentity.id = "editor"; }
-
-    default-font-family: Theme.font-ui;
     title: "Editor";
-    // preferred-, not fixed: a fixed size makes the window unresizable, and the content
-    // stays this size even when the compositor maximises or fullscreens the window.
-    preferred-width: 1200px;
-    preferred-height: 800px;
-    min-width: 640px;
-    min-height: 400px;
+    preferred-width: 1100px; preferred-height: 760px;
+    min-width: 640px; min-height: 440px;
+    default-font-family: Theme.font-ui;
     background: Theme.bg-deep;
-
-    // ── File state ──
-    in property <string> file-name <=> editor.file-name;
-    in-out property <string> file-content <=> editor.file-content;
-    in property <bool> is-modified <=> editor.is-modified;
-    in property <bool> is-readonly <=> editor.is-readonly;
-
-    // ── Tab state ──
-    in property <[EditorTabData]> tabs <=> editor.tabs;
-    in property <int> tab-count <=> editor.tab-count;
-    in property <int> active-tab <=> editor.active-tab;
-    callback switch-tab <=> editor.switch-tab;
-    callback new-tab <=> editor.new-tab;
-    callback close-tab <=> editor.close-tab;
-
-    // ── Line/column info ──
-    in property <int> cursor-line <=> editor.cursor-line;
-    in property <int> cursor-col <=> editor.cursor-col;
-    in property <int> total-lines <=> editor.total-lines;
-    in property <string> encoding <=> editor.encoding;
-    in property <string> line-ending <=> editor.line-ending;
-    in property <string> file-type <=> editor.file-type;
-
-    // ── Line numbers ──
-    in property <string> line-numbers-text <=> editor.line-numbers-text;
-
-    // ── Go-to-line ──
-    in-out property <bool> show-goto-line <=> editor.show-goto-line;
-    in-out property <string> goto-line-input <=> editor.goto-line-input;
-    callback goto-line <=> editor.goto-line;
-
-    // ── Autosave ──
-    in property <bool> autosave-enabled <=> editor.autosave-enabled;
-    in property <string> last-saved-time <=> editor.last-saved-time;
-
-    // ── Save As dialog ──
-    in-out property <bool> show-save-dialog <=> editor.show-save-dialog;
-    in-out property <string> save-dir <=> editor.save-dir;
-    in-out property <string> save-filename <=> editor.save-filename;
-    in property <string> save-error <=> editor.save-error;
-
-    // ── AI assist ──
-    in-out property <bool> show-ai-panel <=> editor.show-ai-panel;
-    in-out property <string> ai-prompt <=> editor.ai-prompt;
-    in property <string> ai-response <=> editor.ai-response;
-    in property <bool> ai-is-working <=> editor.ai-is-working;
-
-    // ── Find & Replace ──
-    in-out property <bool> show-find-bar <=> editor.show-find-bar;
-    in-out property <string> find-query <=> editor.find-query;
-    in-out property <string> replace-text <=> editor.replace-text;
-    in property <int> find-match-count <=> editor.find-match-count;
-    in property <int> find-current-match <=> editor.find-current-match;
-    in-out property <bool> show-replace-row <=> editor.show-replace-row;
-
-    // ── Large file / encoding / minimap ──
-    in property <bool> editor-large-file-warning <=> editor.editor-large-file-warning;
-    in property <string> editor-file-size-text <=> editor.editor-file-size-text;
-    in-out property <bool> editor-show-encoding-picker <=> editor.editor-show-encoding-picker;
-    in-out property <bool> editor-show-line-ending-picker <=> editor.editor-show-line-ending-picker;
-    in-out property <bool> editor-minimap-visible <=> editor.editor-minimap-visible;
-
-    // ── Callbacks ──
-    callback save-file <=> editor.save-file;
-    callback save-file-as <=> editor.save-file-as;
-    callback content-changed <=> editor.content-changed;
-    callback ai-request <=> editor.ai-request;
-    callback ai-insert <=> editor.ai-insert;
-    callback ai-dismiss <=> editor.ai-dismiss;
-    callback find-next <=> editor.find-next;
-    callback find-prev <=> editor.find-prev;
-    callback replace-current <=> editor.replace-current;
-    callback replace-all <=> editor.replace-all;
-    callback find-query-changed <=> editor.find-query-changed;
-    callback editor-set-encoding <=> editor.editor-set-encoding;
-    callback editor-set-line-ending <=> editor.editor-set-line-ending;
-    callback editor-toggle-minimap <=> editor.editor-toggle-minimap;
-
-    editor := TextEditorScreen {
-        // Fills the window (no explicit size: Slint forbids width/height next to max-*).
-        // The screen's own layouts may report a bounded maximum (a stretch layout of fixed rows);
-        // the window must still open at its preferred size and grow with the user.
-        max-width: 100000px;
-        max-height: 100000px;
+    init => { AppIdentity.id = "editor"; }
+    in property <[DocumentTab]> tabs;
+    in-out property <string> content;
+    in property <string> document-title: "Untitled";
+    in property <string> path-label: "A little space for your next idea";
+    in property <string> language: "Plain text";
+    in property <bool> modified;
+    in property <bool> busy;
+    in property <string> notice;
+    in property <string> recovery-status: "Draft recovery ready";
+    in property <string> numbers: "1";
+    in property <int> line-count: 1;
+    in property <int> cursor-line: 1;
+    in property <int> cursor-column: 1;
+    in property <string> ending: "LF";
+    in-out property <int> font-pixels: 14;
+    in-out property <bool> show-find;
+    in-out property <bool> show-replace;
+    in-out property <bool> match-case;
+    in-out property <string> query;
+    in-out property <string> replacement;
+    in property <int> match-count;
+    in property <int> match-index;
+    // 1 open, 2 save as, 3 unsaved changes, 4 go to line.
+    in-out property <int> dialog;
+    in-out property <string> dialog-path;
+    in property <string> dialog-error;
+    in property <string> close-label;
+    in-out property <bool> syntax: true;
+    in property <string> keywords;
+    in property <string> strings;
+    in property <string> comments;
+    in property <bool> has-highlights;
+    callback action(string);
+    callback select-tab(int);
+    callback close-tab(int);
+    callback edited(string);
+    callback cursor(int);
+    callback search();
+    callback refresh();
+    public function focus-editor() { editor.focus(); }
+    public function select-range(start: int, end: int) { editor.set-selection-offsets(start,end); }
+    public function reset-position() { scroll.viewport-y = 0px; scroll.viewport-x = 0px; editor.set-selection-offsets(0,0); }
+    public function shortcut(event: KeyEvent) -> EventResult {
+        if (event.modifiers.control) {
+            if (event.text == "z" || event.text == "Z" || event.text == "y") { root.action(event.modifiers.shift || event.text == "y" ? "redo" : "undo"); return accept; }
+            if (event.text == "s" || event.text == "S") { root.action(event.modifiers.shift ? "save-as" : "save"); return accept; }
+            if (event.text == "n" || event.text == "t") { root.action("new"); return accept; }
+            if (event.text == "o") { root.action("open"); return accept; }
+            if (event.text == "w") { root.action("close"); return accept; }
+            if (event.text == "f" || event.text == "h") { root.show-find = true; root.show-replace = event.text == "h"; find-field.focus(); return accept; }
+            if (event.text == "g") { root.action("goto"); return accept; }
+            if (event.text == "+" || event.text == "=") { root.font-pixels = min(22,root.font-pixels+1); return accept; }
+            if (event.text == "-") { root.font-pixels = max(11,root.font-pixels - 1); return accept; }
+            if (event.text == Key.Tab) { root.action(event.modifiers.shift ? "previous-tab" : "next-tab"); return accept; }
+        }
+        if (event.text == Key.F3) { root.action(event.modifiers.shift ? "find-prev" : "find-next"); return accept; }
+        if (event.text == Key.Escape) { if(root.dialog != 0) {root.action("cancel");} else {root.show-find = false; root.focus-editor();} return accept; }
+        return reject;
     }
+    changed dialog => { if(root.dialog != 0 && root.dialog != 3) { path-field.focus(); } else if(root.dialog == 0) { editor.focus(); } }
+    FocusScope {
+    width:root.width; height:root.height;
+    key-pressed(event) => { return root.shortcut(event); }
+    VerticalLayout {
+        spacing: 0px;
+        AppHeader {
+            app-id: "editor"; icon: Icons.editor; title: "Text Editor";
+            subtitle: root.busy ? "Working…" : root.modified ? "Unsaved changes" : "Ready";
+            actions: [
+                {id:"open",icon:Icons.folder,label:"Open"},
+                {id:"find",icon:Icons.search,label:"Find",active:root.show-find},
+                {id:"save",icon:Icons.save,label:"Save",emphasis:2}
+            ];
+            action(id) => { if(id == "find") {root.show-find = !root.show-find; if(root.show-find){find-field.focus();}} else {root.action(id);} }
+        }
+        Rectangle {
+            height: 43px; background: Theme.bg-surface;
+            HorizontalLayout {
+                padding-left: 12px; padding-right: 8px; spacing: 4px;
+                for tab[i] in root.tabs : Rectangle {
+                    min-width: 0px; preferred-width: 178px; max-width: 178px; horizontal-stretch: 1; height: 38px;
+                    border-radius: 7px; background: tab.active ? Theme.bg-elevated : area.has-hover ? Theme.hover-fill : transparent;
+                    area := TouchArea { clicked => { root.select-tab(i); } }
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 4px; spacing: 6px;
+                        Text { text: tab.modified ? "●" : ""; width: 8px; color: Theme.accent; font-size: 9px; vertical-alignment: center; }
+                        Text { text: tab.title; color: tab.active ? Theme.text-primary : Theme.text-secondary; font-size: 13px; overflow: elide; vertical-alignment: center; }
+                        close := TouchArea { width: 22px; clicked => { root.close-tab(i); } Text { text: "×"; color: close.has-hover ? Theme.text-primary : Theme.text-dim; horizontal-alignment: center; vertical-alignment: center; } }
+                    }
+                    if tab.active : Rectangle { y: parent.height - 2px; height: 2px; background: Theme.accent; }
+                }
+                YIconButton { icon-path: Icons.plus; variant: 2; clicked => {root.action("new");} }
+                Rectangle {horizontal-stretch:1;}
+            }
+        }
+        Rectangle {
+            height: 40px; background: Theme.bg-surface;
+            HorizontalLayout {
+                padding-left: 20px; padding-right: 12px; spacing: 12px;
+                Text { text: root.path-label; color: Theme.text-dim; font-size: 12px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                YButton {label:"Save As"; variant:2; size:0; clicked=>{root.action("save-as");}}
+                YButton {label:root.syntax ? "Color on" : "Color off"; variant:2; size:0; clicked=>{root.syntax = !root.syntax;}}
+            }
+        }
+        if root.notice != "" : Rectangle {
+            height: message.preferred-height + 20px; background: Theme.bg-elevated;
+            message := Text { x:20px; y:10px; width: parent.width - 40px; text:root.notice; color:Theme.amber; font-size:13px; wrap:word-wrap; }
+        }
+        Rectangle {
+            height: root.show-find ? (root.show-replace ? 90px : 48px) : 0px; clip:true; background:Theme.bg-elevated;
+            VerticalLayout {
+                padding:8px; spacing:6px;
+                HorizontalLayout {
+                    spacing:8px;
+                    find-field := YInput { placeholder:"Find in document"; mode:1; value<=>root.query; edited(_)=>{root.search();} cleared=>{root.search();} accepted(_)=>{root.action("find-next");} }
+                    Text {text: root.match-count == 0 ? "No matches" : "\{root.match-index} / \{root.match-count}"; color:Theme.text-secondary; font-size:12px; vertical-alignment:center; width:90px;}
+                    YButton {label:root.match-case ? "Aa ✓" : "Aa"; variant:2; size:0; clicked=>{root.match-case = !root.match-case; root.search();}}
+                    YIconButton {icon-path:Icons.chevron-up; variant:2; clicked=>{root.action("find-prev");}}
+                    YIconButton {icon-path:Icons.chevron-down; variant:2; clicked=>{root.action("find-next");}}
+                    YButton {label:"Replace"; variant:2; size:0; clicked=>{root.show-replace = !root.show-replace;}}
+                    YIconButton {icon-path:Icons.close; variant:2; clicked=>{root.show-find=false;root.focus-editor();}}
+                }
+                if root.show-replace : HorizontalLayout {
+                    spacing:8px;
+                    YInput {placeholder:"Replace with"; value<=>root.replacement; accepted(_)=>{root.action("replace");}}
+                    YButton {label:"Replace"; variant:1; size:0; clicked=>{root.action("replace");}}
+                    YButton {label:"Replace all"; variant:1; size:0; clicked=>{root.action("replace-all");}}
+                }
+            }
+        }
+        Rectangle {height:1px;background:Theme.separator;}
+        Rectangle {
+            vertical-stretch:1; clip:true; background:Theme.bg-deep;
+            if root.content == "" : VerticalLayout {
+                padding-left:80px; padding-top:70px; alignment:start; spacing:12px;
+                Text {text:"Make room for an idea."; color:Theme.text-dim; font-size:25px; font-weight:500;}
+                Text {text:"Start writing, or open a text file.\nCtrl+O  Open     Ctrl+S  Save     Ctrl+F  Find";color:Theme.text-dim; font-size:14px;}
+            }
+            scroll := ScrollView {
+                width:parent.width; height:parent.height;
+                viewport-width: max(self.visible-width, editor.preferred-width + 110px);
+                viewport-height:max(self.visible-height,editor.preferred-height + 40px);
+                Rectangle {
+                width:scroll.viewport-width; height:scroll.viewport-height;
+                Rectangle {x:0px;y:0px;width:60px;height:scroll.viewport-height;background:Theme.bg-surface;}
+                gutter := Text {x:8px;y:20px;width:40px;text:root.numbers;horizontal-alignment:right;font-family:Theme.font-mono;font-size:root.font-pixels * 1px;color:Theme.text-dim;}
+                editor := TextInput {
+                    x:80px;y:20px;width:max(scroll.visible-width - 100px,self.preferred-width);height:self.preferred-height;
+                    text<=>root.content;font-family:Theme.font-mono;font-size:root.font-pixels * 1px;color:Theme.text-primary;
+                    single-line:false;wrap:no-wrap;read-only:root.busy || root.dialog != 0;
+                    selection-background-color:Theme.accent;selection-foreground-color:Theme.bg-deep;
+                    page-height:scroll.visible-height;
+                    edited=>{root.edited(self.text);}
+                    key-pressed(event)=>{return root.shortcut(event);}
+                    cursor-position-changed(pos)=>{
+                        root.cursor(self.cursor-position-byte-offset);
+                        if(pos.y + 44px > -scroll.viewport-y + scroll.visible-height){scroll.viewport-y = min(0px, scroll.visible-height - pos.y - 44px);}
+                        if(pos.y + 16px < -scroll.viewport-y){scroll.viewport-y = -pos.y;}
+                        if(pos.x + 100px > -scroll.viewport-x + scroll.visible-width){scroll.viewport-x = min(0px,scroll.visible-width - pos.x - 110px);}
+                        if(pos.x + 70px < -scroll.viewport-x){scroll.viewport-x = min(0px,-pos.x);}
+                    }
+                }
+                // Bounded lexical color layers use the same font and exact line geometry.
+                // Selection remains native and legible; non-ASCII/tabbed lines use plain text.
+                if root.syntax && root.has-highlights && editor.cursor-position-byte-offset == editor.anchor-position-byte-offset : Rectangle {
+                    x:80px;y:20px;width:editor.width;height:editor.height;
+                    Text {x:0px;y:0px;width:parent.width;height:parent.height;text:root.keywords;font-family:Theme.font-mono;font-size:root.font-pixels * 1px;color:Theme.accent;}
+                    Text {x:0px;y:0px;width:parent.width;height:parent.height;text:root.strings;font-family:Theme.font-mono;font-size:root.font-pixels * 1px;color:Theme.amber;}
+                    Text {x:0px;y:0px;width:parent.width;height:parent.height;text:root.comments;font-family:Theme.font-mono;font-size:root.font-pixels * 1px;color:Theme.text-dim;}
+                }
+                }
+            }
+        }
+        Rectangle {height:1px;background:Theme.separator;}
+        Rectangle {
+            height:32px;background:Theme.bg-surface;
+            HorizontalLayout {padding-left:20px;padding-right:16px;spacing:18px;
+                Text {text:"Ln \{root.cursor-line}, Col \{root.cursor-column}";color:Theme.text-secondary;font-size:12px;vertical-alignment:center;}
+                Text {text:"\{root.line-count} lines";color:Theme.text-dim;font-size:12px;vertical-alignment:center;}
+                Text {text:root.recovery-status;color:Theme.text-dim;font-size:12px;vertical-alignment:center;horizontal-stretch:1;overflow:elide;}
+                Text {text:root.language + "  ·  UTF-8  ·  " + root.ending;color:Theme.text-secondary;font-size:12px;vertical-alignment:center;}
+            }
+        }
+    }
+    Rectangle {
+        visible:root.dialog != 0;
+        background:#00000066;
+        TouchArea {}
+        Rectangle {
+            x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;
+            width:min(520px,root.width - 48px);height:modal.preferred-height;
+            border-radius:14px;background:Theme.bg-elevated;border-width:1px;border-color:Theme.border-default;
+            modal := VerticalLayout {
+                padding:24px;spacing:16px;
+                Text {text:root.dialog == 1 ? "Open a file" : root.dialog == 2 ? "Save a copy" : root.dialog == 4 ? "Go to line" : "Keep your changes?";color:Theme.text-primary;font-size:22px;font-weight:600;}
+                Text {text:root.dialog == 3 ? root.close-label : root.dialog == 4 ? "Enter a line number." : "Absolute path or ~/ — UTF-8 text, up to 1 MiB.";color:Theme.text-secondary;font-size:14px;wrap:word-wrap;}
+                path-field := YInput {visible:root.dialog != 3; value<=>root.dialog-path;accepted(_)=>{root.action("confirm");}}
+                if root.dialog-error != "" : Text {text:root.dialog-error;color:Theme.amber;font-size:13px;wrap:word-wrap;}
+                HorizontalLayout {spacing:8px;alignment:end;
+                    YButton {label:"Cancel";variant:2;clicked=>{root.action("cancel");}}
+                    if root.dialog == 3 : YButton {label:"Discard";variant:1;clicked=>{root.action("discard");}}
+                    YButton {label:root.busy ? "Working…" : root.dialog == 1 ? "Open" : root.dialog == 4 ? "Go" : "Save";variant:0;clicked=>{root.action(root.dialog == 3 ? "save-close" : "confirm");}}
+                }
+            }
+        }
+    }
+}
 }

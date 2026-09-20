@@ -1,7 +1,7 @@
 // File browser — full-featured file navigation with sidebar, status bar.
 // Screen 8. Sidebar (Places/Devices) + breadcrumb + list + details panel.
 // Wrapped in WindowFrame by app.slint — no internal header needed.
-// Firelight treatment: glassmorphism, holographic glows, gradient accents.
+// Native workbench: virtualized content, explicit actions, on-demand previews.
 // Enterprise features: multi-select, context menu, detail panel toggle,
 // create file/folder, status bar with selection info.
 
@@ -9,6 +9,8 @@ import { Theme } from "theme.slint";
 import { AppIdentity } from "components/app_color.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
+import { AppHeader } from "app_header.slint";
+import { YButton } from "y_button.slint";
 import { ListView } from "std-widgets.slint";
 import { YInput } from "components/y_input.slint";
 
@@ -51,12 +53,59 @@ export struct FileOpItem {
     status: string,     // "in_progress", "done", "error"
 }
 
+component FilePlace inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> active;
+    callback clicked();
+    height: 36px; border-radius: 6px;
+    background: root.active ? Theme.accent.transparentize(88%) : touch.has-hover ? Theme.hover-fill : transparent;
+    accessible-role: button; accessible-label: root.label; accessible-action-default => { root.clicked(); }
+    focus := FocusScope { key-pressed(e) => { if e.text == Key.Return || e.text == " " { root.clicked(); return accept; } reject } }
+    touch := TouchArea { clicked => { focus.focus(); root.clicked(); } }
+    HorizontalLayout { padding-left: 10px; padding-right: 8px; spacing: 10px;
+        Icon { commands: root.icon; size: 16px; tint: root.active ? Theme.accent : Theme.text-secondary; y: (parent.height - self.height)/2; }
+        Text { text: root.label; font-size: 12px; color: root.active ? Theme.text-primary : Theme.text-secondary; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+    }
+    border-width: focus.has-focus ? 1px : 0px; border-color: Theme.accent;
+}
+component FileRow inherits Rectangle {
+    in property <FileEntry> entry;
+    in property <bool> selected;
+    in property <bool> focused;
+    callback clicked(); callback activate(); callback context();
+    background: root.selected ? Theme.accent.transparentize(88%) : touch.has-hover ? Theme.hover-fill : transparent;
+    border-width: root.focused ? 1px : 0px; border-color: Theme.accent.transparentize(55%);
+    accessible-role: list-item; accessible-label: root.entry.name; accessible-action-default => { root.activate(); }
+    touch := TouchArea { clicked => { root.clicked(); } double-clicked => { root.activate(); } pointer-event(e) => { if e.button == PointerEventButton.right && e.kind == PointerEventKind.down { root.context(); } } }
+    HorizontalLayout { padding-left: 18px; padding-right: 16px; spacing: 14px;
+        Icon { commands: root.entry.is-dir ? Icons.folder : Icons.file-kind(root.entry.icon-char); tint: root.entry.is-dir ? Theme.accent : Theme.text-secondary; size: 21px; y: (parent.height - self.height)/2; }
+        Text { text: root.entry.name; color: Theme.text-primary; font-size: 13px; font-weight: root.entry.is-dir ? 500 : 400; vertical-alignment: center; horizontal-stretch: 1; min-width: 0px; overflow: elide; }
+        if root.width >= 420px : Text { text: root.entry.is-dir ? "Folder" : root.entry.size-text; color: Theme.text-dim; font-size: 11px; width: 76px; vertical-alignment: center; horizontal-alignment: right; }
+        if root.width >= 680px : Text { text: root.entry.modified-text; color: Theme.text-dim; font-size: 11px; width: 64px; vertical-alignment: center; horizontal-alignment: right; }
+    }
+}
+component FileTile inherits Rectangle {
+    in property <FileEntry> entry;
+    in property <bool> focused;
+    callback clicked(); callback activate();
+    background: root.entry.selected ? Theme.accent.transparentize(88%) : touch.has-hover ? Theme.hover-fill : transparent;
+    border-width: root.focused ? 1px : 0px; border-color: Theme.accent.transparentize(55%);
+    accessible-role: list-item; accessible-label: root.entry.name; accessible-action-default => { root.activate(); }
+    touch := TouchArea { clicked => { root.clicked(); } double-clicked => { root.activate(); } }
+    VerticalLayout { padding: 12px; spacing: 6px;
+        Rectangle { height: 40px; Icon { commands: root.entry.is-dir ? Icons.folder : Icons.file-kind(root.entry.icon-char); tint: root.entry.is-dir ? Theme.accent : Theme.text-secondary; size: 36px; x: (parent.width - self.width)/2; } }
+        Text { text: root.entry.name; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; overflow: elide; height: 18px; }
+        Text { text: root.entry.is-dir ? "Folder" : root.entry.size-text; color: Theme.text-dim; font-size: 10px; horizontal-alignment: center; height: 14px; }
+    }
+}
+
 export component FileBrowser inherits Rectangle {
     // This screen draws its own header rather than AppHeader, so it has to say what
     // it is: AppIdentity is otherwise left holding whichever app was opened before it.
-    init => { AppIdentity.id = "files"; }
 
-    background: transparent;
+
+
 
     in property <string> current-path: "~";
     in property <[FileEntry]> entries: [];
@@ -187,2406 +236,324 @@ export component FileBrowser inherits Rectangle {
         return "Name A-Z";
     }
 
-    VerticalLayout {
-        spacing: 0px;
-
-        // ── Tab bar — horizontal row of open tabs ──
-        if root.file-tabs.length > 0 : Rectangle {
-            height: 34px;
-            background: Theme.bg-surface;
-
-            // Bottom edge
-            Rectangle {
-                y: parent.height - 1px;
-                width: 100%;
-                height: 1px;
-                background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 4px;
-                alignment: start;
-
-                for tab[idx] in root.file-tabs : TouchArea {
-                    width: tab-pill.preferred-width + 32px;
-                    height: 28px;
-                    clicked => { root.file-switch-tab(idx); }
-
-                    tab-pill := Rectangle {
-                        border-radius: Theme.r-md;
-                        background: tab.is-active
-                            ? Theme.accent-dim
-                            : (parent.has-hover ? Theme.hover-fill : transparent);
-                        border-width: tab.is-active ? 1px : 0;
-                        border-color: Theme.cyan-dim;
-                        animate background, border-width { duration: Theme.dur-fast; }
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 4px;
-                            spacing: 6px;
-                            alignment: center;
-
-                            Text {
-                                text: tab.label;
-                                color: tab.is-active ? Theme.cyan : Theme.text-secondary;
-                                font-size: Theme.fs-micro;
-                                font-weight: tab.is-active ? 600 : 400;
-                                vertical-alignment: center;
-                                overflow: elide;
-                                max-width: 120px;
-                                animate color { duration: Theme.dur-fast; }
-                            }
-
-                            // Close button
-                            tab-close := TouchArea {
-                                width: 16px; height: 16px;
-                                clicked => { root.file-close-tab(idx); }
-                                Rectangle {
-                                    border-radius: 4px;
-                                    background: tab-close.has-hover ? Theme.color-danger-dim : transparent;
-                                    animate background { duration: Theme.dur-fast; }
-                                    Icon {
-                                        commands: Icons.close;
-                                        size: 12px;
-                                        tint: tab-close.has-hover ? Theme.color-danger : Theme.text-dim;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // "+" button to add a new tab
-                new-tab-btn := TouchArea {
-                    width: 28px; height: 28px;
-                    clicked => { root.file-new-tab(); }
-                    Rectangle {
-                        border-radius: Theme.r-md;
-                        background: new-tab-btn.has-hover
-                            ? Theme.hover-fill
-                            : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Text {
-                            text: "+";
-                            color: new-tab-btn.has-hover ? Theme.cyan : Theme.text-dim;
-                            font-size: Theme.fs-headline;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            animate color { duration: Theme.dur-fast; }
-                        }
-                    }
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-            }
+    in property <string> notice;
+    in property <bool> operation-busy;
+    in property <string> operation-text;
+    in property <float> operation-progress;
+    in property <bool> can-undo;
+    callback refresh();
+    callback cancel-operation();
+    callback undo-trash();
+    callback open-with(string);
+    callback dismiss-notice();
+    property <bool> ctrl-held;
+    property <bool> shift-held;
+    property <string> dialog-kind;
+    property <string> dialog-value;
+    property <string> dialog-old;
+    property <bool> open-with-visible;
+    property <int> columns: max(1, floor(list-area.width / 148px));
+    property <string> selected-name: root.selected-index >= 0 && root.selected-index < root.entries.length ? root.entries[root.selected-index].name : "";
+    public function focus-list() { listing.focus(); }
+    function open-selected() {
+        if root.selected-index >= 0 && !root.file-trash-mode {
+            if root.entries[root.selected-index].is-dir { root.navigate-dir(root.selected-name); }
+            else { root.open-file(root.selected-name); }
         }
-
-        // ── Navigation bar — glass gradient with back/forward/up/home + breadcrumbs ──
-        Rectangle {
-            height: 40px;
-            background: Theme.bg-surface;
-
-            // Bottom holographic edge
-            Rectangle {
-                y: parent.height - 1px;
-                width: 100%;
-                height: 1px;
-                background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 2px;
-
-                // Back button
-                back-btn := TouchArea {
-                    width: 28px; height: 32px;
-                    clicked => { root.selected-index = -1; root.clear-selection(); root.go-back(); }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: back-btn.has-hover && root.can-go-back
-                            ? Theme.hover-fill
-                            : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Icon {
-                            commands: Icons.chevron-left;
-                            size: 14px;
-                            tint: root.can-go-back ? (back-btn.has-hover ? Theme.cyan : Theme.text-secondary) : Theme.text-dim;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            animate tint { duration: Theme.dur-fast; }
-                        }
-                    }
-                }
-
-                // Forward button
-                fwd-btn := TouchArea {
-                    width: 28px; height: 32px;
-                    clicked => { root.selected-index = -1; root.clear-selection(); root.go-forward(); }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: fwd-btn.has-hover && root.can-go-forward
-                            ? Theme.hover-fill
-                            : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Icon {
-                            commands: Icons.chevron-right;
-                            size: 14px;
-                            tint: root.can-go-forward ? (fwd-btn.has-hover ? Theme.cyan : Theme.text-secondary) : Theme.text-dim;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            animate tint { duration: Theme.dur-fast; }
-                        }
-                    }
-                }
-
-                // Up button
-                up-btn := TouchArea {
-                    width: 28px; height: 32px;
-                    clicked => { root.selected-index = -1; root.clear-selection(); root.go-up(); }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: up-btn.has-hover
-                            ? Theme.hover-fill
-                            : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Icon {
-                            commands: Icons.arrow-up;
-                            size: 16px;
-                            tint: up-btn.has-hover ? Theme.cyan : Theme.text-secondary;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            animate tint { duration: Theme.dur-fast; }
-                        }
-                    }
-                }
-
-                // Home button
-                home-btn := TouchArea {
-                    width: 28px; height: 32px;
-                    clicked => { root.selected-index = -1; root.clear-selection(); root.navigate-to-path("~"); }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: home-btn.has-hover
-                            ? Theme.hover-fill
-                            : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Icon {
-                            commands: Icons.home;
-                            size: 16px;
-                            tint: home-btn.has-hover ? Theme.cyan : Theme.text-secondary;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            animate tint { duration: Theme.dur-fast; }
-                        }
-                    }
-                }
-
-                // Separator
-                Rectangle {
-                    width: 1px; height: 24px;
-                    background: Theme.border-subtle;
-                }
-
-                // Breadcrumb / editable address bar toggle
-                if !root.address-editing : HorizontalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 0px;
-
-                    // Double-click area to enter address editing
-                    addr-click := TouchArea {
-                        horizontal-stretch: 1;
-                        double-clicked => { root.address-editing = true; }
-
-                        HorizontalLayout {
-                            spacing: 0px;
-
-                            for seg[idx] in root.breadcrumbs : HorizontalLayout {
-                                spacing: 4px;
-
-                                if idx > 0 : Text {
-                                    text: "/";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.font-small;
-                                    vertical-alignment: center;
-                                }
-
-                                TouchArea {
-                                    height: 28px;
-                                    width: seg-text.preferred-width + 12px;
-                                    clicked => { root.selected-index = -1; root.clear-selection(); root.navigate-to-path(seg.full-path); }
-
-                                    Rectangle {
-                                        border-radius: 4px;
-                                        background: parent.has-hover
-                                            ? Theme.hover-fill
-                                            : transparent;
-                                        animate background { duration: Theme.dur-fast; }
-
-                                        seg-text := Text {
-                                            text: seg.label;
-                                            color: idx == root.breadcrumbs.length - 1 ? Theme.cyan : Theme.cyan-dim;
-                                            font-size: Theme.font-small;
-                                            font-weight: idx == root.breadcrumbs.length - 1 ? 600 : 400;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
-
-                            Rectangle { horizontal-stretch: 1; }
-                        }
-                    }
-                }
-
-                // Editable address bar (shown when address-editing is true)
-                if root.address-editing : HorizontalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 4px;
-
-                    addr-input := YInput {
-                        horizontal-stretch: 1;
-                        value: root.current-path;
-                        accepted(t) => {
-                            root.address-editing = false;
-                            root.selected-index = -1;
-                            root.clear-selection();
-                            root.navigate-to-path(t);
-                        }
-                    }
-
-                    // Cancel button
-                    addr-cancel := TouchArea {
-                        width: 28px; height: 28px;
-                        clicked => { root.address-editing = false; }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: addr-cancel.has-hover ? Theme.color-danger-dim : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: Icons.close;
-                                size: 14px;
-                                tint: Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-                }
-
-                // Spacer (only when not in address editing mode and breadcrumbs don't stretch)
-                if root.address-editing : Rectangle { }
-
-                // Toolbar buttons
-                HorizontalLayout {
-                    spacing: 2px;
-                    alignment: end;
-
-                    // Search toggle / inline filter
-                    if !root.search-active : search-btn := TouchArea {
-                        width: 28px; height: 32px;
-                        clicked => { root.search-active = true; root.search-text = ""; }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: search-btn.has-hover
-                                ? Theme.hover-fill : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: Icons.search;
-                                size: 14px;
-                                tint: Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-
-                    if root.search-active : HorizontalLayout {
-                        spacing: 2px;
-
-                        filter-input := YInput {
-                            width: 180px;
-                            mode: 1;
-                            placeholder: "Filter...";
-                            value: root.search-text;
-                            edited(t) => { root.search-text = t; root.file-filter-changed(t); }
-                            cleared() => { root.search-text = ""; root.file-filter-changed(""); }
-                        }
-
-                        filter-close := TouchArea {
-                            width: 24px; height: 28px;
-                            clicked => { root.search-active = false; root.search-text = ""; root.file-filter-changed(""); }
-                            Rectangle {
-                                border-radius: Theme.r-sm;
-                                background: filter-close.has-hover ? Theme.color-danger-dim : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                Icon {
-                                    commands: Icons.close;
-                                    size: 14px;
-                                    tint: Theme.text-secondary;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                            }
-                        }
-                    }
-
-                    // Address bar toggle
-                    addr-btn := TouchArea {
-                        width: 28px; height: 32px;
-                        clicked => { root.address-editing = !root.address-editing; }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: addr-btn.has-hover
-                                ? Theme.hover-fill : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Text {
-                                text: "/";
-                                color: root.address-editing ? Theme.cyan : (addr-btn.has-hover ? Theme.cyan : Theme.text-dim);
-                                font-size: Theme.fs-body; font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                animate color { duration: Theme.dur-fast; }
-                            }
-                        }
-                    }
-
-                    // New file
-                    newfile-btn := TouchArea {
-                        width: 28px; height: 32px;
-                        clicked => { root.new-file-name = ""; root.show-new-file-dialog = true; }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: newfile-btn.has-hover
-                                ? Theme.color-success-dim : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: Icons.checkbox;
-                                size: 14px;
-                                tint: newfile-btn.has-hover ? Theme.color-success : Theme.text-dim;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                animate tint { duration: Theme.dur-fast; }
-                            }
-                        }
-                    }
-
-                    // New folder
-                    newfolder-btn := TouchArea {
-                        width: 28px; height: 32px;
-                        clicked => { root.new-folder-name = ""; root.show-new-folder-dialog = true; }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: newfolder-btn.has-hover
-                                ? Theme.hover-fill : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Text {
-                                text: "+";
-                                color: newfolder-btn.has-hover ? Theme.cyan : Theme.cyan-dim;
-                                font-size: Theme.fs-headline;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                animate color { duration: Theme.dur-fast; }
-                            }
-                        }
-                    }
-
-                    // Paste
-                    if root.has-clipboard : TouchArea {
-                        width: 28px; height: 32px;
-                        clicked => { root.file-paste(); }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: parent.has-hover
-                                ? Theme.hover-fill : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: Icons.copy;
-                                size: 14px;
-                                tint: Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-
-                    // Toggle hidden
-                    hidden-btn := TouchArea {
-                        width: 28px; height: 32px;
-                        clicked => { root.selected-index = -1; root.clear-selection(); root.toggle-hidden(); }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: hidden-btn.has-hover
-                                ? Theme.hover-fill : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: root.show-hidden ? Icons.spark : Icons.wifi;
-                                size: 14px;
-                                tint: root.show-hidden ? Theme.cyan : Theme.text-dim;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-
-                    // Detail panel toggle
-                    detail-toggle-btn := TouchArea {
-                        width: 28px; height: 32px;
-                        clicked => { root.detail-panel-visible = !root.detail-panel-visible; }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: detail-toggle-btn.has-hover
-                                ? Theme.hover-fill : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: Icons.list;
-                                size: 16px;
-                                tint: root.detail-panel-visible ? Theme.cyan : (detail-toggle-btn.has-hover ? Theme.cyan : Theme.text-dim);
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                animate tint { duration: Theme.dur-fast; }
-                            }
-                        }
-                    }
-
-                    // Grid/List view toggle
-                    view-toggle-btn := TouchArea {
-                        width: 28px; height: 32px;
-                        clicked => { root.grid-view = !root.grid-view; root.selected-index = -1; root.clear-selection(); }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: view-toggle-btn.has-hover
-                                ? Theme.hover-fill : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: root.grid-view ? Icons.list : Icons.grid;
-                                size: 14px;
-                                tint: view-toggle-btn.has-hover ? Theme.cyan : Theme.text-dim;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                animate tint { duration: Theme.dur-fast; }
-                            }
-                        }
-                    }
-
-                    // Trash toggle
-                    trash-toggle-btn := TouchArea {
-                        width: 32px; height: 32px;
-                        clicked => { root.file-toggle-trash(); }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: root.file-trash-mode
-                                ? Theme.color-danger-dim
-                                : (trash-toggle-btn.has-hover ? Theme.hover-fill : transparent);
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: Icons.trash;
-                                size: 14px;
-                                tint: root.file-trash-mode ? Theme.color-danger : (trash-toggle-btn.has-hover ? Theme.cyan : Theme.text-dim);
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                                animate tint { duration: Theme.dur-fast; }
-                            }
-
-                            // Badge showing trash count
-                            if root.file-trash-count > 0 && !root.file-trash-mode : Rectangle {
-                                x: parent.width - 12px;
-                                y: 0;
-                                width: 14px;
-                                height: 14px;
-                                border-radius: 7px;
-                                background: Theme.color-danger;
-                                Text {
-                                    text: root.file-trash-count < 100 ? root.file-trash-count : "99+";
-                                    color: Theme.text-on-accent;
-                                    font-size: Theme.fs-micro;
-                                    font-weight: 700;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-
-                    // Batch rename (visible when multi-select active)
-                    if root.selection-count > 1 : batch-rename-btn := TouchArea {
-                        width: 28px; height: 32px;
-                        clicked => { root.file-batch-rename-open = true; root.file-batch-rename-pattern = ""; root.file-batch-rename-replace = ""; }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: batch-rename-btn.has-hover
-                                ? Theme.hover-fill : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Text {
-                                text: "R";
-                                color: batch-rename-btn.has-hover ? Theme.amber : Theme.text-dim;
-                                font-size: Theme.fs-caption;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                animate color { duration: Theme.dur-fast; }
-                            }
-                        }
-                    }
-                }
-            }
+    }
+    function command(id: string) {
+        if id == "new-folder" { root.dialog-kind = "New folder"; root.dialog-value = ""; }
+        else if id == "new-file" { root.dialog-kind = "New file"; root.dialog-value = ""; }
+        else if id == "rename" && root.selected-name != "" { root.dialog-kind = "Rename"; root.dialog-old = root.selected-name; root.dialog-value = root.selected-name; }
+        else if id == "copy" { root.copy-selected(); }
+        else if id == "copy-path" { root.context-copy-path(root.selected-name); }
+        else if id == "cut" { root.cut-selected(); }
+        else if id == "paste" { root.file-paste(); }
+        else if id == "trash" { root.delete-selected(); }
+        else if id == "preview" && root.selected-index >= 0 { root.file-quick-look(root.selected-index); }
+        else if id == "details" { root.detail-panel-visible = !root.detail-panel-visible; if root.detail-panel-visible { root.file-selection-changed(root.selected-name); } }
+        else if id == "terminal" { root.context-open-terminal(); }
+        else if id == "refresh" { root.refresh(); }
+        else if id == "hidden" { root.toggle-hidden(); }
+        else if id == "new-tab" { root.file-new-tab(); }
+        else if id == "open-with" { root.open-with-visible = true; }
+        else if id == "restore" { root.file-restore-from-trash(root.selected-index); }
+        else if id == "empty-trash" { root.dialog-kind = "Empty Trash"; }
+    }
+    function submit-dialog() {
+        if root.dialog-kind == "New folder" { root.create-folder(root.dialog-value); }
+        else if root.dialog-kind == "New file" { root.create-file(root.dialog-value); }
+        else if root.dialog-kind == "Rename" { root.file-rename(root.dialog-old, root.dialog-value); }
+        else if root.dialog-kind == "Empty Trash" { root.file-empty-trash(); }
+        root.dialog-kind = ""; listing.focus();
+    }
+    function reveal-selection() {
+        if root.selected-index < 0 { return; }
+        if root.grid-view {
+            let y = floor(root.selected-index / root.columns) * 116px;
+            if y + grid-list.viewport-y < 0px { grid-list.viewport-y = -y; }
+            if y + 116px + grid-list.viewport-y > grid-list.visible-height { grid-list.viewport-y = grid-list.visible-height - y - 116px; }
+        } else {
+            let y = root.selected-index * 46px;
+            if y + list-view.viewport-y < 0px { list-view.viewport-y = -y; }
+            if y + 46px + list-view.viewport-y > list-view.visible-height { list-view.viewport-y = list-view.visible-height - y - 46px; }
         }
-
-        // ── Multi-select action bar ──
-        if root.selection-count > 1 : Rectangle {
-            height: 36px;
-            background: Theme.bg-surface;
-
-            Rectangle {
-                y: parent.height - 1px; width: 100%; height: 1px;
-                background: Theme.separator;
+    }
+    changed selected-index => { root.reveal-selection(); }
+    changed grid-view => { root.reveal-selection(); }
+    changed is-loading => { if !root.is-loading { listing.focus(); } }
+    changed current-path => { root.search-text = ""; }
+    init => { AppIdentity.id = "files"; listing.focus(); }
+    background: Theme.bg-deep;
+    min-width: 0px; min-height: 0px;
+    preferred-width: 0px; preferred-height: 0px;
+    horizontal-stretch: 1; vertical-stretch: 1;
+    FocusScope {
+        enabled: root.dialog-kind == "" && !root.file-quick-look-open && !root.open-with-visible;
+        capture-key-pressed(e) => {
+            root.ctrl-held = e.modifiers.control; root.shift-held = e.modifiers.shift;
+            if e.modifiers.control && (e.text == "l" || e.text == "L") { root.address-editing = true; return accept; }
+            if e.modifiers.control && (e.text == "f" || e.text == "F") { search-input.focus(); return accept; }
+            if e.modifiers.alt && e.text == Key.LeftArrow { root.go-back(); return accept; }
+            if e.modifiers.alt && e.text == Key.RightArrow { root.go-forward(); return accept; }
+            if e.modifiers.alt && e.text == Key.UpArrow { root.go-up(); return accept; }
+            if e.text == Key.F5 { root.refresh(); return accept; }
+            if e.text == Key.Escape {
+                root.address-editing = false; root.show-context-menu = false;
+                if root.search-text != "" { root.search-text = ""; root.file-filter-changed(""); }
+                listing.focus(); return accept;
             }
-
-            HorizontalLayout {
-                padding-left: 12px; padding-right: 12px; spacing: 8px;
-
-                // Selection badge
-                Rectangle {
-                    width: sel-badge-text.preferred-width + 16px;
-                    height: 24px;
-                    border-radius: Theme.r-lg;
-                    background: Theme.accent-dim;
-                    border-width: 1px; border-color: Theme.cyan-dim;
-
-                    sel-badge-text := Text {
-                        text: root.selection-count + " selected";
-                        color: Theme.cyan;
-                        font-size: Theme.fs-micro; font-weight: 600;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-
-                // Copy selected
-                ms-copy-btn := TouchArea {
-                    width: 56px; height: 28px;
-                    clicked => { root.copy-selected(); }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ms-copy-btn.has-hover ? Theme.hover-fill : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Text { text: "Copy"; color: ms-copy-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
-                    }
-                }
-
-                // Cut selected
-                ms-cut-btn := TouchArea {
-                    width: 48px; height: 28px;
-                    clicked => { root.cut-selected(); }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ms-cut-btn.has-hover ? Theme.hover-fill : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Text { text: "Cut"; color: ms-cut-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
-                    }
-                }
-
-                // Delete selected
-                ms-del-btn := TouchArea {
-                    width: 60px; height: 28px;
-                    clicked => { root.delete-target-name = root.selection-count + " items"; root.show-delete-dialog = true; }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ms-del-btn.has-hover ? Theme.color-danger-dim : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Text { text: "Delete"; color: ms-del-btn.has-hover ? Theme.color-danger : Theme.color-danger; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
-                    }
-                }
-
-                // Clear selection
-                ms-clear-btn := TouchArea {
-                    width: 24px; height: 28px;
-                    clicked => { root.clear-selection(); root.selected-index = -1; }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ms-clear-btn.has-hover ? Theme.color-danger-dim : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Icon {
-                            commands: Icons.close;
-                            size: 14px;
-                            tint: Theme.text-secondary;
-                            y: (parent.height - self.height) / 2;
-                        }
-                    }
-                }
-            }
+            reject
         }
-
-        // ── Trash mode action bar ──
-        if root.file-trash-mode : Rectangle {
-            height: 36px;
-            background: Theme.bg-surface;
-
-            Rectangle {
-                y: parent.height - 1px; width: 100%; height: 1px;
-                background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                padding-left: 12px; padding-right: 12px; spacing: 8px;
-
-                // Trash badge
-                Rectangle {
-                    width: trash-badge-txt.preferred-width + 16px;
-                    height: 24px;
-                    border-radius: Theme.r-lg;
-                    background: Theme.color-danger-dim;
-                    border-width: 1px; border-color: Theme.color-danger-dim;
-
-                    trash-badge-txt := Text {
-                        text: "Trash (" + root.file-trash-count + ")";
-                        color: Theme.color-danger;
-                        font-size: Theme.fs-micro; font-weight: 600;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-
-                // Restore selected
-                if root.selected-index >= 0 : trash-restore-btn := TouchArea {
-                    width: 72px; height: 28px;
-                    clicked => { root.file-restore-from-trash(root.selected-index); }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: trash-restore-btn.has-hover ? Theme.color-success-dim : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Text { text: "Restore"; color: trash-restore-btn.has-hover ? Theme.color-success : Theme.color-success; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
-                    }
-                }
-
-                // Empty trash
-                trash-empty-btn := TouchArea {
-                    width: 88px; height: 28px;
-                    clicked => { root.file-empty-trash(); }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: trash-empty-btn.has-hover ? Theme.color-danger-dim : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Text { text: "Empty Trash"; color: trash-empty-btn.has-hover ? Theme.color-danger : Theme.color-danger; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
-                    }
-                }
-
-                // Exit trash view
-                trash-exit-btn := TouchArea {
-                    width: 24px; height: 28px;
-                    clicked => { root.file-toggle-trash(); }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: trash-exit-btn.has-hover ? Theme.color-danger-dim : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Icon {
-                            commands: Icons.close;
-                            size: 14px;
-                            tint: Theme.text-secondary;
-                            y: (parent.height - self.height) / 2;
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Main body: sidebar + file list + optional detail panel ──
-        HorizontalLayout {
-            vertical-stretch: 1;
+        key-released(e) => { root.ctrl-held = e.modifiers.control; root.shift-held = e.modifiers.shift; reject }
+        VerticalLayout {
             spacing: 0px;
-
-            // ── Left sidebar — Places & Devices ──
+            AppHeader {
+                app-id: "files"; title: "Files"; icon: Icons.files;
+                subtitle: root.file-trash-mode ? "Recover deleted items" : root.dir-type-badge != "" ? root.dir-type-badge : "Your files, in place";
+                actions: [
+                    {id: root.file-trash-mode ? "empty-trash" : "new-folder", label: root.file-trash-mode ? "Empty Trash" : "New folder", icon: root.file-trash-mode ? Icons.trash : Icons.plus, emphasis: 2, disabled: root.operation-busy || root.is-loading || (root.file-trash-mode && root.entries.length == 0)},
+                    {id: "preview", label: "Preview", icon: Icons.eye, disabled: root.selected-index < 0 || root.file-trash-mode},
+                    {id: "new-file", label: "New file", icon: Icons.file, disabled: root.file-trash-mode || root.operation-busy},
+                    {id: "new-tab", label: "New tab", icon: Icons.plus, disabled: root.file-trash-mode || root.file-tabs.length >= 8},
+                    {separator: true},
+                    {id: "copy", label: "Copy", icon: Icons.copy, disabled: root.selection-count == 0 || root.file-trash-mode},
+                    {id: "copy-path", label: "Copy path", icon: Icons.link, disabled: root.selection-count != 1 || root.file-trash-mode},
+                    {id: "cut", label: "Cut", icon: Icons.arrow-right, disabled: root.selection-count == 0 || root.file-trash-mode},
+                    {id: "paste", label: "Paste", icon: Icons.clipboard, disabled: !root.has-clipboard || root.operation-busy || root.file-trash-mode},
+                    {id: "rename", label: "Rename", icon: Icons.editor, disabled: root.selection-count != 1 || root.operation-busy || root.file-trash-mode},
+                    {id: "trash", label: "Move to Trash", icon: Icons.trash, disabled: root.selection-count == 0 || root.operation-busy || root.file-trash-mode},
+                    {id: "open-with", label: "Open with…", icon: Icons.link, disabled: root.selection-count != 1 || root.file-trash-mode},
+                    {separator: true},
+                    {id: "details", label: "Details", icon: Icons.file, active: root.detail-panel-visible, disabled: root.selected-index < 0 || root.file-trash-mode},
+                    {id: "hidden", label: "Show hidden files", icon: Icons.eye, active: root.show-hidden},
+                    {id: "terminal", label: "Open Terminal here", icon: Icons.terminal, disabled: root.file-trash-mode},
+                    {id: "refresh", label: "Refresh", icon: Icons.refresh}
+                ];
+                action(id) => { root.command(id); }
+            }
+            if root.file-tabs.length > 1 : Rectangle {
+                height: 36px; background: Theme.bg-surface;
+                HorizontalLayout { padding-left: 10px; spacing: 3px; alignment: start;
+                    for tab[index] in root.file-tabs : Rectangle {
+                        width: min(180px, (root.width - 20px) / root.file-tabs.length); height: 36px;
+                        background: tab.is-active ? Theme.bg-deep : transparent;
+                        TouchArea { clicked => { root.file-switch-tab(index); listing.focus(); } }
+                        Text { x: 12px; width: parent.width - 42px; height: parent.height; vertical-alignment: center; text: tab.label; color: tab.is-active ? Theme.text-primary : Theme.text-secondary; font-size: 12px; overflow: elide; }
+                        YButton { x: parent.width - 27px; y: 5px; width: 24px; height: 24px; icon-only: true; label: "Close tab"; icon-path: Icons.close; variant: 2; size: 0; clicked => { root.file-close-tab(index); } }
+                        Rectangle { y: parent.height - 2px; height: 2px; background: tab.is-active ? Theme.accent : transparent; }
+                    }
+                }
+            }
             Rectangle {
-                width: 160px;
-                background: Theme.bg-deep;
-
-                // Right border
-                Rectangle {
-                    x: parent.width - 1px;
-                    width: 1px;
-                    height: 100%;
-                    background: Theme.border-default;
+                height: 54px; background: Theme.bg-surface;
+                HorizontalLayout { padding: 10px; spacing: 5px;
+                    YButton { label: "Back"; icon-path: Icons.arrow-left; icon-only: true; variant: 2; disabled: !root.can-go-back || root.file-trash-mode; clicked => { root.go-back(); } }
+                    YButton { label: "Forward"; icon-path: Icons.arrow-right; icon-only: true; variant: 2; disabled: !root.can-go-forward || root.file-trash-mode; clicked => { root.go-forward(); } }
+                    YButton { label: "Parent folder"; icon-path: Icons.arrow-up; icon-only: true; variant: 2; disabled: root.file-trash-mode || root.current-path == "/"; clicked => { root.go-up(); } }
+                    path-area := Rectangle { horizontal-stretch: 1; min-width: 80px; clip: true;
+                        if root.address-editing : YInput { init => { self.focus(); } value: root.current-path; placeholder: "Enter a folder path"; accepted(path) => { root.navigate-to-path(path); root.address-editing = false; listing.focus(); } }
+                        if !root.address-editing : HorizontalLayout { spacing: 0px; alignment: start;
+                            for crumb[index] in root.breadcrumbs : YButton {
+                                visible: index >= root.breadcrumbs.length - (root.width < 800px ? 1 : 3);
+                                width: index < root.breadcrumbs.length - (root.width < 800px ? 1 : 3) ? 0px : min(120px, path-area.width / min(root.breadcrumbs.length, root.width < 800px ? 1 : 3));
+                                label: crumb.label; size: 0; variant: 2; disabled: root.file-trash-mode;
+                                clicked => { root.navigate-to-path(crumb.full-path); }
+                            }
+                            YButton { width: 24px; label: "Edit location · Ctrl L"; icon-path: Icons.editor; icon-only: true; variant: 2; size: 0; disabled: root.file-trash-mode; clicked => { root.address-editing = true; } }
+                        }
+                    }
+                    search-input := YInput { width: root.width >= 1000px ? 240px : 180px; mode: 1; value <=> root.search-text; placeholder: "Search this folder"; edited(text) => { root.file-filter-changed(text); } }
                 }
-
-                Flickable {
-                    width: parent.width - 1px;
-                    height: parent.height;
-                    viewport-height: sidebar-col.preferred-height;
-
-                    sidebar-col := VerticalLayout {
-                        alignment: start;
-                        padding: 8px;
-                        padding-top: 12px;
-                        spacing: 2px;
-
-                        // ── Places section ──
-                        Text {
-                            text: "Places";
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                            font-weight: 600;
-                            letter-spacing: 1.5px;
+            }
+            if root.notice != "" : Rectangle {
+                height: max(44px, notice-label.preferred-height + 20px); background: Theme.bg-elevated;
+                HorizontalLayout { padding-left: 16px; padding-right: 8px; spacing: 8px;
+                    notice-label := Text { wrap: word-wrap; text: root.notice; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    if root.can-undo : YButton { label: "Undo trash"; variant: 1; size: 0; disabled: root.operation-busy; clicked => { root.undo-trash(); } }
+                    YButton { label: "Dismiss message"; icon-path: Icons.close; icon-only: true; variant: 2; size: 0; clicked => { root.dismiss-notice(); } }
+                }
+            }
+            if root.operation-busy : Rectangle {
+                height: 48px; background: Theme.bg-surface;
+                HorizontalLayout { padding-left: 16px; padding-right: 12px; spacing: 12px;
+                    Text { text: root.operation-text; color: Theme.text-secondary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    YButton { label: "Cancel"; variant: 1; size: 0; clicked => { root.cancel-operation(); } }
+                }
+                Rectangle { y: parent.height - 2px; height: 2px; width: max(4px, parent.width * root.operation-progress); background: Theme.accent; }
+            }
+            HorizontalLayout { spacing: 0px;
+                if root.width >= 620px : Rectangle {
+                    width: root.width >= 900px ? 184px : 140px; background: Theme.bg-surface;
+                    VerticalLayout { padding: 12px; spacing: 4px;
+                        Text { text: "PLACES"; color: Theme.text-dim; font-size: 10px; font-weight: 600; height: 28px; vertical-alignment: center; }
+                        for place in [
+                            {label:"Home", path:"~", icon:Icons.home},
+                            {label:"Documents", path:"~/Documents", icon:Icons.file},
+                            {label:"Downloads", path:"~/Downloads", icon:Icons.download},
+                            {label:"Pictures", path:"~/Pictures", icon:Icons.image},
+                            {label:"File system", path:"/", icon:Icons.folder}
+                        ] : FilePlace {
+                            label: place.label; icon: place.icon; active: root.current-path == place.path && !root.file-trash-mode;
+                            clicked => { root.navigate-to-path(place.path); listing.focus(); }
                         }
-
-                        Rectangle { height: 4px; }
-
-                        // Home
-                        sb-home := TouchArea {
-                            height: 30px;
-                            clicked => { root.selected-index = -1; root.clear-selection(); root.navigate-to-path("~"); }
-                            Rectangle {
-                                border-radius: Theme.r-sm;
-                                background: sb-home.has-hover
-                                    ? Theme.hover-fill
-                                    : (root.current-path == "~" || root.current-path == "/home/yantrik"
-                                        ? Theme.hover-fill
-                                        : transparent);
-                                animate background { duration: Theme.dur-fast; }
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    spacing: 8px;
-                                    Rectangle {
-                                        width: 20px; height: 20px; border-radius: 5px;
-                                        background: #3a9ac8;
-                                        border-width: 1px; border-color: #3a9ac840;
-                                        Icon {
-                                            commands: Icons.home;
-                                            size: 14px;
-                                            tint: Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
+                        Rectangle { height: 16px; }
+                        FilePlace { label: "Trash"; icon: Icons.trash; active: root.file-trash-mode; clicked => { if !root.file-trash-mode { root.file-toggle-trash(); } } }
+                        Rectangle { vertical-stretch: 1; }
+                        Text { text: root.free-space-text; color: Theme.text-dim; font-size: 11px; overflow: elide; height: 28px; vertical-alignment: center; }
+                    }
+                }
+                list-area := Rectangle {
+                    horizontal-stretch: 1; min-width: 0px; background: Theme.bg-deep;
+                    VerticalLayout { spacing: 0px;
+                        Rectangle { height: 52px;
+                            HorizontalLayout { padding-left: 18px; padding-right: 12px; spacing: 6px;
+                                Text { text: root.file-trash-mode ? "Trash" : root.breadcrumbs.length > 0 ? root.breadcrumbs[root.breadcrumbs.length - 1].label : "Files"; font-size: 20px; font-weight: 600; color: Theme.text-primary; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                                if root.file-trash-mode : YButton { label: "Restore"; size: 0; variant: 1; disabled: root.selection-count != 1 || root.operation-busy; clicked => { root.command("restore"); } }
+                                if root.file-trash-mode && root.width >= 900px : YButton { label: "Empty Trash"; size: 0; variant: 2; disabled: root.entries.length == 0 || root.operation-busy; clicked => { root.command("empty-trash"); } }
+                                if !root.file-trash-mode : YButton { label: root.sort-field == "name" ? "Name" : root.sort-field == "size" ? "Size" : "Modified"; size: 0; variant: 2; clicked => { root.sort-field = root.sort-field == "name" ? "size" : root.sort-field == "size" ? "modified" : "name"; root.file-sort-changed(root.sort-field, root.sort-ascending); } }
+                                if !root.file-trash-mode : YButton { label: "Reverse sort order"; icon-path: root.sort-ascending ? Icons.arrow-up : Icons.arrow-down; icon-only: true; size: 0; variant: 2; clicked => { root.sort-ascending = !root.sort-ascending; root.file-sort-changed(root.sort-field, root.sort-ascending); } }
+                                YButton { label: root.grid-view ? "List view" : "Grid view"; icon-path: root.grid-view ? Icons.list : Icons.grid; icon-only: true; size: 0; variant: 2; clicked => { root.grid-view = !root.grid-view; } }
+                            }
+                        }
+                        Rectangle { height: 36px; background: Theme.bg-surface;
+                            HorizontalLayout { padding-left: 16px; padding-right: 10px; spacing: 4px;
+                                Text { text: root.selection-count > 0 ? "\{root.selection-count} selected" : "\{root.entries.length} items"; color: Theme.text-secondary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                if root.selection-count > 0 && !root.file-trash-mode : YButton { label: "Copy"; icon-path: Icons.copy; icon-only: root.width < 950px; size: 0; variant: 2; clicked => { root.copy-selected(); } }
+                                if root.selection-count > 0 && !root.file-trash-mode : YButton { label: "Move to Trash"; icon-path: Icons.trash; icon-only: true; size: 0; variant: 2; disabled: root.operation-busy; clicked => { root.delete-selected(); } }
+                                if root.selection-count > 0 : YButton { label: "Clear selection"; icon-path: Icons.close; icon-only: true; size: 0; variant: 2; clicked => { root.clear-selection(); listing.focus(); } }
+                            }
+                        }
+                        listing := FocusScope {
+                            enabled: !root.is-loading;
+                            vertical-stretch: 1;
+                            key-pressed(e) => {
+                                if e.modifiers.control && (e.text == "a" || e.text == "A") { root.select-all(); return accept; }
+                                if e.modifiers.control && (e.text == "c" || e.text == "C") && !root.file-trash-mode { root.copy-selected(); return accept; }
+                                if e.modifiers.control && (e.text == "x" || e.text == "X") && !root.file-trash-mode { root.cut-selected(); return accept; }
+                                if e.modifiers.control && (e.text == "v" || e.text == "V") && !root.file-trash-mode { root.file-paste(); return accept; }
+                                if e.modifiers.control && (e.text == "t" || e.text == "T") { root.file-new-tab(); return accept; }
+                                if e.modifiers.control && (e.text == "w" || e.text == "W") { root.file-close-tab(root.file-active-tab); return accept; }
+                                if e.text == Key.F2 && root.selection-count == 1 { root.command("rename"); return accept; }
+                                if e.text == Key.Delete && !root.file-trash-mode { root.delete-selected(); return accept; }
+                                if e.text == Key.Return { root.open-selected(); return accept; }
+                                if e.text == " " && root.selected-index >= 0 { root.file-quick-look(root.selected-index); return accept; }
+                                if root.entries.length > 0 && (e.text == Key.DownArrow || e.text == Key.UpArrow || e.text == Key.LeftArrow || e.text == Key.RightArrow || e.text == Key.Home || e.text == Key.End) {
+                                    let delta = e.text == Key.UpArrow ? -(root.grid-view ? root.columns : 1) : e.text == Key.DownArrow ? (root.grid-view ? root.columns : 1) : e.text == Key.LeftArrow ? -1 : 1;
+                                    let next = e.text == Key.Home ? 0 : e.text == Key.End ? root.entries.length - 1 : max(0, min(root.entries.length - 1, root.selected-index + delta));
+                                    root.multi-select-clicked(next, false, e.modifiers.shift); root.reveal-selection(); return accept;
+                                }
+                                reject
+                            }
+                            list-view := ListView {
+                                visible: !root.is-loading && !root.grid-view;
+                                for entry[index] in (root.grid-view || root.is-loading ? [] : root.entries) : FileRow {
+                                    entry: entry; height: 46px;
+                                    selected: entry.selected; focused: listing.has-focus && index == root.selected-index;
+                                    clicked => { listing.focus(); root.multi-select-clicked(index, root.ctrl-held, root.shift-held); }
+                                    activate => { root.selected-index = index; root.open-selected(); }
+                                    context => { root.multi-select-clicked(index, false, false); root.open-with-visible = true; }
+                                }
+                            }
+                            grid-list := ListView {
+                                visible: !root.is-loading && root.grid-view;
+                                for row in (root.grid-view && !root.is-loading ? ceil(root.entries.length / root.columns) : 0) : Rectangle {
+                                    height: 116px;
+                                    HorizontalLayout { spacing: 0px; alignment: start;
+                                        for col in root.columns : cell := Rectangle {
+                                            width: list-area.width / root.columns; height: 116px;
+                                            property <int> index: row * root.columns + col;
+                                            if cell.index < root.entries.length : FileTile {
+                                                entry: root.entries[cell.index]; focused: listing.has-focus && cell.index == root.selected-index;
+                                                clicked => { listing.focus(); root.multi-select-clicked(cell.index, root.ctrl-held, root.shift-held); }
+                                                activate => { root.selected-index = cell.index; root.open-selected(); }
+                                            }
                                         }
                                     }
-                                    Text { text: "Home"; color: sb-home.has-hover ? Theme.cyan : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
                                 }
                             }
-                        }
-
-                        // Documents
-                        sb-docs := TouchArea {
-                            height: 30px;
-                            clicked => { root.selected-index = -1; root.clear-selection(); root.navigate-to-path("~/Documents"); }
-                            Rectangle {
-                                border-radius: Theme.r-sm;
-                                background: sb-docs.has-hover
-                                    ? Theme.hover-fill : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    spacing: 8px;
-                                    Rectangle {
-                                        width: 20px; height: 20px; border-radius: 5px;
-                                        background: #5a7abd;
-                                        border-width: 1px; border-color: #5a7abd40;
-                                        Icon {
-                                            commands: Icons.list;
-                                            size: 14px;
-                                            tint: Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-                                    Text { text: "Documents"; color: sb-docs.has-hover ? Theme.cyan : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
+                            if root.is-loading || root.entries.length == 0 : YEmptyState {
+                                icon-path: root.is-loading ? Icons.folder : root.file-trash-mode ? Icons.trash : root.search-text != "" ? Icons.search : Icons.folder;
+                                title: root.is-loading ? "Opening folder…" : root.search-text != "" ? "No matching files" : root.file-trash-mode ? "Trash is empty" : "This folder is empty";
+                                description: root.is-loading ? "Reading this folder’s contents." : root.search-text != "" ? "Try another name. Search stays in this folder." : root.file-trash-mode ? "Items moved to Trash can be restored here." : "Create a folder or paste files to get started.";
                             }
                         }
-
-                        // Downloads
-                        sb-dl := TouchArea {
-                            height: 30px;
-                            clicked => { root.selected-index = -1; root.clear-selection(); root.navigate-to-path("~/Downloads"); }
-                            Rectangle {
-                                border-radius: Theme.r-sm;
-                                background: sb-dl.has-hover
-                                    ? Theme.hover-fill : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    spacing: 8px;
-                                    Rectangle {
-                                        width: 20px; height: 20px; border-radius: 5px;
-                                        background: Theme.color-success;
-                                        border-width: 1px; border-color: #3aad6a40;
-                                        Icon {
-                                            commands: Icons.arrow-down;
-                                            size: 14px;
-                                            tint: Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-                                    Text { text: "Downloads"; color: sb-dl.has-hover ? Theme.cyan : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
+                    }
+                }
+                if root.detail-panel-visible && root.width >= 1050px && root.selected-index >= 0 : Rectangle {
+                    width: 250px; background: Theme.bg-surface;
+                    VerticalLayout { padding: 18px; spacing: 12px;
+                        HorizontalLayout { Text { text: "Details"; color: Theme.text-primary; font-size: 14px; font-weight: 600; horizontal-stretch: 1; } YButton { label: "Close details"; icon-path: Icons.close; icon-only: true; variant: 2; size: 0; clicked => { root.detail-panel-visible = false; } } }
+                        Icon { commands: Icons.file-kind(root.file-details.icon-char); size: 42px; tint: Theme.accent; }
+                        Text { text: root.file-details.name; color: Theme.text-primary; font-size: 17px; font-weight: 600; wrap: word-wrap; }
+                        Text { text: root.file-details.file-type + "\n" + root.file-details.size-text + "\n" + root.file-details.modified-text; color: Theme.text-secondary; font-size: 12px; wrap: word-wrap; }
+                        Text { text: root.file-details.path-text; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+                        YButton { label: "Open preview"; icon-path: Icons.eye; variant: 1; clicked => { root.file-quick-look(root.selected-index); } }
+                        HorizontalLayout { spacing: 5px;
+                            YButton { label: "Summarize"; icon-path: Icons.spark; size: 0; variant: 1; disabled: root.is-summarizing || !root.file-details.is-text-file; clicked => { root.request-summarize(); } }
+                            YButton { label: "Ask AI"; size: 0; variant: 2; disabled: root.is-summarizing || !root.file-details.is-text-file; clicked => { root.request-ask-ai(); } }
                         }
-
-                        // Pictures
-                        sb-pics := TouchArea {
-                            height: 30px;
-                            clicked => { root.selected-index = -1; root.clear-selection(); root.navigate-to-path("~/Pictures"); }
-                            Rectangle {
-                                border-radius: Theme.r-sm;
-                                background: sb-pics.has-hover
-                                    ? Theme.hover-fill : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    spacing: 8px;
-                                    Rectangle {
-                                        width: 20px; height: 20px; border-radius: 5px;
-                                        background: #9a4a9a;
-                                        border-width: 1px; border-color: #9a4a9a40;
-                                        Icon {
-                                            commands: Icons.apps;
-                                            size: 14px;
-                                            tint: Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-                                    Text { text: "Pictures"; color: sb-pics.has-hover ? Theme.cyan : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
+                        if root.is-summarizing || root.ai-summary != "" : Flickable {
+                            min-height: 80px; vertical-stretch: 1; viewport-width: self.width; viewport-height: answer.preferred-height;
+                            answer := Text { width: parent.width; text: root.ai-summary != "" ? root.ai-summary : "Thinking…"; color: Theme.text-secondary; font-size: 12px; wrap: word-wrap; }
                         }
-
-                        // Music
-                        sb-music := TouchArea {
-                            height: 30px;
-                            clicked => { root.selected-index = -1; root.clear-selection(); root.navigate-to-path("~/Music"); }
-                            Rectangle {
-                                border-radius: Theme.r-sm;
-                                background: sb-music.has-hover
-                                    ? Theme.hover-fill : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    spacing: 8px;
-                                    Rectangle {
-                                        width: 20px; height: 20px; border-radius: 5px;
-                                        background: #c89a3a;
-                                        border-width: 1px; border-color: #c89a3a40;
-                                        Icon {
-                                            commands: Icons.music;
-                                            size: 14px;
-                                            tint: Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-                                    Text { text: "Music"; color: sb-music.has-hover ? Theme.cyan : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
-                        }
-
-                        Rectangle { height: 12px; }
-
-                        // ── Devices section ──
-                        Text {
-                            text: "Devices";
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                            font-weight: 600;
-                            letter-spacing: 1.5px;
-                        }
-
-                        Rectangle { height: 4px; }
-
-                        // File System
-                        sb-root := TouchArea {
-                            height: 30px;
-                            clicked => { root.selected-index = -1; root.clear-selection(); root.navigate-to-path("/"); }
-                            Rectangle {
-                                border-radius: Theme.r-sm;
-                                background: sb-root.has-hover
-                                    ? Theme.hover-fill : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    spacing: 8px;
-                                    Rectangle {
-                                        width: 20px; height: 20px; border-radius: 5px;
-                                        background: #6a6a7a;
-                                        border-width: 1px; border-color: #6a6a7a40;
-                                        Icon {
-                                            commands: Icons.spark;
-                                            size: 14px;
-                                            tint: Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-                                    Text { text: "File System"; color: sb-root.has-hover ? Theme.cyan : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
-                        }
-
-                        // /tmp
-                        sb-tmp := TouchArea {
-                            height: 30px;
-                            clicked => { root.selected-index = -1; root.clear-selection(); root.navigate-to-path("/tmp"); }
-                            Rectangle {
-                                border-radius: Theme.r-sm;
-                                background: sb-tmp.has-hover
-                                    ? Theme.hover-fill : transparent;
-                                animate background { duration: Theme.dur-fast; }
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    spacing: 8px;
-                                    Rectangle {
-                                        width: 20px; height: 20px; border-radius: 5px;
-                                        background: #bd5a4a;
-                                        border-width: 1px; border-color: #bd5a4a40;
-                                        Text { text: "T"; color: Theme.text-on-accent; font-size: Theme.fs-micro; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-                                    }
-                                    Text { text: "Temp"; color: sb-tmp.has-hover ? Theme.cyan : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
-                        }
+                        if !root.is-summarizing && root.ai-summary == "" : Rectangle { vertical-stretch: 1; }
                     }
                 }
             }
-
-            // ── Center: file list area ──
-            // Wrapped in a Rectangle, which is the whole fix.
-            //
-            // This was a bare `VerticalLayout { horizontal-stretch: 1; }`. A layout's preferred
-            // width is derived from its children, and Slint honours that over the stretch — so
-            // the file list never expanded. It rendered 285 pixels wide inside a 1120 pixel
-            // pane: the column headers stopped a quarter of the way across, and the empty-state
-            // message centred itself at x=302, which is the middle of 160..445 rather than of
-            // the screen. Measuring the pixels is how that was pinned down.
-            //
-            // A Rectangle has no content-derived preferred width, so stretch does what it says.
-            // Settings has always done it this way; the two screens simply disagreed.
-            Rectangle {
-                horizontal-stretch: 1;
-                VerticalLayout {
-                    spacing: 0px;
-
-                    // ── Column headers (list view only) ──
-                    if !root.grid-view : Rectangle {
-                        height: 28px;
-                        background: Theme.bg-surface;
-
-                        // Bottom edge
-                        Rectangle {
-                            y: parent.height - 1px; width: 100%; height: 1px;
-                            background: Theme.separator;
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 50px; // align with file names (icon badge 28px + 12px pad + 10px gap)
-                            padding-right: 8px;
-                            spacing: 10px;
-
-                            // Name header
-                            name-hdr := TouchArea {
-                                horizontal-stretch: 1; height: 28px;
-                                clicked => {
-                                    if root.sort-field == "name" { root.sort-ascending = !root.sort-ascending; }
-                                    else { root.sort-field = "name"; root.sort-ascending = true; }
-                                    root.file-sort-changed(root.sort-field, root.sort-ascending);
-                                }
-                                HorizontalLayout {
-                                    spacing: 4px;
-                                    Text {
-                                        text: "Name";
-                                        color: root.sort-field == "name" ? Theme.cyan : (name-hdr.has-hover ? Theme.text-secondary : Theme.text-dim);
-                                        font-size: Theme.fs-micro; font-weight: 600;
-                                        vertical-alignment: center;
-                                        animate color { duration: Theme.dur-fast; }
-                                    }
-                                    if root.sort-field == "name" : Icon {
-                                        commands: root.sort-ascending ? Icons.chevron-up : Icons.chevron-down;
-                                        size: 14px;
-                                        tint: Theme.cyan-dim;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                }
-                            }
-
-                            // Size header
-                            size-hdr := TouchArea {
-                                width: 80px; height: 28px;
-                                clicked => {
-                                    if root.sort-field == "size" { root.sort-ascending = !root.sort-ascending; }
-                                    else { root.sort-field = "size"; root.sort-ascending = false; }
-                                    root.file-sort-changed(root.sort-field, root.sort-ascending);
-                                }
-                                HorizontalLayout {
-                                    spacing: 4px;
-                                    Text {
-                                        text: "Size";
-                                        color: root.sort-field == "size" ? Theme.cyan : (size-hdr.has-hover ? Theme.text-secondary : Theme.text-dim);
-                                        font-size: Theme.fs-micro; font-weight: 600;
-                                        vertical-alignment: center;
-                                        animate color { duration: Theme.dur-fast; }
-                                    }
-                                    if root.sort-field == "size" : Icon {
-                                        commands: root.sort-ascending ? Icons.chevron-up : Icons.chevron-down;
-                                        size: 14px;
-                                        tint: Theme.cyan-dim;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                }
-                            }
-
-                            // Modified header
-                            mod-hdr := TouchArea {
-                                width: 80px; height: 28px;
-                                clicked => {
-                                    if root.sort-field == "modified" { root.sort-ascending = !root.sort-ascending; }
-                                    else { root.sort-field = "modified"; root.sort-ascending = true; }
-                                    root.file-sort-changed(root.sort-field, root.sort-ascending);
-                                }
-                                HorizontalLayout {
-                                    spacing: 4px;
-                                    Text {
-                                        text: "Modified";
-                                        color: root.sort-field == "modified" ? Theme.cyan : (mod-hdr.has-hover ? Theme.text-secondary : Theme.text-dim);
-                                        font-size: Theme.fs-micro; font-weight: 600;
-                                        vertical-alignment: center;
-                                        animate color { duration: Theme.dur-fast; }
-                                    }
-                                    if root.sort-field == "modified" : Icon {
-                                        commands: root.sort-ascending ? Icons.chevron-up : Icons.chevron-down;
-                                        size: 14px;
-                                        tint: Theme.cyan-dim;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Grid view ──
-                    if root.grid-view : Flickable {
-                        vertical-stretch: 1;
-                        viewport-height: ((root.entries.length + 3) / 4) * 100px;
-
-                        for entry[idx] in root.entries : grid-card := Rectangle {
-                            property <int> col-idx: idx - (idx / 4) * 4;
-                            property <int> row-idx: idx / 4;
-                            x: self.col-idx * (parent.width / 4);
-                            y: self.row-idx * 100px;
-                            width: parent.width / 4;
-                            height: 100px;
-
-                            property <color> grid-badge-color:
-                                entry.is-dir ? #3a9ac8 :
-                                entry.icon-char == "\u{25c7}" ? #3aad6a :
-                                entry.icon-char == "\u{2261}" ? #5a7abd :
-                                entry.icon-char == "\u{25a3}" ? #9a4a9a :
-                                entry.icon-char == "\u{266a}" ? #c89a3a :
-                                entry.icon-char == "\u{25b6}" ? #c84a5a :
-                                entry.icon-char == "\u{25a4}" ? #7a8a6a :
-                                entry.icon-char == "\u{25a7}" ? #bd5a4a :
-                                entry.icon-char == "\u{2699}" ? #4a7abd :
-                                entry.icon-char == "\u{00b7}" ? #6a6a7a :
-                                #5a5a7a;
-
-                            grid-card-touch := TouchArea {
-                                clicked => {
-                                    if entry.is-dir {
-                                        root.selected-index = -1;
-                                        root.clear-selection();
-                                        root.navigate-dir(entry.name);
-                                    } else {
-                                        root.multi-select-clicked(idx, false, false);
-                                        root.file-selection-changed(entry.name);
-                                    }
-                                }
-                                double-clicked => {
-                                    if !entry.is-dir {
-                                        root.open-file(entry.name);
-                                    }
-                                }
-                            }
-
-                            // Card background
-                            Rectangle {
-                                border-radius: 10px;
-                                x: 4px;
-                                y: 4px;
-                                width: parent.width - 8px;
-                                height: parent.height - 8px;
-                                background: entry.selected
-                                    ? Theme.accent-dim
-                                    : (grid-card-touch.has-hover
-                                        ? Theme.hover-fill
-                                        : transparent);
-                                border-width: entry.selected ? 1px : (grid-card-touch.has-hover ? 1px : 0);
-                                border-color: entry.selected ? Theme.cyan-dim : Theme.border-subtle;
-                                animate background, border-width, border-color { duration: Theme.dur-fast; }
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 6px;
-                                    padding: 8px;
-
-                                    // Icon badge
-                                    Rectangle {
-                                        property <color> badge-color: grid-card.grid-badge-color;
-                                        width: 36px;
-                                        height: 36px;
-                                        border-radius: 10px;
-                                        background: badge-color;
-                                        border-width: 1px;
-                                        border-color: badge-color;
-                                        Icon {
-                                            commands: Icons.file-kind(entry.icon-char);
-                                            size: 20px;
-                                            thickness: 1.7px;
-                                            tint: Theme.text-on-accent;
-                                            x: (parent.width - self.width) / 2;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-
-                                    // File name
-                                    Text {
-                                        text: entry.name;
-                                        color: entry.is-dir ? Theme.cyan-light : Theme.text-primary;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: entry.is-dir ? 600 : 400;
-                                        horizontal-alignment: center;
-                                        overflow: elide;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── File list (list view) ──
-                    if !root.grid-view : ListView {
-                        vertical-stretch: 1;
-
-                        for entry[idx] in entries : Rectangle {
-                            height: 44px;
-                            background: entry.selected
-                                ? Theme.accent-dim
-                                : (file-touch.has-hover
-                                    ? Theme.hover-fill
-                                    : transparent);
-                            animate background { duration: Theme.dur-fast; }
-
-                            // Left edge glow on selected
-                            if entry.selected : Rectangle {
-                                x: 0; width: 3px; height: parent.height;
-                                background: Theme.cyan;
-                                drop-shadow-blur: 8px;
-                                drop-shadow-color: Theme.cyan-glow;
-                            }
-
-                            file-touch := TouchArea {
-                                // The menu existed and had no way to be summoned the way anyone
-                                // would try. Right-click is the gesture; the "⋯" button stays for
-                                // touch and for anyone who prefers it.
-                                pointer-event(e) => {
-                                    if (e.button == PointerEventButton.right
-                                        && e.kind == PointerEventKind.down) {
-                                        root.context-menu-index = idx;
-                                        root.context-menu-x = self.absolute-position.x
-                                            - root.absolute-position.x + self.mouse-x;
-                                        root.context-menu-y = self.absolute-position.y
-                                            - root.absolute-position.y + self.mouse-y;
-                                        root.show-context-menu = true;
-                                    }
-                                }
-                                clicked => {
-                                    if entry.is-dir {
-                                        root.selected-index = -1;
-                                        root.clear-selection();
-                                        root.navigate-dir(entry.name);
-                                    } else {
-                                        root.multi-select-clicked(idx, false, false);
-                                        root.file-selection-changed(entry.name);
-                                    }
-                                }
-                                double-clicked => {
-                                    if !entry.is-dir {
-                                        root.open-file(entry.name);
-                                    }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 8px;
-                                spacing: 10px;
-
-                                // Vivid icon badge
-                                Rectangle {
-                                    property <color> badge-color:
-                                        entry.is-dir ? #3a9ac8 :
-                                        entry.icon-char == "\u{25c7}" ? #3aad6a :
-                                        entry.icon-char == "\u{2261}" ? #5a7abd :
-                                        entry.icon-char == "\u{25a3}" ? #9a4a9a :
-                                        entry.icon-char == "\u{266a}" ? #c89a3a :
-                                        entry.icon-char == "\u{25b6}" ? #c84a5a :
-                                        entry.icon-char == "\u{25a4}" ? #7a8a6a :
-                                        entry.icon-char == "\u{25a7}" ? #bd5a4a :
-                                        entry.icon-char == "\u{2699}" ? #4a7abd :
-                                        entry.icon-char == "\u{00b7}" ? #6a6a7a :
-                                        #5a5a7a;
-                                    width: 28px;
-                                    height: 28px;
-                                    border-radius: 7px;
-                                    background: badge-color;
-                                    border-width: 1px;
-                                    border-color: badge-color;
-                                    Icon {
-                                        commands: Icons.file-kind(entry.icon-char);
-                                        size: 16px;
-                                        thickness: 1.7px;
-                                        tint: Theme.text-on-accent;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                }
-
-                                // Name
-                                Text {
-                                    text: entry.name;
-                                    color: entry.is-dir ? Theme.cyan-light : Theme.text-primary;
-                                    font-size: Theme.font-body;
-                                    font-weight: entry.is-dir ? 600 : 400;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-
-                                // Size
-                                if !entry.is-dir : Text {
-                                    text: entry.size-text;
-                                    color: Theme.text-dim;
-                                    font-size: Theme.font-small;
-                                    vertical-alignment: center;
-                                }
-
-                                // Modified
-                                Text {
-                                    text: entry.modified-text;
-                                    color: Theme.text-dim;
-                                    font-size: Theme.font-small;
-                                    vertical-alignment: center;
-                                }
-
-                                // Context menu trigger button (more actions)
-                                ctx-btn := TouchArea {
-                                    width: 24px; height: 28px;
-                                    clicked => {
-                                        root.context-menu-index = idx;
-                                        // Under the button that opened it. This used to set 0,0 —
-                                        // which the menu then ignored anyway.
-                                        root.context-menu-x = self.absolute-position.x
-                                            - root.absolute-position.x;
-                                        root.context-menu-y = self.absolute-position.y
-                                            - root.absolute-position.y + self.height;
-                                        root.show-context-menu = true;
-                                    }
-                                    Rectangle {
-                                        border-radius: 4px;
-                                        background: ctx-btn.has-hover ? Theme.border-subtle : transparent;
-                                        animate background { duration: Theme.dur-fast; }
-                                        Icon {
-                                            commands: Icons.more;
-                                            size: 14px;
-                                            tint: ctx-btn.has-hover ? Theme.text-primary : Theme.text-dim;
-                                            x: (parent.width - self.width) / 2;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Row separator
-                            Rectangle {
-                                y: parent.height - 1px;
-                                height: 1px;
-                                background: Theme.separator;
-                            }
-                        }
-                    }
-
-                    // ── Single-select action bar ──
-                    if root.selected-index >= 0 && root.selected-index < root.entries.length && root.selection-count <= 1 : Rectangle {
-                        height: 48px;
-                        background: Theme.bg-surface;
-                        // Top holographic edge
-                        Rectangle {
-                            y: 0; width: 100%; height: 1px;
-                            background: Theme.separator;
-                        }
-
-                        HorizontalLayout {
-                            padding-left: 16px; padding-right: 16px; spacing: 8px; alignment: center;
-
-                            open-btn := TouchArea {
-                                width: 56px; height: 36px;
-                                clicked => { root.open-file(root.entries[root.selected-index].name); root.selected-index = -1; root.clear-selection(); }
-                                Rectangle {
-                                    border-radius: Theme.r-md;
-                                    background: open-btn.has-hover ? Theme.hover-fill : transparent;
-                                    border-width: open-btn.has-hover ? 1px : 0; border-color: Theme.cyan-dim;
-                                    animate background, border-width { duration: Theme.dur-fast; }
-                                    Text { text: "Open"; color: open-btn.has-hover ? Theme.cyan : Theme.cyan-dim; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
-
-                            // Quick Look button
-                            if !root.entries[root.selected-index].is-dir : ql-btn := TouchArea {
-                                width: 72px; height: 36px;
-                                clicked => { root.file-quick-look(root.selected-index); }
-                                Rectangle {
-                                    border-radius: Theme.r-md;
-                                    background: ql-btn.has-hover ? Theme.hover-fill : transparent;
-                                    border-width: ql-btn.has-hover ? 1px : 0; border-color: Theme.amber-dim;
-                                    animate background, border-width { duration: Theme.dur-fast; }
-                                    Text { text: "Preview"; color: ql-btn.has-hover ? Theme.amber : Theme.amber-dim; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
-
-                            copy-btn := TouchArea {
-                                width: 56px; height: 36px;
-                                clicked => { root.file-copy(root.entries[root.selected-index].name); root.selected-index = -1; root.clear-selection(); }
-                                Rectangle {
-                                    border-radius: Theme.r-md;
-                                    background: copy-btn.has-hover ? Theme.hover-fill : transparent;
-                                    animate background { duration: Theme.dur-fast; }
-                                    Text { text: "Copy"; color: copy-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
-
-                            cut-btn := TouchArea {
-                                width: 56px; height: 36px;
-                                clicked => { root.file-cut(root.entries[root.selected-index].name); root.selected-index = -1; root.clear-selection(); }
-                                Rectangle {
-                                    border-radius: Theme.r-md;
-                                    background: cut-btn.has-hover ? Theme.hover-fill : transparent;
-                                    animate background { duration: Theme.dur-fast; }
-                                    Text { text: "Cut"; color: cut-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
-
-                            rename-btn := TouchArea {
-                                width: 64px; height: 36px;
-                                clicked => { root.rename-old-name = root.entries[root.selected-index].name; root.rename-new-name = root.entries[root.selected-index].name; root.show-rename-dialog = true; }
-                                Rectangle {
-                                    border-radius: Theme.r-md;
-                                    background: rename-btn.has-hover ? Theme.hover-fill : transparent;
-                                    animate background { duration: Theme.dur-fast; }
-                                    Text { text: "Rename"; color: rename-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
-
-                            del-btn := TouchArea {
-                                width: 64px; height: 36px;
-                                clicked => { root.delete-target-name = root.entries[root.selected-index].name; root.show-delete-dialog = true; }
-                                Rectangle {
-                                    border-radius: Theme.r-md;
-                                    background: del-btn.has-hover ? Theme.color-danger-dim : transparent;
-                                    border-width: del-btn.has-hover ? 1px : 0; border-color: Theme.color-danger-dim;
-                                    animate background, border-width { duration: Theme.dur-fast; }
-                                    Text { text: "Delete"; color: del-btn.has-hover ? Theme.color-danger : Theme.color-danger; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Empty state ──
-                    //
-                    // Three things were wrong here and the photograph showed all of them at once:
-                    // a solid teal disc sitting left of centre with a dash inside it, and the words
-                    // "Empty directory" somewhere else again.
-                    //
-                    //   `x: (parent.width - 48px) / 2` inside a VerticalLayout does nothing --
-                    //     a layout positions its own children and ignores x. So the circle never
-                    //     centred, and the label, which centred itself, landed somewhere else.
-                    //   The Icon had `y:` centring but no `x:`, so the dash sat against the
-                    //     circle's left edge rather than in it.
-                    //   `background: Theme.accent-dim` is a solid accent fill. The house style for
-                    //     this circle is Theme.tint-accent, which is why it read as a teal blob.
-                    //
-                    // YEmptyState does all three correctly and is what the other views use.
-                    if entries.length == 0 && !is-loading : YEmptyState {
-                        vertical-stretch: 1;
-                        icon-path: Icons.folder;
-                        title: "Empty directory";
-                        description: "Nothing here yet.";
-                    }
-
-                    // Loading
-                    if is-loading : VerticalLayout {
-                        vertical-stretch: 1;
-                        alignment: center;
-                        Text { text: "Loading..."; color: Theme.text-dim; font-size: Theme.font-body; horizontal-alignment: center; }
-                    }
-                }
-            }
-
-            // ── Right detail panel (toggleable) ──
-            if root.detail-panel-visible && root.selected-index >= 0 && root.file-details.name != "" : Rectangle {
-                width: 260px;
-
-                background: Theme.bg-card;
-
-                // Left holographic border
-                Rectangle {
-                    x: 0; y: 0; width: 2px; height: parent.height;
-                    background: Theme.border-strong;
-                    opacity: 0.6;
-                }
-
-                // Close button
-                detail-close := TouchArea {
-                    x: parent.width - 36px; y: 4px; width: 28px; height: 28px;
-                    clicked => { root.detail-panel-visible = false; }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: detail-close.has-hover ? Theme.color-danger-dim : transparent;
-                        animate background { duration: Theme.dur-fast; }
-                        Icon {
-                            commands: Icons.close;
-                            size: 14px;
-                            tint: detail-close.has-hover ? Theme.color-danger : Theme.text-dim;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            animate tint { duration: Theme.dur-fast; }
-                        }
-                    }
-                }
-
-                Flickable {
-                    x: 2px; y: 0; width: parent.width - 2px; height: parent.height;
-                    viewport-height: detail-col.preferred-height;
-
-                    detail-col := VerticalLayout {
-                        alignment: start;
-                        padding: 16px; padding-top: 12px; spacing: 14px;
-
-                        // Large icon badge
-                        HorizontalLayout {
-                            spacing: 12px;
-                            Rectangle {
-                                property <color> detail-badge-color:
-                                    root.file-details.icon-char == "\u{25c7}" ? #3aad6a :
-                                    root.file-details.icon-char == "\u{2261}" ? #5a7abd :
-                                    root.file-details.icon-char == "\u{25a3}" ? #9a4a9a :
-                                    root.file-details.icon-char == "\u{266a}" ? #c89a3a :
-                                    root.file-details.icon-char == "\u{25b6}" ? #c84a5a :
-                                    root.file-details.icon-char == "\u{25a4}" ? #7a8a6a :
-                                    root.file-details.icon-char == "\u{25a7}" ? #bd5a4a :
-                                    root.file-details.icon-char == "\u{2699}" ? #4a7abd :
-                                    root.file-details.icon-char == "\u{00b7}" ? #6a6a7a :
-                                    #5a5a7a;
-                                width: 48px; height: 48px; border-radius: Theme.r-lg;
-                                background: detail-badge-color;
-                                border-width: 1px; border-color: detail-badge-color;
-                                Icon { commands: Icons.file-kind(root.file-details.icon-char); size: 26px; thickness: 1.7px; tint: Theme.text-on-accent; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
-                            }
-                            VerticalLayout {
-                                alignment: center; horizontal-stretch: 1;
-                                Text { text: root.file-details.name; color: Theme.text-primary; font-size: Theme.fs-body; font-weight: 600; wrap: word-wrap; }
-                                Text { text: root.file-details.file-type; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                            }
-                        }
-
-                        // Separator
-                        Rectangle { height: 1px; background: Theme.separator; opacity: 0.5; }
-
-                        // Info rows
-                        VerticalLayout {
-                            spacing: 10px;
-                            if root.file-details.size-text != "" : HorizontalLayout { spacing: 8px; Text { text: "Size"; color: Theme.text-dim; font-size: Theme.fs-caption; width: 72px; vertical-alignment: center; } Text { text: root.file-details.size-text; color: Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                            if root.file-details.modified-text != "" : HorizontalLayout { spacing: 8px; Text { text: "Modified"; color: Theme.text-dim; font-size: Theme.fs-caption; width: 72px; } Text { text: root.file-details.modified-text; color: Theme.text-secondary; font-size: Theme.fs-caption; wrap: word-wrap; horizontal-stretch: 1; } }
-                            HorizontalLayout { spacing: 8px; Text { text: "Path"; color: Theme.text-dim; font-size: Theme.fs-caption; width: 72px; } Text { text: root.file-details.path-text; color: Theme.text-secondary; font-size: Theme.fs-caption; wrap: char-wrap; horizontal-stretch: 1; } }
-                            if root.file-details.permissions != "" : HorizontalLayout { spacing: 8px; Text { text: "Perms"; color: Theme.text-dim; font-size: Theme.fs-caption; width: 72px; vertical-alignment: center; } Text { text: root.file-details.permissions; color: Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                        }
-
-                        // Preview
-                        if root.file-details.is-text-file : VerticalLayout {
-                            spacing: 8px;
-                            Rectangle { height: 1px; background: Theme.separator; opacity: 0.5; }
-                            Text { text: "Preview"; color: Theme.cyan-dim; font-size: Theme.fs-caption; font-weight: 600; letter-spacing: 2px; }
-                            Rectangle {
-                                clip: true; border-radius: Theme.r-sm; height: 180px;
-                                background: Theme.bg-deep;
-                                border-width: 1px; border-color: Theme.border-subtle;
-                                Rectangle { x: 8px; y: 0; width: parent.width - 16px; height: 1px; background: Theme.separator; }
-                                Text { x: 8px; y: 8px; width: parent.width - 16px; text: root.file-details.preview-text; color: Theme.text-dim; font-size: Theme.fs-micro; wrap: word-wrap; }
-                            }
-                        }
-
-                        // ── AI Actions ──
-                        Rectangle { height: 1px; background: Theme.separator; opacity: 0.5; }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            padding-top: 2px;
-
-                            // Summarize button
-                            if root.file-details.is-text-file : summarize-btn := TouchArea {
-                                horizontal-stretch: 1;
-                                height: 32px;
-                                clicked => { root.show-summary-dialog = true; root.request-summarize(); }
-                                Rectangle {
-                                    border-radius: Theme.r-md;
-                                    background: summarize-btn.has-hover
-                                        ? Theme.hover-fill
-                                        : transparent;
-                                    border-width: 1px;
-                                    border-color: summarize-btn.has-hover ? Theme.amber-dim : Theme.border-subtle;
-                                    animate background, border-color { duration: Theme.dur-fast; }
-                                    HorizontalLayout {
-                                        spacing: 6px;
-                                        alignment: center;
-                                        Icon {
-                                            commands: Icons.spark;
-                                            size: 14px;
-                                            tint: Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                        Text { text: "Summarize"; color: summarize-btn.has-hover ? Theme.amber : Theme.amber-dim; font-size: Theme.fs-caption; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                    }
-                                }
-                            }
-
-                            // Ask AI button
-                            ask-ai-btn := TouchArea {
-                                horizontal-stretch: 1;
-                                height: 32px;
-                                clicked => { root.request-ask-ai(); }
-                                Rectangle {
-                                    border-radius: Theme.r-md;
-                                    background: ask-ai-btn.has-hover
-                                        ? Theme.hover-fill
-                                        : transparent;
-                                    border-width: 1px;
-                                    border-color: ask-ai-btn.has-hover ? Theme.cyan-dim : Theme.border-subtle;
-                                    animate background, border-color { duration: Theme.dur-fast; }
-                                    HorizontalLayout {
-                                        spacing: 6px;
-                                        alignment: center;
-                                        Icon {
-                                            commands: Icons.chip;
-                                            size: 14px;
-                                            tint: Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                        Text { text: "Ask AI"; color: ask-ai-btn.has-hover ? Theme.cyan : Theme.cyan-dim; font-size: Theme.fs-caption; vertical-alignment: center; animate color { duration: Theme.dur-fast; } }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Quick actions
-                        Rectangle { height: 1px; background: Theme.separator; opacity: 0.5; }
-
-                        VerticalLayout {
-                            spacing: 4px;
-
-                            // Copy path button
-                            cp-path-btn := TouchArea {
-                                height: 28px;
-                                clicked => { root.context-copy-path(root.file-details.path-text); }
-                                Rectangle {
-                                    border-radius: Theme.r-sm;
-                                    background: cp-path-btn.has-hover ? Theme.hover-fill : transparent;
-                                    animate background { duration: Theme.dur-fast; }
-                                    HorizontalLayout {
-                                        padding-left: 8px; spacing: 8px;
-                                        Icon {
-                                            commands: Icons.copy;
-                                            size: 14px;
-                                            tint: Theme.text-secondary;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                        Text { text: "Copy Path"; color: cp-path-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; }
-                                    }
-                                }
-                            }
-
-                            // Open terminal here
-                            term-btn := TouchArea {
-                                height: 28px;
-                                clicked => { root.context-open-terminal(); }
-                                Rectangle {
-                                    border-radius: Theme.r-sm;
-                                    background: term-btn.has-hover ? Theme.hover-fill : transparent;
-                                    animate background { duration: Theme.dur-fast; }
-                                    HorizontalLayout {
-                                        padding-left: 8px; spacing: 8px;
-                                        Icon { commands: Icons.terminal; size: 13px; tint: Theme.text-dim; y: (parent.height - self.height) / 2; }
-                                        Text { text: "Open Terminal Here"; color: term-btn.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── File operations queue drawer ──
-        if root.file-op-queue.length > 0 : Rectangle {
-            height: root.file-op-queue-visible ? min(root.file-op-queue.length * 32px + 36px, 160px) : 28px;
-            background: Theme.bg-surface;
-            clip: true;
-            animate height { duration: Theme.dur-normal; easing: ease-out; }
-
-            // Top edge
-            Rectangle {
-                y: 0; width: 100%; height: 1px;
-                background: Theme.separator;
-            }
-
-            VerticalLayout {
-                spacing: 0px;
-
-                // Toggle header
-                ops-toggle := TouchArea {
-                    height: 28px;
-                    clicked => { root.file-op-queue-visible = !root.file-op-queue-visible; }
-                    HorizontalLayout {
-                        padding-left: 12px; padding-right: 12px; spacing: 8px;
-
-                        Icon {
-                            commands: root.file-op-queue-visible ? Icons.chevron-down : Icons.play;
-                            size: 12px;
-                            tint: Theme.text-dim;
-                            y: (parent.height - self.height) / 2;
-                        }
-
-                        Text {
-                            text: root.file-op-queue.length + " operation(s)";
-                            color: Theme.cyan-dim;
-                            font-size: Theme.fs-micro;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-
-                        Rectangle { horizontal-stretch: 1; }
-                    }
-                }
-
-                // Operation items
-                if root.file-op-queue-visible : Flickable {
-                    vertical-stretch: 1;
-                    viewport-height: root.file-op-queue.length * 32px;
-
-                    for op[idx] in root.file-op-queue : Rectangle {
-                        height: 32px;
-                        y: idx * 32px;
-
-                        HorizontalLayout {
-                            padding-left: 16px; padding-right: 16px; spacing: 8px;
-
-                            Text {
-                                text: op.operation;
-                                color: op.status == "error" ? Theme.color-danger : (op.status == "done" ? Theme.color-success : Theme.text-secondary);
-                                font-size: Theme.fs-micro;
-                                width: 56px;
-                                vertical-alignment: center;
-                            }
-
-                            Text {
-                                text: op.filename;
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-micro;
-                                horizontal-stretch: 1;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-
-                            // Progress bar
-                            Rectangle {
-                                width: 80px; height: 6px;
-                                border-radius: 3px;
-                                background: Theme.hover-fill;
-
-                                Rectangle {
-                                    width: parent.width * op.progress;
-                                    height: 100%;
-                                    border-radius: 3px;
-                                    background: op.status == "error" ? Theme.color-danger : (op.status == "done" ? Theme.color-success : Theme.cyan);
-                                    animate width { duration: Theme.dur-fast; }
-                                }
-                            }
-
-                            Icon {
-                                commands: op.status == "done" ? Icons.check : op.status == "error" ? Icons.close : "";
-                                size: 13px;
-                                tint: op.status == "done" ? Theme.color-success : Theme.color-danger;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Status bar — file count + selection info + sort order + free space ──
-        Rectangle {
-            height: 26px;
-            background: Theme.bg-surface;
-
-            // Top edge
-            Rectangle {
-                y: 0; width: 100%; height: 1px;
-                background: Theme.separator;
-            }
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                spacing: 16px;
-
-                // Item count
-                Text {
-                    text: root.entries.length == 1 ? "1 item" : root.entries.length + " items";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                // Selection count
-                if root.selection-count > 0 : Text {
-                    text: "\u{2502}";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                if root.selection-count > 0 : Text {
-                    text: root.selection-count + " selected";
-                    color: Theme.cyan-dim;
-                    font-size: Theme.fs-micro;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-
-                // Selection size
-                if root.selection-size-text != "" : Text {
-                    text: "(" + root.selection-size-text + ")";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                // Sort order
-                Text {
-                    text: "\u{2502}";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                Text {
-                    text: root.sort-order-text();
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                if root.dir-type-badge != "" : Text {
-                    text: "\u{2502}";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                if root.dir-type-badge != "" : Text {
-                    text: root.dir-type-badge;
-                    color: Theme.amber-dim;
-                    font-size: Theme.fs-micro;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-
-                if root.free-space-text != "" : Text {
-                    text: "\u{2502}";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                if root.free-space-text != "" : Text {
-                    text: "Free: " + root.free-space-text;
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-
-                Rectangle { horizontal-stretch: 1; }
-
-                Text {
-                    text: root.current-path;
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                    overflow: elide;
+            Rectangle { height: 30px; background: Theme.bg-surface;
+                HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 16px;
+                    Text { text: root.is-loading ? "Loading…" : "\{root.entries.length} items"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                    Text { text: root.selection-count > 0 ? root.selection-size-text : root.current-path; color: Theme.text-dim; font-size: 11px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                    if root.width >= 850px : Text { text: "Enter  Open   ·   Space  Preview   ·   Ctrl L  Location"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
                 }
             }
         }
     }
-
-    // ═══ Context menu overlay ═══
-    if root.show-context-menu && root.context-menu-index >= 0 && root.context-menu-index < root.entries.length : Rectangle {
-        // No backdrop fill. This dimmed the whole file list behind a centred card, which makes a
-        // right-click on one row read as a modal dialog about the whole window — and hides the
-        // very thing you just clicked on. The catcher stays, invisible, so clicking away still
-        // dismisses.
-        width: 100%; height: 100%;
-        TouchArea {
-            clicked => { root.show-context-menu = false; }
-        }
-
-        // At the pointer, kept on screen. Clamped rather than centred: a context menu that opens
-        // somewhere else is a menu you have to go and find.
+    if root.dialog-kind != "" || root.file-quick-look-open || root.open-with-visible : FocusScope {
+        key-pressed(e) => { if e.text == Key.Escape { root.dialog-kind = ""; root.file-close-quick-look(); root.open-with-visible = false; listing.focus(); return accept; } reject }
+        Rectangle { background: #00000088; TouchArea {} }
         Rectangle {
-            x: min(root.context-menu-x, parent.width - 208px);
-            y: min(root.context-menu-y, max(0px, parent.height - self.height - 8px));
-            width: 200px;
-            // Its contents, not a guess. 380px was ~95px taller than the items, so the menu
-            // trailed a slab of empty panel under the last entry.
-            height: menu-body.preferred-height;
-            border-radius: Theme.r-lg;
-            background: Theme.bg-elevated;
-            border-width: 1px; border-color: Theme.border-subtle;
-            drop-shadow-blur: 24px; drop-shadow-color: Theme.overlay-shadow;
-            clip: true;
-
-            // Block clicks from passing through
-            TouchArea {}
-
-            menu-body := VerticalLayout {
-                padding: 6px; spacing: 0px;
-
-                // Header
-                Rectangle {
-                    height: 32px;
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        Text {
-                            text: root.entries[root.context-menu-index].name;
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-caption; font-weight: 600;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                    }
+            width: root.file-quick-look-open ? min(680px, root.width - 48px) : min(430px, root.width - 48px);
+            height: root.file-quick-look-open ? min(480px, root.height - 48px) : root.open-with-visible ? 310px : 200px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            background: Theme.bg-elevated; border-radius: 12px; border-width: 1px; border-color: Theme.border-strong;
+            VerticalLayout { padding: 20px; spacing: 14px;
+                Text { text: root.file-quick-look-open ? root.file-quick-look-name : root.open-with-visible ? root.selected-name : root.dialog-kind; color: Theme.text-primary; font-size: 18px; font-weight: 600; overflow: elide; }
+                if root.dialog-kind != "" && root.dialog-kind != "Empty Trash" : YInput { init => { self.focus(); } value <=> root.dialog-value; placeholder: "Name"; accepted(_) => { if root.dialog-value != "" { root.submit-dialog(); } } }
+                if root.dialog-kind == "Empty Trash" : Text { text: "Permanently remove all items in Trash? This cannot be undone."; color: Theme.text-secondary; font-size: 13px; wrap: word-wrap; }
+                if root.file-quick-look-open : Flickable { viewport-width: self.width; viewport-height: preview.preferred-height;
+                    preview := Text { width: parent.width; text: root.file-quick-look-content; color: Theme.text-secondary; font-family: Theme.font-mono; font-size: 13px; wrap: word-wrap; }
                 }
-                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                // Open
-                ctx-open := TouchArea {
-                    height: 32px;
-                    clicked => {
-                        if root.entries[root.context-menu-index].is-dir {
-                            root.navigate-dir(root.entries[root.context-menu-index].name);
-                        } else {
-                            root.open-file(root.entries[root.context-menu-index].name);
-                        }
-                        root.show-context-menu = false;
-                    }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ctx-open.has-hover ? Theme.hover-fill : transparent;
-                        HorizontalLayout { padding-left: 12px; spacing: 10px; Text { text: "Open"; color: ctx-open.has-hover ? Theme.cyan : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                    }
+                if root.open-with-visible : VerticalLayout { spacing: 8px;
+                    YButton { init => { self.focus(); } label: "Open with default app"; icon-path: Icons.link; variant: 1; clicked => { root.open-with-visible = false; root.open-selected(); } }
+                    YButton { label: "Open with Text Editor"; icon-path: Icons.editor; variant: 1; disabled: root.file-trash-mode || (root.selected-index >= 0 && root.entries[root.selected-index].is-dir); clicked => { root.open-with-visible = false; root.open-with("editor"); } }
+                    YButton { label: "Rename"; icon-path: Icons.editor; variant: 2; disabled: root.file-trash-mode || root.operation-busy; clicked => { root.open-with-visible = false; root.command("rename"); } }
+                    YButton { label: "Move to Trash"; icon-path: Icons.trash; variant: 2; disabled: root.file-trash-mode || root.operation-busy; clicked => { root.open-with-visible = false; root.delete-selected(); } }
                 }
-
-                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                // Copy
-                ctx-copy := TouchArea {
-                    height: 32px;
-                    clicked => { root.file-copy(root.entries[root.context-menu-index].name); root.show-context-menu = false; }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ctx-copy.has-hover ? Theme.hover-fill : transparent;
-                        HorizontalLayout { padding-left: 12px; spacing: 10px; Text { text: "Copy"; color: ctx-copy.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                    }
-                }
-
-                // Cut
-                ctx-cut := TouchArea {
-                    height: 32px;
-                    clicked => { root.file-cut(root.entries[root.context-menu-index].name); root.show-context-menu = false; }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ctx-cut.has-hover ? Theme.hover-fill : transparent;
-                        HorizontalLayout { padding-left: 12px; spacing: 10px; Text { text: "Cut"; color: ctx-cut.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                    }
-                }
-
-                // Paste (if clipboard)
-                if root.has-clipboard : ctx-paste := TouchArea {
-                    height: 32px;
-                    clicked => { root.file-paste(); root.show-context-menu = false; }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ctx-paste.has-hover ? Theme.hover-fill : transparent;
-                        HorizontalLayout { padding-left: 12px; spacing: 10px; Text { text: "Paste"; color: ctx-paste.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                    }
-                }
-
-                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                // Rename
-                ctx-rename := TouchArea {
-                    height: 32px;
-                    clicked => {
-                        root.rename-old-name = root.entries[root.context-menu-index].name;
-                        root.rename-new-name = root.entries[root.context-menu-index].name;
-                        root.show-rename-dialog = true;
-                        root.show-context-menu = false;
-                    }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ctx-rename.has-hover ? Theme.hover-fill : transparent;
-                        HorizontalLayout { padding-left: 12px; spacing: 10px; Text { text: "Rename"; color: ctx-rename.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                    }
-                }
-
-                // Delete
-                ctx-del := TouchArea {
-                    height: 32px;
-                    clicked => {
-                        root.delete-target-name = root.entries[root.context-menu-index].name;
-                        root.show-delete-dialog = true;
-                        root.show-context-menu = false;
-                    }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ctx-del.has-hover ? Theme.color-danger-dim : transparent;
-                        HorizontalLayout { padding-left: 12px; spacing: 10px; Text { text: "Delete"; color: ctx-del.has-hover ? Theme.color-danger : Theme.color-danger; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                    }
-                }
-
-                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                // Compress
-                ctx-compress := TouchArea {
-                    height: 32px;
-                    clicked => { root.context-compress(root.entries[root.context-menu-index].name); root.show-context-menu = false; }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ctx-compress.has-hover ? Theme.hover-fill : transparent;
-                        HorizontalLayout { padding-left: 12px; spacing: 10px; Text { text: "Compress"; color: ctx-compress.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                    }
-                }
-
-                // Copy Path
-                ctx-cp-path := TouchArea {
-                    height: 32px;
-                    clicked => { root.context-copy-path(root.entries[root.context-menu-index].name); root.show-context-menu = false; }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ctx-cp-path.has-hover ? Theme.hover-fill : transparent;
-                        HorizontalLayout { padding-left: 12px; spacing: 10px; Text { text: "Copy Path"; color: ctx-cp-path.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                    }
-                }
-
-                // Open Terminal Here
-                ctx-term := TouchArea {
-                    height: 32px;
-                    clicked => { root.context-open-terminal(); root.show-context-menu = false; }
-                    Rectangle {
-                        border-radius: Theme.r-sm;
-                        background: ctx-term.has-hover ? Theme.hover-fill : transparent;
-                        HorizontalLayout { padding-left: 12px; spacing: 10px; Text { text: "Open Terminal Here"; color: ctx-term.has-hover ? Theme.text-primary : Theme.text-secondary; font-size: Theme.fs-caption; vertical-alignment: center; } }
-                    }
-                }
-            }
-        }
-    }
-
-    // ═══ Rename dialog ═══
-    if root.show-rename-dialog : Rectangle {
-        width: 100%; height: 100%; background: Theme.overlay-backdrop;
-        TouchArea { clicked => { root.show-rename-dialog = false; root.selected-index = -1; root.clear-selection(); } }
-        Rectangle {
-            x: (parent.width - 340px) / 2; y: (parent.height - 180px) / 2; width: 340px; height: 180px;
-            border-radius: 16px;
-            background: Theme.bg-elevated;
-            border-width: 1px; border-color: Theme.border-subtle;
-            drop-shadow-blur: 24px; drop-shadow-color: Theme.overlay-shadow;
-            Rectangle { x: 16px; y: 1px; width: parent.width - 32px; height: 1px; border-radius: 0.5px; background: Theme.separator; }
-            TouchArea {}
-            VerticalLayout {
-                padding: 20px; spacing: 16px;
-                Text { text: "Rename"; color: Theme.text-primary; font-size: Theme.font-title; font-weight: 600; }
-                rename-input := YInput { value: root.rename-new-name; placeholder: "New name"; edited(t) => { root.rename-new-name = t; } accepted(t) => { root.file-rename(root.rename-old-name, t); root.show-rename-dialog = false; root.selected-index = -1; root.clear-selection(); } }
-                HorizontalLayout {
-                    spacing: 12px; alignment: end;
-                    TouchArea { width: 80px; height: 36px; clicked => { root.show-rename-dialog = false; root.selected-index = -1; root.clear-selection(); } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : transparent; animate background { duration: Theme.dur-fast; } Text { text: "Cancel"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                    TouchArea { width: 80px; height: 36px; clicked => { root.file-rename(root.rename-old-name, root.rename-new-name); root.show-rename-dialog = false; root.selected-index = -1; root.clear-selection(); } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : Theme.bg-elevated; animate background { duration: Theme.dur-fast; } Text { text: "Rename"; color: Theme.cyan; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                }
-            }
-        }
-    }
-
-    // ═══ Delete dialog ═══
-    if root.show-delete-dialog : Rectangle {
-        width: 100%; height: 100%; background: Theme.overlay-backdrop;
-        TouchArea { clicked => { root.show-delete-dialog = false; root.selected-index = -1; root.clear-selection(); } }
-        Rectangle {
-            x: (parent.width - 340px) / 2; y: (parent.height - 160px) / 2; width: 340px; height: 160px;
-            border-radius: 16px;
-            background: Theme.bg-elevated;
-            border-width: 1px; border-color: Theme.border-subtle;
-            drop-shadow-blur: 24px; drop-shadow-color: Theme.overlay-shadow;
-            Rectangle { x: 16px; y: 1px; width: parent.width - 32px; height: 1px; border-radius: 0.5px; background: Theme.separator; }
-            TouchArea {}
-            VerticalLayout {
-                padding: 20px; spacing: 16px;
-                Text { text: "Delete \"" + root.delete-target-name + "\"?"; color: Theme.text-primary; font-size: Theme.font-body; wrap: word-wrap; }
-                Text { text: "This cannot be undone."; color: Theme.text-dim; font-size: Theme.font-small; }
-                HorizontalLayout {
-                    spacing: 12px; alignment: end;
-                    TouchArea { width: 80px; height: 36px; clicked => { root.show-delete-dialog = false; root.selected-index = -1; root.clear-selection(); } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : transparent; animate background { duration: Theme.dur-fast; } Text { text: "Cancel"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                    TouchArea { width: 80px; height: 36px; clicked => {
-                        if root.selection-count > 1 {
-                            root.delete-selected();
-                        } else {
-                            root.file-delete(root.delete-target-name);
-                        }
-                        root.show-delete-dialog = false; root.selected-index = -1; root.clear-selection();
-                    } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.color-danger-dim : Theme.color-danger; drop-shadow-blur: parent.has-hover ? 8px : 0; drop-shadow-color: Theme.color-danger-dim; animate background, drop-shadow-blur { duration: Theme.dur-fast; } Text { text: "Delete"; color: Theme.text-on-accent; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                }
-            }
-        }
-    }
-
-    // ═══ New folder dialog ═══
-    if root.show-new-folder-dialog : Rectangle {
-        width: 100%; height: 100%; background: Theme.overlay-backdrop;
-        TouchArea { clicked => { root.show-new-folder-dialog = false; } }
-        Rectangle {
-            x: (parent.width - 340px) / 2; y: (parent.height - 180px) / 2; width: 340px; height: 180px;
-            border-radius: 16px;
-            background: Theme.bg-elevated;
-            border-width: 1px; border-color: Theme.border-subtle;
-            drop-shadow-blur: 24px; drop-shadow-color: Theme.overlay-shadow;
-            Rectangle { x: 16px; y: 1px; width: parent.width - 32px; height: 1px; border-radius: 0.5px; background: Theme.separator; }
-            TouchArea {}
-            VerticalLayout {
-                padding: 20px; spacing: 16px;
-                Text { text: "New Folder"; color: Theme.text-primary; font-size: Theme.font-title; font-weight: 600; }
-                folder-input := YInput { value: root.new-folder-name; placeholder: "Folder name"; edited(t) => { root.new-folder-name = t; } accepted(t) => { root.create-folder(t); root.show-new-folder-dialog = false; } }
-                HorizontalLayout {
-                    spacing: 12px; alignment: end;
-                    TouchArea { width: 80px; height: 36px; clicked => { root.show-new-folder-dialog = false; } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : transparent; animate background { duration: Theme.dur-fast; } Text { text: "Cancel"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                    TouchArea { width: 80px; height: 36px; clicked => { root.create-folder(root.new-folder-name); root.show-new-folder-dialog = false; } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : Theme.bg-elevated; animate background { duration: Theme.dur-fast; } Text { text: "Create"; color: Theme.cyan; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                }
-            }
-        }
-    }
-
-    // ═══ New file dialog ═══
-    if root.show-new-file-dialog : Rectangle {
-        width: 100%; height: 100%; background: Theme.overlay-backdrop;
-        TouchArea { clicked => { root.show-new-file-dialog = false; } }
-        Rectangle {
-            x: (parent.width - 340px) / 2; y: (parent.height - 180px) / 2; width: 340px; height: 180px;
-            border-radius: 16px;
-            background: Theme.bg-elevated;
-            border-width: 1px; border-color: Theme.border-subtle;
-            drop-shadow-blur: 24px; drop-shadow-color: Theme.overlay-shadow;
-            Rectangle { x: 16px; y: 1px; width: parent.width - 32px; height: 1px; border-radius: 0.5px; background: Theme.separator; }
-            TouchArea {}
-            VerticalLayout {
-                padding: 20px; spacing: 16px;
-                Text { text: "New File"; color: Theme.text-primary; font-size: Theme.font-title; font-weight: 600; }
-                file-input := YInput { value: root.new-file-name; placeholder: "File name"; edited(t) => { root.new-file-name = t; } accepted(t) => { root.create-file(t); root.show-new-file-dialog = false; } }
-                HorizontalLayout {
-                    spacing: 12px; alignment: end;
-                    TouchArea { width: 80px; height: 36px; clicked => { root.show-new-file-dialog = false; } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : transparent; animate background { duration: Theme.dur-fast; } Text { text: "Cancel"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                    TouchArea { width: 80px; height: 36px; clicked => { root.create-file(root.new-file-name); root.show-new-file-dialog = false; } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.color-success-dim : Theme.bg-elevated; animate background { duration: Theme.dur-fast; } Text { text: "Create"; color: Theme.color-success; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                }
-            }
-        }
-    }
-
-    // ═══ AI Summary dialog ═══
-    if root.show-summary-dialog : Rectangle {
-        width: 100%; height: 100%; background: Theme.overlay-backdrop;
-        TouchArea { clicked => { root.show-summary-dialog = false; } }
-        Rectangle {
-            x: (parent.width - 420px) / 2; y: (parent.height - 300px) / 2; width: 420px; height: 300px;
-            border-radius: 16px;
-            background: Theme.bg-elevated;
-            border-width: 1px; border-color: root.is-summarizing ? Theme.amber : Theme.amber-dim;
-            drop-shadow-blur: 32px; drop-shadow-color: Theme.amber-glow;
-            animate border-color { duration: Theme.dur-slow; }
-
-            // Top holographic edge
-            Rectangle {
-                y: 0; width: parent.width; height: 1px; border-radius: 16px;
-                background: Theme.separator;
-            }
-
-            VerticalLayout {
-                padding: 20px; spacing: 12px;
-
-                // Header
-                HorizontalLayout {
-                    spacing: 10px;
-                    Icon {
-                        commands: Icons.spark;
-                        size: 16px;
-                        tint: Theme.amber;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        Text {
-                            text: "AI Summary";
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-headline;
-                            font-weight: 600;
-                        }
-                        Text {
-                            text: root.file-details.name;
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-caption;
-                        }
-                    }
-                    // Close button
-                    summary-close := TouchArea {
-                        width: 28px; height: 28px;
-                        clicked => { root.show-summary-dialog = false; }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: summary-close.has-hover ? Theme.color-danger-dim : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: Icons.close;
-                                size: 14px;
-                                tint: Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-                }
-
-                // Separator
-                Rectangle { height: 1px; background: Theme.separator; opacity: 0.4; }
-
-                // Summary content area
-                Rectangle {
-                    vertical-stretch: 1;
-                    clip: true;
-                    border-radius: Theme.r-md;
-                    background: Theme.bg-deep;
-                    border-width: 1px; border-color: Theme.border-subtle;
-
-                    Flickable {
-                        x: 0; y: 0; width: parent.width; height: parent.height;
-                        viewport-height: summary-text.preferred-height + 24px;
-
-                        summary-text := Text {
-                            x: 14px;
-                            y: 12px;
-                            width: parent.width - 28px;
-                            text: root.is-summarizing && root.ai-summary == "" ? "Thinking..." : root.ai-summary;
-                            color: root.is-summarizing && root.ai-summary == "" ? Theme.text-dim : Theme.text-secondary;
-                            font-size: Theme.fs-caption;
-                            font-italic: root.is-summarizing && root.ai-summary == "";
-                            wrap: word-wrap;
-                            horizontal-alignment: left;
-                        }
-                    }
-
-                    // Pulsing glow while summarizing
-                    if root.is-summarizing : Rectangle {
-                        x: 0; y: 0; width: parent.width; height: parent.height;
-                        border-radius: Theme.r-md;
-                        border-width: 1px;
-                        border-color: Theme.amber;
-                        opacity: 0.4;
-                        animate opacity { duration: Theme.dur-slow; }
-                    }
-                }
-
-                // Status
-                if root.is-summarizing : Text {
-                    text: "Generating summary\u{2026}";
-                    color: Theme.amber-dim;
-                    font-size: Theme.fs-micro;
-                    horizontal-alignment: center;
-                }
-            }
-        }
-    }
-
-    // ═══ Batch rename dialog ═══
-    if root.file-batch-rename-open : Rectangle {
-        width: 100%; height: 100%; background: Theme.overlay-backdrop;
-        TouchArea { clicked => { root.file-batch-rename-open = false; } }
-        Rectangle {
-            x: (parent.width - 400px) / 2; y: (parent.height - 260px) / 2; width: 400px; height: 260px;
-            border-radius: 16px;
-            background: Theme.bg-elevated;
-            border-width: 1px; border-color: Theme.amber-dim;
-            drop-shadow-blur: 24px; drop-shadow-color: Theme.amber-glow;
-
-            // Top edge
-            Rectangle {
-                y: 0; width: parent.width; height: 1px; border-radius: 16px;
-                background: Theme.separator;
-            }
-
-            TouchArea {}
-
-            VerticalLayout {
-                padding: 20px; spacing: 14px;
-
-                // Header
-                HorizontalLayout {
-                    spacing: 10px;
-                    Text { text: "R"; color: Theme.amber; font-size: Theme.fs-headline; font-weight: 700; vertical-alignment: center; }
-                    Text { text: "Batch Rename"; color: Theme.text-primary; font-size: Theme.fs-headline; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
-                    batch-close := TouchArea {
-                        width: 28px; height: 28px;
-                        clicked => { root.file-batch-rename-open = false; }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: batch-close.has-hover ? Theme.color-danger-dim : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: Icons.close;
-                                size: 14px;
-                                tint: Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-                }
-
-                // Pattern input
-                VerticalLayout {
-                    spacing: 4px;
-                    Text { text: "Find pattern"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 600; letter-spacing: 1px; }
-                    batch-pattern-input := YInput {
-                        value: root.file-batch-rename-pattern;
-                        placeholder: "e.g. .txt";
-                        edited(t) => { root.file-batch-rename-pattern = t; }
-                    }
-                }
-
-                // Replace input
-                VerticalLayout {
-                    spacing: 4px;
-                    Text { text: "Replace with"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 600; letter-spacing: 1px; }
-                    batch-replace-input := YInput {
-                        value: root.file-batch-rename-replace;
-                        placeholder: "e.g. .md";
-                        edited(t) => { root.file-batch-rename-replace = t; }
-                    }
-                }
-
-                // Preview hint
-                Text {
-                    text: root.selection-count + " file(s) will be renamed";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    font-italic: true;
-                }
-
-                // Buttons
-                HorizontalLayout {
-                    spacing: 12px; alignment: end;
-                    TouchArea { width: 80px; height: 36px; clicked => { root.file-batch-rename-open = false; } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : transparent; animate background { duration: Theme.dur-fast; } Text { text: "Cancel"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                    TouchArea { width: 88px; height: 36px; clicked => { root.file-batch-rename-execute(); root.file-batch-rename-open = false; } Rectangle { border-radius: Theme.r-md; background: parent.has-hover ? Theme.hover-fill : Theme.bg-elevated; animate background { duration: Theme.dur-fast; } Text { text: "Rename All"; color: Theme.amber; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; } } }
-                }
-            }
-        }
-    }
-
-    // ═══ Quick Look overlay ═══
-    if root.file-quick-look-open : Rectangle {
-        width: 100%; height: 100%; background: Theme.overlay-backdrop;
-        TouchArea { clicked => { root.file-quick-look-open = false; root.file-close-quick-look(); } }
-        Rectangle {
-            x: (parent.width - 520px) / 2; y: (parent.height - 420px) / 2; width: 520px; height: 420px;
-            border-radius: 16px;
-            background: Theme.bg-elevated;
-            border-width: 1px; border-color: Theme.cyan-dim;
-            drop-shadow-blur: 32px; drop-shadow-color: Theme.cyan-glow;
-
-            // Top holographic edge
-            Rectangle {
-                y: 0; width: parent.width; height: 1px; border-radius: 16px;
-                background: Theme.separator;
-            }
-
-            TouchArea {}
-
-            VerticalLayout {
-                padding: 20px; spacing: 12px;
-
-                // Header
-                HorizontalLayout {
-                    spacing: 10px;
-                    Icon {
-                        commands: Icons.apps;
-                        size: 14px;
-                        tint: Theme.text-secondary;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        Text { text: "Quick Look"; color: Theme.text-primary; font-size: Theme.fs-headline; font-weight: 600; }
-                        Text { text: root.file-quick-look-name; color: Theme.text-dim; font-size: Theme.fs-caption; overflow: elide; }
-                    }
-                    ql-close := TouchArea {
-                        width: 28px; height: 28px;
-                        clicked => { root.file-quick-look-open = false; root.file-close-quick-look(); }
-                        Rectangle {
-                            border-radius: Theme.r-sm;
-                            background: ql-close.has-hover ? Theme.color-danger-dim : transparent;
-                            animate background { duration: Theme.dur-fast; }
-                            Icon {
-                                commands: Icons.close;
-                                size: 14px;
-                                tint: Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-                        }
-                    }
-                }
-
-                // Separator
-                Rectangle { height: 1px; background: Theme.separator; opacity: 0.5; }
-
-                // Content area
-                Rectangle {
-                    vertical-stretch: 1;
-                    clip: true;
-                    border-radius: Theme.r-md;
-                    background: Theme.bg-deep;
-                    border-width: 1px; border-color: Theme.border-subtle;
-
-                    Flickable {
-                        x: 0; y: 0; width: parent.width; height: parent.height;
-                        viewport-height: ql-content-text.preferred-height + 24px;
-
-                        ql-content-text := Text {
-                            x: 14px;
-                            y: 12px;
-                            width: parent.width - 28px;
-                            text: root.file-quick-look-content != "" ? root.file-quick-look-content : "No preview available";
-                            color: root.file-quick-look-content != "" ? Theme.text-secondary : Theme.text-dim;
-                            font-size: Theme.fs-caption;
-                            font-italic: root.file-quick-look-content == "";
-                            wrap: word-wrap;
-                            horizontal-alignment: left;
-                        }
-                    }
+                HorizontalLayout { alignment: end; spacing: 8px;
+                    YButton { init => { if root.file-quick-look-open || root.dialog-kind == "Empty Trash" { self.focus(); } } label: root.file-quick-look-open || root.open-with-visible ? "Close" : "Cancel"; variant: 2; clicked => { root.dialog-kind = ""; root.file-close-quick-look(); root.open-with-visible = false; listing.focus(); } }
+                    if root.dialog-kind != "" : YButton { label: root.dialog-kind == "Empty Trash" ? "Empty Trash" : root.dialog-kind == "Rename" ? "Rename" : "Create"; variant: root.dialog-kind == "Empty Trash" ? 3 : 0; disabled: root.dialog-kind != "Empty Trash" && root.dialog-value == ""; clicked => { root.submit-dialog(); } }
                 }
             }
         }

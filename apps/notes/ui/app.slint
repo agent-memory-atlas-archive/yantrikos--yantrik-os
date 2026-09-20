@@ -1,130 +1,203 @@
-// Yantrik Notes — standalone app window.
-// Wraps the shared NotesEditor component in its own Window.
-
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
 import { AppIdentity } from "app_color.slint";
-import { NotesEditor, NoteEntry, NoteVersionEntry, NoteBacklink, NoteImage } from "notes_editor.slint";
-import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
-import { AgentProposal } from "components/agent_proposal.slint";
-
-export { NoteEntry, NoteVersionEntry, NoteBacklink, NoteImage, ThemeMode, AccentPreset }
-// The agent layer's types, so the Rust side can build them.
-export { AgentContextItem, AgentSuggestion, AgentProposal }
-
+import { AppHeader } from "app_header.slint";
+import { YButton, YIconButton } from "y_button.slint";
+import { YInput } from "y_input.slint";
+import { Icon, Icons } from "icon.slint";
+import { ScrollView } from "std-widgets.slint";
+export { ThemeMode, AccentPreset }
+export struct NoteRow { id:string, title:string, preview:string, date:string, pinned:bool, selected:bool }
+export struct BookRow { name:string, count:int, selected:bool }
+export struct PreviewBlock { text:string, kind:int }
 export component NotesApp inherits Window {
-    // What app this window is.
-    //
-    // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
-    // the screens that have one, and Email's account-setup screen has none -- so the app that
-    // most needs to look like itself on first run was the one screen still drawing the house
-    // teal. The window is the only element every screen of an app is inside.
-    init => { AppIdentity.id = "notes"; }
-
-    default-font-family: Theme.font-ui;
-    title: "Notes";
-    // preferred-, not fixed: a fixed size makes the window unresizable, and the content
-    // stays this size even when the compositor maximises or fullscreens the window.
-    preferred-width: 1100px;
-    preferred-height: 720px;
-    min-width: 640px;
-    min-height: 400px;
-    background: Theme.bg-deep;
-
-    // ── Note list ──
-    in property <[NoteEntry]> notes-list <=> editor.notes-list;
-    in property <int> selected-index <=> editor.selected-index;
-
-    // ── Editor state ──
-    in-out property <string> current-content <=> editor.current-content;
-    in property <string> current-title <=> editor.current-title;
-    in property <bool> is-modified <=> editor.is-modified;
-    in property <int> note-count <=> editor.note-count;
-
-    // ── Search ──
-    in-out property <string> search-query <=> editor.search-query;
-    in property <bool> is-searching <=> editor.is-searching;
-
-    // ── Folders ──
-    in-out property <int> active-folder <=> editor.active-folder;
-    in property <int> folder-all-count <=> editor.folder-all-count;
-    in property <int> folder-fav-count <=> editor.folder-fav-count;
-    in property <int> folder-recent-count <=> editor.folder-recent-count;
-
-    // ── Tags ──
-    in-out property <string> current-tags <=> editor.current-tags;
-
-    // ── Metadata ──
-    in property <string> meta-created <=> editor.meta-created;
-    in property <string> meta-modified <=> editor.meta-modified;
-    in property <int> meta-word-count <=> editor.meta-word-count;
-
-    // ── AI ──
-    in property <bool> ai-is-working <=> editor.ai-is-working;
-    // ── The agent layer ──
-    in property <[AgentContextItem]> agent-context <=> editor.agent-context;
-    in property <[AgentSuggestion]> agent-suggestions <=> editor.agent-suggestions;
-    in property <string> agent-unavailable <=> editor.agent-unavailable;
-    callback agent-context-activated <=> editor.agent-context-activated;
-    callback agent-suggestion-activated <=> editor.agent-suggestion-activated;
-    in property <AgentProposal> proposal <=> editor.proposal;
-    in property <bool> proposal-working <=> editor.proposal-working;
-
-    in property <string> ai-response <=> editor.ai-response;
-    in-out property <bool> ai-panel-open <=> editor.ai-panel-open;
-
-    // ── Version history ──
-    in property <[NoteVersionEntry]> version-history <=> editor.version-history;
-    in-out property <bool> version-panel-open <=> editor.version-panel-open;
-
-    // ── Backlinks ──
-    in property <[NoteBacklink]> backlinks <=> editor.backlinks;
-    in property <[NoteBacklink]> outbound-links <=> editor.outbound-links;
-    in-out property <bool> backlinks-panel-open <=> editor.backlinks-panel-open;
-
-    // ── Meeting mode ──
-    in property <bool> meeting-mode <=> editor.meeting-mode;
-
-    // ── Export ──
-    in property <string> export-status <=> editor.export-status;
-
-    // ── Callbacks (forwarded via alias — no parens allowed) ──
-    callback new-note <=> editor.new-note;
-    callback save-note <=> editor.save-note;
-    callback delete-note <=> editor.delete-note;
-    callback close-note <=> editor.close-note;
-    callback select-note <=> editor.select-note;
-    callback search-notes <=> editor.search-notes;
-    callback content-changed <=> editor.content-changed;
-    callback select-folder <=> editor.select-folder;
-    callback update-tags <=> editor.update-tags;
-    callback toggle-pin <=> editor.toggle-pin;
-    callback new-from-template <=> editor.new-from-template;
-    callback insert-format <=> editor.insert-format;
-    callback ai-structure <=> editor.ai-structure;
-    callback ai-summarize <=> editor.ai-summarize;
-    callback ai-apply <=> editor.ai-apply;
-    callback ai-dismiss <=> editor.ai-dismiss;
-    callback view-version <=> editor.view-version;
-    callback restore-version <=> editor.restore-version;
-    callback find-backlinks <=> editor.find-backlinks;
-    callback open-note <=> editor.open-note;
-
-    // ── Images ──
-    in property <[NoteImage]> note-images <=> editor.note-images;
-    in-out property <bool> images-panel-open <=> editor.images-panel-open;
-    in-out property <int> image-preview-index <=> editor.image-preview-index;
-    in-out property <string> attach-image-path <=> editor.attach-image-path;
-    callback scan-images <=> editor.scan-images;
-    callback attach-image <=> editor.attach-image;
-    callback toggle-meeting-mode <=> editor.toggle-meeting-mode;
-    callback export-md <=> editor.export-md;
-    callback import-md <=> editor.import-md;
-
-    editor := NotesEditor {
-        // Fills the window (no explicit size: Slint forbids width/height next to max-*).
-        // The screen's own layouts may report a bounded maximum (a stretch layout of fixed rows);
-        // the window must still open at its preferred size and grow with the user.
-        max-width: 100000px;
-        max-height: 100000px;
+ title:"Notes";preferred-width:1120px;preferred-height:760px;min-width:680px;min-height:460px;
+ default-font-family:Theme.font-ui;background:Theme.bg-deep;
+ init=>{AppIdentity.id="notes";}
+ in property <[NoteRow]> notes;
+ in property <[BookRow]> books;
+ in property <[PreviewBlock]> blocks;
+ in-out property <string> content;
+ in-out property <string> query;
+ in-out property <string> notebook;
+ in-out property <string> tags;
+ in property <string> note-title;
+ in property <string> status:"Opening your library…";
+ in property <string> notice;
+ in property <bool> busy;
+ in property <bool> opened;
+ in property <bool> trashed;
+ in property <bool> modified;
+ in property <bool> pinned;
+ in property <int> words;
+ in property <int> all-count;
+ in property <int> pin-count;
+ in property <int> trash-count;
+ in-out property <string> folder:"all";
+ in-out property <bool> focus-mode;
+ in-out property <bool> preview;
+ in-out property <int> dialog;
+ in-out property <string> path;
+ callback action(string);
+ callback choose(string);
+ callback filter();
+ callback edited(string);
+ callback metadata();
+ callback refresh();
+ public function caret(offset:int){editor.set-selection-offsets(offset,offset);}
+ public function focus-shortcuts(){keys.focus();}
+ public function focus-content(){if(root.preview||!root.opened){keys.focus();}else{editor.focus();}}
+ public function focus-editor(){editor.focus();}
+ public function reset-position(){writing.viewport-y=0px;editor.set-selection-offsets(0,0);}
+ public function shortcut(event:KeyEvent)->EventResult {
+  if(event.modifiers.control){
+   if(event.text=="z"||event.text=="Z"||event.text=="y"){root.action(event.modifiers.shift||event.text=="y"?"redo":"undo");return accept;}
+   if(event.text=="s"){root.action("save");return accept;}
+   if(event.text=="n"){root.action("new");return accept;}
+   if(event.text=="f"){root.focus-mode=false;search.focus();return accept;}
+   if(event.text=="p"){root.action("preview");return accept;}
+   if(event.text=="e"){root.action("focus");return accept;}
+  }
+  if(event.text==Key.F5){root.action("reload");return accept;}
+  if(event.text==Key.Escape){root.dialog=0;root.focus-mode=false;root.focus-content();return accept;}
+  return reject;
+ }
+ changed dialog=>{if(root.dialog!=0){path-field.focus();}}
+ keys:=FocusScope {width:root.width;height:root.height;key-pressed(event)=>{return root.shortcut(event);}
+ Flickable { width:root.width;height:root.height;interactive:false;viewport-width:self.width;viewport-height:self.height;
+ VerticalLayout {spacing:0px;
+  AppHeader {
+   app-id:"notes";icon:Icons.notes;title:"Notes";subtitle:root.status;
+   leading-actions:[{id:"focus",icon:Icons.list,label:root.focus-mode?"Library":"Focus",active:root.focus-mode}];
+   actions:[{id:"reload",icon:Icons.refresh,label:"Refresh"},{id:"import",icon:Icons.import,label:"Import"},{id:"new",icon:Icons.plus,label:"New note",emphasis:2}];
+   action(id)=>{root.action(id);}
+  }
+  if root.notice!="" : Rectangle {height:message.preferred-height+20px;background:Theme.bg-elevated;
+   message:=Text{x:20px;y:10px;width:parent.width - 40px;text:root.notice;color:Theme.amber;font-size:13px;wrap:word-wrap;}
+  }
+  HorizontalLayout {spacing:0px;
+   Rectangle {width:root.focus-mode?0px:268px;clip:true;background:Theme.bg-surface;
+    VerticalLayout {padding:14px;spacing:10px;
+     Text{text:"YOUR LIBRARY";color:Theme.text-dim;font-size:10px;font-weight:600;letter-spacing:1.6px;height:24px;}
+     HorizontalLayout {spacing:5px;
+      YButton{label:"All  \{root.all-count}";variant:root.folder=="all"?1:2;size:0;clicked=>{root.folder="all";root.filter();}}
+      YButton{label:"Pinned  \{root.pin-count}";variant:root.folder=="favorites"?1:2;size:0;clicked=>{root.folder="favorites";root.filter();}}
+      YIconButton{icon-path:Icons.trash;variant:root.folder=="trash"?1:2;clicked=>{root.folder="trash";root.filter();}}
+     }
+     search:=YInput{value<=>root.query;mode:1;placeholder:"Search title, text, tags";edited(_)=>{root.filter();}cleared=>{root.filter();}}
+     if root.books.length>0 : ScrollView {height:min(112px,root.books.length*30px);viewport-width:self.visible-width;
+      VerticalLayout {spacing:2px;alignment:start;
+       for book in root.books : TouchArea {height:28px;clicked=>{root.folder="book:"+book.name;root.filter();}
+        Rectangle {border-radius:5px;background:book.selected?Theme.hover-fill-strong:parent.has-hover?Theme.hover-fill:transparent;
+         HorizontalLayout{padding-left:8px;padding-right:8px;spacing:8px;
+          Icon{commands:Icons.folder;size:13px;tint:Theme.amber;y:(parent.height - self.height)/2;}
+          Text{text:book.name;color:Theme.text-secondary;font-size:12px;overflow:elide;horizontal-stretch:1;vertical-alignment:center;}
+          Text{text:"\{book.count}";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
+         }
+        }
+       }
+      }
+     }
+     HorizontalLayout {height:24px;
+      Text{text:root.folder=="trash"?"TRASH · \{root.trash-count}":"\{root.notes.length} NOTES";color:Theme.text-dim;font-size:10px;letter-spacing:1px;vertical-alignment:center;horizontal-stretch:1;}
+      YButton{label:"Recent";variant:root.folder=="recent"?1:2;size:0;clicked=>{root.folder="recent";root.filter();}}
+     }
+     ScrollView {vertical-stretch:1;viewport-width:self.visible-width;
+      VerticalLayout {alignment:start;spacing:5px;
+       if root.notes.length==0 : Text{text:"No notes here yet.";color:Theme.text-dim;font-size:13px;height:70px;horizontal-alignment:center;vertical-alignment:center;}
+       for note in root.notes : TouchArea {height:99px;clicked=>{root.choose(note.id);}
+        Rectangle {border-radius:9px;clip:true;background:note.selected?Theme.hover-fill-strong:parent.has-hover?Theme.hover-fill:transparent;
+         if note.selected : Rectangle{x:0px;y:16px;width:3px;height:65px;background:Theme.amber;border-radius:2px;}
+         VerticalLayout {padding:12px;spacing:5px;
+          HorizontalLayout{spacing:5px;
+           if note.pinned : Icon{commands:Icons.star;size:12px;tint:Theme.amber;y:(parent.height - self.height)/2;}
+           Text{text:note.title;color:Theme.text-primary;font-size:14px;font-weight:600;overflow:elide;}
+          }
+          Text{text:note.preview;color:Theme.text-secondary;font-size:12px;overflow:elide;}
+          Text{text:note.date;color:Theme.text-dim;font-size:10px;overflow:elide;}
+         }
+        }
+       }
+      }
+     }
+     Text{text:"Markdown files · Stored on this device";color:Theme.text-dim;font-size:10px;height:20px;vertical-alignment:center;}
     }
+   }
+   Rectangle{width:1px;background:Theme.separator;}
+   VerticalLayout {spacing:0px;horizontal-stretch:1;
+    if root.opened : Rectangle {height:54px;background:Theme.bg-surface;
+     HorizontalLayout{padding-left:20px;padding-right:14px;spacing:6px;
+      Text{text:root.note-title;color:Theme.text-primary;font-weight:600;font-size:15px;overflow:elide;horizontal-stretch:1;vertical-alignment:center;}
+      YIconButton{icon-path:Icons.star;variant:root.pinned?1:2;clicked=>{root.action("pin");}}
+      YButton{label:root.preview?"Write":"Preview";variant:root.preview?1:2;size:0;clicked=>{root.action("preview");}}
+      YIconButton{icon-path:Icons.export;variant:2;clicked=>{root.action("export");}}
+      YIconButton{icon-path:root.trashed?Icons.refresh:Icons.trash;variant:2;clicked=>{root.action(root.trashed?"restore":"trash");}}
+     }
+    }
+    if root.opened && !root.trashed : Rectangle {height:44px;
+     HorizontalLayout{padding-left:24px;padding-right:24px;spacing:10px;
+      Text{text:"Notebook";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
+      YInput{value<=>root.notebook;placeholder:"Unfiled";min-width:100px;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
+      if root.width>850px : Text{text:"Tags";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
+      if root.width>850px : YInput{value<=>root.tags;placeholder:"Comma separated";min-width:100px;edited(_)=>{root.metadata();}cleared=>{root.metadata();}}
+     }
+    }
+    Rectangle {vertical-stretch:1;clip:true;
+     if !root.opened : VerticalLayout {padding:50px;alignment:center;spacing:18px;
+      Icon{commands:Icons.notes;size:46px;tint:Theme.amber;}
+      Text{text:"A little space to think.";color:Theme.text-primary;font-size:30px;font-weight:600;horizontal-alignment:center;}
+      Text{text:"Gather ideas. Keep the details. Make something of them.\nChoose a note, or start a fresh page.";color:Theme.text-secondary;font-size:14px;wrap:word-wrap;horizontal-alignment:center;}
+      HorizontalLayout{alignment:center;YButton{label:"Create a note";variant:0;clicked=>{root.action("new");}}}
+      Text{text:"Ctrl+N  New     Ctrl+F  Search     Ctrl+E  Focus";color:Theme.text-dim;font-size:11px;horizontal-alignment:center;}
+     }
+     writing:=ScrollView {visible:root.opened&&!root.preview;width:parent.width;height:parent.height;
+      viewport-width:self.visible-width;viewport-height:max(self.visible-height,editor.preferred-height+72px);
+      Rectangle {width:writing.viewport-width;height:writing.viewport-height;
+       editor:=TextInput {
+        x:max(28px,(writing.visible-width - 720px)/2);y:30px;width:min(720px,writing.visible-width - 56px);height:max(self.preferred-height,writing.visible-height - 60px);
+        text<=>root.content;single-line:false;wrap:word-wrap;font-size:16px;color:Theme.text-primary;
+        read-only:!root.opened||root.trashed||root.dialog!=0;
+        selection-background-color:Theme.accent;selection-foreground-color:Theme.bg-deep;page-height:writing.visible-height;
+        edited=>{root.edited(self.text);}key-pressed(event)=>{return root.shortcut(event);}
+        cursor-position-changed(pos)=>{
+         if(pos.y+60px > -writing.viewport-y+writing.visible-height){writing.viewport-y=min(0px,writing.visible-height - pos.y - 60px);}
+         if(pos.y+24px < -writing.viewport-y){writing.viewport-y=-pos.y;}
+        }
+       }
+      }
+     }
+     if root.opened&&root.preview : ScrollView {viewport-width:self.visible-width;
+      VerticalLayout {alignment:start;padding:32px;spacing:16px;
+       for block in root.blocks : Rectangle {background:block.kind==2?Theme.bg-surface:transparent;border-radius:8px;height:rendered.preferred-height+16px;
+        rendered:=Text{x:12px;y:8px;width:parent.width - 24px;text:block.text;wrap:word-wrap;
+         color:block.kind==3?Theme.text-secondary:Theme.text-primary;font-family:block.kind==2?Theme.font-mono:Theme.font-ui;
+         font-size:block.kind==1?24px:15px;font-weight:block.kind==1?600:400;
+        }
+       }
+      }
+     }
+    }
+    Rectangle{height:1px;background:Theme.separator;}
+    Rectangle {height:38px;background:Theme.bg-surface;
+     HorizontalLayout{padding-left:24px;padding-right:16px;spacing:14px;
+      Text{text:root.opened?"\{root.words} words":"Ready when you are";color:Theme.text-dim;font-size:11px;vertical-alignment:center;}
+      Text{text:root.trashed?"In Trash · Restore to keep writing":root.status;color:root.modified?Theme.amber:Theme.text-secondary;font-size:11px;vertical-alignment:center;horizontal-stretch:1;overflow:elide;}
+      if root.modified : YButton{label:"Save a copy";variant:2;size:0;clicked=>{root.action("copy");}}
+     }
+    }
+   }
+  }
+ }
+ }
+ Rectangle{visible:root.dialog!=0;background:#00000066;TouchArea{}
+  Rectangle{x:(parent.width - self.width)/2;y:(parent.height - self.height)/2;width:min(510px,root.width - 48px);height:modal.preferred-height;background:Theme.bg-elevated;border-radius:14px;
+   modal:=VerticalLayout{padding:24px;spacing:16px;
+    Text{text:root.dialog==1?"Import Markdown":"Export Markdown";color:Theme.text-primary;font-size:22px;font-weight:600;}
+    Text{text:root.dialog==1?"Choose a local Markdown file to copy into your library.":"Save a new file. Existing files are never overwritten.";color:Theme.text-secondary;wrap:word-wrap;font-size:13px;}
+    path-field:=YInput{value<=>root.path;placeholder:"/home/yantrik/Documents/note.md";accepted(_)=>{root.action("confirm");}}
+    if root.notice!="" : Text{text:root.notice;color:Theme.amber;font-size:13px;wrap:word-wrap;}
+    HorizontalLayout{alignment:end;spacing:8px;YButton{label:"Cancel";variant:2;clicked=>{root.dialog=0;}}YButton{label:root.busy?"Working…":"Continue";variant:0;clicked=>{root.action("confirm");}}}
+   }
+  }
+ }
+ }
 }

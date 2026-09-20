@@ -6,7 +6,10 @@
 use std::path::{Path, PathBuf};
 
 /// A single directory entry for display.
+#[derive(Clone)]
 pub struct DirEntry {
+    pub size_bytes: u64,
+    pub modified: std::time::SystemTime,
     pub name: String,
     pub is_dir: bool,
     pub size_text: String,
@@ -30,7 +33,7 @@ pub fn collapse_home(path: &Path) -> String {
     if let Ok(home) = std::env::var("HOME") {
         let home_path = Path::new(&home);
         if let Ok(relative) = path.strip_prefix(home_path) {
-            return format!("~/{}", relative.display());
+            return if relative.as_os_str().is_empty() { "~".into() } else { format!("~/{}", relative.display()) };
         }
     }
     path.display().to_string()
@@ -54,64 +57,61 @@ pub fn list_dir_full(
     sort_field: &str,
     sort_ascending: bool,
 ) -> Vec<DirEntry> {
+    list_dir_checked(path, show_hidden, name_filter, sort_field, sort_ascending).unwrap_or_default()
+}
+
+pub fn list_dir_checked(
+    path: &str,
+    show_hidden: bool,
+    name_filter: &str,
+    sort_field: &str,
+    sort_ascending: bool,
+) -> Result<Vec<DirEntry>, String> {
     let expanded = expand_home(path);
-    let filter_lower = name_filter.to_lowercase();
-
-    let read_dir = match std::fs::read_dir(&expanded) {
-        Ok(rd) => rd,
-        Err(e) => {
-            tracing::warn!(path = %expanded.display(), error = %e, "Failed to read directory");
-            return Vec::new();
+    let filter = name_filter.to_lowercase();
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&expanded).map_err(|e| format!("{}: {e}", expanded.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            "This folder has non-UTF-8 filenames. Use Terminal to rename them before browsing here."
+        })?;
+        if (!show_hidden && name.starts_with('.')) || !name.to_lowercase().contains(&filter) {
+            continue;
         }
-    };
-
-    let mut entries: Vec<DirEntry> = read_dir
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            let hidden_ok = show_hidden || !name.starts_with('.');
-            let filter_ok = filter_lower.is_empty() || name.to_lowercase().contains(&filter_lower);
-            hidden_ok && filter_ok
-        })
-        .map(|e| {
-            let meta = e.metadata().ok();
-            let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-            let name = e.file_name().to_string_lossy().to_string();
-
-            let size_text = if is_dir {
+        let meta = std::fs::symlink_metadata(entry.path()).map_err(|e| format!("{name}: {e}"))?;
+        // A link to a directory can be entered explicitly; recursive operations never follow it.
+        let is_dir = if meta.file_type().is_symlink() {
+            entry.path().is_dir()
+        } else {
+            meta.is_dir()
+        };
+        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        entries.push(DirEntry {
+            size_bytes: meta.len(),
+            modified,
+            name: name.clone(),
+            is_dir,
+            size_text: if is_dir {
                 String::new()
             } else {
-                meta.as_ref()
-                    .map(|m| format_size(m.len()))
-                    .unwrap_or_default()
-            };
-
-            let modified_text = meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .map(format_modified)
-                .unwrap_or_default();
-
-            let icon_char = if is_dir {
-                "📁".to_string()
+                format_size(meta.len())
+            },
+            modified_text: format_modified(modified),
+            icon_char: if is_dir {
+                "folder".into()
             } else {
                 file_icon(&name)
-            };
-
-            DirEntry {
-                name,
-                is_dir,
-                size_text,
-                modified_text,
-                icon_char,
-                selected: false,
-            }
-        })
-        .collect();
-
+            },
+            selected: false,
+        });
+        if entries.len() > 50000 {
+            return Err(
+                "This folder has more than 50,000 items. Use Terminal to narrow it down.".into(),
+            );
+        }
+    }
     sort_entries(&mut entries, sort_field, sort_ascending);
-
-    entries
+    Ok(entries)
 }
 
 /// Sort entries by field. Directories are always first.
@@ -123,15 +123,15 @@ pub fn sort_entries(entries: &mut Vec<DirEntry>, field: &str, ascending: bool) {
             return dir_cmp;
         }
         let ord = match field {
-            "size" => {
-                let sa = parse_size_bytes(&a.size_text);
-                let sb = parse_size_bytes(&b.size_text);
-                sa.cmp(&sb)
-            }
-            "modified" => a.modified_text.cmp(&b.modified_text),
+            "size" => a.size_bytes.cmp(&b.size_bytes),
+            "modified" => a.modified.cmp(&b.modified),
             _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         };
-        if ascending { ord } else { ord.reverse() }
+        if ascending {
+            ord
+        } else {
+            ord.reverse()
+        }
     });
 }
 
@@ -203,33 +203,52 @@ fn format_modified(time: std::time::SystemTime) -> String {
 
 fn file_icon(name: &str) -> String {
     let lower = name.to_lowercase();
-    if lower.ends_with(".rs") || lower.ends_with(".py") || lower.ends_with(".js")
-        || lower.ends_with(".ts") || lower.ends_with(".c") || lower.ends_with(".h")
-        || lower.ends_with(".go") || lower.ends_with(".java")
+    if lower.ends_with(".rs")
+        || lower.ends_with(".py")
+        || lower.ends_with(".js")
+        || lower.ends_with(".ts")
+        || lower.ends_with(".c")
+        || lower.ends_with(".h")
+        || lower.ends_with(".go")
+        || lower.ends_with(".java")
     {
         "◇".to_string()
     } else if lower.ends_with(".txt") || lower.ends_with(".md") || lower.ends_with(".log") {
         "≡".to_string()
-    } else if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")
-        || lower.ends_with(".gif") || lower.ends_with(".svg") || lower.ends_with(".webp")
+    } else if lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".gif")
+        || lower.ends_with(".svg")
+        || lower.ends_with(".webp")
     {
         "▣".to_string()
-    } else if lower.ends_with(".mp3") || lower.ends_with(".wav") || lower.ends_with(".flac")
+    } else if lower.ends_with(".mp3")
+        || lower.ends_with(".wav")
+        || lower.ends_with(".flac")
         || lower.ends_with(".ogg")
     {
         "♪".to_string()
-    } else if lower.ends_with(".mp4") || lower.ends_with(".mkv") || lower.ends_with(".avi")
+    } else if lower.ends_with(".mp4")
+        || lower.ends_with(".mkv")
+        || lower.ends_with(".avi")
         || lower.ends_with(".webm")
     {
         "▶".to_string()
-    } else if lower.ends_with(".zip") || lower.ends_with(".tar.gz") || lower.ends_with(".7z")
-        || lower.ends_with(".rar") || lower.ends_with(".deb")
+    } else if lower.ends_with(".zip")
+        || lower.ends_with(".tar.gz")
+        || lower.ends_with(".7z")
+        || lower.ends_with(".rar")
+        || lower.ends_with(".deb")
     {
         "▤".to_string()
     } else if lower.ends_with(".pdf") {
         "▧".to_string()
-    } else if lower.ends_with(".toml") || lower.ends_with(".yaml") || lower.ends_with(".yml")
-        || lower.ends_with(".json") || lower.ends_with(".xml")
+    } else if lower.ends_with(".toml")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".json")
+        || lower.ends_with(".xml")
     {
         "⚙".to_string()
     } else if lower.starts_with('.') {
@@ -248,7 +267,11 @@ pub fn breadcrumb_segments(path: &str) -> Vec<(String, String)> {
     if parts.is_empty() {
         return vec![("/".to_string(), "/".to_string())];
     }
-    let mut segments = Vec::new();
+    let mut segments = if path.starts_with('/') {
+        vec![("/".into(), "/".into())]
+    } else {
+        Vec::new()
+    };
     let mut accumulated = String::new();
     for (i, part) in parts.iter().enumerate() {
         if i == 0 && *part == "~" {
@@ -258,116 +281,53 @@ pub fn breadcrumb_segments(path: &str) -> Vec<(String, String)> {
         } else {
             accumulated = format!("{}/{}", accumulated, part);
         }
-        segments.push((part.to_string(), accumulated.clone()));
+        segments.push((
+            if *part == "~" {
+                "Home".into()
+            } else {
+                part.to_string()
+            },
+            accumulated.clone(),
+        ));
     }
     segments
 }
 
-/// Delete a file or empty directory.
+/// Delete uses recoverable Trash; permanent removal is confined to explicit Empty Trash.
 pub fn delete_entry(dir: &str, name: &str) -> Result<(), String> {
-    let expanded = expand_home(dir);
-    let target = expanded.join(name);
-    if !target.exists() {
-        return Err("File not found".to_string());
-    }
-    // Safety: don't delete outside home
-    if let Ok(home) = std::env::var("HOME") {
-        if !target.starts_with(&home) && !target.starts_with("/tmp") {
-            return Err("Cannot delete files outside home directory".to_string());
-        }
-    }
-    if target.is_dir() {
-        std::fs::remove_dir_all(&target).map_err(|e| e.to_string())
-    } else {
-        std::fs::remove_file(&target).map_err(|e| e.to_string())
-    }
+    crate::fileops::name(name)?;
+    crate::fileops::trash(&expand_home(dir).join(name), &crate::fileops::trash_root()).map(|_| ())
 }
-
-/// Rename a file or directory.
-pub fn rename_entry(dir: &str, old_name: &str, new_name: &str) -> Result<(), String> {
-    if new_name.is_empty() || new_name.contains('/') || new_name.contains('\0') {
-        return Err("Invalid name".to_string());
+pub fn rename_entry(dir: &str, old: &str, new: &str) -> Result<(), String> {
+    crate::fileops::name(old)?;
+    crate::fileops::name(new)?;
+    if old == new {
+        return Ok(());
     }
-    let expanded = expand_home(dir);
-    let src = expanded.join(old_name);
-    let dst = expanded.join(new_name);
-    if !src.exists() {
-        return Err("Source not found".to_string());
-    }
-    if dst.exists() {
-        return Err("Name already exists".to_string());
-    }
-    std::fs::rename(&src, &dst).map_err(|e| e.to_string())
+    crate::fileops::rename_no_replace(&expand_home(dir).join(old), &expand_home(dir).join(new))
 }
-
-/// Create a new directory.
 pub fn create_folder(dir: &str, name: &str) -> Result<(), String> {
-    if name.is_empty() || name.contains('/') || name.contains('\0') {
-        return Err("Invalid folder name".to_string());
-    }
-    let expanded = expand_home(dir);
-    let target = expanded.join(name);
-    if target.exists() {
-        return Err("Already exists".to_string());
-    }
-    std::fs::create_dir(&target).map_err(|e| e.to_string())
+    crate::fileops::create_folder(&expand_home(dir), name)
 }
-
-/// Copy a file or directory into a destination directory.
-pub fn copy_entry(src_dir: &str, name: &str, dst_dir: &str) -> Result<(), String> {
-    let src = expand_home(src_dir).join(name);
-    let dst = expand_home(dst_dir).join(name);
-    if !src.exists() {
-        return Err("Source not found".to_string());
-    }
-    if src.is_dir() {
-        copy_dir_recursive(&src, &dst)
-    } else {
-        std::fs::copy(&src, &dst).map(|_| ()).map_err(|e| e.to_string())
-    }
+pub fn copy_entry(src: &str, name: &str, dst: &str) -> Result<(), String> {
+    crate::fileops::name(name)?;
+    crate::fileops::transfer(
+        &expand_home(src).join(name),
+        &expand_home(dst),
+        false,
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |_| {},
+    )
 }
-
-/// Move a file or directory into a destination directory.
-pub fn move_entry(src_dir: &str, name: &str, dst_dir: &str) -> Result<(), String> {
-    let src = expand_home(src_dir).join(name);
-    let dst = expand_home(dst_dir).join(name);
-    if !src.exists() {
-        return Err("Source not found".to_string());
-    }
-    std::fs::rename(&src, &dst).map_err(|e| {
-        // rename fails across filesystems — fall back to copy+delete
-        if src.is_dir() {
-            if let Err(ce) = copy_dir_recursive(&src, &dst) {
-                return format!("Move failed: {}, copy fallback failed: {}", e, ce);
-            }
-            if let Err(de) = std::fs::remove_dir_all(&src) {
-                return format!("Copied but failed to remove source: {}", de);
-            }
-        } else {
-            if let Err(ce) = std::fs::copy(&src, &dst) {
-                return format!("Move failed: {}, copy fallback failed: {}", e, ce);
-            }
-            if let Err(de) = std::fs::remove_file(&src) {
-                return format!("Copied but failed to remove source: {}", de);
-            }
-        }
-        String::new() // success via fallback
-    }).and_then(|_| Ok(()))
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-    let entries = std::fs::read_dir(src).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        let child_src = entry.path();
-        let child_dst = dst.join(entry.file_name());
-        if child_src.is_dir() {
-            copy_dir_recursive(&child_src, &child_dst)?;
-        } else {
-            std::fs::copy(&child_src, &child_dst).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
+pub fn move_entry(src: &str, name: &str, dst: &str) -> Result<(), String> {
+    crate::fileops::name(name)?;
+    crate::fileops::transfer(
+        &expand_home(src).join(name),
+        &expand_home(dst),
+        true,
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |_| {},
+    )
 }
 
 // ── File details ──
@@ -521,19 +481,39 @@ fn format_modified_full(time: std::time::SystemTime) -> String {
         "Just now".to_string()
     } else if secs < 3600 {
         let m = secs / 60;
-        if m == 1 { "1 minute ago".to_string() } else { format!("{} minutes ago", m) }
+        if m == 1 {
+            "1 minute ago".to_string()
+        } else {
+            format!("{} minutes ago", m)
+        }
     } else if secs < 86400 {
         let h = secs / 3600;
-        if h == 1 { "1 hour ago".to_string() } else { format!("{} hours ago", h) }
+        if h == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{} hours ago", h)
+        }
     } else if secs < 86400 * 30 {
         let d = secs / 86400;
-        if d == 1 { "Yesterday".to_string() } else { format!("{} days ago", d) }
+        if d == 1 {
+            "Yesterday".to_string()
+        } else {
+            format!("{} days ago", d)
+        }
     } else if secs < 86400 * 365 {
         let mo = secs / (86400 * 30);
-        if mo == 1 { "1 month ago".to_string() } else { format!("{} months ago", mo) }
+        if mo == 1 {
+            "1 month ago".to_string()
+        } else {
+            format!("{} months ago", mo)
+        }
     } else {
         let y = secs / (86400 * 365);
-        if y == 1 { "1 year ago".to_string() } else { format!("{} years ago", y) }
+        if y == 1 {
+            "1 year ago".to_string()
+        } else {
+            format!("{} years ago", y)
+        }
     }
 }
 
@@ -565,10 +545,33 @@ fn format_file_permissions(meta: &Option<std::fs::Metadata>) -> String {
 fn is_text_extension(name: &str) -> bool {
     let lower = name.to_lowercase();
     let text_exts = [
-        ".txt", ".md", ".log", ".rs", ".py", ".js", ".ts", ".c", ".h",
-        ".go", ".java", ".toml", ".yaml", ".yml", ".json", ".xml",
-        ".sh", ".css", ".html", ".htm", ".csv", ".ini", ".cfg",
-        ".conf", ".env", ".makefile", ".dockerfile",
+        ".txt",
+        ".md",
+        ".log",
+        ".rs",
+        ".py",
+        ".js",
+        ".ts",
+        ".c",
+        ".h",
+        ".go",
+        ".java",
+        ".toml",
+        ".yaml",
+        ".yml",
+        ".json",
+        ".xml",
+        ".sh",
+        ".css",
+        ".html",
+        ".htm",
+        ".csv",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".env",
+        ".makefile",
+        ".dockerfile",
     ];
     text_exts.iter().any(|ext| lower.ends_with(ext))
         || lower == "makefile"
@@ -577,33 +580,38 @@ fn is_text_extension(name: &str) -> bool {
         || lower == ".dockerignore"
 }
 
-fn read_preview(path: &Path, max_lines: usize) -> String {
-    use std::io::{BufRead, BufReader};
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return String::new(),
+pub fn read_preview(path: &Path, max_lines: usize) -> String {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+    else {
+        return "Could not read this file.".into();
     };
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return String::new();
+    }
+    let mut data = Vec::new();
+    if let Err(e) = file.take(65536).read_to_end(&mut data) {
+        return format!("Could not read preview: {e}");
+    }
+    String::from_utf8_lossy(&data)
         .lines()
         .take(max_lines)
-        .filter_map(|l| l.ok())
-        .map(|l| if l.len() > 120 { format!("{}...", &l[..117]) } else { l })
-        .collect();
-    lines.join("\n")
+        .map(|line| {
+            let mut text: String = line.chars().take(240).collect();
+            if line.chars().count() > 240 {
+                text.push('…');
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
-
-/// Create a new empty file.
 pub fn create_file(dir: &str, name: &str) -> Result<(), String> {
-    if name.is_empty() || name.contains('/') || name.contains('\0') {
-        return Err("Invalid file name".to_string());
-    }
-    let expanded = expand_home(dir);
-    let target = expanded.join(name);
-    if target.exists() {
-        return Err("Already exists".to_string());
-    }
-    std::fs::File::create(&target).map(|_| ()).map_err(|e| e.to_string())
+    crate::fileops::create_file(&expand_home(dir), name)
 }
 
 /// Compress a file or directory into a .tar.gz archive.
@@ -634,36 +642,12 @@ pub fn get_full_path(dir: &str, name: &str) -> String {
 
 /// Calculate total size of a list of files in a directory.
 pub fn calculate_selection_size(dir: &str, names: &[String]) -> String {
-    let expanded = expand_home(dir);
-    let total: u64 = names
+    let total = names
         .iter()
-        .filter_map(|name| {
-            let path = expanded.join(name);
-            std::fs::metadata(&path).ok().map(|m| {
-                if m.is_dir() {
-                    dir_size_recursive(&path)
-                } else {
-                    m.len()
-                }
-            })
-        })
-        .sum();
+        .filter_map(|n| std::fs::symlink_metadata(expand_home(dir).join(n)).ok())
+        .filter(|m| m.is_file())
+        .fold(0u64, |sum, m| sum.saturating_add(m.len()));
     format_size(total)
-}
-
-fn dir_size_recursive(path: &Path) -> u64 {
-    let mut total = 0u64;
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                total += dir_size_recursive(&p);
-            } else if let Ok(m) = std::fs::metadata(&p) {
-                total += m.len();
-            }
-        }
-    }
-    total
 }
 
 /// Detect the project type of a directory by checking for marker files.

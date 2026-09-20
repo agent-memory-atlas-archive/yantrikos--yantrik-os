@@ -1,1743 +1,933 @@
-//! Yantrik Notes — standalone app binary.
-//!
-//! Communicates with `notes-service` via JSON-RPC IPC.
-//! Falls back to local filesystem if service is unavailable.
-
-use std::cell::RefCell;
-use std::path::PathBuf;
-use std::rc::Rc;
-
-use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+//! Native Notes workbench. Filesystem work is serialized on one sleeping worker.
+mod store;
+use slint::{ComponentHandle, ModelRc, VecModel};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::mpsc, time::Duration};
+use store::Note;
 use yantrik_app_runtime::prelude::*;
-use yantrik_ipc_transport::SyncRpcClient;
-
 slint::include_modules!();
-
+enum Job {
+    Load,
+    Save(Note),
+    Trash(Note),
+    Restore(Note),
+    Import(PathBuf, usize),
+    Export(PathBuf, String),
+    Stop,
+}
+enum Event {
+    Loaded(Result<(Vec<Note>, String), String>),
+    Saved(Result<Note, String>),
+    Trashed(String, Result<(), String>),
+    Restored(Result<Note, String>),
+    Imported(Result<Note, String>),
+    Exported(Result<(), String>),
+}
+struct Workbench {
+    notes: Vec<Note>,
+    current: Option<Note>,
+    jobs: mpsc::Sender<Job>,
+    events: mpsc::Receiver<Event>,
+    timer: slint::Timer,
+    worker: Option<std::thread::JoinHandle<()>>,
+    pending: Option<String>,
+    quitting: bool,
+    ready: bool,
+    failed: bool,
+    undo: Vec<String>,
+    redo: Vec<String>,
+}
+type State = Rc<RefCell<Workbench>>;
 fn main() {
     init_tracing("yantrik-notes");
-
-    // One window per app: a second launch defers to the running one (the shell focuses it).
-    let Some(_instance) = instance::claim("notes") else { return };
-
-    let app = NotesApp::new().unwrap();
-
-    // Same dark/accent choice as the shell, read from the shell's settings file.
-    let theme = theme::load();
-    app.global::<ThemeMode>().set_dark(theme.dark);
-    app.global::<AccentPreset>().set_index(theme.accent_index);
-
-    // Held until the window closes: a dropped Timer stops firing.
-    let _vault_watch = wire(&app);
-    app.run().unwrap();
-}
-
-// ── Service wrappers ─────────────────────────────────────────────────
-
-fn list_via_service(folder: Option<&str>) -> Result<Vec<NoteEntry>, String> {
-    let client = SyncRpcClient::for_service("notes");
-    let params = match folder {
-        Some(f) => serde_json::json!({ "folder": f }),
-        None => serde_json::json!({}),
-    };
-    let result = client.call("notes.list", params).map_err(|e| e.message)?;
-    let summaries: Vec<yantrik_ipc_contracts::notes::NoteSummary> =
-        serde_json::from_value(result).map_err(|e| e.to_string())?;
-    Ok(summaries.into_iter().map(summary_to_entry).collect())
-}
-
-fn get_via_service(note_id: &str) -> Result<yantrik_ipc_contracts::notes::NoteContent, String> {
-    let client = SyncRpcClient::for_service("notes");
-    let result = client
-        .call("notes.get", serde_json::json!({ "note_id": note_id }))
-        .map_err(|e| e.message)?;
-    serde_json::from_value(result).map_err(|e| e.to_string())
-}
-
-fn create_via_service(title: &str, body: &str, tags: Vec<String>) -> Result<yantrik_ipc_contracts::notes::NoteContent, String> {
-    let client = SyncRpcClient::for_service("notes");
-    let result = client
-        .call("notes.create", serde_json::json!({ "title": title, "body": body, "tags": tags }))
-        .map_err(|e| e.message)?;
-    serde_json::from_value(result).map_err(|e| e.to_string())
-}
-
-fn update_via_service(note_id: &str, title: &str, body: &str) -> Result<(), String> {
-    let client = SyncRpcClient::for_service("notes");
-    client
-        .call("notes.update", serde_json::json!({ "note_id": note_id, "title": title, "body": body }))
-        .map_err(|e| e.message)?;
-    Ok(())
-}
-
-fn delete_via_service(note_id: &str) -> Result<(), String> {
-    let client = SyncRpcClient::for_service("notes");
-    client
-        .call("notes.delete", serde_json::json!({ "note_id": note_id }))
-        .map_err(|e| e.message)?;
-    Ok(())
-}
-
-fn set_pinned_via_service(note_id: &str, pinned: bool) -> Result<(), String> {
-    let client = SyncRpcClient::for_service("notes");
-    client
-        .call("notes.set_pinned", serde_json::json!({ "note_id": note_id, "pinned": pinned }))
-        .map_err(|e| e.message)?;
-    Ok(())
-}
-
-fn set_tags_via_service(note_id: &str, tags: Vec<String>) -> Result<(), String> {
-    let client = SyncRpcClient::for_service("notes");
-    client
-        .call("notes.set_tags", serde_json::json!({ "note_id": note_id, "tags": tags }))
-        .map_err(|e| e.message)?;
-    Ok(())
-}
-
-fn search_via_service(query: &str) -> Result<Vec<NoteEntry>, String> {
-    let client = SyncRpcClient::for_service("notes");
-    let result = client
-        .call("notes.search", serde_json::json!({ "query": query }))
-        .map_err(|e| e.message)?;
-    let summaries: Vec<yantrik_ipc_contracts::notes::NoteSummary> =
-        serde_json::from_value(result).map_err(|e| e.to_string())?;
-    Ok(summaries.into_iter().map(summary_to_entry).collect())
-}
-
-/// Search the vault directly, for when notes-service is not running.
-///
-/// Without this, a failed service call left the list untouched: the search box showed a query and
-/// the list showed everything, with nothing to say the search had not happened. Every other read
-/// in this file already falls back to the filesystem; search was the one that did not.
-fn search_fs(query: &str) -> Vec<NoteEntry> {
-    let needle = query.trim().to_lowercase();
-    if needle.is_empty() {
-        return scan_notes_fs();
+    if std::env::var("LIBGL_ALWAYS_SOFTWARE").as_deref() == Ok("1")
+        && matches!(
+            std::env::var("SLINT_BACKEND").as_deref(),
+            Ok("winit") | Err(_)
+        )
+    {
+        std::env::set_var("SLINT_BACKEND", "winit-software");
     }
-    scan_notes_fs()
-        .into_iter()
-        .filter(|e| {
-            if e.title.to_lowercase().contains(&needle) {
-                return true;
-            }
-            // Body too — a note is usually easier to find by something it says than by its title.
-            std::fs::read_to_string(notes_dir().join(e.filename.as_str()))
-                .map(|body| body.to_lowercase().contains(&needle))
-                .unwrap_or(false)
-        })
-        .collect()
-}
-
-fn summary_to_entry(s: yantrik_ipc_contracts::notes::NoteSummary) -> NoteEntry {
-    let tag_preview = s.tags.first().cloned().unwrap_or_default();
-    NoteEntry {
-        title: s.title.into(),
-        filename: s.id.into(),
-        modified: s.modified_at.into(),
-        preview: s.snippet.into(),
-        is_pinned: s.pinned,
-        tags: tag_preview.into(),
-        created: s.created_at.into(),
-        word_count: s.word_count as i32,
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(
+            PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"))
+                .join("yantrik-notes.lock"),
+        )
+        .expect("Notes instance lock");
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let _ = std::process::Command::new("wlrctl")
+            .args(["toplevel", "focus", "title:Notes"])
+            .status();
+        return;
     }
-}
-
-fn folder_name(idx: i32) -> Option<&'static str> {
-    match idx {
-        0 => None,
-        1 => Some("favorites"),
-        2 => Some("recent"),
-        _ => None,
-    }
-}
-
-// ── Filesystem fallback ──────────────────────────────────────────────
-
-fn notes_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".local/share/yantrik/notes")
-}
-
-#[derive(Default, Clone)]
-struct NoteMeta {
-    pinned: bool,
-    tags: String,
-}
-
-fn meta_path(md_path: &std::path::Path) -> PathBuf {
-    md_path.with_extension("meta")
-}
-
-fn read_meta(md_path: &std::path::Path) -> NoteMeta {
-    let mp = meta_path(md_path);
-    let content = std::fs::read_to_string(&mp).unwrap_or_default();
-    let mut meta = NoteMeta::default();
-    for line in content.lines() {
-        if let Some(v) = line.strip_prefix("pinned:") {
-            meta.pinned = v.trim() == "true";
-        } else if let Some(v) = line.strip_prefix("tags:") {
-            meta.tags = v.trim().to_string();
-        }
-    }
-    meta
-}
-
-fn write_meta(md_path: &std::path::Path, meta: &NoteMeta) {
-    let mp = meta_path(md_path);
-    let content = format!("pinned:{}\ntags:{}\n", meta.pinned, meta.tags);
-    let _ = std::fs::write(&mp, content);
-}
-
-fn scan_notes_fs() -> Vec<NoteEntry> {
-    let dir = notes_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let mut entries = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for de in rd.flatten() {
-            let path = de.path();
-            if path.extension().map(|e| e == "md").unwrap_or(false) {
-                let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                let content = std::fs::read_to_string(&path).unwrap_or_default();
-                // The first heading names the note; the filename is only the fallback.
-                let title = content
-                    .lines()
-                    .find_map(|l| l.strip_prefix("# ").map(|t| t.trim().to_string()))
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or_else(|| fname.trim_end_matches(".md").to_string());
-                let preview: String = content
-                    .lines()
-                    .find(|l| !l.trim().is_empty() && !l.starts_with('#'))
-                    .unwrap_or_default()
-                    .chars()
-                    .take(120)
-                    .collect();
-                let (modified_secs, modified) = std::fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .map(|t| {
-                        let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                        let local: chrono::DateTime<chrono::Local> = t.into();
-                        (secs, local.format("%b %-d, %H:%M").to_string())
-                    })
-                    .unwrap_or_default();
-                let meta = read_meta(&path);
-                let wc = content.split_whitespace().count();
-                entries.push((modified_secs, NoteEntry {
-                    title: title.into(),
-                    filename: fname.into(),
-                    created: modified.clone().into(),
-                    modified: modified.into(),
-                    preview: preview.into(),
-                    is_pinned: meta.pinned,
-                    tags: meta.tags.into(),
-                    word_count: wc as i32,
-                }));
-            }
-        }
-    }
-    // Sort: pinned first, then newest first
-    entries.sort_by(|(sa, a), (sb, b)| b.is_pinned.cmp(&a.is_pinned).then_with(|| sb.cmp(sa)));
-    entries.into_iter().map(|(_, e)| e).collect()
-}
-
-fn template_content(template: &str) -> &'static str {
-    match template {
-        "meeting" => "# Meeting Notes\n\n**Date:** \n**Attendees:** \n\n## Discussion Points\n\n1. \n\n## Action Items\n\n- [ ] \n",
-        "project" => "# Project Brief\n\n## Overview\n\n\n## Objectives\n\n1. \n\n## Timeline\n\n| Milestone | Date | Status |\n|-----------|------|--------|\n",
-        "decision" => "# Decision Log\n\n## Decision\n\n\n## Context\n\n\n## Options\n\n### Option A\n- **Pros:** \n- **Cons:** \n\n## Decision\n\n\n## Follow-up\n\n- [ ] \n",
-        "todo" => "# TODO List\n\n## High Priority\n\n- [ ] \n\n## Medium Priority\n\n- [ ] \n\n## Low Priority\n\n- [ ] \n",
-        _ => "# New Note\n\n",
-    }
-}
-
-// ── Wire all callbacks ───────────────────────────────────────────────
-
-/// Every `[[target]]` in the text, in order. `[[target|alias]]` yields `target`.
-///
-/// match_indices gives byte offsets at char boundaries, so the slicing below is safe on
-/// non-ASCII note bodies.
-fn wikilinks(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for (start, _) in text.match_indices("[[") {
-        // `![[shot.png]]` is an image embed, not a link to a note.
-        if start > 0 && text.as_bytes()[start - 1] == b'!' {
-            continue;
-        }
-        let rest = &text[start + 2..];
-        if let Some(end) = rest.find("]]") {
-            let target = rest[..end].split('|').next().unwrap_or("").trim();
-            if !target.is_empty() && !target.contains('\n') {
-                out.push(target.to_string());
-            }
-        }
-    }
-    out
-}
-
-/// A link resolves by title or by filename, case-insensitively, with or without the extension —
-/// `[[Build times]]`, `[[build times]]` and `[[build-times.md]]` should all find the same note.
-fn link_key(s: &str) -> String {
-    s.trim().trim_end_matches(".md").to_lowercase()
-}
-
-/// `content` with its title set to `title`: the first `# ` heading rewritten, or one added at the
-/// top when the note has none. The heading is what names a note (see `title_of`), so this is the
-/// whole of renaming one.
-fn with_title(content: &str, title: &str) -> String {
-    let title = title.trim();
-    let mut replaced = false;
-    let mut lines: Vec<String> = Vec::new();
-    for line in content.lines() {
-        if !replaced && line.starts_with("# ") {
-            lines.push(format!("# {title}"));
-            replaced = true;
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-    if !replaced {
-        let body = content.trim_start_matches('\n');
-        return if body.is_empty() { format!("# {title}\n\n") } else { format!("# {title}\n\n{body}") };
-    }
-    let mut out = lines.join("\n");
-    if content.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
-
-/// The first `# ` heading names a note; the filename is only the fallback.
-fn title_of(content: &str, fname: &str) -> String {
-    content
-        .lines()
-        .find_map(|l| l.strip_prefix("# ").map(|t| t.trim().to_string()))
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| fname.trim_end_matches(".md").to_string())
-}
-
-struct VaultFile {
-    filename: String,
-    title: String,
-    content: String,
-}
-
-/// Read the whole vault once. Both link directions need titles, and one of them needs bodies,
-/// so doing this per link would read every file N times.
-fn read_vault() -> Vec<VaultFile> {
-    let dir = notes_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().map(|e| e != "md").unwrap_or(true) {
-                return None;
-            }
-            let filename = path.file_name()?.to_string_lossy().to_string();
-            let content = std::fs::read_to_string(&path).ok()?;
-            Some(VaultFile {
-                title: title_of(&content, &filename),
-                filename,
-                content,
-            })
-        })
-        .collect()
-}
-
-/// Notes that link *to* `target_file`.
-fn backlinks_in(vault: &[VaultFile], target_file: &str) -> Vec<NoteBacklink> {
-    let target = vault.iter().find(|f| f.filename == target_file);
-    let keys = [
-        link_key(target.map(|f| f.title.as_str()).unwrap_or(target_file)),
-        link_key(target_file),
-    ];
-
-    let mut out: Vec<NoteBacklink> = vault
-        .iter()
-        // A note linking to itself is not a backlink.
-        .filter(|f| f.filename != target_file)
-        .filter(|f| wikilinks(&f.content).iter().any(|l| keys.contains(&link_key(l))))
-        .map(|f| NoteBacklink {
-            title: f.title.clone().into(),
-            filename: f.filename.clone().into(),
-        })
-        .collect();
-    out.sort_by_key(|b| b.title.to_lowercase());
-    out
-}
-
-/// Where this note points. A target with no note yet is kept, with an empty `filename` — that is
-/// a dangling link, and it is the most useful thing on the panel: it is work promised and not
-/// yet done.
-fn outbound_in(vault: &[VaultFile], content: &str) -> Vec<NoteBacklink> {
-    let mut out: Vec<NoteBacklink> = Vec::new();
-    for target in wikilinks(content) {
-        let key = link_key(&target);
-        let hit = vault
-            .iter()
-            .find(|f| link_key(&f.title) == key || link_key(&f.filename) == key);
-        let entry = match hit {
-            Some(f) => NoteBacklink {
-                title: f.title.clone().into(),
-                filename: f.filename.clone().into(),
-            },
-            None => NoteBacklink {
-                title: target.clone().into(),
-                filename: "".into(),
-            },
-        };
-        if !out.iter().any(|e| e.title == entry.title && e.filename == entry.filename) {
-            out.push(entry);
-        }
-    }
-    out
-}
-
-/// Both directions for the note in front of you, from a single read of the vault.
-fn links_for(target_file: &str, content: &str) -> (Vec<NoteBacklink>, Vec<NoteBacklink>) {
-    let vault = read_vault();
-    (backlinks_in(&vault, target_file), outbound_in(&vault, content))
-}
-
-/// What a directory scan can see without opening a file. Millisecond mtimes plus size and count
-/// catch a new note, a deleted one, and an edit.
-fn vault_fingerprint() -> (usize, u64, u64) {
-    let (mut count, mut newest, mut bytes) = (0usize, 0u64, 0u64);
-    if let Ok(entries) = std::fs::read_dir(notes_dir()) {
-        for entry in entries.flatten() {
-            if entry.path().extension().map(|e| e != "md").unwrap_or(true) {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else { continue };
-            count += 1;
-            bytes += meta.len();
-            if let Ok(t) = meta.modified() {
-                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                    newest = newest.max(d.as_millis() as u64);
-                }
-            }
-        }
-    }
-    (count, newest, bytes)
-}
-
-/// Row of `filename` in the list as it currently stands.
-fn index_of(ui: &NotesApp, filename: &str) -> Option<i32> {
-    let model = ui.get_notes_list();
-    (0..model.row_count()).find_map(|i| {
-        let entry = model.row_data(i)?;
-        (entry.filename.as_str() == filename).then_some(i as i32)
-    })
-}
-
-/// How close a memory has to be before it is worth showing.
-///
-/// Without a floor the rail filled with the companion's own telemetry — "App opened:
-/// yantrik-notes", 9% match, against a note about quarterly planning. Recall always returns
-/// its best N; "best" is not the same as "relevant", and a row that is 9% related is not
-/// context, it is noise with a number on it. The whole claim the rail makes is that what it
-/// shows is true and relevant; one junk row costs more than the three good ones gain.
-const MEMORY_FLOOR: f64 = 0.35;
-
-/// Fill the agent rail for the open note.
-///
-/// # The rule
-///
-/// Every row comes from something the app or the companion actually holds, and carries the
-/// word for where it came from. Nothing is added to fill the column. When there is nothing
-/// true to say the rail collapses and the editor is wider, which is an honest answer and the
-/// one a fresh machine should get.
-///
-/// This matters more here than it looks. The OS ships fifty-five controls that promise
-/// intelligence and, before this, one of them was wired; the rest logged "standalone mode" and
-/// returned. A rail that behaved the same way on every screen would not read as an intelligent
-/// system, it would read as a broken one.
-///
-/// The links are computed locally and cost nothing. Memory needs the shell, so it is fetched on
-/// a worker thread and appended when it arrives — never blocking the note you are typing in.
-fn refresh_agent_rail(ui: &NotesApp, note_id: &str) {
-    let note_open = ui.get_selected_index() >= 0;
-    let title = ui.get_current_title().to_string();
-    let body = ui.get_current_content().to_string();
-
-    // ── Context: what this note is already connected to ──
-    let mut context: Vec<AgentContextItem> = Vec::new();
-    if note_open {
-        let (inbound, outbound) = links_for(note_id, &body);
-        // A note that links here AND is linked from here is ONE related note, not two rows
-        // with the same title one above the other — which is what it looked like, and reads as
-        // a duplicate rather than as a fact about the link going both ways.
-        for b in inbound.iter().take(5) {
-            let mutual = outbound.iter().any(|o| o.filename == b.filename);
-            context.push(AgentContextItem {
-                id: format!("note:{}", b.filename).into(),
-                label: b.title.clone(),
-                detail: if mutual { "links both ways" } else { "mentions this note" }.into(),
-                source: "linked".into(),
-            });
-        }
-        for b in outbound.iter().take(5) {
-            if inbound.iter().any(|i| i.filename == b.filename) {
-                continue;
-            }
-            context.push(AgentContextItem {
-                id: format!("note:{}", b.filename).into(),
-                label: b.title.clone(),
-                detail: "this note links to it".into(),
-                source: "linked".into(),
-            });
-        }
-    }
-    ui.set_agent_context(ModelRc::new(VecModel::from(context.clone())));
-
-    // ── What it can do next ──
-    //
-    // Only actions that work. Structure and Summarize call companion::ask; Related calls
-    // companion::recall. Nothing is offered that would log a line and return.
-    let online = companion::is_online();
-    let mut next: Vec<AgentSuggestion> = Vec::new();
-    if note_open && online {
-        let working = ui.get_ai_is_working();
-        next.push(AgentSuggestion {
-            id: "summarize".into(),
-            label: "Summarise this note".into(),
-            detail: "five bullets, from what it says".into(),
-            icon: "template".into(),
-            running: working,
-            proposes: true,
+    let ui = NotesApp::new().unwrap();
+    let prefs = theme::load();
+    ui.global::<ThemeMode>().set_dark(prefs.dark);
+    ui.global::<AccentPreset>().set_index(prefs.accent_index);
+    let dir = std::env::var_os("YANTRIK_NOTES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join(".local/share/yantrik/notes")
         });
-        next.push(AgentSuggestion {
-            id: "structure".into(),
-            label: "Give it headings".into(),
-            detail: "reorganise, keeping every fact".into(),
-            icon: "spark".into(),
-            running: working,
-            proposes: true,
-        });
-        next.push(AgentSuggestion {
-            id: "related".into(),
-            label: "Find related".into(),
-            detail: "search what Yantrik remembers".into(),
-            icon: "search".into(),
-            running: false,
-            proposes: false,
-        });
+    let s = wire(&ui, dir, true);
+    ui.run().unwrap();
+    let mut b = s.borrow_mut();
+    b.timer.stop();
+    let _ = b.jobs.send(Job::Stop);
+    if let Some(w) = b.worker.take() {
+        let _ = w.join();
     }
-    ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
-
-    // ── When the shell is not there ──
-    //
-    // Said once, plainly, instead of every row failing on its own. Running an app on its own
-    // is a supported thing to do, not an error.
-    ui.set_agent_unavailable(if online || !note_open {
-        SharedString::new()
-    } else {
-        "Not connected. Start the Yantrik shell for memory and suggestions.".into()
+}
+fn wire(ui: &NotesApp, dir: PathBuf, publish: bool) -> State {
+    let (jobs, work) = mpsc::channel();
+    let (results, events) = mpsc::channel();
+    let weak = ui.as_weak();
+    let worker = std::thread::spawn(move || {
+        while let Ok(job) = work.recv() {
+            let e = match job {
+                Job::Load => Event::Loaded(store::load(&dir)),
+                Job::Save(n) => Event::Saved(store::save(&dir, &n)),
+                Job::Trash(n) => Event::Trashed(n.id.clone(), store::trash(&dir, &n)),
+                Job::Restore(n) => Event::Restored(store::restore(&dir, &n)),
+                Job::Import(p, remaining) => Event::Imported((|| {
+                    let text = store::read(&p, store::LIMIT)?.ok_or("File not found")?;
+                    store::validate(&text)?;
+                    if text.len() > remaining {
+                        return Err("Library reached its 32 MiB text limit.".into());
+                    }
+                    let mut n = Note::blank("Imported note");
+                    n.text = text;
+                    store::save(&dir, &n)
+                })()),
+                Job::Export(p, t) => Event::Exported(store::atomic(&p, &t, false)),
+                Job::Stop => break,
+            };
+            if results.send(e).is_err() {
+                break;
+            }
+            let _ = weak.upgrade_in_event_loop(|u| u.invoke_refresh());
+        }
     });
-
-    // ── Memory, when there is something to search with ──
-    if note_open && online && !title.trim().is_empty() {
-        let query = title.clone();
-        let back = ui.as_weak();
-        std::thread::spawn(move || {
-            let found: Vec<_> = companion::recall(&query, 6)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|m| m.score >= MEMORY_FLOOR)
-                .take(3)
-                .collect();
-            if found.is_empty() {
-                return;
-            }
-            let _ = back.upgrade_in_event_loop(move |ui| {
-                let mut rows: Vec<AgentContextItem> = context;
-                for m in found {
-                    // One line of the memory, not the whole thing: this is a pointer, and a
-                    // paragraph in a 280px column is a wall.
-                    let line = m.text.lines().next().unwrap_or("").trim().to_string();
-                    rows.push(AgentContextItem {
-                        id: format!("memory:{}", m.rid).into(),
-                        label: line.into(),
-                        detail: format!("{}% match", (m.score * 100.0).round() as i64).into(),
-                        source: "memory".into(),
-                    });
-                }
-                ui.set_agent_context(ModelRc::new(VecModel::from(rows)));
-            });
-        });
-    }
-}
-
-/// Refresh whichever side panels are open for `id`, and the agent rail, which is always on.
-fn refresh_panels(ui: &NotesApp, id: &str) {
-    refresh_agent_rail(ui, id);
-    if ui.get_backlinks_panel_open() {
-        let (inbound, outbound) = links_for(id, &ui.get_current_content().to_string());
-        ui.set_backlinks(ModelRc::new(VecModel::from(inbound)));
-        ui.set_outbound_links(ModelRc::new(VecModel::from(outbound)));
-    }
-    if ui.get_images_panel_open() {
-        ui.set_note_images(ModelRc::new(VecModel::from(images_for(
-            &ui.get_current_content().to_string(),
-        ))));
-    }
-}
-
-/// Load a note into the editor. Shared by the list and by following a backlink.
-fn load_note(ui: &NotesApp, idx: i32, id: &str) {
-    if let Ok(note) = get_via_service(id) {
-        let wc = note.body.split_whitespace().count();
-        ui.set_current_content(note.body.into());
-        ui.set_current_title(note.title.into());
-        ui.set_current_tags(note.tags.join(", ").into());
-        ui.set_meta_word_count(wc as i32);
-        ui.set_meta_created(note.created_at.into());
-        ui.set_meta_modified(note.modified_at.into());
-    } else {
-        // Filesystem fallback
-        let path = notes_dir().join(id);
-        let content = std::fs::read_to_string(&path).unwrap_or_default();
-        let meta = read_meta(&path);
-        ui.set_current_title(title_of(&content, id).into());
-        ui.set_current_content(content.clone().into());
-        ui.set_current_tags(meta.tags.into());
-        ui.set_meta_word_count(content.split_whitespace().count() as i32);
-    }
-    ui.set_selected_index(idx);
-    ui.set_is_modified(false);
-}
-
-/// Where attached files live. Obsidian's convention, and it keeps the vault root readable.
-fn attachments_dir() -> PathBuf {
-    notes_dir().join("attachments")
-}
-
-/// A name that is free in `dir`: `shot.png`, then `shot-1.png`, and so on. Never overwrite an
-/// existing attachment — a different note may already embed it.
-fn unique_attachment_name(dir: &std::path::Path, base: &str) -> String {
-    if !dir.join(base).exists() {
-        return base.to_string();
-    }
-    let (stem, ext) = match base.rsplit_once('.') {
-        Some((s, e)) => (s, e),
-        None => (base, ""),
-    };
-    for n in 1.. {
-        let candidate = if ext.is_empty() {
-            format!("{stem}-{n}")
-        } else {
-            format!("{stem}-{n}.{ext}")
-        };
-        if !dir.join(&candidate).exists() {
-            return candidate;
+    let s = Rc::new(RefCell::new(Workbench {
+        notes: vec![],
+        current: None,
+        jobs,
+        events,
+        timer: slint::Timer::default(),
+        worker: Some(worker),
+        pending: None,
+        quitting: false,
+        ready: false,
+        failed: false,
+        undo: vec![],
+        redo: vec![],
+    }));
+    let w = ui.as_weak();
+    let b = s.clone();
+    ui.on_refresh(move || {
+        if let Some(u) = w.upgrade() {
+            receive(&u, &b)
         }
-    }
-    unreachable!()
-}
-
-fn is_image_name(name: &str) -> bool {
-    let n = name.to_lowercase();
-    [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"]
-        .iter()
-        .any(|e| n.ends_with(e))
-}
-
-/// Every image a note embeds, in order, as written. Understands both
-/// `![[shot.png]]` and `![alt](attachments/shot.png)`.
-fn image_refs(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-
-    for (start, _) in text.match_indices("![[") {
-        let rest = &text[start + 3..];
-        if let Some(end) = rest.find("]]") {
-            let name = rest[..end].split('|').next().unwrap_or("").trim();
-            if !name.is_empty() {
-                out.push(name.to_string());
-            }
-        }
-    }
-
-    // ![alt](target) — the alt text is decoration, the target is the file.
-    for (start, _) in text.match_indices("](") {
-        // Only when it is an image: the run before `](` has to open with `![`.
-        let head = &text[..start];
-        let Some(open) = head.rfind("![") else { continue };
-        if head[open..].contains(']') {
-            continue;
-        }
-        let rest = &text[start + 2..];
-        if let Some(end) = rest.find(')') {
-            let target = rest[..end].split_whitespace().next().unwrap_or("").trim();
-            if !target.is_empty() && !target.starts_with("http") {
-                out.push(target.to_string());
-            }
-        }
-    }
-
-    out.dedup();
-    out
-}
-
-/// Resolve an embed against the vault: attachments first, then the vault root, then treat it
-/// as a path in its own right.
-fn resolve_image(reference: &str) -> Option<PathBuf> {
-    let candidates = [
-        attachments_dir().join(reference),
-        notes_dir().join(reference),
-        PathBuf::from(reference),
-    ];
-    candidates.into_iter().find(|p| p.is_file())
-}
-
-/// Load what the current note embeds. A reference that does not resolve is still listed, marked
-/// `found: false` — a silently missing picture is worse than a visibly missing one.
-fn images_for(content: &str) -> Vec<NoteImage> {
-    image_refs(content)
-        .into_iter()
-        .map(|reference| {
-            let resolved = resolve_image(&reference);
-            let (source, found) = match resolved.as_ref() {
-                Some(p) => match slint::Image::load_from_path(p) {
-                    Ok(img) => (img, true),
-                    Err(e) => {
-                        tracing::warn!(image = %p.display(), error = ?e, "Could not decode image");
-                        (slint::Image::default(), false)
-                    }
-                },
-                None => (slint::Image::default(), false),
-            };
-            NoteImage {
-                name: reference
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&reference)
-                    .to_string()
-                    .into(),
-                path: resolved
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| reference.clone())
-                    .into(),
-                source,
-                found,
-            }
-        })
-        .collect()
-}
-
-/// The two things Notes asks the companion for.
-#[derive(Clone, Copy)]
-enum AiAction {
-    Structure,
-    Summarize,
-}
-
-impl AiAction {
-    /// What the card calls this while it is working and when it lands.
-    fn proposal_title(self) -> &'static str {
-        match self {
-            AiAction::Structure => "Restructured note",
-            AiAction::Summarize => "Summary",
-        }
-    }
-
-    fn prompt(self, title: &str, body: &str) -> String {
-        match self {
-            AiAction::Structure => format!(
-                "Reorganise the following note into clear markdown sections with headings. \
-                 Keep every fact; do not invent anything. Reply with the note only.\n\n\
-                 # {title}\n\n{body}"
-            ),
-            AiAction::Summarize => format!(
-                "Summarise the following note in at most five bullet points. \
-                 Use only what the note says. Reply with the bullets only.\n\n\
-                 # {title}\n\n{body}"
-            ),
-        }
-    }
-}
-
-/// Ask the companion on a worker thread and hand the answer back to the UI thread.
-fn wire_ai_action(app: &NotesApp, current_file: Rc<RefCell<String>>, action: AiAction) {
-    let weak = app.as_weak();
-    let handler = move || {
-        let Some(ui) = weak.upgrade() else { return };
-        if current_file.borrow().is_empty() {
-            return;
-        }
-        let title = ui.get_current_title().to_string();
-        let body = ui.get_current_content().to_string();
-        if body.trim().is_empty() {
-            ui.set_ai_response("This note is empty.".into());
-            ui.set_ai_panel_open(true);
-            return;
-        }
-
-        ui.set_ai_is_working(true);
-        ui.set_ai_panel_open(true);
-        ui.set_ai_response("".into());
-        ui.set_proposal_working(true);
-        ui.set_proposal(AgentProposal {
-            title: action.proposal_title().into(),
-            body: SharedString::new(),
-            source: "from this note".into(),
-            impact: SharedString::new(),
-            destructive: false,
-            verb: "Apply".into(),
-        });
-
-        let prompt = action.prompt(&title, &body);
-        let back = ui.as_weak();
-        std::thread::spawn(move || {
-            let outcome = companion::ask(&prompt);
-            // upgrade_in_event_loop hops back to the UI thread; touching the UI from here
-            // would be a data race.
-            let _ = back.upgrade_in_event_loop(move |ui| {
-                ui.set_ai_is_working(false);
-                ui.set_proposal_working(false);
-                match outcome {
-                    Ok(text) => {
-                        let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
-                        ui.set_ai_response(text.clone().into());
-                        ui.set_proposal(AgentProposal {
-                            title: action.proposal_title().into(),
-                            body: text.into(),
-                            source: "from this note".into(),
-                            // What pressing the button does, said before it is pressed. Apply
-                            // appends and leaves the note unsaved, and both halves of that
-                            // belong on the card rather than in anyone's memory.
-                            impact: format!(
-                                "Appends {lines} line{} to this note, unsaved",
-                                if lines == 1 { "" } else { "s" }
-                            )
-                            .into(),
-                            destructive: false,
-                            verb: "Apply".into(),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Companion call failed");
-                        ui.set_ai_response(SharedString::new());
-                        ui.set_proposal(AgentProposal {
-                            title: "The companion did not answer".into(),
-                            body: format!("{e}\n\nIs the Yantrik shell running?").into(),
-                            source: SharedString::new(),
-                            impact: SharedString::new(),
-                            destructive: false,
-                            // Nothing to apply, so the only button that means anything is the
-                            // one that closes it.
-                            verb: "Close".into(),
-                        });
-                    }
-                }
-            });
-        });
-    };
-
-    match action {
-        AiAction::Structure => app.on_ai_structure(handler),
-        AiAction::Summarize => app.on_ai_summarize(handler),
-    }
-}
-
-// ── The control surface ──────────────────────────────────────────────
-//
-// What the companion can see of Notes, and what it can ask Notes to do. Before this, the only
-// way for it to know which note was open was to screenshot the window and send the pixels to a
-// vision model — for our own software, which knows the answer exactly.
-//
-// Every action below calls the callback the button calls. That is deliberate: one code path, so
-// an action cannot drift away from what the app actually does, and driving Notes needs no
-// synthetic mouse.
-
-/// Filename of the row whose title (or filename) matches `needle`, case-insensitively.
-///
-/// Callers name notes the way a person would — by title — while the app addresses them by
-/// filename. Exact title first, then filename, then a contains-match, so a half-remembered name
-/// still lands.
-fn note_named(ui: &NotesApp, needle: &str) -> Option<String> {
-    let want = needle.trim().to_lowercase();
-    if want.is_empty() {
-        return None;
-    }
-    let model = ui.get_notes_list();
-    let rows: Vec<NoteEntry> = (0..model.row_count()).filter_map(|i| model.row_data(i)).collect();
-
-    let exact = rows.iter().find(|e| {
-        e.title.to_lowercase() == want || e.filename.to_lowercase() == want
     });
-    exact
-        .or_else(|| rows.iter().find(|e| e.title.to_lowercase().contains(&want)))
-        .map(|e| e.filename.to_string())
-}
-
-fn publish_control(app: &NotesApp, current_file: Rc<RefCell<String>>) {
-    use yantrik_app_runtime::control::{Action, App, Param, View};
-
-    let describe = {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        move || {
-            let Some(ui) = weak.upgrade() else {
-                return View::new("Notes — closing");
-            };
-            let open = cf.borrow().clone();
-            let title = ui.get_current_title().to_string();
-            let modified = ui.get_is_modified();
-            let words = ui.get_meta_word_count();
-
-            let summary = if open.is_empty() {
-                format!("Notes — no note open, {} in the vault", ui.get_note_count())
-            } else {
-                format!(
-                    "Notes — {}\u{201c}{title}\u{201d}, {words} words{}",
-                    if modified { "editing " } else { "" },
-                    if modified { ", unsaved" } else { "" }
-                )
-            };
-
-            // The titles, not the bodies. A caller that wants a body asks for the note; this is
-            // the glance, and it has to stay small enough to send on every turn.
-            let model = ui.get_notes_list();
-            let listed: Vec<serde_json::Value> = (0..model.row_count().min(50))
-                .filter_map(|i| model.row_data(i))
-                .map(|e| {
-                    serde_json::json!({
-                        "title": e.title.to_string(),
-                        "filename": e.filename.to_string(),
-                        "pinned": e.is_pinned,
-                    })
-                })
-                .collect();
-
-            View::new(summary)
-                .with("open_note", if open.is_empty() { serde_json::Value::Null } else { open.clone().into() })
-                .with("title", title)
-                .with("unsaved", modified)
-                .with("word_count", words)
-                .with("note_count", ui.get_note_count())
-                .with("folder", match ui.get_active_folder() {
-                    1 => "favorites",
-                    2 => "recent",
-                    _ => "all",
-                })
-                .with("search_query", ui.get_search_query().to_string())
-                .with("notes", serde_json::Value::Array(listed))
+    let w = ui.as_weak();
+    let b = s.clone();
+    ui.on_action(move |a| {
+        if let Some(u) = w.upgrade() {
+            action(&u, &b, a.as_str())
         }
-    };
-
-    let weak = app.as_weak();
-    let ui_for = move || weak.upgrade().ok_or_else(|| "Notes window is gone".to_string());
-
-    let open_ui = ui_for.clone();
-    let new_ui = ui_for.clone();
-    let save_ui = ui_for.clone();
-    let append_ui = ui_for.clone();
-    let title_ui = ui_for.clone();
-    let search_ui = ui_for.clone();
-    let folder_ui = ui_for;
-    let append_file = current_file;
-
-    App::new("notes")
-        .describe(describe)
-        .action(
-            Action::new("open_note", "Open a note in the editor, by title or filename")
-                .arg(Param::text("title").describe("The note's title, or its filename")),
-            move |args| {
-                let ui = open_ui()?;
-                let want = args["title"].as_str().unwrap_or_default();
-                let filename = note_named(&ui, want)
-                    .ok_or_else(|| format!("no note here is called \"{want}\""))?;
-                // The same callback the backlinks panel calls.
-                ui.invoke_open_note(filename.clone().into());
-                Ok(serde_json::json!({ "opened": filename, "title": ui.get_current_title().to_string() }))
-            },
-        )
-        // A title, because every note an agent made was "Untitled": new_note took no arguments
-        // and nothing could rename a note, so asked for "a note titled Groceries" a mind could
-        // write the list and never the name — and said so, truthfully, every time.
-        .action(
-            Action::new("new_note", "Start a new note and open it for editing")
-                .arg(Param::text("title").optional().describe("What to call the note; untitled if left out")),
-            move |args| {
-                let ui = new_ui()?;
-                ui.invoke_new_note();
-                if let Some(title) = args["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
-                    retitle(&ui, title);
-                }
-                Ok(serde_json::json!({ "title": ui.get_current_title().to_string() }))
-            },
-        )
-        .action(
-            Action::new("set_title", "Rename the open note and save it")
-                .arg(Param::text("title").describe("The note's new title")),
-            move |args| {
-                let ui = title_ui()?;
-                if ui.get_current_title().is_empty() {
-                    return Err("no note is open; call new_note or open_note first".into());
-                }
-                let title = args["title"].as_str().map(str::trim).unwrap_or_default();
-                if title.is_empty() {
-                    return Err("`title` is empty".into());
-                }
-                retitle(&ui, title);
-                Ok(serde_json::json!({ "title": ui.get_current_title().to_string() }))
-            },
-        )
-        .action(
-            Action::new("save", "Write the open note to disk"),
-            move |_args| {
-                let ui = save_ui()?;
-                if ui.get_current_title().is_empty() {
-                    return Err("no note is open".into());
-                }
-                ui.invoke_save_note();
-                Ok(serde_json::json!({ "saved": ui.get_current_title().to_string() }))
-            },
-        )
-        .action(
-            Action::new("append", "Add text to the end of the open note and save it")
-                .arg(Param::text("text").describe("Markdown to append")),
-            move |args| {
-                let ui = append_ui()?;
-                if append_file.borrow().is_empty() {
-                    return Err("no note is open; call new_note or open_note first".into());
-                }
-                let addition = args["text"].as_str().unwrap_or_default();
-                if addition.trim().is_empty() {
-                    return Err("`text` is empty".into());
-                }
-                let mut content = ui.get_current_content().to_string();
-                if !content.is_empty() && !content.ends_with('\n') {
-                    content.push('\n');
-                }
-                content.push_str(addition);
-                if !content.ends_with('\n') {
-                    content.push('\n');
-                }
-                ui.set_meta_word_count(content.split_whitespace().count() as i32);
-                ui.set_current_content(content.into());
-                ui.set_is_modified(true);
-                // Saved, unlike the AI suggestions in the panel: this text was asked for
-                // explicitly by name, not proposed for review.
-                ui.invoke_save_note();
-                Ok(serde_json::json!({ "appended_chars": addition.len() }))
-            },
-        )
-        .action(
-            Action::new("search", "Filter the note list, and report what matched")
-                .arg(Param::text("query")),
-            move |args| {
-                let ui = search_ui()?;
-                let query = args["query"].as_str().unwrap_or_default().to_string();
-                ui.set_search_query(query.clone().into());
-                ui.invoke_search_notes(query.into());
-                let model = ui.get_notes_list();
-                let hits: Vec<String> = (0..model.row_count().min(25))
-                    .filter_map(|i| model.row_data(i))
-                    .map(|e| e.title.to_string())
-                    .collect();
-                Ok(serde_json::json!({ "matched": ui.get_note_count(), "titles": hits }))
-            },
-        )
-        .action(
-            Action::new("set_folder", "Switch the list between all, favorites and recent")
-                .arg(Param::text("folder").describe("all | favorites | recent")),
-            move |args| {
-                let ui = folder_ui()?;
-                let index = match args["folder"].as_str().unwrap_or_default().to_lowercase().as_str() {
-                    "all" => 0,
-                    "favorites" | "favourites" | "pinned" => 1,
-                    "recent" => 2,
-                    other => return Err(format!("unknown folder `{other}`; use all, favorites or recent")),
-                };
-                ui.invoke_select_folder(index);
-                Ok(serde_json::json!({ "showing": ui.get_note_count() }))
-            },
-        )
-        .serve();
-}
-
-fn wire(app: &NotesApp) -> slint::Timer {
-    let current_file: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-
-    // Initial load
-    let notes = list_via_service(None).unwrap_or_else(|_| scan_notes_fs());
-    let count = notes.len() as i32;
-    app.set_notes_list(ModelRc::new(VecModel::from(notes)));
-    app.set_note_count(count);
-    app.set_folder_all_count(count);
-
-    // ── New note ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_new_note(move || {
-            let title = "Untitled";
-            let body = "# Untitled\n\n";
-            if let Ok(note) = create_via_service(title, body, vec![]) {
-                *cf.borrow_mut() = note.id.clone();
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_current_content(note.body.into());
-                    ui.set_current_title(note.title.into());
-                    ui.set_is_modified(false);
-                    refresh_list(&ui, 0);
-                }
-            } else {
-                // Filesystem fallback
-                let dir = notes_dir();
-                let _ = std::fs::create_dir_all(&dir);
-                let fname = format!("untitled-{}.md", uuid7::uuid7());
-                let path = dir.join(&fname);
-                let _ = std::fs::write(&path, body);
-                *cf.borrow_mut() = fname;
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_current_content(body.into());
-                    ui.set_current_title(title.into());
-                    ui.set_is_modified(false);
-                    refresh_list(&ui, 0);
-                }
-            }
-        });
-    }
-
-    // ── New from template ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_new_from_template(move |template| {
-            let tmpl = template.to_string();
-            let title = format!("{} Note", tmpl.chars().next().unwrap_or('N').to_uppercase().collect::<String>() + &tmpl[1..]);
-            let body = template_content(&tmpl);
-            if let Ok(note) = create_via_service(&title, body, vec![tmpl.clone()]) {
-                *cf.borrow_mut() = note.id.clone();
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_current_content(note.body.into());
-                    ui.set_current_title(note.title.into());
-                    ui.set_is_modified(false);
-                    refresh_list(&ui, 0);
-                }
-            } else {
-                let dir = notes_dir();
-                let _ = std::fs::create_dir_all(&dir);
-                let fname = format!("{}-{}.md", tmpl, uuid7::uuid7());
-                let path = dir.join(&fname);
-                let _ = std::fs::write(&path, body);
-                *cf.borrow_mut() = fname;
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_current_content(body.into());
-                    ui.set_current_title(title.into());
-                    ui.set_is_modified(false);
-                    refresh_list(&ui, 0);
-                }
-            }
-        });
-    }
-
-    // ── Save note ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_save_note(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let content = ui.get_current_content().to_string();
-            let title = ui.get_current_title().to_string();
-            let id = cf.borrow().clone();
-            if id.is_empty() { return; }
-
-            if update_via_service(&id, &title, &content).is_ok() {
-                // Also update tags if set
-                let tags_str = ui.get_current_tags().to_string();
-                if !tags_str.is_empty() {
-                    let tags: Vec<String> = tags_str.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
-                    let _ = set_tags_via_service(&id, tags);
-                }
-            } else {
-                // Filesystem fallback
-                let path = notes_dir().join(&id);
-                let _ = std::fs::write(&path, &content);
-            }
-            ui.set_is_modified(false);
-            let wc = content.split_whitespace().count();
-            ui.set_meta_word_count(wc as i32);
-        });
-    }
-
-    // ── Delete note ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_delete_note(move || {
-            let id = cf.borrow().clone();
-            if id.is_empty() { return; }
-
-            if delete_via_service(&id).is_err() {
-                let path = notes_dir().join(&id);
-                let _ = std::fs::remove_file(&path);
-                let _ = std::fs::remove_file(meta_path(&path));
-            }
-            *cf.borrow_mut() = String::new();
-            if let Some(ui) = weak.upgrade() {
-                ui.set_current_content("".into());
-                ui.set_current_title("".into());
-                ui.set_selected_index(-1);
-                refresh_list(&ui, ui.get_active_folder());
-            }
-        });
-    }
-
-    // ── Select note ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_select_note(move |idx| {
-            let Some(ui) = weak.upgrade() else { return };
-            let model = ui.get_notes_list();
-            if idx < 0 || idx as usize >= model.row_count() { return; }
-            let entry = model.row_data(idx as usize).unwrap();
-            let id = entry.filename.to_string();
-            *cf.borrow_mut() = id.clone();
-            load_note(&ui, idx, &id);
-            ui.set_image_preview_index(0);
-            refresh_panels(&ui, &id);
-        });
-    }
-
-    // ── Search ──
-    {
-        let weak = app.as_weak();
-        app.on_search_notes(move |query| {
-            let Some(ui) = weak.upgrade() else { return };
-            let q = query.to_string();
-            if q.is_empty() {
-                refresh_list(&ui, ui.get_active_folder());
-                return;
-            }
-            let results = search_via_service(&q).unwrap_or_else(|_| search_fs(&q));
-            let count = results.len() as i32;
-            ui.set_notes_list(ModelRc::new(VecModel::from(results)));
-            ui.set_note_count(count);
-        });
-    }
-
-    // ── Content changed ──
-    {
-        let weak = app.as_weak();
-        app.on_content_changed(move |_content| {
-            if let Some(ui) = weak.upgrade() {
-                ui.set_is_modified(true);
-            }
-        });
-    }
-
-    // ── Select folder ──
-    {
-        let weak = app.as_weak();
-        app.on_select_folder(move |idx| {
-            if let Some(ui) = weak.upgrade() {
-                ui.set_active_folder(idx);
-                refresh_list(&ui, idx);
-            }
-        });
-    }
-
-    // ── Toggle pin ──
-    {
-        let weak = app.as_weak();
-        app.on_toggle_pin(move |idx| {
-            let Some(ui) = weak.upgrade() else { return };
-            let model = ui.get_notes_list();
-            if idx < 0 || idx as usize >= model.row_count() { return; }
-            let entry = model.row_data(idx as usize).unwrap();
-            let id = entry.filename.to_string();
-            let new_pinned = !entry.is_pinned;
-
-            if set_pinned_via_service(&id, new_pinned).is_err() {
-                let path = notes_dir().join(&id);
-                let mut meta = read_meta(&path);
-                meta.pinned = new_pinned;
-                write_meta(&path, &meta);
-            }
-            refresh_list(&ui, ui.get_active_folder());
-        });
-    }
-
-    // ── Update tags ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_update_tags(move |tags_str| {
-            let id = cf.borrow().clone();
-            if id.is_empty() { return; }
-            let tags: Vec<String> = tags_str.to_string().split(',')
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect();
-
-            if set_tags_via_service(&id, tags).is_err() {
-                let path = notes_dir().join(&id);
-                let mut meta = read_meta(&path);
-                meta.tags = tags_str.to_string();
-                write_meta(&path, &meta);
-            }
-            if let Some(ui) = weak.upgrade() {
-                ui.set_current_tags(tags_str);
-            }
-        });
-    }
-
-    // ── Insert formatting ──
-    {
-        let weak = app.as_weak();
-        app.on_insert_format(move |fmt| {
-            let Some(ui) = weak.upgrade() else { return };
-            let current = ui.get_current_content().to_string();
-            let insertion = match fmt.as_str() {
-                "bold" => "**bold**",
-                "italic" => "*italic*",
-                "code" => "`code`",
-                "heading" => "\n## Heading\n",
-                "list" => "\n- Item\n",
-                "checkbox" => "\n- [ ] Task\n",
-                "link" => "[link text](url)",
-                "quote" => "\n> Quote\n",
-                "divider" => "\n---\n",
-                "table" => "\n| Col 1 | Col 2 |\n|-------|-------|\n|       |       |\n",
-                _ => "",
-            };
-            if !insertion.is_empty() {
-                let new_content = format!("{}{}", current, insertion);
-                ui.set_current_content(new_content.into());
-                ui.set_is_modified(true);
-            }
-        });
-    }
-
-    // ── Close note ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_close_note(move || {
-            *cf.borrow_mut() = String::new();
-            if let Some(ui) = weak.upgrade() {
-                ui.set_current_content("".into());
-                ui.set_current_title("".into());
-                ui.set_current_tags("".into());
-                ui.set_selected_index(-1);
-                ui.set_is_modified(false);
-            }
-        });
-    }
-
-    // ── Export ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_export_md(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let id = cf.borrow().clone();
-            if id.is_empty() { return; }
-            let content = ui.get_current_content().to_string();
-            let export_dir = notes_dir().join("exports");
-            let _ = std::fs::create_dir_all(&export_dir);
-            let export_path = export_dir.join(&id);
-            match std::fs::write(&export_path, &content) {
-                Ok(_) => ui.set_export_status(format!("Exported to {}", export_path.display()).into()),
-                Err(e) => ui.set_export_status(format!("Export failed: {e}").into()),
-            }
-        });
-    }
-
-    // Stubs for AI features (need companion bridge in standalone mode)
-    // ── AI, via the companion in the shell ──
-    //
-    // These were stubs: the model, the memory and the bond live in the shell process. They are
-    // now RPC calls on the same bus the services use. The work happens on a worker thread —
-    // asking an LLM on the UI thread would freeze the window for the length of the answer.
-    wire_ai_action(app, current_file.clone(), AiAction::Structure);
-    wire_ai_action(app, current_file.clone(), AiAction::Summarize);
-
-    // Apply: drop the suggestion into the note, where the author can edit or undo it.
-    {
-        let weak = app.as_weak();
-        app.on_ai_apply(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let suggestion = ui.get_ai_response().to_string();
-            if suggestion.is_empty() {
-                return;
-            }
-            let mut content = ui.get_current_content().to_string();
-            if !content.is_empty() && !content.ends_with('\n') {
-                content.push('\n');
-            }
-            content.push_str(&format!("\n{suggestion}\n"));
-            ui.set_current_content(content.clone().into());
-            ui.set_meta_word_count(content.split_whitespace().count() as i32);
-            // Left unsaved on purpose: generated text should be looked at before it is kept.
-            ui.set_is_modified(true);
-            ui.set_ai_panel_open(false);
-            ui.set_ai_response("".into());
-            ui.set_proposal(AgentProposal::default());
-        });
-    }
-
-    {
-        let weak = app.as_weak();
-        app.on_ai_dismiss(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_ai_response("".into());
-            ui.set_ai_panel_open(false);
-        });
-    }
-    app.on_view_version(|_| {});
-    app.on_restore_version(|_| {});
-    // ── The agent rail ──
-    //
-    // Both callbacks dispatch into the SAME handlers the toolbar buttons use. That is the rule
-    // the control surface already follows and it holds here for the same reason: a suggestion
-    // that runs its own copy of an action is a second implementation, and the two drift.
-    {
-        let weak = app.as_weak();
-        app.on_agent_suggestion_activated(move |id| {
-            let Some(ui) = weak.upgrade() else { return };
-            match id.as_str() {
-                "summarize" => ui.invoke_ai_summarize(),
-                "structure" => ui.invoke_ai_structure(),
-                // "Find related" is the one suggestion that does not propose anything: it
-                // searches memory and fills the context section above. Nothing changes, so
-                // nothing is asked.
-                "related" => {
-                    let query = ui.get_current_title().to_string();
-                    if query.trim().is_empty() {
+    });
+    let w = ui.as_weak();
+    let b = s.clone();
+    ui.on_choose(move |id| {
+        if let Some(u) = w.upgrade() {
+            action(&u, &b, &format!("open:{id}"))
+        }
+    });
+    let w = ui.as_weak();
+    let b = s.clone();
+    ui.on_filter(move || {
+        if let Some(u) = w.upgrade() {
+            list(&u, &b)
+        }
+    });
+    let w = ui.as_weak();
+    let b = s.clone();
+    ui.on_edited(move |text| {
+        if let Some(u) = w.upgrade() {
+            edit(&u, &b, text.to_string())
+        }
+    });
+    let w = ui.as_weak();
+    let b = s.clone();
+    ui.on_metadata(move || {
+        if let Some(u) = w.upgrade() {
+            {
+                let mut st = b.borrow_mut();
+                if let Some(n) = st.current.as_mut() {
+                    if n.trash {
                         return;
                     }
-                    let back = ui.as_weak();
-                    std::thread::spawn(move || {
-                        let found = companion::recall(&query, 10).map(|rows| {
-                            rows.into_iter()
-                                .filter(|m| m.score >= MEMORY_FLOOR)
-                                .take(5)
-                                .collect::<Vec<_>>()
-                        });
-                        let _ = back.upgrade_in_event_loop(move |ui| match found {
-                            Ok(rows) if !rows.is_empty() => {
-                                let mut items: Vec<AgentContextItem> =
-                                    ui.get_agent_context().iter().collect();
-                                items.retain(|i| !i.id.starts_with("memory:"));
-                                for m in rows {
-                                    let line =
-                                        m.text.lines().next().unwrap_or("").trim().to_string();
-                                    items.push(AgentContextItem {
-                                        id: format!("memory:{}", m.rid).into(),
-                                        label: line.into(),
-                                        detail: format!(
-                                            "{}% match",
-                                            (m.score * 100.0).round() as i64
-                                        )
-                                        .into(),
-                                        source: "memory".into(),
-                                    });
+                    n.set_field(
+                        "notebook",
+                        &u.get_notebook().chars().take(80).collect::<String>(),
+                    );
+                    n.set_field("tags", &u.get_tags().chars().take(512).collect::<String>());
+                }
+            }
+            changed(&u, &b);
+        }
+    });
+    let w = ui.as_weak();
+    let b = s.clone();
+    ui.window().on_close_requested(move || {
+        let Some(u) = w.upgrade() else {
+            return slint::CloseRequestResponse::HideWindow;
+        };
+        if u.get_busy() {
+            u.set_notice("Please wait for the current operation before closing.".into());
+            return slint::CloseRequestResponse::KeepWindowShown;
+        }
+        if b.borrow().current.as_ref().is_some_and(Note::dirty) {
+            b.borrow_mut().quitting = true;
+            save(&u, &b);
+            slint::CloseRequestResponse::KeepWindowShown
+        } else {
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
+    send(ui, &s, Job::Load);
+    if publish {
+        control(ui, &s)
+    }
+    s
+}
+fn send(ui: &NotesApp, s: &State, job: Job) {
+    ui.set_busy(true);
+    ui.set_status("Working…".into());
+    if s.borrow().jobs.send(job).is_err() {
+        ui.set_busy(false);
+        ui.set_notice(
+            "Storage worker stopped. Keep this window open to preserve your draft.".into(),
+        );
+    }
+}
+fn changed(ui: &NotesApp, s: &State) {
+    let b = s.borrow();
+    let Some(n) = &b.current else { return };
+    ui.set_modified(n.dirty());
+    ui.set_note_title(n.title().into());
+    ui.set_words(n.text.split_whitespace().count() as i32);
+    ui.set_status(
+        if n.dirty() {
+            "Unsaved · autosave pending"
+        } else {
+            "All changes saved"
+        }
+        .into(),
+    );
+    let w = ui.as_weak();
+    let state = Rc::downgrade(s);
+    b.timer.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_millis(750),
+        move || {
+            if let (Some(u), Some(s)) = (w.upgrade(), state.upgrade()) {
+                save(&u, &s)
+            }
+        },
+    );
+}
+fn edit(ui: &NotesApp, s: &State, text: String) {
+    if s.borrow()
+        .notes
+        .iter()
+        .filter(|n| {
+            s.borrow()
+                .current
+                .as_ref()
+                .is_none_or(|c| c.id != n.id || c.trash != n.trash)
+        })
+        .map(|n| n.text.len())
+        .sum::<usize>()
+        + text.len()
+        > store::VAULT_LIMIT
+    {
+        ui.set_notice("Library reached its 32 MiB text limit.".into());
+        if let Some(n) = &s.borrow().current {
+            ui.set_content(n.text.clone().into());
+        }
+        return;
+    }
+    if let Err(e) = store::validate(&text) {
+        ui.set_notice(e.into());
+        if let Some(n) = &s.borrow().current {
+            ui.set_content(n.text.clone().into());
+        }
+        return;
+    }
+    {
+        let mut b = s.borrow_mut();
+        let Some(n) = b.current.as_mut() else { return };
+        if n.trash {
+            return;
+        }
+        if n.text == text {
+            return;
+        }
+        let previous = std::mem::replace(&mut n.text, text);
+        remember(&mut b.undo, previous);
+        b.redo.clear();
+    }
+    changed(ui, s);
+}
+fn save(ui: &NotesApp, s: &State) {
+    if ui.get_busy() {
+        return;
+    }
+    let n = {
+        let b = s.borrow();
+        b.timer.stop();
+        if !b.ready {
+            return;
+        }
+        b.current.clone()
+    };
+    if let Some(n) = n {
+        if n.dirty() && !n.trash {
+            send(ui, s, Job::Save(n));
+        }
+    }
+}
+fn remember(history: &mut Vec<String>, text: String) {
+    history.push(text);
+    while history.len() > 64 || history.iter().map(String::len).sum::<usize>() > 2 * 1024 * 1024 {
+        history.remove(0);
+    }
+}
+fn undo(ui: &NotesApp, s: &State, redo: bool) {
+    let mut b = s.borrow_mut();
+    if b.current.as_ref().is_none_or(|n| n.trash) {
+        return;
+    }
+    let text = if redo { b.redo.pop() } else { b.undo.pop() };
+    let Some(text) = text else { return };
+    let n = b.current.as_mut().unwrap();
+    let previous = std::mem::replace(&mut n.text, text.clone());
+    if redo {
+        remember(&mut b.undo, previous)
+    } else {
+        remember(&mut b.redo, previous)
+    }
+    drop(b);
+    ui.set_content(text.clone().into());
+    ui.invoke_caret(text.len() as i32);
+    changed(ui, s);
+}
+fn show(ui: &NotesApp, s: &State) {
+    {
+        let mut b = s.borrow_mut();
+        b.undo.clear();
+        b.redo.clear();
+    }
+    let b = s.borrow();
+    let n = b.current.as_ref();
+    ui.set_opened(n.is_some());
+    ui.set_content(n.map(|n| n.text.clone()).unwrap_or_default().into());
+    ui.set_note_title(n.map(Note::title).unwrap_or_default().into());
+    ui.set_notebook(n.map(|n| n.field("notebook")).unwrap_or_default().into());
+    ui.set_tags(n.map(|n| n.field("tags")).unwrap_or_default().into());
+    ui.set_trashed(n.is_some_and(|n| n.trash));
+    ui.set_pinned(n.is_some_and(|n| n.field("pinned") == "true"));
+    ui.set_modified(n.is_some_and(Note::dirty));
+    ui.set_words(n.map(|n| n.text.split_whitespace().count()).unwrap_or(0) as i32);
+    ui.set_status(
+        if n.is_some_and(|n| n.trash) {
+            "Recoverable deletion"
+        } else if n.is_some_and(Note::dirty) {
+            "Unsaved · autosave pending"
+        } else {
+            "All changes saved"
+        }
+        .into(),
+    );
+    drop(b);
+    list(ui, s);
+    if ui.get_preview() {
+        preview(ui, s)
+    }
+    ui.invoke_reset_position();
+    ui.invoke_focus_content();
+}
+fn list(ui: &NotesApp, s: &State) {
+    let b = s.borrow();
+    let q = ui.get_query().trim().to_lowercase();
+    let folder = ui.get_folder();
+    let current = b.current.as_ref();
+    let all: Vec<_> = b
+        .notes
+        .iter()
+        .map(|n| {
+            current
+                .filter(|c| c.id == n.id && c.trash == n.trash)
+                .unwrap_or(n)
+        })
+        .collect();
+    ui.set_all_count(all.iter().filter(|n| !n.trash).count() as i32);
+    ui.set_pin_count(
+        all.iter()
+            .filter(|n| !n.trash && n.field("pinned") == "true")
+            .count() as i32,
+    );
+    ui.set_trash_count(all.iter().filter(|n| n.trash).count() as i32);
+    let mut books = std::collections::BTreeMap::<String, i32>::new();
+    for n in &all {
+        let name = n.field("notebook");
+        if !n.trash && !name.is_empty() {
+            *books.entry(name).or_default() += 1;
+        }
+    }
+    ui.set_books(ModelRc::new(VecModel::from(
+        books
+            .into_iter()
+            .map(|(name, count)| BookRow {
+                selected: folder == format!("book:{name}"),
+                name: name.into(),
+                count,
+            })
+            .collect::<Vec<_>>(),
+    )));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut visible: Vec<_> = all
+        .into_iter()
+        .filter(|n| {
+            let scope = match folder.as_str() {
+                "trash" => n.trash,
+                "favorites" => !n.trash && n.field("pinned") == "true",
+                "recent" => !n.trash && now.saturating_sub(n.modified) < 7 * 86400,
+                f if f.starts_with("book:") => !n.trash && n.field("notebook") == f[5..],
+                _ => !n.trash,
+            };
+            scope
+                && (q.is_empty()
+                    || n.text.to_lowercase().contains(&q)
+                    || n.meta.to_lowercase().contains(&q))
+        })
+        .collect();
+    visible.sort_by(|a, b| {
+        b.field("pinned")
+            .cmp(&a.field("pinned"))
+            .then(b.modified.cmp(&a.modified))
+            .then(a.id.cmp(&b.id))
+    });
+    ui.set_notes(ModelRc::new(VecModel::from(
+        visible
+            .into_iter()
+            .map(|n| NoteRow {
+                id: format!("{}{}", if n.trash { "trash:" } else { "" }, n.id).into(),
+                title: n.title().into(),
+                preview: n
+                    .text
+                    .lines()
+                    .find(|l| !l.trim().is_empty() && !l.starts_with('#'))
+                    .unwrap_or("A fresh page")
+                    .chars()
+                    .take(90)
+                    .collect::<String>()
+                    .into(),
+                date: chrono::DateTime::from_timestamp(n.modified as i64, 0)
+                    .map(|d| {
+                        d.with_timezone(&chrono::Local)
+                            .format("%b %-d · %H:%M")
+                            .to_string()
+                    })
+                    .unwrap_or_default()
+                    .into(),
+                pinned: n.field("pinned") == "true",
+                selected: current.is_some_and(|c| c.id == n.id && c.trash == n.trash),
+            })
+            .collect::<Vec<_>>(),
+    )));
+}
+fn preview(ui: &NotesApp, s: &State) {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+    let b = s.borrow();
+    let Some(n) = &b.current else { return };
+    let mut blocks = vec![];
+    let mut text = String::new();
+    let mut kind = 0;
+    let flush = |blocks: &mut Vec<PreviewBlock>, text: &mut String, kind| {
+        if !text.trim().is_empty() {
+            blocks.push(PreviewBlock {
+                text: std::mem::take(text).into(),
+                kind,
+            })
+        }
+    };
+    for event in Parser::new_ext(
+        &n.text,
+        Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH,
+    ) {
+        match event {
+            Event::Start(Tag::Heading { .. }) => {
+                flush(&mut blocks, &mut text, kind);
+                kind = 1;
+            }
+            Event::Start(Tag::CodeBlock(_)) => {
+                flush(&mut blocks, &mut text, kind);
+                kind = 2;
+            }
+            Event::Start(Tag::BlockQuote(_)) => {
+                flush(&mut blocks, &mut text, kind);
+                kind = 3;
+            }
+            Event::Start(Tag::Item) => {
+                flush(&mut blocks, &mut text, kind);
+                text.push_str("• ");
+            }
+            Event::End(
+                TagEnd::Heading(_)
+                | TagEnd::Paragraph
+                | TagEnd::CodeBlock
+                | TagEnd::Item
+                | TagEnd::BlockQuote(_),
+            ) => {
+                flush(&mut blocks, &mut text, kind);
+                kind = 0;
+            }
+            Event::Text(t) | Event::Code(t) => text.push_str(&t),
+            Event::SoftBreak | Event::HardBreak => text.push('\n'),
+            Event::TaskListMarker(v) => {
+                if text == "• " {
+                    text.clear()
+                }
+                text.push_str(if v { "☑ " } else { "☐ " })
+            }
+            Event::Rule => {
+                flush(&mut blocks, &mut text, kind);
+                text.push_str("────────────");
+                flush(&mut blocks, &mut text, 0);
+            }
+            _ => {}
+        }
+    }
+    flush(&mut blocks, &mut text, kind);
+    ui.set_blocks(ModelRc::new(VecModel::from(blocks)));
+}
+fn receive(ui: &NotesApp, s: &State) {
+    loop {
+        let e = { s.borrow().events.try_recv() };
+        let Ok(e) = e else { break };
+        ui.set_busy(false);
+        let result: Result<(), String> = match e {
+            Event::Loaded(r) => r.map(|(notes, notice)| {
+                let mut b = s.borrow_mut();
+                let id = b.current.as_ref().map(|n| (n.id.clone(), n.trash));
+                b.notes = notes;
+                b.current = id.and_then(|(id, t)| {
+                    b.notes.iter().find(|n| n.id == id && n.trash == t).cloned()
+                });
+                b.ready = true;
+                ui.set_notice(notice.into());
+                drop(b);
+                show(ui, s);
+            }),
+            Event::Saved(r) => r.map(|saved| {
+                let mut b = s.borrow_mut();
+                if let Some(n) = b.current.as_mut() {
+                    if n.id == saved.id {
+                        n.baseline = saved.baseline.clone();
+                        n.baseline_meta = saved.baseline_meta.clone();
+                        n.modified = saved.modified;
+                    }
+                }
+                if let Some(n) = b.notes.iter_mut().find(|n| n.id == saved.id && !n.trash) {
+                    *n = saved;
+                } else {
+                    b.notes.push(saved);
+                }
+                b.failed = false;
+                drop(b);
+                ui.set_notice("".into());
+                changed(ui, s);
+                list(ui, s);
+            }),
+            Event::Trashed(id, r) => r.map(|_| {
+                let mut b = s.borrow_mut();
+                if let Some(n) = b.notes.iter_mut().find(|n| n.id == id && !n.trash) {
+                    n.trash = true;
+                }
+                b.current = None;
+                drop(b);
+                show(ui, s);
+                ui.set_notice("Moved to Trash. You can restore it from the library.".into());
+            }),
+            Event::Restored(r) | Event::Imported(r) => r.map(|n| {
+                let mut b = s.borrow_mut();
+                b.notes.retain(|a| a.id != n.id);
+                b.notes.push(n.clone());
+                b.current = Some(n);
+                drop(b);
+                ui.set_folder("all".into());
+                ui.set_query("".into());
+                ui.set_notice("".into());
+                ui.set_dialog(0);
+                show(ui, s);
+            }),
+            Event::Exported(r) => r.map(|_| {
+                ui.set_dialog(0);
+                ui.set_notice("Exported to the requested file.".into());
+                ui.set_status("All changes saved".into());
+            }),
+        };
+        if let Err(e) = result {
+            let mut b = s.borrow_mut();
+            b.pending = None;
+            b.quitting = false;
+            b.failed = true;
+            ui.set_notice(e.into());
+            ui.set_status("Needs attention · draft kept".into());
+            continue;
+        }
+        let dirty = s.borrow().current.as_ref().is_some_and(Note::dirty);
+        if !dirty {
+            let pending = s.borrow_mut().pending.take();
+            if let Some(a) = pending {
+                action(ui, s, &a)
+            }
+            if s.borrow().quitting {
+                let _ = ui.hide();
+            }
+        } else if s.borrow().quitting || s.borrow().pending.is_some() {
+            save(ui, s)
+        }
+    }
+}
+fn expanded(s: &str) -> PathBuf {
+    if let Some(p) = s.strip_prefix("~/") {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(p)
+    } else {
+        PathBuf::from(s)
+    }
+}
+fn action(ui: &NotesApp, s: &State, id: &str) {
+    if id == "focus" {
+        ui.set_focus_mode(!ui.get_focus_mode());
+        ui.invoke_focus_content();
+        return;
+    }
+    if id == "preview" {
+        ui.set_preview(!ui.get_preview());
+        if ui.get_preview() {
+            preview(ui, s);
+            ui.invoke_focus_shortcuts();
+        } else {
+            ui.invoke_focus_editor()
+        }
+        return;
+    }
+    if matches!(id, "undo" | "redo") {
+        undo(ui, s, id == "redo");
+        return;
+    }
+    if ui.get_busy() {
+        ui.set_notice("Please wait for the current operation.".into());
+        return;
+    }
+    if !s.borrow().ready {
+        ui.set_notice(
+            "The library is unavailable. Resolve the storage error, then Refresh.".into(),
+        );
+        if id == "reload" {
+            send(ui, s, Job::Load)
+        }
+        return;
+    }
+    let navigation = id == "new"
+        || id.starts_with("new:")
+        || id.starts_with("open:")
+        || matches!(id, "reload" | "trash" | "import");
+    if navigation && s.borrow().current.as_ref().is_some_and(Note::dirty) {
+        s.borrow_mut().pending = Some(id.into());
+        save(ui, s);
+        return;
+    }
+    ui.set_notice("".into());
+    match id {
+        "new" => new(ui, s, "Untitled"),
+        a if a.starts_with("new:") => new(ui, s, &a[4..]),
+        a if a.starts_with("open:") => {
+            let key = &a[5..];
+            let (trash, id) = key
+                .strip_prefix("trash:")
+                .map(|p| (true, p))
+                .unwrap_or((false, key));
+            let n = s
+                .borrow()
+                .notes
+                .iter()
+                .find(|n| n.id == id && n.trash == trash)
+                .cloned();
+            if n.is_some() {
+                s.borrow_mut().current = n;
+                s.borrow_mut().failed = false;
+                show(ui, s);
+            }
+        }
+        "save" => save(ui, s),
+        "reload" => send(ui, s, Job::Load),
+        "pin" => {
+            if let Some(n) = s.borrow_mut().current.as_mut() {
+                if n.trash {
+                    return;
+                }
+                let v = n.field("pinned") != "true";
+                n.set_field("pinned", if v { "true" } else { "false" });
+                ui.set_pinned(v);
+            }
+            changed(ui, s);
+            save(ui, s);
+        }
+        "trash" => {
+            let n = s.borrow().current.clone();
+            if let Some(n) = n {
+                if !n.trash {
+                    send(ui, s, Job::Trash(n))
+                }
+            }
+        }
+        "restore" => {
+            let n = s.borrow().current.clone();
+            if let Some(n) = n {
+                if n.trash {
+                    send(ui, s, Job::Restore(n))
+                }
+            }
+        }
+        "copy" => {
+            let n = s.borrow().current.clone();
+            if let Some(mut n) = n {
+                let b = s.borrow();
+                if b.notes.len() >= 2000
+                    || b.notes.iter().map(|n| n.text.len()).sum::<usize>() + n.text.len()
+                        > store::VAULT_LIMIT
+                {
+                    ui.set_notice(
+                        "Library reached its note or text limit (2,000 notes / 32 MiB).".into(),
+                    );
+                    return;
+                }
+                drop(b);
+                n.id = format!("copy-{}.md", uuid7::uuid7());
+                n.baseline = None;
+                n.baseline_meta = None;
+                n.trash = false;
+                let mut b = s.borrow_mut();
+                b.current = Some(n.clone());
+                b.failed = false;
+                b.notes.push(n);
+                drop(b);
+                show(ui, s);
+                save(ui, s);
+            }
+        }
+        "import" => {
+            ui.set_path("".into());
+            ui.set_dialog(1);
+        }
+        "export" => {
+            if ui.get_opened() {
+                ui.set_path("".into());
+                ui.set_dialog(2);
+            }
+        }
+        "confirm" => {
+            let p = expanded(ui.get_path().trim());
+            if !p.is_absolute() {
+                ui.set_notice("Enter an absolute file path.".into());
+                return;
+            }
+            if ui.get_dialog() == 1 {
+                {
+                    let b = s.borrow();
+                    let remaining = store::VAULT_LIMIT
+                        .saturating_sub(b.notes.iter().map(|n| n.text.len()).sum::<usize>());
+                    if b.notes.len() >= 2000 {
+                        ui.set_notice("The library supports up to 2,000 notes.".into());
+                        return;
+                    }
+                    drop(b);
+                    send(ui, s, Job::Import(p, remaining))
+                }
+            } else if ui.get_dialog() == 2 {
+                send(ui, s, Job::Export(p, ui.get_content().to_string()))
+            }
+        }
+        _ => {}
+    }
+}
+fn new(ui: &NotesApp, s: &State, title: &str) {
+    if s.borrow().notes.len() >= 2000
+        || s.borrow().notes.iter().map(|n| n.text.len()).sum::<usize>() + 1024 > store::VAULT_LIMIT
+    {
+        ui.set_notice("The library supports up to 2,000 notes.".into());
+        return;
+    }
+    let n = Note::blank(&title.chars().take(160).collect::<String>());
+    let mut b = s.borrow_mut();
+    b.notes.push(n.clone());
+    b.current = Some(n);
+    b.failed = false;
+    drop(b);
+    ui.set_folder("all".into());
+    ui.set_query("".into());
+    ui.set_preview(false);
+    show(ui, s);
+    ui.invoke_caret(ui.get_content().len() as i32);
+    save(ui, s);
+}
+fn control(ui: &NotesApp, s: &State) {
+    use yantrik_app_runtime::control::{Action, App, Param, View};
+    let w = ui.as_weak();
+    let b = s.clone();
+    let mut app=App::new("notes").describe(move||{
+  let Some(u)=w.upgrade()else{return View::new("Notes closed")};let b=b.borrow();let n=b.current.as_ref();
+  View::new("Notes").with("open_note",n.map(|n|n.id.clone())).with("title",n.map(Note::title)).with("unsaved",n.is_some_and(Note::dirty)).with("content",n.map(|n|n.text.chars().take(4000).collect::<String>())).with("busy",u.get_busy()).with("notice",u.get_notice().to_string()).with("status",u.get_status().to_string()).with("folder",u.get_folder().to_string()).with("preview",u.get_preview()).with("focus",u.get_focus_mode()).with("note_count",u.get_all_count()).with("trash_count",u.get_trash_count()).with("search_query",u.get_query().to_string()).with("matches",{use slint::Model;u.get_notes().row_count()}).with("notes",b.notes.iter().take(100).map(|n|serde_json::json!({"filename":n.id,"title":n.title(),"trash":n.trash,"pinned":n.field("pinned")=="true","notebook":n.field("notebook")})).collect::<Vec<_>>())
+ });
+    for name in [
+        "new_note",
+        "open_note",
+        "set_title",
+        "append",
+        "set_content",
+        "search",
+        "set_folder",
+        "notebook",
+        "tags",
+        "save",
+        "trash",
+        "restore",
+        "copy",
+        "reload",
+        "preview",
+        "focus",
+        "import",
+        "export",
+    ] {
+        let param = match name {
+            "new_note" | "open_note" | "set_title" => "title",
+            "search" => "query",
+            "set_folder" => "folder",
+            "import" | "export" => "path",
+            _ => "text",
+        };
+        let mut a = Action::new(name, &format!("Notes: {name}"));
+        if !matches!(
+            name,
+            "save" | "trash" | "restore" | "copy" | "reload" | "preview" | "focus"
+        ) {
+            a = a.arg(Param::text(param).optional());
+        }
+        let w = ui.as_weak();
+        let b = s.clone();
+        app = app.action(a, move |args| {
+            let u = w.upgrade().ok_or("Notes closed")?;
+            if u.get_busy() {
+                return Err("Notes is busy".into());
+            }
+            let value = args[param].as_str().unwrap_or_default();
+            match name {
+                "new_note" => action(
+                    &u,
+                    &b,
+                    &format!("new:{}", if value.is_empty() { "Untitled" } else { value }),
+                ),
+                "open_note" => {
+                    let key = {
+                        let b = b.borrow();
+                        let n = b
+                            .notes
+                            .iter()
+                            .find(|n| n.id == value || n.title() == value)
+                            .ok_or("Note not found")?;
+                        format!("open:{}{}", if n.trash { "trash:" } else { "" }, n.id)
+                    };
+                    action(&u, &b, &key)
+                }
+                "set_title" | "append" | "set_content" => {
+                    let mut text = b
+                        .borrow()
+                        .current
+                        .as_ref()
+                        .filter(|n| !n.trash)
+                        .ok_or("Open a note first")?
+                        .text
+                        .clone();
+                    if name == "append" {
+                        text.push_str(value)
+                    } else if name == "set_content" {
+                        text = value.into()
+                    } else {
+                        let title = value.replace(['\r', '\n'], " ");
+                        let mut replaced = false;
+                        text = text
+                            .lines()
+                            .map(|l| {
+                                if !replaced && l.starts_with("# ") {
+                                    replaced = true;
+                                    format!("# {title}")
+                                } else {
+                                    l.into()
                                 }
-                                ui.set_agent_context(ModelRc::new(VecModel::from(items)));
-                            }
-                            Ok(_) => {
-                                // Nothing found is an answer, and saying so beats a rail that
-                                // looks like it is still thinking.
-                                ui.set_agent_unavailable(
-                                    "Nothing in memory mentions this note yet.".into(),
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "recall failed");
-                                ui.set_agent_unavailable(format!("Memory search failed: {e}").into());
-                            }
-                        });
-                    });
-                }
-                other => tracing::warn!(id = other, "unknown rail suggestion"),
-            }
-        });
-    }
-    {
-        let weak = app.as_weak();
-        app.on_agent_context_activated(move |id| {
-            let Some(ui) = weak.upgrade() else { return };
-            // A linked note opens. A memory row is a pointer, not a place to go: the Memory
-            // screen owns that, and inventing a half-view of a memory inside Notes would be a
-            // second answer to a question another screen already answers.
-            if let Some(file) = id.strip_prefix("note:") {
-                if let Some(idx) = index_of(&ui, file) {
-                    ui.invoke_select_note(idx);
-                }
-            }
-        });
-    }
-
-    // ── Backlinks ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_find_backlinks(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let id = cf.borrow().clone();
-            if id.is_empty() {
-                return;
-            }
-            let (inbound, outbound) = links_for(&id, &ui.get_current_content().to_string());
-            tracing::info!(
-                note = %id,
-                links_in = inbound.len(),
-                links_out = outbound.len(),
-                "Scanned the vault for links"
-            );
-            ui.set_backlinks(ModelRc::new(VecModel::from(inbound)));
-            ui.set_outbound_links(ModelRc::new(VecModel::from(outbound)));
-        });
-    }
-
-    // ── Follow a backlink ──
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_open_note(move |name| {
-            let Some(ui) = weak.upgrade() else { return };
-            let name = name.to_string();
-            let model = ui.get_notes_list();
-            for i in 0..model.row_count() {
-                let Some(entry) = model.row_data(i) else { continue };
-                if entry.filename.as_str() == name {
-                    *cf.borrow_mut() = name.clone();
-                    load_note(&ui, i as i32, &name);
-                    ui.set_image_preview_index(0);
-                    refresh_panels(&ui, &name);
-                    return;
-                }
-            }
-            tracing::warn!(note = %name, "Backlink target is not in the current list");
-        });
-    }
-    // ── Images ──
-    {
-        let weak = app.as_weak();
-        app.on_scan_images(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let found = images_for(&ui.get_current_content().to_string());
-            tracing::info!(images = found.len(), "Scanned note for images");
-            if ui.get_image_preview_index() as usize >= found.len() {
-                ui.set_image_preview_index(0);
-            }
-            ui.set_note_images(ModelRc::new(VecModel::from(found)));
-        });
-    }
-
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        app.on_attach_image(move |raw_path| {
-            let Some(ui) = weak.upgrade() else { return };
-            let id = cf.borrow().clone();
-            if id.is_empty() {
-                return;
-            }
-
-            let mut given = raw_path.to_string().trim().to_string();
-            if let Some(rest) = given.strip_prefix("~/") {
-                if let Ok(home) = std::env::var("HOME") {
-                    given = format!("{home}/{rest}");
-                }
-            }
-            let src = PathBuf::from(&given);
-            if !src.is_file() {
-                tracing::warn!(path = %given, "Attach: no such file");
-                return;
-            }
-            let Some(base) = src.file_name().map(|n| n.to_string_lossy().to_string()) else { return };
-            if !is_image_name(&base) {
-                tracing::warn!(path = %given, "Attach: not an image");
-                return;
-            }
-
-            // Never overwrite an existing attachment; a note elsewhere may embed it.
-            let dir = attachments_dir();
-            if std::fs::create_dir_all(&dir).is_err() {
-                tracing::error!(dir = %dir.display(), "Attach: cannot create attachments dir");
-                return;
-            }
-            let name = unique_attachment_name(&dir, &base);
-            if let Err(e) = std::fs::copy(&src, dir.join(&name)) {
-                tracing::error!(error = ?e, "Attach: copy failed");
-                return;
-            }
-
-            // Embed it, then save through the same path the Save button uses, so the reference
-            // and the file land together.
-            let mut content = ui.get_current_content().to_string();
-            if !content.ends_with('\n') && !content.is_empty() {
-                content.push('\n');
-            }
-            content.push_str(&format!("\n![[{name}]]\n"));
-            let title = ui.get_current_title().to_string();
-            if update_via_service(&id, &title, &content).is_err() {
-                let _ = std::fs::write(notes_dir().join(&id), &content);
-            }
-            ui.set_current_content(content.clone().into());
-            ui.set_meta_word_count(content.split_whitespace().count() as i32);
-            ui.set_is_modified(false);
-            ui.set_note_images(ModelRc::new(VecModel::from(images_for(&content))));
-            tracing::info!(image = %name, "Attached image");
-        });
-    }
-
-    app.on_toggle_meeting_mode(|| {});
-    app.on_import_md(|| {});
-
-    // Published last: everything the surface reports is wired by now, so the first
-    // `app.describe` cannot catch a half-built window.
-    publish_control(app, current_file.clone());
-
-    // ── Watch the vault ──
-    //
-    // Something other than this app writes here: an agent, a sync tool, another editor. A poll
-    // is enough — a directory stat costs nothing next to a note that never shows up — and it
-    // keeps everything on the UI thread, with no channel to drain.
-    let watch = slint::Timer::default();
-    {
-        let weak = app.as_weak();
-        let cf = current_file.clone();
-        let seen = std::cell::RefCell::new(vault_fingerprint());
-        watch.start(
-            slint::TimerMode::Repeated,
-            std::time::Duration::from_secs(2),
-            move || {
-                let now = vault_fingerprint();
-                if *seen.borrow() == now {
-                    return;
-                }
-                *seen.borrow_mut() = now;
-
-                let Some(ui) = weak.upgrade() else { return };
-                tracing::info!("Vault changed on disk, reloading");
-                refresh_list(&ui, ui.get_active_folder());
-
-                let id = cf.borrow().clone();
-                if id.is_empty() {
-                    return;
-                }
-                match index_of(&ui, &id) {
-                    // Never overwrite an unsaved buffer: the person typing wins over the file.
-                    // Keep the selection pointing at the right row, which may have moved.
-                    Some(i) if ui.get_is_modified() => ui.set_selected_index(i),
-                    Some(i) => {
-                        load_note(&ui, i, &id);
-                        refresh_panels(&ui, &id);
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !replaced {
+                            text = format!("# {title}\n\n{text}")
+                        }
                     }
-                    None => {
-                        // The open note was deleted from under us.
-                        tracing::info!(note = %id, "Open note disappeared from the vault");
-                        cf.borrow_mut().clear();
-                        ui.set_selected_index(-1);
-                        ui.set_current_content("".into());
-                        ui.set_current_title("".into());
-                    }
+                    store::validate(&text)?;
+                    u.set_content(text.clone().into());
+                    edit(&u, &b, text);
                 }
-            },
-        );
+                "search" => {
+                    u.set_query(value.into());
+                    list(&u, &b)
+                }
+                "set_folder" => {
+                    u.set_folder(value.into());
+                    list(&u, &b)
+                }
+                "notebook" | "tags" => {
+                    if name == "notebook" {
+                        u.set_notebook(value.into())
+                    } else {
+                        u.set_tags(value.into())
+                    }
+                    u.invoke_metadata()
+                }
+                "import" | "export" => {
+                    if b.borrow().current.as_ref().is_some_and(Note::dirty) {
+                        return Err("Save the current draft first".into());
+                    }
+                    u.set_dialog(if name == "import" { 1 } else { 2 });
+                    u.set_path(value.into());
+                    action(&u, &b, "confirm")
+                }
+                _ => action(&u, &b, name),
+            }
+            Ok(serde_json::json!({"accepted":true,"completed":!u.get_busy()}))
+        });
     }
-    watch
+    app.serve();
 }
-
-/// Rename the open note: its heading, the title the editor shows, then save and show the list with
-/// the new name in it.
-fn retitle(ui: &NotesApp, title: &str) {
-    let content = with_title(&ui.get_current_content().to_string(), title);
-    ui.set_current_content(content.into());
-    ui.set_current_title(title.into());
-    ui.set_is_modified(true);
-    ui.invoke_save_note();
-    refresh_list(ui, 0);
-}
-
-fn refresh_list(ui: &NotesApp, folder: i32) {
-    let folder_str = folder_name(folder);
-    let notes = list_via_service(folder_str).unwrap_or_else(|_| scan_notes_fs());
-    let count = notes.len() as i32;
-    ui.set_notes_list(ModelRc::new(VecModel::from(notes)));
-    ui.set_note_count(count);
-    if folder == 0 {
-        ui.set_folder_all_count(count);
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wikilinks_reads_targets_and_aliases() {
-        let links = wikilinks("see [[Build times]] and [[notes/other.md|that one]]");
-        assert_eq!(links, vec!["Build times", "notes/other.md"]);
-    }
-
-    #[test]
-    fn an_image_embed_is_not_a_note_link() {
-        // `![[shot.png]]` shares its opening bracket run with a wikilink; treating it as one
-        // would put a phantom note in every backlink list.
-        let links = wikilinks("![[shot.png]] but [[Real note]] counts");
-        assert_eq!(links, vec!["Real note"]);
-    }
-
-    #[test]
-    fn links_resolve_regardless_of_case_or_extension() {
-        assert_eq!(link_key("Build times"), link_key("build TIMES"));
-        assert_eq!(link_key("build-times.md"), link_key("build-times"));
-    }
-
-    #[test]
-    fn a_title_rewrites_the_heading_and_keeps_the_body() {
-        assert_eq!(with_title("# Untitled\n\n", "Groceries"), "# Groceries\n\n");
-        assert_eq!(
-            with_title("# Untitled\n\n- milk\n- eggs\n", "Groceries"),
-            "# Groceries\n\n- milk\n- eggs\n"
-        );
-        // Only the first heading names the note; later ones are sections.
-        assert_eq!(with_title("# Old\n\n# Section\n", "New"), "# New\n\n# Section\n");
-        // A note with no heading gains one, and the result is what title_of reads back.
-        let added = with_title("just a line\n", "Groceries");
-        assert_eq!(added, "# Groceries\n\njust a line\n");
-        assert_eq!(title_of(&added, "x.md"), "Groceries");
-    }
-
-    #[test]
-    fn title_comes_from_the_first_heading() {
-        assert_eq!(title_of("# Real title\n\nbody", "slug.md"), "Real title");
-        assert_eq!(title_of("no heading here", "slug.md"), "slug");
-        // An empty heading is not a title.
-        assert_eq!(title_of("# \n\nbody", "slug.md"), "slug");
-    }
-
-    #[test]
-    fn image_refs_understands_both_syntaxes() {
-        let refs = image_refs("![[a.png]] then ![alt text](attachments/b.jpg) done");
-        assert_eq!(refs, vec!["a.png", "attachments/b.jpg"]);
-    }
-
-    #[test]
-    fn image_refs_skips_remote_and_plain_links() {
-        // A plain link is not an embed, and a remote image is not in the vault.
-        let refs = image_refs("[a note](other.md) and ![remote](https://example.com/x.png)");
-        assert!(refs.is_empty(), "got {refs:?}");
-    }
-
-    #[test]
-    fn attachment_names_never_collide() {
-        let dir = std::env::temp_dir().join(format!("yantrik-notes-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        assert_eq!(unique_attachment_name(&dir, "shot.png"), "shot.png");
-        std::fs::write(dir.join("shot.png"), b"x").unwrap();
-        assert_eq!(unique_attachment_name(&dir, "shot.png"), "shot-1.png");
-        std::fs::write(dir.join("shot-1.png"), b"x").unwrap();
-        assert_eq!(unique_attachment_name(&dir, "shot.png"), "shot-2.png");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-}
+mod tests;

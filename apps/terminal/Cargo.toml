@@ -18,6 +18,16 @@ slint = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+pty-process = "0.5"
+vt100 = "0.16"
+libc = "0.2"
+anyhow = "1"
+
+[lib]
+path = "src/session.rs"
 
 [build-dependencies]
 slint-build = "1.17"
+
+[dev-dependencies]
+png = "0.18"

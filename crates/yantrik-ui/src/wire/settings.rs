@@ -6,7 +6,9 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::sync::{Arc, Mutex};
 
 use crate::app_context::AppContext;
-use crate::{App, AccentPreset, ThemeMode, AIStatusData, AIProviderData, AIModelData, SettingsCategoryItem};
+use crate::{
+    AIModelData, AIProviderData, AIStatusData, AccentPreset, App, SettingsCategoryItem, ThemeMode,
+};
 
 /// Accent color preset names in cycle order (matches AccentPreset.index).
 const ACCENT_PRESETS: &[&str] = &["cyan", "amber", "purple", "green", "pink"];
@@ -18,8 +20,15 @@ const ACCENT_PRESETS: &[&str] = &["cyan", "amber", "purple", "green", "pink"];
 /// scripts/render-wallpapers.py; both write into crates/yantrik-ui-slint/ui/wallpapers and both
 /// are committed beside their output, so the desktop stays editable and reproducible rather
 /// than being four PNGs somebody exported once.
-const WALLPAPER_PRESETS: &[&str] =
-    &["serenity", "first-light", "nightfall", "aurora", "sunset", "ocean", "nebula"];
+const WALLPAPER_PRESETS: &[&str] = &[
+    "serenity",
+    "first-light",
+    "nightfall",
+    "aurora",
+    "sunset",
+    "ocean",
+    "nebula",
+];
 
 /// All user-facing settings that persist across reboots.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +83,10 @@ impl Default for UserSettings {
             companion_name: String::new(),
             agent_mode: false,
             place: Place::default(),
-            pinned_apps: super::pins::DEFAULT_PINS.iter().map(|s| s.to_string()).collect(),
+            pinned_apps: super::pins::DEFAULT_PINS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             preferred_mind: String::new(),
         }
     }
@@ -190,9 +202,10 @@ fn settings_path() -> String {
 /// Load persisted settings (or defaults if missing/corrupt).
 pub fn load() -> UserSettings {
     let path = settings_path();
-    match std::fs::read_to_string(&path) {
+    match crate::config_store::load(&path).and_then(|v| v.ok_or_else(|| "No settings file".into()))
+    {
         Ok(content) => serde_yaml::from_str(&content).unwrap_or_else(|e| {
-            tracing::warn!("Corrupt settings.yaml, using defaults: {e}");
+            tracing::warn!("Corrupt settings.yaml, using defaults; original file preserved");
             UserSettings::default()
         }),
         Err(_) => {
@@ -207,14 +220,18 @@ pub fn load() -> UserSettings {
                         let val = trimmed.trim_start_matches("dark:").trim();
                         settings.dark_mode = val != "false";
                     } else if trimmed.starts_with("accent_color:") {
-                        let val = trimmed.trim_start_matches("accent_color:").trim().trim_matches('"');
+                        let val = trimmed
+                            .trim_start_matches("accent_color:")
+                            .trim()
+                            .trim_matches('"');
                         if ACCENT_PRESETS.contains(&val) {
                             settings.accent_color = val.to_string();
                         }
                     }
                 }
-                save(&settings);
-                let _ = std::fs::remove_file(&old_theme);
+                if save(&settings).is_ok() {
+                    let _ = std::fs::remove_file(&old_theme);
+                }
                 tracing::info!("Migrated theme.yaml → settings.yaml");
             }
             settings
@@ -222,26 +239,74 @@ pub fn load() -> UserSettings {
     }
 }
 
-/// Persist settings to YAML.
-fn save(settings: &UserSettings) {
-    let path = settings_path();
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match serde_yaml::to_string(settings) {
-        Ok(yaml) => {
-            if let Err(e) = std::fs::write(&path, yaml) {
-                tracing::warn!("Failed to write settings: {e}");
-            }
+thread_local! { static STATUS_UI: std::cell::RefCell<Option<slint::Weak<App>>> = const { std::cell::RefCell::new(None) }; }
+fn report(result: &Result<(), String>) {
+    report_for(result, true);
+}
+fn report_for(result: &Result<(), String>, can_retry: bool) {
+    STATUS_UI.with(|slot| {
+        if let Some(ui) = slot.borrow().as_ref().and_then(|w| w.upgrade()) {
+            ui.set_settings_save_error(result.is_err());
+            ui.set_settings_save_can_retry(can_retry);
+            ui.set_settings_save_status(match result {
+                Ok(()) => "Changes saved on this device".into(),
+                Err(e) => format!("Not saved: {e}").into(),
+            });
         }
-        Err(e) => tracing::warn!("Failed to serialize settings: {e}"),
+    });
+    if let Err(e) = result {
+        tracing::warn!(error=%e,"Preferences were not saved");
+    }
+}
+fn validate_file<T: serde::de::DeserializeOwned>(path: &str) -> Result<(), String> {
+    if let Some(raw) = crate::config_store::load(path)? {
+        serde_yaml::from_str::<T>(&raw).map_err(|_|"Existing preferences have invalid values and were preserved. Repair the file and restart the shell.".to_string())?;
+    }
+    Ok(())
+}
+fn save(settings: &UserSettings) -> Result<(), String> {
+    let result = validate_file::<UserSettings>(&settings_path()).and_then(|()| {
+        serde_yaml::to_string(settings)
+            .map_err(|_| "Cannot serialize preferences.".into())
+            .and_then(|yaml| crate::config_store::save(settings_path(), &yaml))
+    });
+    report(&result);
+    result
+}
+fn persist(shared: &SharedSettings) -> Result<(), String> {
+    match shared.lock() {
+        Ok(s) => save(&s),
+        Err(_) => {
+            let result = Err("Preference store unavailable".into());
+            report(&result);
+            result
+        }
     }
 }
 
-/// Save via shared handle (used from callbacks).
-fn persist(shared: &SharedSettings) {
-    if let Ok(s) = shared.lock() {
-        save(&s);
+fn unavailable_service(ui: &App, service: &str) {
+    let status = "unavailable".into();
+    let detail =
+        "Connection adapter is not installed in this build. No account data has been synced."
+            .into();
+    match service {
+        "google" => {
+            ui.set_conn_google_status(status);
+            ui.set_conn_google_detail(detail)
+        }
+        "spotify" => {
+            ui.set_conn_spotify_status(status);
+            ui.set_conn_spotify_detail(detail)
+        }
+        "facebook" => {
+            ui.set_conn_facebook_status(status);
+            ui.set_conn_facebook_detail(detail)
+        }
+        "instagram" => {
+            ui.set_conn_instagram_status(status);
+            ui.set_conn_instagram_detail(detail)
+        }
+        _ => {}
     }
 }
 
@@ -259,7 +324,13 @@ pub fn accent_name_to_index(name: &str) -> i32 {
 
 /// Wire settings callbacks with persistence.
 pub fn wire(ui: &App, ctx: &AppContext) {
+    STATUS_UI.with(|slot| *slot.borrow_mut() = Some(ui.as_weak()));
     let settings = Arc::new(Mutex::new(load()));
+    let initial = validate_file::<UserSettings>(&settings_path())
+        .and_then(|()| validate_file::<ProviderStore>(&providers_path()));
+    if initial.is_err() {
+        report(&initial);
+    }
     // Published before anything reads a preference out of it.
     let _ = LIVE.set(settings.clone());
 
@@ -271,6 +342,17 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     };
     ui.set_agent_mode(agent_mode);
     tracing::info!(agent_mode, "Shell face selected");
+
+    let ui_weak = ui.as_weak();
+    let mode_settings = settings.clone();
+    ui.on_set_agent_mode(move |value| {
+        let Some(ui) = ui_weak.upgrade() else { return };
+        ui.set_agent_mode(value);
+        if let Ok(mut saved) = mode_settings.lock() {
+            saved.agent_mode = value;
+        }
+        persist(&mode_settings);
+    });
 
     // Dark mode toggle
     let ui_weak = ui.as_weak();
@@ -370,113 +452,27 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         tracing::info!(from = current, to = next, "Auto-lock timeout changed");
     });
 
-    // ── Connected Services ──
-
-    // Connect service callback
-    let ui_weak = ui.as_weak();
+    // Account adapters are not implemented. Never fabricate connection or sync results.
+    for service in ["google", "spotify", "facebook", "instagram"] {
+        unavailable_service(ui, service);
+    }
+    let weak = ui.as_weak();
     ui.on_connect_service(move |service| {
-        let svc = service.to_string();
-        tracing::info!(service = %svc, "Connect service requested");
-
-        let Some(ui) = ui_weak.upgrade() else { return };
-
-        // Set "connecting" state immediately
-        match svc.as_str() {
-            "google" => ui.set_conn_google_status("connecting".into()),
-            "spotify" => ui.set_conn_spotify_status("connecting".into()),
-            "facebook" => ui.set_conn_facebook_status("connecting".into()),
-            "instagram" => ui.set_conn_instagram_status("connecting".into()),
-            _ => {}
-        }
-
-        // Simulate connection completing after 2 seconds (dummy for UI testing)
-        let ui_weak2 = ui.as_weak();
-        let svc2 = svc.clone();
-        slint::Timer::single_shot(std::time::Duration::from_secs(2), move || {
-            let Some(ui) = ui_weak2.upgrade() else { return };
-            match svc2.as_str() {
-                "google" => {
-                    ui.set_conn_google_status("connected".into());
-                    ui.set_conn_google_detail("Last sync: just now — 42 contacts, 8 events".into());
-                }
-                "spotify" => {
-                    ui.set_conn_spotify_status("connected".into());
-                    ui.set_conn_spotify_detail("Last sync: just now — 15 artists, 6 genres".into());
-                }
-                "facebook" => {
-                    ui.set_conn_facebook_status("connected".into());
-                    ui.set_conn_facebook_detail("Last sync: just now — 128 friends, 3 events".into());
-                }
-                "instagram" => {
-                    ui.set_conn_instagram_status("connected".into());
-                    ui.set_conn_instagram_detail("Last sync: just now — 5 interests, 12 hashtags".into());
-                }
-                _ => {}
-            }
-            tracing::info!(service = %svc2, "Service connected (dummy)");
-        });
-    });
-
-    // Disconnect service callback
-    let ui_weak = ui.as_weak();
-    ui.on_disconnect_service(move |service| {
-        let svc = service.to_string();
-        tracing::info!(service = %svc, "Disconnect service requested");
-
-        let Some(ui) = ui_weak.upgrade() else { return };
-        match svc.as_str() {
-            "google" => {
-                ui.set_conn_google_status("disconnected".into());
-                ui.set_conn_google_detail("".into());
-            }
-            "spotify" => {
-                ui.set_conn_spotify_status("disconnected".into());
-                ui.set_conn_spotify_detail("".into());
-            }
-            "facebook" => {
-                ui.set_conn_facebook_status("disconnected".into());
-                ui.set_conn_facebook_detail("".into());
-            }
-            "instagram" => {
-                ui.set_conn_instagram_status("disconnected".into());
-                ui.set_conn_instagram_detail("".into());
-            }
-            _ => {}
+        if let Some(ui) = weak.upgrade() {
+            unavailable_service(&ui, service.as_str());
         }
     });
-
-    // Sync service callback
-    let ui_weak = ui.as_weak();
+    let weak = ui.as_weak();
     ui.on_sync_service(move |service| {
-        let svc = service.to_string();
-        tracing::info!(service = %svc, "Sync service requested");
-
-        let Some(ui) = ui_weak.upgrade() else { return };
-
-        // Update detail text to show syncing
-        let syncing_text = "Syncing...";
-        match svc.as_str() {
-            "google" => ui.set_conn_google_detail(syncing_text.into()),
-            "spotify" => ui.set_conn_spotify_detail(syncing_text.into()),
-            "facebook" => ui.set_conn_facebook_detail(syncing_text.into()),
-            "instagram" => ui.set_conn_instagram_detail(syncing_text.into()),
-            _ => {}
+        if let Some(ui) = weak.upgrade() {
+            unavailable_service(&ui, service.as_str());
         }
-
-        // Simulate sync completing
-        let ui_weak2 = ui.as_weak();
-        let svc2 = svc.clone();
-        slint::Timer::single_shot(std::time::Duration::from_secs(1), move || {
-            let Some(ui) = ui_weak2.upgrade() else { return };
-            let detail = format!("Last sync: just now — synced successfully");
-            match svc2.as_str() {
-                "google" => ui.set_conn_google_detail(detail.into()),
-                "spotify" => ui.set_conn_spotify_detail(detail.into()),
-                "facebook" => ui.set_conn_facebook_detail(detail.into()),
-                "instagram" => ui.set_conn_instagram_detail(detail.into()),
-                _ => {}
-            }
-        });
+    });
+    let weak = ui.as_weak();
+    ui.on_disconnect_service(move |service| {
+        if let Some(ui) = weak.upgrade() {
+            unavailable_service(&ui, service.as_str());
+        }
     });
 
     // Wallpaper changed: preset name or file path
@@ -512,10 +508,20 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 }
                 Err(e) => {
                     tracing::warn!(path = %wp, error = %e, "Failed to load wallpaper image");
+                    if let Ok(saved) = s.lock() {
+                        ui.set_wallpaper_path(saved.wallpaper.clone().into());
+                    }
+                    report(&Err("This file could not be loaded as wallpaper.".into()));
                 }
             }
         } else {
             tracing::warn!(path = %wp, "Wallpaper file not found");
+            if let Ok(saved) = s.lock() {
+                ui.set_wallpaper_path(saved.wallpaper.clone().into());
+            }
+            report(&Err(
+                "Wallpaper file not found. The saved wallpaper is unchanged.".into(),
+            ));
         }
     });
 
@@ -524,7 +530,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     let bridge = ctx.bridge.clone();
     ui.on_rename_user(move |name| {
         let name = name.to_string().trim().to_string();
-        if name.is_empty() { return; }
+        if name.is_empty() {
+            return;
+        }
         if let Ok(mut st) = s.lock() {
             st.user_name = name.clone();
         }
@@ -538,7 +546,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     let bridge = ctx.bridge.clone();
     ui.on_rename_companion(move |name| {
         let name = name.to_string().trim().to_string();
-        if name.is_empty() { return; }
+        if name.is_empty() {
+            return;
+        }
         if let Ok(mut st) = s.lock() {
             st.companion_name = name.clone();
         }
@@ -552,6 +562,25 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     // ── AI Provider Management ──
 
     let providers = Arc::new(Mutex::new(ProviderStore::load()));
+    let s = settings.clone();
+    ui.on_retry_settings_save(move || {
+        let _ = persist(&s);
+    });
+    let weak = ui.as_weak();
+    let accent_settings = settings.clone();
+    ui.on_choose_accent(move |name| {
+        let Some(ui) = weak.upgrade() else { return };
+        if !ACCENT_PRESETS.contains(&name.as_str()) {
+            return;
+        }
+        ui.set_settings_accent_color(name.clone());
+        ui.global::<AccentPreset>()
+            .set_index(accent_name_to_index(name.as_str()));
+        if let Ok(mut saved) = accent_settings.lock() {
+            saved.accent_color = name.to_string();
+        }
+        let _ = persist(&accent_settings);
+    });
 
     // Push initial AI status + providers to UI
     {
@@ -562,15 +591,51 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
     // Settings search (sidebar category filtering)
     let all_cats: Vec<SettingsCategoryItem> = vec![
-        SettingsCategoryItem { icon: "".into(), label: "Appearance".into(), id: 0 },
-        SettingsCategoryItem { icon: "".into(), label: "AI & Intelligence".into(), id: 1 },
-        SettingsCategoryItem { icon: "".into(), label: "Desktop".into(), id: 2 },
-        SettingsCategoryItem { icon: "".into(), label: "Network".into(), id: 3 },
-        SettingsCategoryItem { icon: "".into(), label: "Accounts".into(), id: 4 },
-        SettingsCategoryItem { icon: "".into(), label: "Privacy & Security".into(), id: 5 },
-        SettingsCategoryItem { icon: "".into(), label: "System".into(), id: 6 },
-        SettingsCategoryItem { icon: "".into(), label: "Skills".into(), id: 7 },
-        SettingsCategoryItem { icon: "".into(), label: "Harnesses".into(), id: 8 },
+        SettingsCategoryItem {
+            icon: "".into(),
+            label: "Appearance".into(),
+            id: 0,
+        },
+        SettingsCategoryItem {
+            icon: "".into(),
+            label: "AI & Intelligence".into(),
+            id: 1,
+        },
+        SettingsCategoryItem {
+            icon: "".into(),
+            label: "Desktop".into(),
+            id: 2,
+        },
+        SettingsCategoryItem {
+            icon: "".into(),
+            label: "Network".into(),
+            id: 3,
+        },
+        SettingsCategoryItem {
+            icon: "".into(),
+            label: "Accounts".into(),
+            id: 4,
+        },
+        SettingsCategoryItem {
+            icon: "".into(),
+            label: "Privacy & Security".into(),
+            id: 5,
+        },
+        SettingsCategoryItem {
+            icon: "".into(),
+            label: "System".into(),
+            id: 6,
+        },
+        SettingsCategoryItem {
+            icon: "".into(),
+            label: "Skills".into(),
+            id: 7,
+        },
+        SettingsCategoryItem {
+            icon: "".into(),
+            label: "Harnesses".into(),
+            id: 8,
+        },
     ];
     // Push initial categories
     ui.set_settings_categories(ModelRc::new(VecModel::from(all_cats.clone())));
@@ -582,8 +647,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             ui.set_settings_categories(ModelRc::new(VecModel::from(all_cats.clone())));
             return;
         }
-        let filtered: Vec<SettingsCategoryItem> = all_cats.iter()
-            .filter(|cat| cat.label.to_string().to_lowercase().contains(&q))
+        let matches = crate::config_store::search_categories(&q);
+        let filtered: Vec<SettingsCategoryItem> = all_cats
+            .iter()
+            .filter(|cat| matches.contains(&cat.id))
             .cloned()
             .collect();
         ui.set_settings_categories(ModelRc::new(VecModel::from(filtered)));
@@ -614,32 +681,35 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 /// Shared with onboarding so first boot and Settings cannot drift apart.
 pub(crate) fn provider_preset(id: &str) -> (&'static str, &'static str) {
     match id {
-            "openai"       => ("OpenAI",       "https://api.openai.com/v1"),
-            "anthropic"    => ("Anthropic",     "https://api.anthropic.com/v1"),
-            "gemini"       => ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai"),
-            "deepseek"     => ("DeepSeek",      "https://api.deepseek.com/v1"),
-            "groq"         => ("Groq",          "https://api.groq.com/openai/v1"),
-            "mistral"      => ("Mistral",       "https://api.mistral.ai/v1"),
-            "xai"          => ("xAI Grok",      "https://api.x.ai/v1"),
-            "perplexity"   => ("Perplexity",    "https://api.perplexity.ai"),
-            "cerebras"     => ("Cerebras",      "https://api.cerebras.ai/v1"),
-            "sambanova"    => ("SambaNova",     "https://api.sambanova.ai/v1"),
-            "qwen"         => ("Qwen",          "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-            "minimax"      => ("MiniMax",       "https://api.minimax.chat/v1"),
-            "kimi"         => ("Kimi",          "https://api.moonshot.cn/v1"),
-            "baidu"        => ("Baidu",         "https://qianfan.baidubce.com/v2"),
-            "zhipu"        => ("Zhipu GLM",     "https://open.bigmodel.cn/api/paas/v4"),
-            "openrouter"   => ("OpenRouter",    "https://openrouter.ai/api/v1"),
-            "together"     => ("Together",      "https://api.together.xyz/v1"),
-            "fireworks"    => ("Fireworks",     "https://api.fireworks.ai/inference/v1"),
-            "huggingface"  => ("HuggingFace",   "https://api-inference.huggingface.co/v1"),
-            "nanogpt"      => ("NanoGPT",       "https://api.nano-gpt.com/v1"),
-            "ollama"       => ("Ollama",        "http://localhost:11434/v1"),
-            "ollama-cloud" => ("Ollama Cloud",  ""),
-            "llamacpp"     => ("llama.cpp",     "http://localhost:8080/v1"),
-            "lmstudio"     => ("LM Studio",     "http://localhost:1234/v1"),
-            "vllm"         => ("vLLM",          "http://localhost:8000/v1"),
-            _              => ("Custom",        ""),
+        "openai" => ("OpenAI", "https://api.openai.com/v1"),
+        "anthropic" => ("Anthropic", "https://api.anthropic.com/v1"),
+        "gemini" => (
+            "Google Gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        ),
+        "deepseek" => ("DeepSeek", "https://api.deepseek.com/v1"),
+        "groq" => ("Groq", "https://api.groq.com/openai/v1"),
+        "mistral" => ("Mistral", "https://api.mistral.ai/v1"),
+        "xai" => ("xAI Grok", "https://api.x.ai/v1"),
+        "perplexity" => ("Perplexity", "https://api.perplexity.ai"),
+        "cerebras" => ("Cerebras", "https://api.cerebras.ai/v1"),
+        "sambanova" => ("SambaNova", "https://api.sambanova.ai/v1"),
+        "qwen" => ("Qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        "minimax" => ("MiniMax", "https://api.minimax.chat/v1"),
+        "kimi" => ("Kimi", "https://api.moonshot.cn/v1"),
+        "baidu" => ("Baidu", "https://qianfan.baidubce.com/v2"),
+        "zhipu" => ("Zhipu GLM", "https://open.bigmodel.cn/api/paas/v4"),
+        "openrouter" => ("OpenRouter", "https://openrouter.ai/api/v1"),
+        "together" => ("Together", "https://api.together.xyz/v1"),
+        "fireworks" => ("Fireworks", "https://api.fireworks.ai/inference/v1"),
+        "huggingface" => ("HuggingFace", "https://api-inference.huggingface.co/v1"),
+        "nanogpt" => ("NanoGPT", "https://api.nano-gpt.com/v1"),
+        "ollama" => ("Ollama", "http://localhost:11434/v1"),
+        "ollama-cloud" => ("Ollama Cloud", ""),
+        "llamacpp" => ("llama.cpp", "http://localhost:8080/v1"),
+        "lmstudio" => ("LM Studio", "http://localhost:1234/v1"),
+        "vllm" => ("vLLM", "http://localhost:8000/v1"),
+        _ => ("Custom", ""),
     }
 }
 
@@ -657,13 +727,18 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
             name: name.to_string(),
             provider_type: ptype.to_string(),
             base_url: url.to_string(),
-            api_key: if key.is_empty() { None } else { Some(key.to_string()) },
+            api_key: if key.is_empty() {
+                None
+            } else {
+                Some(key.to_string())
+            },
             auth_type: auth.to_string(),
             is_primary: false,
             is_fallback: false,
         };
         tracing::info!(name = %entry.name, provider_type = %entry.provider_type, "Saving provider");
         let made_primary = if let Ok(mut store) = ps.lock() {
+            let before = store.clone();
             // If this is the first provider, make it primary
             let make_primary = store.entries.is_empty();
             store.entries.push(entry.clone());
@@ -672,13 +747,18 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
                     e.is_primary = true;
                 }
             }
-            store.save();
+            if store.save().is_err() {
+                *store = before;
+                return;
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 push_providers_to_ui(&ui, &store);
                 push_ai_status_to_ui(&ui, &store, bridge.is_online());
             }
             make_primary
-        } else { false };
+        } else {
+            false
+        };
 
         // Hot-reload the LLM backend if this is the primary provider
         if made_primary {
@@ -697,7 +777,10 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
             } else {
                 entry.base_url.clone()
             };
-            tracing::info!(model = default_model, "Hot-reloading LLM with new primary provider");
+            tracing::info!(
+                model = default_model,
+                "Hot-reloading LLM with new primary provider"
+            );
             bridge_for_save.reload_llm(
                 entry.provider_type.clone(),
                 base_url,
@@ -715,8 +798,12 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
         let id = id.to_string();
         tracing::info!(id = %id, "Deleting provider");
         if let Ok(mut store) = ps.lock() {
+            let before = store.clone();
             store.entries.retain(|e| e.id != id);
-            store.save();
+            if store.save().is_err() {
+                *store = before;
+                return;
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 push_providers_to_ui(&ui, &store);
                 push_ai_status_to_ui(&ui, &store, bridge.is_online());
@@ -740,7 +827,11 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
             let weak = ui_weak.clone();
             let ps2 = ps.clone();
             std::thread::spawn(move || {
-                let result = test_provider_connection(&entry.base_url, entry.api_key.as_deref(), &entry.auth_type);
+                let result = test_provider_connection(
+                    &entry.base_url,
+                    entry.api_key.as_deref(),
+                    &entry.auth_type,
+                );
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         // Update the provider status in the store
@@ -750,9 +841,11 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
                             }
                             push_providers_to_ui_with_test(&ui, &store, &result);
                         }
-                        ui.set_settings_provider_test_result(
-                            if result.success { "success".into() } else { format!("error: {}", result.message).into() }
-                        );
+                        ui.set_settings_provider_test_result(if result.success {
+                            "success".into()
+                        } else {
+                            format!("error: {}", result.message).into()
+                        });
                     }
                 });
             });
@@ -763,7 +856,11 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
     let ui_weak = ui.as_weak();
     ui.on_test_new_provider(move |url, key, auth| {
         let url_str = url.to_string();
-        let key_str = if key.is_empty() { None } else { Some(key.to_string()) };
+        let key_str = if key.is_empty() {
+            None
+        } else {
+            Some(key.to_string())
+        };
         let auth_str = auth.to_string();
 
         tracing::info!(url = %url_str, "Testing new provider connection");
@@ -779,9 +876,11 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
             let result = test_provider_connection(&url_str, key_str.as_deref(), &auth_str);
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak2.upgrade() {
-                    ui.set_settings_provider_test_result(
-                        if result.success { "success".into() } else { format!("error: {}", result.message).into() }
-                    );
+                    ui.set_settings_provider_test_result(if result.success {
+                        "success".into()
+                    } else {
+                        format!("error: {}", result.message).into()
+                    });
                 }
             });
         });
@@ -795,10 +894,14 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
         let id = id.to_string();
         tracing::info!(id = %id, "Setting primary provider");
         if let Ok(mut store) = ps.lock() {
+            let before = store.clone();
             for e in &mut store.entries {
                 e.is_primary = e.id == id;
             }
-            store.save();
+            if store.save().is_err() {
+                *store = before;
+                return;
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 push_providers_to_ui(&ui, &store);
                 push_ai_status_to_ui(&ui, &store, bridge.is_online());
@@ -814,10 +917,14 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
         let id = id.to_string();
         tracing::info!(id = %id, "Setting fallback provider");
         if let Ok(mut store) = ps.lock() {
+            let before = store.clone();
             for e in &mut store.entries {
                 e.is_fallback = e.id == id;
             }
-            store.save();
+            if store.save().is_err() {
+                *store = before;
+                return;
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 push_providers_to_ui(&ui, &store);
                 push_ai_status_to_ui(&ui, &store, bridge.is_online());
@@ -893,7 +1000,12 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
         if let Some(provider) = primary {
             let weak = ui_weak.clone();
             std::thread::spawn(move || {
-                let models = fetch_models(&provider.base_url, provider.api_key.as_deref(), &provider.auth_type, &provider.provider_type);
+                let models = fetch_models(
+                    &provider.base_url,
+                    provider.api_key.as_deref(),
+                    &provider.auth_type,
+                    &provider.provider_type,
+                );
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         let model_data: Vec<AIModelData> = models
@@ -909,7 +1021,10 @@ fn wire_rest(ui: &App, ctx: &AppContext, providers: Arc<Mutex<ProviderStore>>) {
                             })
                             .collect();
                         ui.set_settings_available_models(ModelRc::new(VecModel::from(model_data)));
-                        tracing::info!(count = ui.get_settings_available_models().row_count(), "Models refreshed");
+                        tracing::info!(
+                            count = ui.get_settings_available_models().row_count(),
+                            "Models refreshed"
+                        );
                     }
                 });
             });
@@ -954,8 +1069,12 @@ pub struct ProviderStoreEntry {
     pub is_fallback: bool,
 }
 
-fn default_provider_type() -> String { "custom".into() }
-fn default_auth_type() -> String { "bearer".into() }
+fn default_provider_type() -> String {
+    "custom".into()
+}
+fn default_auth_type() -> String {
+    "bearer".into()
+}
 
 /// Manages the list of AI providers.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -967,28 +1086,25 @@ pub struct ProviderStore {
 impl ProviderStore {
     pub fn load() -> Self {
         let path = providers_path();
-        match std::fs::read_to_string(&path) {
+        match crate::config_store::load(&path)
+            .and_then(|v| v.ok_or_else(|| "No provider file".into()))
+        {
             Ok(content) => serde_yaml::from_str(&content).unwrap_or_else(|e| {
-                tracing::warn!("Corrupt providers.yaml, using empty: {e}");
+                tracing::warn!("Corrupt providers.yaml, using empty; original file preserved");
                 Self::default()
             }),
             Err(_) => Self::default(),
         }
     }
 
-    pub fn save(&self) {
-        let path = providers_path();
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match serde_yaml::to_string(self) {
-            Ok(yaml) => {
-                if let Err(e) = std::fs::write(&path, yaml) {
-                    tracing::warn!("Failed to write providers.yaml: {e}");
-                }
-            }
-            Err(e) => tracing::warn!("Failed to serialize providers: {e}"),
-        }
+    pub fn save(&self) -> Result<(), String> {
+        let result = validate_file::<Self>(&providers_path()).and_then(|()| {
+            serde_yaml::to_string(self)
+                .map_err(|_| "Cannot serialize providers.".into())
+                .and_then(|yaml| crate::config_store::save(providers_path(), &yaml))
+        });
+        report_for(&result, false);
+        result
     }
 
     pub fn primary(&self) -> Option<&ProviderStoreEntry> {
@@ -1003,39 +1119,58 @@ impl ProviderStore {
 /// Generate a short unique ID.
 fn uuid_short() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     format!("{:x}", ts & 0xFFFFFFFF)
 }
 
 /// Push provider list to UI.
 fn push_providers_to_ui(ui: &App, store: &ProviderStore) {
-    let items: Vec<AIProviderData> = store.entries.iter().map(|e| AIProviderData {
-        id: e.id.clone().into(),
-        name: e.name.clone().into(),
-        provider_type: e.provider_type.clone().into(),
-        base_url: e.base_url.clone().into(),
-        status: "connected".into(), // default — will be updated by test
-        is_primary: e.is_primary,
-        is_fallback: e.is_fallback,
-        latency_ms: -1,
-        error_message: SharedString::default(),
-    }).collect();
+    let items: Vec<AIProviderData> = store
+        .entries
+        .iter()
+        .map(|e| AIProviderData {
+            id: e.id.clone().into(),
+            name: e.name.clone().into(),
+            provider_type: e.provider_type.clone().into(),
+            base_url: e.base_url.clone().into(),
+            status: "connected".into(), // default — will be updated by test
+            is_primary: e.is_primary,
+            is_fallback: e.is_fallback,
+            latency_ms: -1,
+            error_message: SharedString::default(),
+        })
+        .collect();
     ui.set_settings_ai_providers(ModelRc::new(VecModel::from(items)));
 }
 
 /// Push provider list with test result applied.
 fn push_providers_to_ui_with_test(ui: &App, store: &ProviderStore, result: &TestResult) {
-    let items: Vec<AIProviderData> = store.entries.iter().map(|e| AIProviderData {
-        id: e.id.clone().into(),
-        name: e.name.clone().into(),
-        provider_type: e.provider_type.clone().into(),
-        base_url: e.base_url.clone().into(),
-        status: if result.success { "connected".into() } else { "error".into() },
-        is_primary: e.is_primary,
-        is_fallback: e.is_fallback,
-        latency_ms: result.latency_ms,
-        error_message: if result.success { SharedString::default() } else { result.message.clone().into() },
-    }).collect();
+    let items: Vec<AIProviderData> = store
+        .entries
+        .iter()
+        .map(|e| AIProviderData {
+            id: e.id.clone().into(),
+            name: e.name.clone().into(),
+            provider_type: e.provider_type.clone().into(),
+            base_url: e.base_url.clone().into(),
+            status: if result.success {
+                "connected".into()
+            } else {
+                "error".into()
+            },
+            is_primary: e.is_primary,
+            is_fallback: e.is_fallback,
+            latency_ms: result.latency_ms,
+            error_message: if result.success {
+                SharedString::default()
+            } else {
+                result.message.clone().into()
+            },
+        })
+        .collect();
     ui.set_settings_ai_providers(ModelRc::new(VecModel::from(items)));
 }
 
@@ -1049,7 +1184,11 @@ fn push_ai_status_to_ui(ui: &App, store: &ProviderStore, online: bool) {
         provider_type: primary.map_or(SharedString::default(), |p| p.provider_type.clone().into()),
         model_name: ui.get_settings_llm_api_model(),
         model_tier: SharedString::default(), // filled by capability profile later
-        status: if online { "connected".into() } else { "disconnected".into() },
+        status: if online {
+            "connected".into()
+        } else {
+            "disconnected".into()
+        },
         latency_ms: -1,
         tokens_per_sec: 0.0,
         tokens_today: 0,
@@ -1074,7 +1213,11 @@ pub(crate) struct TestResult {
 ///
 /// Shared with onboarding (`wire::ai_onboarding`) so first boot validates a
 /// provider the same way Settings does, instead of simulating a result.
-pub(crate) fn test_provider_connection(base_url: &str, api_key: Option<&str>, auth_type: &str) -> TestResult {
+pub(crate) fn test_provider_connection(
+    base_url: &str,
+    api_key: Option<&str>,
+    auth_type: &str,
+) -> TestResult {
     let url = if base_url.contains("/v1") {
         format!("{}/models", base_url.trim_end_matches('/'))
     } else {
@@ -1091,16 +1234,24 @@ pub(crate) fn test_provider_connection(base_url: &str, api_key: Option<&str>, au
     let mut request = agent.get(&url);
     if let Some(key) = api_key {
         match auth_type {
-            "x-api-key" => { request = request.set("x-api-key", key); }
+            "x-api-key" => {
+                request = request.set("x-api-key", key);
+            }
             "none" => {}
-            _ => { request = request.set("Authorization", &format!("Bearer {}", key)); }
+            _ => {
+                request = request.set("Authorization", &format!("Bearer {}", key));
+            }
         }
     }
 
     match request.call() {
         Ok(response) => {
             let latency = start.elapsed().as_millis() as i32;
-            TestResult { success: true, message: "OK".into(), latency_ms: latency }
+            TestResult {
+                success: true,
+                message: "OK".into(),
+                latency_ms: latency,
+            }
         }
         Err(ureq::Error::Status(code, _response)) => {
             let latency = start.elapsed().as_millis() as i32;
@@ -1130,12 +1281,18 @@ struct FetchedModel {
 }
 
 /// Fetch available models from a provider.
-fn fetch_models(base_url: &str, api_key: Option<&str>, auth_type: &str, provider_type: &str) -> Vec<FetchedModel> {
-    let url = if provider_type == "ollama" || (!base_url.contains("/v1") && !base_url.contains("api.")) {
-        format!("{}/api/tags", base_url.trim_end_matches('/'))
-    } else {
-        format!("{}/models", base_url.trim_end_matches('/'))
-    };
+fn fetch_models(
+    base_url: &str,
+    api_key: Option<&str>,
+    auth_type: &str,
+    provider_type: &str,
+) -> Vec<FetchedModel> {
+    let url =
+        if provider_type == "ollama" || (!base_url.contains("/v1") && !base_url.contains("api.")) {
+            format!("{}/api/tags", base_url.trim_end_matches('/'))
+        } else {
+            format!("{}/models", base_url.trim_end_matches('/'))
+        };
 
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(15))
@@ -1144,9 +1301,13 @@ fn fetch_models(base_url: &str, api_key: Option<&str>, auth_type: &str, provider
     let mut request = agent.get(&url);
     if let Some(key) = api_key {
         match auth_type {
-            "x-api-key" => { request = request.set("x-api-key", key); }
+            "x-api-key" => {
+                request = request.set("x-api-key", key);
+            }
             "none" => {}
-            _ => { request = request.set("Authorization", &format!("Bearer {}", key)); }
+            _ => {
+                request = request.set("Authorization", &format!("Bearer {}", key));
+            }
         }
     }
 
@@ -1226,9 +1387,15 @@ fn detect_tier(name: &str) -> String {
 
     // Try to extract parameter count like "0.8b", "3b", "27b", "70b"
     if let Some(b) = extract_param_billions(&lower) {
-        if b <= 1.5 { return "Tiny".into(); }
-        if b <= 4.0 { return "Small".into(); }
-        if b <= 14.0 { return "Medium".into(); }
+        if b <= 1.5 {
+            return "Tiny".into();
+        }
+        if b <= 4.0 {
+            return "Small".into();
+        }
+        if b <= 14.0 {
+            return "Medium".into();
+        }
         return "Large".into();
     }
 
@@ -1269,7 +1436,9 @@ fn extract_param_billions(name: &str) -> Option<f64> {
 
 /// Format byte size to parameter count string.
 fn format_param_count(size_bytes: u64) -> String {
-    if size_bytes == 0 { return String::new(); }
+    if size_bytes == 0 {
+        return String::new();
+    }
     let gb = size_bytes as f64 / 1_073_741_824.0;
     if gb >= 1.0 {
         format!("{:.1}GB", gb)

@@ -52,6 +52,9 @@ mod clipboard;
 #[allow(dead_code)]
 mod features;
 mod filebrowser;
+mod fileops;
+mod config_store;
+mod models;
 mod focus;
 mod frecency;
 mod i18n;

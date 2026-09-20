@@ -1,11 +1,6 @@
-//! What windows are open.
-//!
-//! The shell knows its own children, because it launched them (see [`crate::running`]). That
-//! registry is the source of truth here: it is reliable, needs no subprocess, and answers in the
-//! same app-id vocabulary a caller uses to open things. `wlrctl toplevel list` remains only as a
-//! fallback for the case the registry cannot cover — windows the shell did not start, in a
-//! development session or an unusual setup — and it never runs when the shell has launched
-//! something itself.
+//! Windows discovered by the compositor, merged with the shell launch registry.
+//! Compositor discovery is cached so surviving windows remain available after a
+//! shell restart without spawning a helper on every taskbar refresh.
 
 /// The title the shell's own window carries, from `title:` in yantrik-ui-slint/ui/app.slint.
 ///
@@ -29,52 +24,30 @@ pub struct WindowEntry {
 /// to asking the compositor, so a development session where apps are started by hand still shows
 /// something rather than nothing.
 pub fn list_windows() -> Vec<WindowEntry> {
-    let ours = shell_windows();
-    if !ours.is_empty() {
-        return ours;
-    }
-    wlrctl_windows()
+    merge_windows(shell_windows(), wlrctl_windows())
 }
 
-/// The window list for the taskbar's periodic refresh.
-///
-/// Same answer as [`list_windows`], with one difference that matters on an idle machine: the
-/// `wlrctl` fallback is only consulted every few seconds, and the result is remembered in
-/// between.
-///
-/// That fallback only runs when the launch registry is EMPTY — which is the common case, since
-/// a desktop with nothing open is most of the time. The taskbar refreshes every three seconds
-/// and is now drawn on every screen rather than only the desktop, so without this the shell
-/// would spawn twenty subprocesses a minute, forever, to be told nothing is open. Idle cost on
-/// this machine has already been fought down once, from 9.7% of a core to 2.1%, and it is not
-/// worth giving back to re-ask a question whose answer has not changed.
+/// Cache compositor discovery for nine seconds. Always merge it with our launch
+/// registry: windows that survived a shell restart must stay in the taskbar when
+/// a newly launched Editor adds the first entry to the fresh registry.
 pub fn list_windows_throttled() -> Vec<WindowEntry> {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
-
-    const FALLBACK_EVERY: Duration = Duration::from_secs(9);
     static CACHE: Mutex<Option<(Instant, Vec<WindowEntry>)>> = Mutex::new(None);
-
-    // Anything the shell launched is known without asking anyone.
-    let ours = shell_windows();
-    if !ours.is_empty() {
-        if let Ok(mut c) = CACHE.lock() {
-            *c = None; // the fallback's answer is stale the moment we have our own
-        }
-        return ours;
+    let Ok(mut cache) = CACHE.lock() else { return list_windows(); };
+    if cache.as_ref().is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(9)) {
+        *cache = Some((Instant::now(), wlrctl_windows()));
     }
+    merge_windows(shell_windows(), cache.as_ref().unwrap().1.clone())
+}
 
-    let Ok(mut cache) = CACHE.lock() else {
-        return wlrctl_windows();
-    };
-    if let Some((at, cached)) = cache.as_ref() {
-        if at.elapsed() < FALLBACK_EVERY {
-            return cached.clone();
+fn merge_windows(mut launched: Vec<WindowEntry>, discovered: Vec<WindowEntry>) -> Vec<WindowEntry> {
+    for window in discovered {
+        if !launched.iter().any(|known| known.title == window.title && known.app_id == window.app_id) {
+            launched.push(window);
         }
     }
-    let fresh = wlrctl_windows();
-    *cache = Some((Instant::now(), fresh.clone()));
-    fresh
+    launched
 }
 
 /// The windows the shell itself has open, from the launch registry only — never a subprocess.
@@ -306,6 +279,13 @@ fn derive_context(title: &str, app_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn surviving_windows_remain_when_editor_is_launched() {
+        let win=|id:&str,title:&str| WindowEntry {app_id:id.into(),title:title.into(),icon_char:String::new(),subtitle:String::new()};
+        let merged=merge_windows(vec![win("editor","Editor")],vec![win("terminal","Terminal"),win("notes","Notes"),win("editor","Editor")]);
+        assert_eq!(merged.iter().map(|w|w.app_id.as_str()).collect::<Vec<_>>(),["editor","terminal","notes"]);
+    }
+
 
     #[test]
     fn a_window_with_no_app_id_is_named_without_the_separator() {

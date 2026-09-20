@@ -1,0 +1,200 @@
+// Native standalone terminal. ANSI canvas is dark; chrome follows the OS.
+import { Theme } from "theme.slint";
+import { AppHeader } from "app_header.slint";
+import { YButton } from "y_button.slint";
+import { YInput } from "y_input.slint";
+import { Icons } from "icon.slint";
+export struct SessionTab { title: string, active: bool, alive: bool }
+export struct TerminalRun { text: string, row: int, col: int, columns: int, fg: color, bg: color, bold: bool, underline: bool }
+export component TerminalWorkbench inherits Rectangle {
+    in property <[SessionTab]> tabs;
+    in property <[TerminalRun]> runs;
+    in property <string> screen-text;
+    in property <string> directory: "~";
+    in property <bool> alive: false;
+    in property <string> status: "Starting shell…";
+    in property <string> notice;
+    in property <int> cursor-row;
+    in property <int> cursor-col;
+    in property <bool> cursor-visible: true;
+    in property <int> scrollback;
+    in-out property <int> font-size: 14;
+    in-out property <bool> show-search: false;
+    in-out property <string> query;
+    in property <int> match-count;
+    in property <int> match-index;
+    in property <int> match-row: -1;
+    in-out property <bool> show-assistant: false;
+    in property <string> explanation;
+    in property <bool> explaining: false;
+    in property <bool> confirm-close: false;
+    callback input(KeyEvent) -> EventResult;
+    callback shortcut(KeyEvent) -> EventResult;
+    callback action(string);
+    callback select-tab(int);
+    callback close-tab(int);
+    callback resized(int, int);
+    callback scroll(int);
+    callback search(string);
+    callback paste-text(string);
+    public function focus-terminal() { terminal-keys.focus(); }
+    public function copy-screen() { clipboard.text = root.screen-text; clipboard.select-all(); clipboard.copy(); }
+    public function paste-clipboard() { clipboard.text = ""; clipboard.paste(); root.paste-text(clipboard.text); clipboard.text = ""; }
+    changed show-search => {
+        if (!root.show-search) { root.query = ""; root.search(""); terminal-keys.focus(); }
+    }
+    init => { terminal-keys.focus(); }
+    background: Theme.bg-deep;
+    min-width: 0px;
+    min-height: 0px;
+    preferred-width: 0px;
+    preferred-height: 0px;
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    // Measure a full row to avoid accumulating single-glyph pixel rounding.
+    property <length> cell-width: measure.preferred-width / 100;
+    property <length> cell-height: root.font-size * 1.5px;
+    property <int> rows: max(2, floor((canvas.height - 32px) / root.cell-height));
+    property <int> columns: max(8, floor((canvas.width - 32px) / root.cell-width));
+    changed rows => { root.resized(root.rows, root.columns); }
+    changed columns => { root.resized(root.rows, root.columns); }
+    measure := Text { text: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM"; font-family: Theme.font-mono; font-size: root.font-size * 1px; visible: false; }
+    clipboard := TextInput { visible: false; width: 0px; height: 0px; single-line: false; }
+    FocusScope {
+        enabled: !root.confirm-close;
+        key-pressed(event) => { return root.shortcut(event); }
+        VerticalLayout {
+            spacing: 0px;
+            AppHeader {
+                app-id: "terminal"; title: "Terminal"; icon: Icons.terminal; subtitle: root.directory;
+                actions: [
+                    { id: "new", label: "New tab", icon: Icons.plus, emphasis: 2, disabled: root.tabs.length >= 8 },
+                    { id: "find", label: "Find", icon: Icons.search, active: root.show-search },
+                    { id: "copy", label: "Copy screen", icon: Icons.copy },
+                    { id: "paste", label: "Paste", icon: Icons.clipboard, disabled: !root.alive },
+                    { separator: true },
+                    { id: "zoom-in", label: "Larger text", icon: Icons.plus },
+                    { id: "zoom-out", label: "Smaller text", icon: Icons.minus },
+                    { id: "zoom-reset", label: "Reset text size", icon: Icons.refresh },
+                    { separator: true },
+                    { id: "assistant", label: "Assistant", icon: Icons.spark, active: root.show-assistant },
+                    { id: "restart", label: "Restart exited shell", icon: Icons.refresh, disabled: root.alive }
+                ];
+                action(id) => {
+                    if (id == "find") { root.show-search = !root.show-search; }
+                    else if (id == "copy") { root.copy-screen(); }
+                    else if (id == "paste") { root.paste-clipboard(); terminal-keys.focus(); }
+                    else if (id == "assistant") { root.show-assistant = !root.show-assistant; }
+                    else { root.action(id); }
+                }
+            }
+            Rectangle {
+                height: 42px; background: Theme.bg-surface;
+                HorizontalLayout {
+                    padding-left: 8px; padding-right: 8px; spacing: 2px; alignment: start;
+                    for tab[index] in root.tabs : Rectangle {
+                        width: min(192px, max(72px, (root.width - 32px) / max(1, root.tabs.length)));
+                        height: 42px; background: tab.active ? Theme.bg-deep : tab-touch.has-hover ? Theme.hover-fill : transparent;
+                        accessible-role: AccessibleRole.tab; accessible-label: tab.title;
+                        accessible-action-default => { root.select-tab(index); terminal-keys.focus(); }
+                        tab-focus := FocusScope {
+                            key-pressed(e) => {
+                                if (e.text == "\n" || e.text == " ") { root.select-tab(index); terminal-keys.focus(); return accept; }
+                                reject
+                            }
+                        }
+                        tab-touch := TouchArea { mouse-cursor: pointer; clicked => { root.select-tab(index); terminal-keys.focus(); } }
+                        Rectangle { x: 10px; y: 19px; width: 5px; height: 5px; border-radius: 3px; background: tab.alive ? #78c9b8 : #8390a0; }
+                        Text { x: 23px; width: parent.width - 49px; height: 100%; text: tab.title; color: tab.active ? Theme.text-primary : Theme.text-secondary; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                        YButton { x: parent.width - 26px; y: 9px; width: 24px; height: 24px; label: "Close " + tab.title; icon-path: Icons.close; icon-only: true; variant: 2; size: 0; clicked => { root.close-tab(index); terminal-keys.focus(); } }
+                        Rectangle { y: parent.height - 2px; height: 2px; width: parent.width; background: tab.active || tab-focus.has-focus ? Theme.accent : transparent; }
+                    }
+                }
+            }
+            if root.show-search : Rectangle {
+                height: 48px; background: Theme.bg-surface;
+                HorizontalLayout {
+                    padding: 8px; spacing: 8px;
+                    find-input := YInput { init => { self.focus(); } value <=> root.query; placeholder: "Find in session history…"; edited(value) => { root.search(value); } accepted(value) => { root.action("next-match"); } }
+                    Text { text: root.query == "" ? "1,000-line history" : root.match-count == 0 ? "No matches" : "\{root.match-index} / \{root.match-count} lines"; color: Theme.text-secondary; font-size: 12px; vertical-alignment: center; }
+                    YButton { label: "Previous match"; icon-path: Icons.chevron-up; icon-only: true; variant: 2; size: 0; disabled: root.match-count == 0; clicked => { root.action("previous-match"); } }
+                    YButton { label: "Next match"; icon-path: Icons.chevron-down; icon-only: true; variant: 2; size: 0; disabled: root.match-count == 0; clicked => { root.action("next-match"); } }
+                    YButton { label: "Close find"; icon-path: Icons.close; icon-only: true; variant: 2; size: 0; clicked => { root.show-search = false; } }
+                }
+            }
+            if root.notice != "" : Rectangle {
+                height: 38px; background: Theme.bg-elevated;
+                HorizontalLayout { padding-left: 16px; padding-right: 8px; spacing: 8px;
+                    Text { text: root.notice; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    YButton { label: "Dismiss message"; icon-path: Icons.close; icon-only: true; size: 0; variant: 2; clicked => { root.action("dismiss"); } }
+                }
+            }
+            canvas := Rectangle {
+                background: #10171e; clip: true; vertical-stretch: 1;
+                terminal-keys := FocusScope {
+                    key-pressed(event) => { return root.input(event); }
+                    TouchArea {
+                        mouse-cursor: text; clicked => { terminal-keys.focus(); }
+                        scroll-event(e) => { root.scroll(Math.round(e.delta-y / 12px)); return accept; }
+                    }
+                    for run in root.runs : Rectangle {
+                        x: 16px + run.col * root.cell-width; y: 16px + run.row * root.cell-height;
+                        width: run.columns * root.cell-width; height: root.cell-height; background: run.bg;
+                        Text { x: 0px; y: 0px; width: parent.width; height: parent.height; horizontal-alignment: left; vertical-alignment: center; text: run.text; color: run.fg; font-family: Theme.font-mono; font-size: root.font-size * 1px; font-weight: run.bold ? 700 : 400; }
+                        if run.underline : Rectangle { y: parent.height - 3px; width: parent.width; height: 1px; background: run.fg; }
+                    }
+                    if root.match-row >= 0 : Rectangle { x: 16px; y: 16px + root.match-row * root.cell-height; width: parent.width - 32px; height: root.cell-height; background: #57c8bc20; border-width: 1px; border-color: #57c8bc; }
+                    if root.cursor-visible && root.alive : Rectangle {
+                        x: 16px + root.cursor-col * root.cell-width; y: 16px + root.cursor-row * root.cell-height;
+                        width: root.cell-width; height: root.cell-height;
+                        background: terminal-keys.has-focus ? #a8e3d755 : transparent;
+                        border-width: 1px; border-color: terminal-keys.has-focus ? #9bdfd0 : #586776;
+                    }
+                }
+                if root.tabs.length == 0 : Text { x: 24px; y: 24px; text: "Start a new tab to open your shell."; color: #9aabbd; font-size: 14px; }
+            }
+            if root.show-assistant : Rectangle {
+                height: root.height < 600px ? 128px : 160px; background: Theme.bg-surface;
+                VerticalLayout { padding: 16px; spacing: 8px;
+                    HorizontalLayout {
+                        Text { text: "Session assistant"; color: Theme.text-primary; font-size: 14px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                        YButton { label: root.explaining ? "Explaining…" : "Explain output"; icon-path: Icons.spark; size: 0; variant: 1; loading: root.explaining; clicked => { root.action("explain"); } }
+                        YButton { label: "Close assistant"; icon-path: Icons.close; icon-only: true; variant: 2; size: 0; clicked => { root.show-assistant = false; } }
+                    }
+                    Flickable { viewport-width: self.width; viewport-height: explanation-text.preferred-height;
+                        explanation-text := Text { width: parent.width; text: root.explanation == "" ? "Ask for an explanation of the visible output when you need it." : root.explanation; color: Theme.text-secondary; font-size: 13px; wrap: word-wrap; }
+                    }
+                }
+            }
+            Rectangle {
+                height: 32px; background: Theme.bg-surface;
+                HorizontalLayout { padding-left: 16px; padding-right: 10px; spacing: 12px;
+                    Rectangle { width: 5px; height: 5px; y: (parent.height - self.height) / 2; border-radius: 3px; background: root.alive ? #78c9b8 : Theme.text-dim; }
+                    Text { text: root.status; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                    Text { text: root.directory; color: Theme.text-secondary; font-size: 11px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                    if root.scrollback > 0 : YButton { label: "Back to live"; size: 0; variant: 2; clicked => { root.action("live"); terminal-keys.focus(); } }
+                    if root.scrollback == 0 && root.width >= 780px : Text { text: "Ctrl Shift T  New tab   ·   Ctrl Shift F  Find"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                    Text { text: "\{root.font-size}px"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+    if root.confirm-close : FocusScope {
+        key-pressed(event) => { return root.shortcut(event); }
+        Rectangle { background: #00000080; TouchArea {} }
+        Rectangle {
+            width: min(420px, parent.width - 48px); height: 166px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            background: Theme.bg-elevated; border-radius: 12px;
+            border-width: 1px; border-color: Theme.border-strong;
+            VerticalLayout { padding: 20px; spacing: 12px;
+                Text { text: "Close this session?"; color: Theme.text-primary; font-size: 18px; font-weight: 600; }
+                Text { text: "A process is still running in this tab. Closing it will end that session."; color: Theme.text-secondary; font-size: 13px; wrap: word-wrap; }
+                HorizontalLayout { alignment: end; spacing: 8px;
+                    YButton { init => { self.focus(); } label: "Keep open"; variant: 1; clicked => { root.action("cancel-close"); root.focus-terminal(); } }
+                    YButton { label: "Close session"; variant: 3; clicked => { root.action("confirm-close"); root.focus-terminal(); } }
+                }
+            }
+        }
+    }
+}

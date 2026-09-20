@@ -1,123 +1,48 @@
-// Yantrik Terminal — standalone app window.
-// Wraps the shared TerminalScreen component in its own Window.
-
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
-import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
-import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
-import { TerminalScreen, TerminalTabData, TerminalSegment } from "terminal.slint";
-
-export { TerminalTabData, TerminalSegment, ThemeMode, AccentPreset }
-export { AgentContextItem, AgentSuggestion, AgentProposal }
-
+import { TerminalWorkbench, SessionTab, TerminalRun } from "terminal_workbench.slint";
+export { ThemeMode, AccentPreset, SessionTab, TerminalRun }
 export component TerminalApp inherits Window {
-    // ── The agent layer ──
-    in property <[AgentContextItem]> agent-context <=> inner.agent-context;
-    in property <[AgentSuggestion]> agent-suggestions <=> inner.agent-suggestions;
-    in property <string> agent-unavailable <=> inner.agent-unavailable;
-    callback agent-context-activated <=> inner.agent-context-activated;
-    callback agent-suggestion-activated <=> inner.agent-suggestion-activated;
-    in property <AgentProposal> proposal <=> inner.proposal;
-    in property <bool> proposal-working <=> inner.proposal-working;
-    callback proposal-applied <=> inner.proposal-applied;
-    callback proposal-dismissed <=> inner.proposal-dismissed;
-    
-    // What app this window is.
-    //
-    // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
-    // the screens that have one, and Email's account-setup screen has none -- so the app that
-    // most needs to look like itself on first run was the one screen still drawing the house
-    // teal. The window is the only element every screen of an app is inside.
-    init => { AppIdentity.id = "terminal"; }
-
-    default-font-family: Theme.font-ui;
     title: "Terminal";
-    // preferred-, not fixed: a fixed size makes the window unresizable, and the content
-    // stays this size even when the compositor maximises or fullscreens the window.
-    preferred-width: 900px;
-    preferred-height: 600px;
-    min-width: 640px;
-    min-height: 400px;
+    preferred-width: 1000px; preferred-height: 680px;
+    min-width: 640px; min-height: 400px;
+    default-font-family: Theme.font-ui;
     background: Theme.bg-deep;
-
-    // Terminal content
-    in property <string> terminal-output <=> inner.terminal-output;
-    in property <[TerminalSegment]> terminal-segments <=> inner.terminal-segments;
-    in property <int> cursor-row <=> inner.cursor-row;
-    in property <int> cursor-col <=> inner.cursor-col;
-    in property <bool> is-alive <=> inner.is-alive;
-
-    // AI suggestion state
-    in property <string> ai-suggestion <=> inner.ai-suggestion;
-    in property <bool> has-suggestion <=> inner.has-suggestion;
-
-    // AI command bar
-    in-out property <bool> show-ai-bar <=> inner.show-ai-bar;
-    in property <string> ai-generated-command <=> inner.ai-generated-command;
-    in property <bool> ai-generating <=> inner.ai-generating;
-
-    // Ghost autocomplete
-    in property <string> ghost-suggestion <=> inner.ghost-suggestion;
-    in property <int> ghost-row <=> inner.ghost-row;
-    in property <int> ghost-col <=> inner.ghost-col;
-
-    // Dangerous command warning
-    in property <bool> show-danger-warning <=> inner.show-danger-warning;
-    in property <string> danger-message <=> inner.danger-message;
-
-    // Tab state
-    in property <int> tab-count <=> inner.tab-count;
-    in property <int> active-tab <=> inner.active-tab;
-    in property <[TerminalTabData]> tabs <=> inner.tabs;
-
-    // Search state
-    in-out property <bool> show-search <=> inner.show-search;
-    in-out property <string> search-query <=> inner.search-query;
-    in property <int> search-match-count <=> inner.search-match-count;
-    in property <int> search-current-match <=> inner.search-current-match;
-
-    // Split pane state
-    in property <bool> terminal-split-active <=> inner.terminal-split-active;
-    in property <string> terminal-split-output <=> inner.terminal-split-output;
-    in property <int> terminal-split-cursor-row <=> inner.terminal-split-cursor-row;
-    in property <int> terminal-split-cursor-col <=> inner.terminal-split-cursor-col;
-
-    // Profile state
-    in property <string> terminal-profile-name <=> inner.terminal-profile-name;
-    in-out property <bool> terminal-show-profiles <=> inner.terminal-show-profiles;
-
-    // CWD + duration
-    in property <string> current-directory <=> inner.current-directory;
-    in property <string> last-command-duration <=> inner.last-command-duration;
-
-    // Callbacks
-    callback terminal-key-pressed <=> inner.terminal-key-pressed;
-    callback request-ai-help <=> inner.request-ai-help;
-    callback dismiss-suggestion <=> inner.dismiss-suggestion;
-    callback restart-terminal <=> inner.restart-terminal;
-    callback switch-tab <=> inner.switch-tab;
-    callback new-tab <=> inner.new-tab;
-    callback close-tab <=> inner.close-tab;
-    callback search-query-changed <=> inner.search-query-changed;
-    callback search-next <=> inner.search-next;
-    callback search-prev <=> inner.search-prev;
-    callback terminal-split-toggle <=> inner.terminal-split-toggle;
-    callback terminal-switch-pane <=> inner.terminal-switch-pane;
-    callback terminal-split-input <=> inner.terminal-split-input;
-    callback terminal-set-profile <=> inner.terminal-set-profile;
-    callback ai-bar-submit <=> inner.ai-bar-submit;
-    callback ai-run-command <=> inner.ai-run-command;
-    callback accept-ghost <=> inner.accept-ghost;
-    callback danger-proceed <=> inner.danger-proceed;
-    callback danger-cancel <=> inner.danger-cancel;
-    callback explain-line <=> inner.explain-line;
-    callback terminal-area-resized <=> inner.terminal-area-resized;
-
-    inner := TerminalScreen {
-        // Fills the window (no explicit size: Slint forbids width/height next to max-*).
-        // The screen's own layouts may report a bounded maximum (a stretch layout of fixed rows);
-        // the window must still open at its preferred size and grow with the user.
-        max-width: 100000px;
-        max-height: 100000px;
-    }
+    init => { AppIdentity.id = "terminal"; }
+    in property <[SessionTab]> tabs <=> workbench.tabs;
+    in property <[TerminalRun]> runs <=> workbench.runs;
+    in property <string> screen-text <=> workbench.screen-text;
+    in property <string> directory <=> workbench.directory;
+    in property <bool> alive <=> workbench.alive;
+    in property <string> status <=> workbench.status;
+    in property <string> notice <=> workbench.notice;
+    in property <int> cursor-row <=> workbench.cursor-row;
+    in property <int> cursor-col <=> workbench.cursor-col;
+    in property <bool> cursor-visible <=> workbench.cursor-visible;
+    in property <int> scrollback <=> workbench.scrollback;
+    in-out property <int> font-size <=> workbench.font-size;
+    in-out property <bool> show-search <=> workbench.show-search;
+    in-out property <string> query <=> workbench.query;
+    in property <int> match-count <=> workbench.match-count;
+    in property <int> match-index <=> workbench.match-index;
+    in property <int> match-row <=> workbench.match-row;
+    in-out property <bool> show-assistant <=> workbench.show-assistant;
+    in property <string> explanation <=> workbench.explanation;
+    in property <bool> explaining <=> workbench.explaining;
+    in property <bool> confirm-close <=> workbench.confirm-close;
+    in-out property <int> explanation-generation: 0;
+    callback input <=> workbench.input;
+    callback shortcut <=> workbench.shortcut;
+    callback action <=> workbench.action;
+    callback select-tab <=> workbench.select-tab;
+    callback close-tab <=> workbench.close-tab;
+    callback resized <=> workbench.resized;
+    callback scroll <=> workbench.scroll;
+    callback search <=> workbench.search;
+    callback paste-text <=> workbench.paste-text;
+    callback refresh();
+    public function focus-terminal() { workbench.focus-terminal(); }
+    public function copy-screen() { workbench.copy-screen(); }
+    public function paste-clipboard() { workbench.paste-clipboard(); }
+    workbench := TerminalWorkbench { max-width: 100000px; max-height: 100000px; }
 }
