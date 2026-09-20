@@ -183,41 +183,71 @@ fn find_upcoming_meetings(conn: &rusqlite::Connection, now: f64, window_secs: f6
         }
     }
 
-    // Strategy 3: Check the calendar events table directly (if populated)
+    // Strategy 3: ask the machine's calendar what is next.
     if meetings.is_empty() {
-        let cal_query = "
-            SELECT id, summary, start
-            FROM calendar_events
-            WHERE start > datetime('now')
-              AND start < datetime('now', '+30 minutes')
-            ORDER BY start ASC
-            LIMIT 5
-        ";
-
-        if let Ok(mut stmt) = conn.prepare(cal_query) {
-            if let Ok(rows) = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            }) {
-                for row in rows.flatten() {
-                    // Calendar events are stored via Google Calendar API
-                    // Use the entity ID format for consistency
-                    let entity_id = format!("meeting:{}", row.0);
-                    meetings.push(UpcomingMeeting {
-                        entity_id,
-                        title: row.1,
-                        minutes_until: 30, // approximate
-                    });
-                }
-            }
-        }
-        // Silently continue if table doesn't exist
+        meetings.extend(from_the_calendar(window_secs));
     }
 
     meetings
+}
+
+/// The next few events on `calendar-service`, the machine's one calendar.
+///
+/// This used to read a `calendar_events` table in the companion's own database, which only the
+/// companion's old calendar tools ever wrote to — so a meeting put on the calendar by the
+/// Calendar app was one this playbook could not see, and one the mind made was one the app could
+/// not show. There is one calendar now and this reads it.
+///
+/// It asks only when the service is already listening. A playbook is evaluated every think cycle,
+/// and a background loop that spawns a service because it ran is a side effect nobody asked for;
+/// the calendar tools a person actually uses start it, and it stays up after that. When it is
+/// down this contributes nothing, exactly as the empty table did.
+fn from_the_calendar(window_secs: f64) -> Vec<UpcomingMeeting> {
+    use yantrik_ipc_contracts::calendar::{method, CalendarEvent, EventsParams};
+
+    const SERVICE: &str = "calendar";
+    if !yantrik_ipc_transport::service::is_up(SERVICE) {
+        return Vec::new();
+    }
+
+    // The store keeps naive local stamps, so the window is asked for in the same terms.
+    let from = chrono::Local::now().naive_local();
+    let to = from + chrono::Duration::seconds(window_secs as i64);
+    let params = EventsParams {
+        start_date: from.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        end_date: to.format("%Y-%m-%dT%H:%M:%S").to_string(),
+    };
+
+    let client = yantrik_ipc_transport::SyncRpcClient::for_service(SERVICE);
+    let Ok(events) = client.call_typed::<_, Vec<CalendarEvent>>(method::EVENTS, &params) else {
+        return Vec::new();
+    };
+
+    events
+        .into_iter()
+        .filter(|e| !e.is_all_day)
+        .filter_map(|event| {
+            // The real number of minutes, from the event's own start. The old strategy answered
+            // "30" for everything it found, which is a placeholder read out as a measurement.
+            let start = chrono::NaiveDateTime::parse_from_str(&event.start, "%Y-%m-%dT%H:%M:%S")
+                .ok()
+                .or_else(|| {
+                    chrono::NaiveDate::parse_from_str(&event.start, "%Y-%m-%d")
+                        .ok()?
+                        .and_hms_opt(0, 0, 0)
+                })?;
+            let seconds_away = (start - from).num_seconds() as f64;
+            if seconds_away <= 0.0 || seconds_away > window_secs {
+                return None;
+            }
+            Some(UpcomingMeeting {
+                entity_id: format!("meeting:{}", event.id),
+                title: event.title,
+                minutes_until: (seconds_away / 60.0).round().max(0.0) as u32,
+            })
+        })
+        .take(5)
+        .collect()
 }
 
 /// Get display name of a cortex entity.

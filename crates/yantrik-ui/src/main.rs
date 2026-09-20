@@ -126,15 +126,41 @@ fn main() {
         "Ambient animation budget set"
     );
 
+    // Start background services.
+    //
+    // Before the companion rather than after it, which is new. `AppContext::init` below starts
+    // the companion on its own worker thread, and one of the first things that thread does is
+    // move the calendar events the companion's old tools kept to themselves into
+    // calendar-service. That needs a way to start an on-demand service, and this process is the
+    // only one that has one — so the manager and the hook come first. Nothing in `init` or in
+    // `wire_all` depends on the services being down.
+    let service_manager = start_services();
+
+    // Anything in this process that needs an on-demand service can now start it directly.
+    //
+    // An app is a separate process and asks the shell over `app.act start_service`, which is
+    // dispatched onto this thread. The companion is not: it runs on a worker thread here, and
+    // that round trip would leave the process only to come back in and queue behind whatever the
+    // compositor is doing. The manager is the same one the rail reads, so a service started this
+    // way is never described as stopped.
+    {
+        let starter = service_manager.clone();
+        yantrik_ipc_transport::service::set_local_starter(move |id| {
+            // `status` before `start`, the same order the control surface uses: it reaps a child
+            // that has exited, and without it an entry still marked Running short-circuits the
+            // start and the socket never comes back.
+            let _ = starter.status(id);
+            starter.start(id)
+        });
+    }
+
     // Initialize all shared state
     let ctx = app_context::AppContext::init(config, &ui, config_path);
 
     // Wire all callbacks
     wire::wire_all(&ui, &ctx);
 
-    // Start background services
-    let service_manager = start_services();
-    // The machine rail lists these; it needs the manager, which only exists from here.
+    // The machine rail lists the services; it needs the manager.
     wire::services::wire(&ui, service_manager.clone());
 
     // The boot screen's stages, read from the same manager the machine rail reads.

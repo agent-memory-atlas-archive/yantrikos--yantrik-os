@@ -694,8 +694,29 @@ impl CompanionService {
         // Recipe engine tables + built-in templates
         crate::recipe::RecipeStore::ensure_tables(&db.conn());
         crate::recipe_templates::register_all(&db.conn());
-        // Calendar local cache
+        // The table the calendar tools used to keep their own events in, and the one-time move of
+        // whatever is still in it into `calendar-service`, which owns calendar data now. A
+        // machine that never used those tools has nothing to move and this costs it a query.
         crate::calendar::ensure_table(&db.conn());
+        {
+            let moved = crate::calendar::migrate::run(
+                &db.conn(),
+                &crate::calendar::backend::ServiceCalendar,
+            );
+            if !moved.nothing_to_do() {
+                tracing::info!(
+                    pending = moved.pending,
+                    moved = moved.moved,
+                    failed = moved.failed.len(),
+                    "Moved the companion's own calendar events into calendar-service"
+                );
+                for reason in &moved.failed {
+                    // Said out loud rather than counted: an appointment that did not move is one
+                    // the Calendar app still cannot show, and the next start will try again.
+                    tracing::warn!(reason = %reason, "An old calendar event did not move");
+                }
+            }
+        }
         // Vault tables (encrypted credential storage)
         yantrikdb_core::vault::init_tables(&db.conn());
 

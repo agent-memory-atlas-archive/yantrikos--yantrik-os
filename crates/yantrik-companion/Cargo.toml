@@ -14,6 +14,11 @@ yantrikdb-core = { workspace = true }
 yantrik-brain = { workspace = true }
 yantrik-ml = { workspace = true, features = ["api-llm", "claude-cli"] }
 yantrik-os = { workspace = true }
+# The calendar tools are callers of `calendar-service`, not a second calendar. These two carry
+# its typed parameters and the socket, and neither pulls in Slint — the companion runs inside the
+# shell and must not link a widget toolkit to keep an appointment.
+yantrik-ipc-contracts = { workspace = true }
+yantrik-ipc-transport = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

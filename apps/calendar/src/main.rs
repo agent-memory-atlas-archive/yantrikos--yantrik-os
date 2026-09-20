@@ -209,6 +209,10 @@ fn create_event_via_service(title: &str, start: &str, end: &str, notes: &str) ->
         description: notes.to_string(),
         location: None,
         color: String::new(),
+        // The form has no field for either, and this is not the place to add one. They are
+        // carried so the mind's calendar tools — which do accept both — can reach the same store.
+        is_all_day: false,
+        attendees: Vec::new(),
     };
     let result = client
         .call(method::CREATE_EVENT, serde_json::to_value(params).map_err(|e| e.to_string())?)

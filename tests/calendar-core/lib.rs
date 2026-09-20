@@ -25,7 +25,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use yantrik_ipc_contracts::calendar::{
-        CreateEventParams, DeleteEventParams, EventsParams, UpdateEventParams,
+        Attendee, AttendeeStatus, CreateEventParams, DeleteEventParams, EventsParams,
+        UpdateEventParams, UpsertRemoteEventParams,
     };
 
     static ID: AtomicUsize = AtomicUsize::new(0);
@@ -59,6 +60,8 @@ mod tests {
             description: String::new(),
             location: None,
             color: String::new(),
+            is_all_day: false,
+            attendees: Vec::new(),
         }
     }
 
@@ -219,6 +222,232 @@ mod tests {
             .store()
             .update(&UpdateEventParams { id: "nope".into(), ..Default::default() })
             .is_err());
+    }
+
+    // ── One calendar, including the events that came from another one ─
+
+    fn upsert(remote_id: &str, title: &str, start: &str, end: &str) -> UpsertRemoteEventParams {
+        UpsertRemoteEventParams {
+            remote_id: remote_id.into(),
+            title: title.into(),
+            start: start.into(),
+            end: end.into(),
+            description: String::new(),
+            location: None,
+            is_all_day: false,
+            attendees: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn syncing_the_same_remote_event_twice_stores_it_once() {
+        // The companion's Google sync had no idempotent way into this store, so it kept its own
+        // SQLite table instead and the Calendar app never saw a synced event at all. The key is
+        // the id the event has at the far end.
+        let f = Fixture::new();
+        let store = f.store();
+        let first = store
+            .upsert_remote(&upsert("goog-1", "Design review", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        let second = store
+            .upsert_remote(&upsert("goog-1", "Design review", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+
+        assert_eq!(first.id, second.id, "the same remote event keeps the id this store gave it");
+        assert_eq!(store.list(&month(2026, 9, 30)).unwrap().len(), 1, "and there is one of it");
+        assert_eq!(second.remote_id.as_deref(), Some("goog-1"));
+    }
+
+    #[test]
+    fn a_remote_event_that_changed_is_edited_rather_than_duplicated() {
+        let f = Fixture::new();
+        let store = f.store();
+        let first = store
+            .upsert_remote(&upsert("goog-1", "Design review", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        let moved = store
+            .upsert_remote(&upsert("goog-1", "Design review", "2026-09-22T16:00:00", "2026-09-22T17:00:00"))
+            .unwrap();
+
+        assert_eq!(moved.id, first.id);
+        assert_eq!(moved.start, "2026-09-22T16:00:00");
+        let listed = store.list(&month(2026, 9, 30)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].start, "2026-09-22T16:00:00");
+    }
+
+    #[test]
+    fn two_different_remote_events_are_two_events() {
+        let f = Fixture::new();
+        let store = f.store();
+        store.upsert_remote(&upsert("goog-1", "One", "2026-09-22T09:00:00", "2026-09-22T10:00:00")).unwrap();
+        store.upsert_remote(&upsert("goog-2", "Two", "2026-09-22T11:00:00", "2026-09-22T12:00:00")).unwrap();
+        assert_eq!(store.list(&month(2026, 9, 30)).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_synced_event_is_listed_like_any_other_so_the_app_can_show_it() {
+        let f = Fixture::new();
+        let store = f.store();
+        store
+            .upsert_remote(&upsert("goog-1", "Design review", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        let listed = store.list(&month(2026, 9, 30)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "Design review");
+    }
+
+    #[test]
+    fn editing_a_remote_event_does_not_orphan_it_from_the_calendar_it_came_from() {
+        // If an edit dropped the remote id, the next sync would see an event it had never been
+        // told about and store a second copy beside this one.
+        let f = Fixture::new();
+        let store = f.store();
+        let synced = store
+            .upsert_remote(&upsert("goog-1", "Design review", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+
+        let edited = store
+            .update(&UpdateEventParams {
+                id: synced.id.clone(),
+                title: Some("Design review (moved)".into()),
+                start: Some("2026-09-22T16:00:00".into()),
+                end: Some("2026-09-22T17:00:00".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(edited.remote_id.as_deref(), Some("goog-1"));
+
+        // And a re-sync still finds it rather than storing a second one.
+        store
+            .upsert_remote(&upsert("goog-1", "Design review", "2026-09-22T16:00:00", "2026-09-22T17:00:00"))
+            .unwrap();
+        assert_eq!(store.list(&month(2026, 9, 30)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_event_made_here_can_be_told_which_remote_event_it_became() {
+        // The other direction: the mind creates an event, pushes it to Google, and records the id
+        // it got there, so the next pull recognises it.
+        let f = Fixture::new();
+        let store = f.store();
+        let made = store.create(&create("Retro", "2026-09-22T14:00:00", "2026-09-22T15:00:00")).unwrap();
+        assert_eq!(made.remote_id, None);
+
+        store
+            .update(&UpdateEventParams {
+                id: made.id.clone(),
+                remote_id: Some("goog-9".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let resynced = store
+            .upsert_remote(&upsert("goog-9", "Retro", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        assert_eq!(resynced.id, made.id);
+        assert_eq!(store.list(&month(2026, 9, 30)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_upsert_without_a_remote_id_is_refused_rather_than_stored_unkeyed() {
+        let f = Fixture::new();
+        assert!(f
+            .store()
+            .upsert_remote(&upsert("  ", "Nameless", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .is_err());
+    }
+
+    // ── What a create can carry ──────────────────────────────────────
+
+    #[test]
+    fn an_all_day_event_is_stored_as_one() {
+        // The mind's calendar tool accepted `all_day` long before this store had anywhere to put
+        // it, so an all-day event asked for by the mind was kept as a timed one.
+        let f = Fixture::new();
+        let store = f.store();
+        let mut params = create("Company holiday", "2026-09-23T00:00:00", "2026-09-23T23:59:59");
+        params.is_all_day = true;
+        let saved = store.create(&params).unwrap();
+        assert!(saved.is_all_day);
+        assert!(store.list(&month(2026, 9, 30)).unwrap()[0].is_all_day);
+    }
+
+    #[test]
+    fn attendees_and_a_location_survive_the_round_trip() {
+        let f = Fixture::new();
+        let store = f.store();
+        let mut params = create("Launch review", "2026-09-22T14:00:00", "2026-09-22T15:00:00");
+        params.location = Some("Studio".into());
+        params.attendees = vec![
+            Attendee { name: "Ana".into(), email: "ana@example.com".into(), status: AttendeeStatus::Pending },
+            Attendee { name: String::new(), email: "bo@example.com".into(), status: AttendeeStatus::Accepted },
+        ];
+        store.create(&params).unwrap();
+
+        // Read back through a fresh store, which is the service restarting.
+        let listed = f.store().list(&month(2026, 9, 30)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].location.as_deref(), Some("Studio"));
+        assert_eq!(listed[0].attendees.len(), 2);
+        assert_eq!(listed[0].attendees[0].name, "Ana");
+        assert_eq!(listed[0].attendees[1].email, "bo@example.com");
+        assert_eq!(listed[0].attendees[1].status, AttendeeStatus::Accepted);
+    }
+
+    #[test]
+    fn a_create_that_says_nothing_about_them_stores_neither() {
+        let f = Fixture::new();
+        let saved = f
+            .store()
+            .create(&create("Plain", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        assert!(!saved.is_all_day);
+        assert!(saved.attendees.is_empty());
+    }
+
+    #[test]
+    fn an_update_can_change_the_new_fields_and_leaves_them_alone_when_it_does_not() {
+        let f = Fixture::new();
+        let store = f.store();
+        let mut params = create("Review", "2026-09-22T14:00:00", "2026-09-22T15:00:00");
+        params.attendees = vec![Attendee {
+            name: "Ana".into(),
+            email: "ana@example.com".into(),
+            status: AttendeeStatus::Pending,
+        }];
+        let saved = store.create(&params).unwrap();
+
+        let all_day = store
+            .update(&UpdateEventParams {
+                id: saved.id.clone(),
+                is_all_day: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(all_day.is_all_day);
+        assert_eq!(all_day.attendees.len(), 1, "an update that said nothing about them kept them");
+
+        let renamed = store
+            .update(&UpdateEventParams {
+                id: saved.id.clone(),
+                title: Some("Release review".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(renamed.is_all_day, "and kept the flag the previous update set");
+    }
+
+    #[test]
+    fn the_create_request_the_app_sends_is_still_read_by_a_service_that_gained_fields() {
+        // The new fields default, so the Calendar app's request — which carries neither — is
+        // parsed exactly as it was before them.
+        let bare = serde_json::json!({
+            "title": "Dentist", "start": "2026-09-22T10:00:00", "end": "2026-09-22T11:00:00"
+        });
+        let read: CreateEventParams = serde_json::from_value(bare).unwrap();
+        assert!(!read.is_all_day);
+        assert!(read.attendees.is_empty());
     }
 
     // ── What the store refuses ───────────────────────────────────────

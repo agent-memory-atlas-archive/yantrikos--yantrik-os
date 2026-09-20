@@ -9,6 +9,7 @@
 pub mod protocol;
 pub mod server;
 pub mod client;
+pub mod service;
 pub mod sync_client;
 
 pub use protocol::{RpcRequest, RpcResponse, RpcError, RPC_PARSE_ERROR, RPC_METHOD_NOT_FOUND, RPC_INTERNAL_ERROR};

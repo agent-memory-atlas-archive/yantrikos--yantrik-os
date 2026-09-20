@@ -2,6 +2,21 @@
 //!
 //! Reuses the email account's OAuth2 tokens (same Google Cloud project).
 //! All operations are blocking — runs on companion worker thread.
+//!
+//! This file used to be two things: a Google client, and a second calendar. The second calendar
+//! was the `calendar_events` table below — `create_local_event`, `get_cached_events` and the rest
+//! — which the mind's tools wrote to and read from while the Calendar app read
+//! `calendar-service`. Neither could see the other's appointments.
+//!
+//! The store is gone. `backend` reaches `calendar-service`, which owns calendar data; `sync`
+//! pulls Google through it so a remote event lands where the app looks; `migrate` carries the
+//! rows the old tools wrote across, once. `ensure_table` stays only so the migration has a table
+//! to read on a machine that used those tools, and nothing lists events from it.
+
+pub mod backend;
+pub mod migrate;
+pub mod stamps;
+pub mod sync;
 
 use crate::config::EmailAccountConfig;
 use crate::email;
@@ -262,9 +277,17 @@ pub fn update_event(
     })
 }
 
-// ── Local SQLite Cache ──
+// ── The table the companion used to keep a calendar in ──
 
-/// Create the calendar_events table for local caching.
+/// Create the `calendar_events` table if it is not there.
+///
+/// It is not a calendar any more. It was: `calendar_create_event` wrote a row here and
+/// `calendar_today` read rows back, which is how the machine came to have two calendars that
+/// never saw each other. `calendar-service` owns events now.
+///
+/// The table is still created, and only for `migrate`: on a machine that used the old tools it
+/// holds appointments that have to be carried across, and the migration's query needs somewhere
+/// to look on a machine that did not. Nothing lists events from it.
 pub fn ensure_table(conn: &rusqlite::Connection) {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS calendar_events (
@@ -282,225 +305,10 @@ pub fn ensure_table(conn: &rusqlite::Connection) {
         );
         CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start);"
     ).ok();
-    // Migrate: add source column if missing (existing installs)
+    // Older installs predate the column the migration reads to tell a locally made event from a
+    // cached Google one. Adding it to a table that already has it fails, which is the check.
     conn.execute("ALTER TABLE calendar_events ADD COLUMN source TEXT NOT NULL DEFAULT 'google'", []).ok();
-}
-
-/// Create an event in local SQLite only (no API call).
-/// Returns the created CalEvent with a local UUID.
-pub fn create_local_event(
-    conn: &rusqlite::Connection,
-    summary: &str,
-    start: &str,
-    end: &str,
-    description: Option<&str>,
-    location: Option<&str>,
-    is_all_day: bool,
-) -> CalEvent {
-    let id = format!("local_{}", uuid_v4());
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-
-    conn.execute(
-        "INSERT OR REPLACE INTO calendar_events (id, summary, description, location, start, end, is_all_day, status, html_link, cached_at, source)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'confirmed', NULL, ?8, 'local')",
-        rusqlite::params![
-            id, summary, description, location,
-            start, end, is_all_day as i32, now,
-        ],
-    ).ok();
-
-    CalEvent {
-        id,
-        summary: summary.to_string(),
-        description: description.map(|s| s.to_string()),
-        location: location.map(|s| s.to_string()),
-        start: start.to_string(),
-        end: end.to_string(),
-        is_all_day,
-        status: "confirmed".to_string(),
-        html_link: None,
-    }
-}
-
-/// Update a local event in SQLite.
-pub fn update_local_event(
-    conn: &rusqlite::Connection,
-    event_id: &str,
-    summary: Option<&str>,
-    start: Option<&str>,
-    end: Option<&str>,
-    description: Option<&str>,
-    location: Option<&str>,
-) -> Result<CalEvent, String> {
-    // Build dynamic UPDATE
-    let mut sets = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-    if let Some(s) = summary {
-        sets.push("summary = ?");
-        params.push(Box::new(s.to_string()));
-    }
-    if let Some(s) = start {
-        sets.push("start = ?");
-        params.push(Box::new(s.to_string()));
-    }
-    if let Some(e) = end {
-        sets.push("end = ?");
-        params.push(Box::new(e.to_string()));
-    }
-    if let Some(d) = description {
-        sets.push("description = ?");
-        params.push(Box::new(d.to_string()));
-    }
-    if let Some(l) = location {
-        sets.push("location = ?");
-        params.push(Box::new(l.to_string()));
-    }
-
-    if sets.is_empty() {
-        return Err("No fields to update".to_string());
-    }
-
-    let sql = format!(
-        "UPDATE calendar_events SET {} WHERE id = ?",
-        sets.join(", ")
-    );
-    params.push(Box::new(event_id.to_string()));
-
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    conn.execute(&sql, param_refs.as_slice())
-        .map_err(|e| format!("Failed to update local event: {}", e))?;
-
-    // Read back
-    get_local_event(conn, event_id)
-        .ok_or_else(|| format!("Event {} not found after update", event_id))
-}
-
-/// Delete a local event from SQLite.
-pub fn delete_local_event(conn: &rusqlite::Connection, event_id: &str) -> Result<(), String> {
-    let rows = conn.execute(
-        "DELETE FROM calendar_events WHERE id = ?1",
-        rusqlite::params![event_id],
-    ).map_err(|e| format!("Failed to delete local event: {}", e))?;
-
-    if rows == 0 {
-        Err(format!("Event {} not found", event_id))
-    } else {
-        Ok(())
-    }
-}
-
-/// Get a single event from local SQLite by ID.
-pub fn get_local_event(conn: &rusqlite::Connection, event_id: &str) -> Option<CalEvent> {
-    conn.query_row(
-        "SELECT id, summary, description, location, start, end, is_all_day, status, html_link
-         FROM calendar_events WHERE id = ?1",
-        rusqlite::params![event_id],
-        |row| Ok(CalEvent {
-            id: row.get(0)?,
-            summary: row.get(1)?,
-            description: row.get(2)?,
-            location: row.get(3)?,
-            start: row.get(4)?,
-            end: row.get(5)?,
-            is_all_day: row.get::<_, i32>(6)? != 0,
-            status: row.get(7)?,
-            html_link: row.get(8)?,
-        }),
-    ).ok()
-}
-
-/// Simple UUID v4 generator (no external dep).
-fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-        (seed & 0xFFFFFFFF) as u32,
-        ((seed >> 32) & 0xFFFF) as u16,
-        ((seed >> 48) & 0x0FFF) as u16,
-        (((seed >> 60) & 0x3F) | 0x80) as u16,
-        (seed >> 64) as u64 & 0xFFFFFFFFFFFF,
-    )
-}
-
-/// Cache a list of events into the local SQLite table.
-/// Replaces all events within the given date range.
-pub fn cache_events(conn: &rusqlite::Connection, events: &[CalEvent], time_min: &str, time_max: &str) {
-    // Delete existing events in this range
-    conn.execute(
-        "DELETE FROM calendar_events WHERE start >= ?1 AND start <= ?2",
-        rusqlite::params![time_min, time_max],
-    ).ok();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-
-    for e in events {
-        conn.execute(
-            "INSERT OR REPLACE INTO calendar_events (id, summary, description, location, start, end, is_all_day, status, html_link, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                e.id, e.summary, e.description, e.location,
-                e.start, e.end, e.is_all_day as i32, e.status,
-                e.html_link, now,
-            ],
-        ).ok();
-    }
-}
-
-/// Read cached events from the local SQLite table within a date range.
-pub fn get_cached_events(
-    conn: &rusqlite::Connection,
-    time_min: &str,
-    time_max: &str,
-) -> Vec<CalEvent> {
-    let mut stmt = match conn.prepare(
-        "SELECT id, summary, description, location, start, end, is_all_day, status, html_link
-         FROM calendar_events
-         WHERE start >= ?1 AND start <= ?2 AND status != 'cancelled'
-         ORDER BY start ASC"
-    ) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-
-    stmt.query_map(rusqlite::params![time_min, time_max], |row| {
-        Ok(CalEvent {
-            id: row.get(0)?,
-            summary: row.get(1)?,
-            description: row.get(2)?,
-            location: row.get(3)?,
-            start: row.get(4)?,
-            end: row.get(5)?,
-            is_all_day: row.get::<_, i32>(6)? != 0,
-            status: row.get(7)?,
-            html_link: row.get(8)?,
-        })
-    })
-    .ok()
-    .map(|rows| rows.flatten().collect())
-    .unwrap_or_default()
-}
-
-/// Get the timestamp of the most recent cache update.
-pub fn cache_age_secs(conn: &rusqlite::Connection) -> f64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-
-    let cached_at: f64 = conn.query_row(
-        "SELECT MAX(cached_at) FROM calendar_events",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0.0);
-
-    if cached_at == 0.0 { f64::MAX } else { now - cached_at }
+    migrate::ensure_marker_table(conn);
 }
 
 // ── Helpers ──

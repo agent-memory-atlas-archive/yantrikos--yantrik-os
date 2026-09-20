@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDateTime;
 use yantrik_ipc_contracts::calendar::{
-    CalendarEvent, CreateEventParams, EventsParams, UpdateEventParams,
+    CalendarEvent, CreateEventParams, EventsParams, UpdateEventParams, UpsertRemoteEventParams,
 };
 use yantrik_ipc_contracts::email::ServiceError;
 
@@ -71,6 +71,31 @@ impl EventStore {
         self.read_event(&self.event_path(id))
     }
 
+    /// Every event on disk, in no particular order. The whole directory.
+    ///
+    /// Only [`Self::find_by_remote_id`] uses this, and only because a remote id is not a filename:
+    /// the store is keyed by the id it gave the event, and a sync arrives holding the other one.
+    /// A calendar is tens to hundreds of small files, so the scan is cheaper than a second index
+    /// that could disagree with the files.
+    fn all_events(&self) -> Vec<CalendarEvent> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .filter_map(|p| self.read_event(&p))
+            .collect()
+    }
+
+    /// The stored event carrying this remote id, if the machine has already seen it.
+    pub fn find_by_remote_id(&self, remote_id: &str) -> Option<CalendarEvent> {
+        self.all_events()
+            .into_iter()
+            .find(|e| e.remote_id.as_deref() == Some(remote_id))
+    }
+
     /// Every event overlapping the requested range, oldest first.
     ///
     /// Overlap, not containment: an event that starts before the range and ends inside it is on
@@ -130,12 +155,67 @@ impl EventStore {
             description: params.description.clone(),
             start: params.start.clone(),
             end: params.end.clone(),
-            is_all_day: false,
+            is_all_day: params.is_all_day,
             location: params.location.clone(),
-            attendees: Vec::new(),
+            attendees: params.attendees.clone(),
             recurrence: None,
             calendar_id: "default".to_string(),
             remote_id: None,
+        };
+        self.write_event(&event)?;
+        Ok(event)
+    }
+
+    /// Store an event that belongs to a remote calendar, once, under the id it has out there.
+    ///
+    /// Idempotent by `remote_id`: the first call stores it and gives it an id of ours, every call
+    /// after that edits the same file. Without this, the only way in was `create`, and syncing a
+    /// week twice would have left two of every event — which is the shape the companion's private
+    /// SQLite cache was hiding rather than solving.
+    ///
+    /// The stored id is never changed, because other things may already point at it.
+    pub fn upsert_remote(
+        &self,
+        params: &UpsertRemoteEventParams,
+    ) -> Result<CalendarEvent, ServiceError> {
+        if params.remote_id.trim().is_empty() {
+            return Err(bad_request("`remote_id` is empty"));
+        }
+        let title = params.title.trim();
+        if title.is_empty() {
+            return Err(bad_request("`title` is empty"));
+        }
+        let start = parse_iso_datetime(&params.start)
+            .ok_or_else(|| bad_request(format!("`start` is not a date and time: {}", params.start)))?;
+        let end = parse_iso_datetime(&params.end)
+            .ok_or_else(|| bad_request(format!("`end` is not a date and time: {}", params.end)))?;
+        if end < start {
+            return Err(bad_request(format!(
+                "`end` ({}) is before `start` ({})",
+                params.end, params.start
+            )));
+        }
+
+        let existing = self.find_by_remote_id(&params.remote_id);
+        let event = CalendarEvent {
+            // Keep the id the store already gave it; only a first sight mints one.
+            id: existing
+                .as_ref()
+                .map(|e| e.id.clone())
+                .unwrap_or_else(|| uuid7::uuid7().to_string()),
+            title: title.to_string(),
+            description: params.description.clone(),
+            start: params.start.clone(),
+            end: params.end.clone(),
+            is_all_day: params.is_all_day,
+            location: params.location.clone(),
+            attendees: params.attendees.clone(),
+            recurrence: existing.as_ref().and_then(|e| e.recurrence.clone()),
+            calendar_id: existing
+                .as_ref()
+                .map(|e| e.calendar_id.clone())
+                .unwrap_or_else(|| "default".to_string()),
+            remote_id: Some(params.remote_id.clone()),
         };
         self.write_event(&event)?;
         Ok(event)
@@ -174,6 +254,19 @@ impl EventStore {
         }
         if let Some(v) = &params.location {
             event.location = Some(v.clone());
+        }
+        if let Some(v) = params.is_all_day {
+            event.is_all_day = v;
+        }
+        if let Some(v) = &params.attendees {
+            event.attendees = v.clone();
+        }
+        // Set once, when a locally made event has just been pushed out to a remote calendar and
+        // has an id there. An update that does not mention it leaves it alone, so editing a synced
+        // event does not quietly orphan it from the calendar it came from — which would show up
+        // on the next sync as a duplicate rather than as the edit it was.
+        if let Some(v) = &params.remote_id {
+            event.remote_id = Some(v.clone());
         }
 
         self.write_event(&event)?;
