@@ -1,8 +1,15 @@
 //! Yantrik System Monitor — standalone app binary.
 //!
 //! Polls `system-monitor` service via JSON-RPC IPC every 2 seconds.
-//! Falls back to local `sysinfo` crate if the service is unavailable.
+//! Falls back to the local `sysinfo` crate if the service is unavailable, and says so — on
+//! screen and in `describe` — because a reading taken by the fallback is not the same reading.
 
+mod outcome;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use outcome::{Liveness, Observed, Provenance, Signal, Source};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use yantrik_app_runtime::prelude::*;
 use yantrik_ipc_contracts::system_monitor::{
@@ -11,6 +18,27 @@ use yantrik_ipc_contracts::system_monitor::{
 use yantrik_ipc_transport::SyncRpcClient;
 
 slint::include_modules!();
+
+/// What the window currently cannot do, and what it currently cannot measure.
+///
+/// Both belong on the same one-line strip and neither may overwrite the other, so they are held
+/// apart here and composed on the way to the screen. Shared by the poll timer, the kill path and
+/// `describe`, all three of which run on the UI thread — the control surface's closures are
+/// dispatched there on purpose (see `control.rs`, "Threading"), so an `Rc` is the right handle.
+#[derive(Default)]
+struct Status {
+    /// Where the numbers on screen came from, as of the most recent poll.
+    reading: Option<Provenance>,
+    /// Why the last thing someone asked for could not be done. Cleared by the next one that can.
+    failure: Option<String>,
+}
+
+/// Put the two kinds of bad news on screen, and nothing when there is none.
+fn show_status(ui: &SystemMonitorApp, status: &Rc<RefCell<Status>>) {
+    let state = status.borrow();
+    let degraded = state.reading.as_ref().and_then(|p| p.notice());
+    ui.set_notice(outcome::compose_notice(state.failure.as_deref(), degraded.as_deref()).into());
+}
 
 /// Fill the agent rail from the numbers already on screen.
 ///
@@ -72,7 +100,10 @@ fn main() {
     app.global::<ThemeMode>().set_dark(theme.dark);
     app.global::<AccentPreset>().set_index(theme.accent_index);
 
-    wire(&app);
+    // Held for the life of the window: a dropped Slint timer stops. This one was bound inside
+    // `wire` and dropped at the end of it, so the window took its readings once at startup and
+    // then showed them, unchanging, for as long as it was open.
+    let _refresh_timer = wire(&app);
     // ── The agent layer ──
     {
         let weak = app.as_weak();
@@ -81,27 +112,14 @@ fn main() {
             if id != "explain" {
                 return;
             }
-            // The readings, handed over as readings. Describing them in prose first and asking the
-            // model to re-derive them is how a monitor starts reporting numbers nobody measured.
-            let facts = format!(
-                "CPU {:.0}%, memory {} of {}, health {} ({})",
-                ui.get_cpu_usage(),
-                ui.get_memory_used_text(),
-                ui.get_memory_total_text(),
-                ui.get_health_status(),
-                ui.get_health_summary()
-            );
+            // The same question the header's AI Explain asks, from the same readings.
+            let prompt = machine_question(&ui);
             ui.set_proposal_working(true);
             ui.set_proposal(AgentProposal {
                 title: "The machine right now".into(),
                 source: "from the current readings".into(),
                 ..Default::default()
             });
-            let prompt = format!(
-                "Here are my machine's readings: {facts}. In at most three short lines say whether \
-                 anything needs attention and why. Use only these numbers; do not guess at causes \
-                 you cannot see."
-            );
             let back = ui.as_weak();
             std::thread::spawn(move || {
                 let outcome = companion::ask(&prompt);
@@ -457,6 +475,125 @@ fn apply_processes(ui: &SystemMonitorApp, procs: &[ProcessInfo]) {
     ui.set_processes(ModelRc::new(VecModel::from(items)));
 }
 
+// ── Ending a process ─────────────────────────────────────────────────
+//
+// One path, three doors: the End button, the Force Kill button, and the `kill_process` action.
+//
+// Before this existed they were three different stories. The action invoked the button's
+// callback and answered `{"killed": pid}` regardless of what happened next; the callback logged
+// a tracing warning when the service refused and then retried locally in silence; the force
+// callback skipped the service and dropped the return value of the kill outright. So a caller
+// was told a process had ended whether the service, the fallback, or neither had managed it,
+// and the person at the window was told nothing at all either way.
+
+/// End a process and report what was observed to happen to it.
+///
+/// The result is returned to whoever asked and, either way, shown on screen — so the agent and
+/// the person cannot come away with different accounts of the same kill. This is Download
+/// Manager's `settle()` arrangement, applied to the one action here that cannot be undone.
+fn end_process(
+    ui: &SystemMonitorApp,
+    status: &Rc<RefCell<Status>>,
+    pid: i32,
+    force: bool,
+) -> Result<Observed, String> {
+    let outcome = kill_and_verify(ui, pid, force);
+    match &outcome {
+        Ok(observed) => {
+            tracing::info!("{}", observed.sentence());
+            status.borrow_mut().failure = None;
+        }
+        Err(reason) => {
+            tracing::warn!("Kill failed: {reason}");
+            status.borrow_mut().failure = Some(reason.clone());
+        }
+    }
+    show_status(ui, status);
+    outcome
+}
+
+/// Signal a process, then look at the process table to find out whether it worked.
+fn kill_and_verify(ui: &SystemMonitorApp, pid: i32, force: bool) -> Result<Observed, String> {
+    let pid = outcome::checked_pid(pid)?;
+    let name = process_name(ui, pid);
+
+    // Nothing to signal. `kill(2)` would fail with ESRCH anyway, but the old local fallback
+    // swallowed that — `sys.process(...)` returning `None` simply did nothing — so ending a pid
+    // that was never there reported the same success as ending a real one.
+    if outcome::liveness(pid) == Liveness::Gone {
+        return Err(format!("no process {pid} is running"));
+    }
+
+    let signal = if force { Signal::Kill } else { Signal::Term };
+    let via = deliver(pid, signal)?;
+    let (exited, waited_ms) = outcome::wait_until_gone(
+        pid,
+        outcome::VERIFY_BUDGET,
+        outcome::VERIFY_STEP,
+        outcome::liveness,
+    );
+    outcome::classify(pid, &name, signal, via, exited, waited_ms)
+}
+
+/// Send the signal by the service if it will take it, and by this process if it will not.
+///
+/// The service runs the same `kill(2)` this does, so the local path is a genuine fallback and
+/// not a lesser one — but which of the two did it is part of the answer, because a machine whose
+/// system-monitor service is dead is a machine whose owner should hear about it.
+fn deliver(pid: u32, signal: Signal) -> Result<Source, String> {
+    let mut service_refused = None;
+
+    // `sysmon.kill_process` takes a pid and no signal, and sends SIGTERM (see
+    // services/system-monitor-service). A forced kill therefore has no service path to try, and
+    // pretending otherwise would send a SIGTERM while answering SIGKILL.
+    if signal == Signal::Term {
+        match kill_process_via_service(pid) {
+            Ok(()) => return Ok(Source::Service),
+            Err(e) => {
+                tracing::warn!("Kill process {pid} via service failed: {e}");
+                service_refused = Some(e);
+            }
+        }
+    }
+
+    match signal_locally(pid, signal) {
+        Ok(()) => Ok(Source::Local),
+        Err(local) => Err(match service_refused {
+            Some(service) => format!("{local} (the service did not take it either: {service})"),
+            None => local,
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn signal_locally(pid: u32, signal: Signal) -> Result<(), String> {
+    let number = match signal {
+        Signal::Term => libc::SIGTERM,
+        Signal::Kill => libc::SIGKILL,
+    };
+    if unsafe { libc::kill(pid as libc::pid_t, number) } == 0 {
+        Ok(())
+    } else {
+        Err(outcome::signal_failure(pid, &std::io::Error::last_os_error()))
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_locally(pid: u32, signal: Signal) -> Result<(), String> {
+    Err(format!("this build cannot send {} to {pid}", signal.as_str()))
+}
+
+/// What the process list is calling this pid, so the answer says what was ended and not only
+/// which number. The list is the top hundred, so a pid outside it has no name here.
+fn process_name(ui: &SystemMonitorApp, pid: u32) -> String {
+    let procs = ui.get_processes();
+    (0..procs.row_count())
+        .filter_map(|i| procs.row_data(i))
+        .find(|p| p.pid == pid as i32)
+        .map(|p| p.name.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 // ── Wire all callbacks ───────────────────────────────────────────────
 
 // ── The control surface ──────────────────────────────────────────────
@@ -468,11 +605,12 @@ fn apply_processes(ui: &SystemMonitorApp, procs: &[ProcessInfo]) {
 // `kill_process` is published as `dangerous`. Every other action here is a view change; this one
 // ends someone's work, and the caller's ceiling should have to allow it explicitly.
 
-fn publish_control(app: &SystemMonitorApp) {
+fn publish_control(app: &SystemMonitorApp, status: Rc<RefCell<Status>>) {
     use yantrik_app_runtime::control::{Action, App, Param, View};
 
     let describe = {
         let weak = app.as_weak();
+        let status = status.clone();
         move || {
             let Some(ui) = weak.upgrade() else {
                 return View::new("System Monitor — closing");
@@ -517,10 +655,15 @@ fn publish_control(app: &SystemMonitorApp) {
                 .map(|n| {
                     serde_json::json!({
                         "name": n.name.to_string(),
-                        "ip": n.ip_address.to_string(),
+                        // Null, not "". Neither the service's snapshot nor `sysinfo` carries an
+                        // address — `NetworkInterface` in the contract has no field for one — so
+                        // this is a thing nobody has measured, not an interface with no address.
+                        "ip": outcome::measured(&n.ip_address),
                     })
                 })
                 .collect();
+
+            let reading = status.borrow().reading.clone().unwrap_or_else(Provenance::service);
 
             let summary = format!(
                 "System — {health}, CPU {cpu:.0}%, memory {mem:.0}% ({} of {}), up {}",
@@ -530,11 +673,30 @@ fn publish_control(app: &SystemMonitorApp) {
             );
 
             View::new(summary)
+                // Where every number above came from. A caller acting on these readings is
+                // entitled to know that the service answered them, because when it did not, the
+                // fallback's blind spots (the CPU model, the interface addresses) used to arrive
+                // looking exactly like measurements.
+                .with("source", reading.source.as_str())
+                .with("degraded", reading.degraded())
+                .with(
+                    "degraded_reason",
+                    reading
+                        .reason
+                        .as_deref()
+                        .map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null),
+                )
+                // Said twice: this is the same text the person is looking at on the strip.
+                .with("notice", ui.get_notice().to_string())
                 .with("health", health)
                 .with("health_score", ui.get_health_score() as f64)
                 .with("health_summary", ui.get_health_summary().to_string())
                 .with("cpu_percent", (cpu * 10.0).round() as f64 / 10.0)
-                .with("cpu_model", ui.get_cpu_model().to_string())
+                // Also null when nothing has measured it, which today is always: the snapshot
+                // contract has no model string in it, so neither path can fill this in. It was
+                // reported as `""`, and an audit read that as a CPU whose model is empty.
+                .with("cpu_model", outcome::measured(&ui.get_cpu_model()))
                 .with("load_average", serde_json::json!([
                     ui.get_load_avg_1().to_string(),
                     ui.get_load_avg_5().to_string(),
@@ -558,6 +720,7 @@ fn publish_control(app: &SystemMonitorApp) {
     let sort_ui = ui_for.clone();
     let search_ui = ui_for.clone();
     let kill_ui = ui_for;
+    let kill_status = status;
 
     App::new("system-monitor")
         .describe(describe)
@@ -597,61 +760,58 @@ fn publish_control(app: &SystemMonitorApp) {
             move |args| {
                 let ui = kill_ui()?;
                 let pid = args["pid"].as_i64().ok_or("`pid` must be a number")? as i32;
-                if pid <= 1 {
-                    return Err(format!("{pid} is not a process this app should end"));
-                }
-                // Named from the list we are showing, so the answer says what was ended rather
-                // than only which number.
-                let procs = ui.get_processes();
-                let name = (0..procs.row_count())
-                    .filter_map(|i| procs.row_data(i))
-                    .find(|p| p.pid == pid)
-                    .map(|p| p.name.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-
-                if args["force"].as_bool().unwrap_or(false) {
-                    ui.invoke_force_kill_process(pid);
-                    Ok(serde_json::json!({ "killed": pid, "name": name, "signal": "SIGKILL" }))
-                } else {
-                    ui.invoke_kill_process(pid);
-                    Ok(serde_json::json!({ "killed": pid, "name": name, "signal": "SIGTERM" }))
-                }
+                let force = args["force"].as_bool().unwrap_or(false);
+                // The same call the End and Force Kill buttons make. It does not return until
+                // the process table has been read back, so `Ok` here means the pid is gone and
+                // an `Err` names which of the ways it can fail happened.
+                end_process(&ui, &kill_status, pid, force).map(|observed| observed.json())
             },
         )
         .serve();
 }
 
-fn wire(app: &SystemMonitorApp) {
-    // Initial snapshot
-    let snap = snapshot_via_service().unwrap_or_else(|_| snapshot_local());
-    apply_snapshot(app, &snap);
+/// One round of readings, and a note of where they came from.
+///
+/// The fallback used to be written `snapshot_via_service().unwrap_or_else(|_| snapshot_local())`,
+/// which threw away both the reason and the fact that it had happened. It is worth keeping — a
+/// monitor that goes blank because a service died is worse than one reading its own `sysinfo` —
+/// but only as long as it is visible, so the value and the provenance now arrive together.
+fn poll(ui: &SystemMonitorApp, status: &Rc<RefCell<Status>>, sort: &str, limit: u32) {
+    let (snap, from_snapshot) = outcome::reading(snapshot_via_service(), snapshot_local);
+    apply_snapshot(ui, &snap);
 
-    let procs = processes_via_service("cpu", 50).unwrap_or_else(|_| processes_local("cpu", 50));
-    apply_processes(app, &procs);
+    let (mut procs, from_processes) =
+        outcome::reading(processes_via_service(sort, limit), || processes_local(sort, limit));
+    let filter = ui.get_process_search().to_string();
+    if !filter.is_empty() {
+        let lower = filter.to_lowercase();
+        procs.retain(|p| p.name.to_lowercase().contains(&lower));
+    }
+    apply_processes(ui, &procs);
+
+    status.borrow_mut().reading = Some(outcome::worse(from_snapshot, from_processes));
+    show_status(ui, status);
+}
+
+fn wire(app: &SystemMonitorApp) -> Timer {
+    let status = Rc::new(RefCell::new(Status::default()));
+
+    // Initial readings, before the surface is published.
+    poll(app, &status, "cpu", 50);
 
     // Polling timer — every 2 seconds
     // Published before the poll starts; the first `app.describe` may catch a fresh window, and
     // reporting zeroes honestly is better than delaying the surface for two seconds.
-    publish_control(app);
+    publish_control(app, status.clone());
 
     let timer = Timer::default();
     let weak = app.as_weak();
+    let poll_status = status.clone();
     timer.start(TimerMode::Repeated, std::time::Duration::from_secs(2), move || {
         let Some(ui) = weak.upgrade() else { return };
-        let snap = snapshot_via_service().unwrap_or_else(|_| snapshot_local());
-        apply_snapshot(&ui, &snap);
-
         let sort = if ui.get_sort_column() == 1 { "mem" } else { "cpu" };
-        let filter = ui.get_process_search().to_string();
-        let mut procs = processes_via_service(sort, 100).unwrap_or_else(|_| processes_local(sort, 100));
-        if !filter.is_empty() {
-            let lower = filter.to_lowercase();
-            procs.retain(|p| p.name.to_lowercase().contains(&lower));
-        }
-        apply_processes(&ui, &procs);
+        poll(&ui, &poll_status, sort, 100);
     });
-    // Keep timer alive
-    let _keep = std::rc::Rc::new(timer);
 
     // Sort column changed
     {
@@ -670,34 +830,91 @@ fn wire(app: &SystemMonitorApp) {
         });
     }
 
-    // Kill process
+    // End / Force Kill
+    //
+    // Both buttons go through the same `end_process` the `kill_process` action calls. The result
+    // is discarded here because the notice strip is where a button reports itself, and
+    // `end_process` has already written it.
     {
+        let weak = app.as_weak();
+        let status = status.clone();
         app.on_kill_process(move |pid| {
-            if pid <= 0 { return; }
-            if let Err(e) = kill_process_via_service(pid as u32) {
-                tracing::warn!("Kill process {} via service failed: {}", pid, e);
-                // Local fallback: attempt sysinfo kill
-                let sys = sysinfo::System::new_all();
-                if let Some(proc) = sys.process(sysinfo::Pid::from_u32(pid as u32)) {
-                    proc.kill();
-                }
-            }
+            let Some(ui) = weak.upgrade() else { return };
+            let _ = end_process(&ui, &status, pid, false);
         });
     }
-
-    // Force kill
     {
+        let weak = app.as_weak();
+        let status = status.clone();
         app.on_force_kill_process(move |pid| {
-            if pid <= 0 { return; }
-            let sys = sysinfo::System::new_all();
-            if let Some(proc) = sys.process(sysinfo::Pid::from_u32(pid as u32)) {
-                proc.kill();
-            }
+            let Some(ui) = weak.upgrade() else { return };
+            let _ = end_process(&ui, &status, pid, true);
         });
     }
 
-    // AI stubs
-    app.on_ai_explain_pressed(|| { tracing::info!("AI explain requested (standalone mode)"); });
-    app.on_ai_dismiss(|| {});
-    app.on_back_pressed(|| { tracing::info!("Back pressed (standalone mode — no-op)"); });
+    // ── AI Explain, in the header ──
+    //
+    // This logged "(standalone mode)" and did nothing, while the agent rail three screens away
+    // already had a working `companion::ask`. Same question, same readings, drawn into the
+    // header's own panel instead of the rail's proposal card.
+    {
+        let weak = app.as_weak();
+        app.on_ai_explain_pressed(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if !companion::is_online() {
+                ui.set_ai_response(companion::OFFLINE_HINT.into());
+                return;
+            }
+            let prompt = machine_question(&ui);
+            ui.set_ai_is_working(true);
+            ui.set_ai_response(SharedString::new());
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&prompt);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_ai_is_working(false);
+                    ui.set_ai_response(match outcome {
+                        Ok(text) => text.into(),
+                        Err(e) => format!("The companion did not answer: {e}").into(),
+                    });
+                });
+            });
+        });
+    }
+    {
+        let weak = app.as_weak();
+        // Clears the answer as well as the panel: reopening it later must not show a reading of
+        // the machine as it was some minutes ago.
+        app.on_ai_dismiss(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_ai_response(SharedString::new());
+            }
+        });
+    }
+    // There is nowhere to go back to from a window of its own, which is why this wrapper sets
+    // `show-back: false` and the arrow is not drawn. The callback cannot fire; it logged a line
+    // saying so, which would only ever have appeared if the claim were false.
+    app.on_back_pressed(|| {});
+
+    timer
+}
+
+/// The current readings, phrased as a question for the companion.
+///
+/// Handed over as readings. Describing them in prose first and asking the model to re-derive
+/// them is how a monitor starts reporting numbers nobody measured.
+fn machine_question(ui: &SystemMonitorApp) -> String {
+    let facts = format!(
+        "CPU {:.0}%, memory {} of {}, health {} ({})",
+        ui.get_cpu_usage(),
+        ui.get_memory_used_text(),
+        ui.get_memory_total_text(),
+        ui.get_health_status(),
+        ui.get_health_summary()
+    );
+    format!(
+        "Here are my machine's readings: {facts}. In at most three short lines say whether \
+         anything needs attention and why. Use only these numbers; do not guess at causes \
+         you cannot see."
+    )
 }

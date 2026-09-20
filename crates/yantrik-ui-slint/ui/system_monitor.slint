@@ -59,6 +59,14 @@ export component SystemMonitor inherits Rectangle {
     callback proposal-applied();
     callback proposal-dismissed();
 
+    /// What the window could not do, and what it could not measure, in the person's words.
+    ///
+    /// Empty when there is neither. A kill that the service refused and the fallback could not
+    /// carry used to leave a tracing line in a log nobody has open, and readings that had
+    /// silently fallen back to this process's own `sysinfo` looked exactly like the service's.
+    /// Both now say so here, and `describe` carries the same text for the mind.
+    in property <string> notice: "";
+
     // Whether there is anywhere to go back TO.
     //
     // The header's back arrow was hardcoded on, which is right inside the shell -- back means
@@ -156,6 +164,31 @@ export component SystemMonitor inherits Rectangle {
                     if (root.ai-panel-open) { root.ai-dismiss(); root.ai-panel-open = false; }
                     else { root.ai-explain-pressed(); root.ai-panel-open = true; }
                 }
+            }
+        }
+
+        // What could not be done, and what could not be measured, above the readings it is
+        // about. A strip rather than a dialog: degraded numbers are still worth looking at,
+        // and a kill that failed leaves the list it failed on right underneath.
+        if root.notice != "" : Rectangle {
+            height: notice-text.preferred-height + Theme.sp-4;
+            background: Theme.color-danger-dim;
+
+            Rectangle {
+                x: 0;
+                width: 2px;
+                height: 100%;
+                background: Theme.color-danger;
+            }
+
+            notice-text := Text {
+                x: Theme.sp-4;
+                width: parent.width - Theme.sp-4 * 2;
+                y: Theme.sp-2;
+                text: root.notice;
+                color: Theme.text-primary;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
             }
         }
 

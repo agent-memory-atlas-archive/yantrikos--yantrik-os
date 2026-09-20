@@ -19,6 +19,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 sysinfo = { workspace = true }
+# The local kill path signals through libc directly: errno is the only place the reason lives,
+# and sysinfo's own kill answers with a bool that cannot tell ESRCH from EPERM.
+libc = "0.2"
 
 [build-dependencies]
 slint-build = "1.17"

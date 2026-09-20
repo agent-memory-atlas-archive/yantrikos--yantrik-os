@@ -75,6 +75,9 @@ export component SystemMonitorApp inherits Window {
     // Uptime
     in property <string> uptime-text <=> inner.uptime-text;
 
+    // What went wrong, for the person; the same string is in `describe` for the mind.
+    in property <string> notice <=> inner.notice;
+
     // Health
     in property <string> health-status <=> inner.health-status;
     in property <float> health-score <=> inner.health-score;
