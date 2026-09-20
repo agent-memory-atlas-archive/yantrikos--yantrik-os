@@ -1,24 +1,56 @@
 // Presentation App (yPresent) — screen 31
-// Full-featured slide deck editor with layouts, themes, speaker notes,
-// presenter mode with timer, text formatting, file save/load, templates,
-// slide search, keyboard navigation, export.
+// Slide deck editor with layouts, themes, speaker notes, a presenter mode with a timer,
+// save and load over a versioned .ydeck file, slide search, keyboard navigation, and export
+// to Markdown and to an outline.
 // Wrapped in WindowFrame by app.slint.
+//
+// What came off this screen on 20 September 2026, and why. Every one of these drew a control
+// with nothing under it; a button that does nothing is worse than an absent one, because a
+// person plans around it.
+//
+//   * Export PDF. Nothing in this dependency set writes a PDF, and a "PDF" that was really
+//     text would be a lie about a file someone is about to send. It comes back when a PDF
+//     writer is a dependency.
+//   * The INSERT tab — text box, image, shape, chart, table, icon. SlideData holds a title,
+//     a body, notes and a layout; there is nowhere for an object to live. It comes back with
+//     a slide model that has objects in it.
+//   * Bold, italic, font size and text colour. The body is one TextInput drawn in one colour
+//     at one size from the theme; there are no runs to mark up. It comes back with a styled
+//     text model.
+//   * Transitions. Nothing here animates between slides, so the dropdown named an effect that
+//     could not happen. It comes back when the presenter view animates.
+//   * The five quick "templates" (Blank, Status, Proposal, Team, Quarterly). Nothing backed
+//     them: five named deck outlines would have been text this app invented. It comes back
+//     with a template directory a person can put their own decks in. The Gallery beside it
+//     stays, because it really does the one thing it claims — it picks a theme.
+//   * The speaker-notes ribbon toggle and pres-save-speaker-note. The toggle gated nothing at
+//     all, and the callback was invoked by no element in this file; the notes editor is
+//     always on screen below the canvas and its text is two-way bound to current-notes.
+//   * The whole AI Assist panel and its thirteen callbacks. It is built around a proposal
+//     architecture — AiProposalState, a per-field apply, a deck-wide preview — that nothing
+//     produced, and wiring thirteen buttons to one companion call would have been thirteen
+//     ways to overwrite a deck with model text and no way to review it. The one place a
+//     generated answer has somewhere to land is the speaker-note field, and that button
+//     (AI Generate, in the notes header) is real.
 
 import { Theme } from "theme.slint";
 import { ListView, ScrollView, LineEdit } from "std-widgets.slint";
 import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButton,
-         RibbonQuickAction, RibbonGroupLabel, RibbonDropdown,
-         RibbonAccentButton } from "components/app_ribbon.slint";
+         RibbonGroupLabel, RibbonDropdown } from "components/app_ribbon.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 
+// A slide as the sidebar and the canvas read it.
+//
+// `slide-number` used to be here and was kept in step by a `renumber()` pass after every
+// reorder and removal — a second source of truth for a thing that is already a position in a
+// list. The sidebar numbers its own rows from the index; there is nothing to fall out of step.
 export struct SlideData {
     title: string,
     body: string,
     notes: string,
     layout: int,
-    slide-number: int,
 }
 
 export struct PresentTheme {
@@ -29,35 +61,6 @@ export struct PresentTheme {
     is-active: bool,
 }
 
-export struct AiSlideProposal {
-    title: string,
-    body: string,
-    notes: string,
-    slide-type: string,
-    has-title: bool,
-    has-body: bool,
-    has-notes: bool,
-    has-slide-type: bool,
-}
-
-export struct AiProposalState {
-    action-name: string,
-    is-deck-proposal: bool,
-    slide-count: int,
-    current-preview-index: int,
-    original-title: string,
-    original-body: string,
-    original-notes: string,
-    proposed-title: string,
-    proposed-body: string,
-    proposed-notes: string,
-    proposed-slide-type: string,
-    title-changed: bool,
-    body-changed: bool,
-    notes-changed: bool,
-    slide-type-changed: bool,
-}
-
 export component PresentationScreen inherits Rectangle {
     background: transparent;
 
@@ -66,7 +69,15 @@ export component PresentationScreen inherits Rectangle {
     in-out property <int> current-slide-index: 0;
     in property <int> slide-count: 1;
     in-out property <int> current-layout: 0;
+    // The chosen theme, as a one-element list.
+    //
+    // This screen reads `themes[0]` and only `themes[0]` — canvas, presenter view and
+    // thumbnails all do — so the app hands it the theme that is selected rather than a list to
+    // choose from. Nothing ever set it, which is why every slide in the app was drawn in the
+    // shell's fallback colours and the Design tab's Theme dropdown was decorative.
     in property <[PresentTheme]> themes: [];
+    /// Which theme that is, so the dropdown can count upwards. Rust wraps.
+    in property <int> current-theme: 0;
     in-out property <bool> is-presenting: false;
     in-out property <string> current-title: "Title Slide";
     in-out property <string> current-body: "Click to add subtitle";
@@ -84,18 +95,19 @@ export component PresentationScreen inherits Rectangle {
     in property <int> search-count: 0;
     in-out property <string> search-query: "";
     in-out property <bool> show-search: false;
-    in property <int> current-transition: 0;
 
-    // Template picker
-    in-out property <bool> show-templates: false;
+    /// What the window could not do, in the person's words.
+    ///
+    /// Empty when nothing has gone wrong, which is also the default — the same string is in
+    /// `describe.notice`, so a failure is said twice: once to whoever is looking at the
+    /// window and once to whoever is driving it. A save that could not be written, a file
+    /// that is a version this build does not read, a companion that did not answer.
+    in property <string> notice: "";
 
-    // Template gallery
+    // Theme gallery. Every theme Rust holds, each drawn in its own colours, with `is-active`
+    // on the one the deck is using — rather than a list of names beside a hardcoded palette.
     in-out property <bool> pres-template-gallery-open: false;
-    in property <[string]> pres-template-names: ["Minimal", "Corporate", "Creative", "Academic", "Pitch Deck"];
-
-    // Speaker notes toggle
-    in-out property <bool> pres-show-speaker-notes: false;
-    in-out property <string> pres-current-speaker-note: "";
+    in property <[PresentTheme]> theme-swatches: [];
 
     // Layout names for display
     property <[string]> layout-names: ["Title Slide", "Title + Content", "Two Column", "Section Header", "Blank", "Image + Text"];
@@ -110,7 +122,6 @@ export component PresentationScreen inherits Rectangle {
     callback set-layout(int);
     callback set-theme(int);
     callback toggle-present();
-    callback export-pdf();
     callback title-edited(string);
     callback body-edited(string);
     callback notes-edited(string);
@@ -122,54 +133,25 @@ export component PresentationScreen inherits Rectangle {
     callback load-presentation();
     callback toggle-timer();
     callback reset-timer();
+    /// One key press, named rather than spelled.
+    ///
+    /// Slint puts the arrows and the page keys in the private-use area, and a Rust `match` on
+    /// "\u{f702}" is unreadable and ungreppable. The translation happens once, in the focus
+    /// scope at the bottom of this file, and the app handles "next", "previous", "first",
+    /// "last" and "escape" — each of which ends in the same `go_to` the buttons use.
     callback key-pressed(string);
-    callback use-template(int);
     callback export-markdown();
     callback export-outline();
     callback search-slides(string);
     callback search-next();
-    callback set-transition(int);
     callback undo();
     callback redo();
+    /// Ask the companion for speaker notes for the slide on screen.
     callback generate-notes();
-    callback format-bold();
-    callback format-italic();
-    callback set-font-size(int);
-    callback set-text-color(int);
-    callback insert-object(string);
 
-    // AI Assist — Proposal-based architecture
-    in-out property <bool> show-ai-panel: false;
-    in property <bool> pres-ai-working: false;
-    in property <string> pres-ai-status: "";
-    in property <bool> pres-ai-has-proposal: false;
-    in property <AiProposalState> pres-ai-proposal;
-    in-out property <bool> pres-ai-apply-title: true;
-    in-out property <bool> pres-ai-apply-body: true;
-    in-out property <bool> pres-ai-apply-notes: true;
-    in-out property <bool> pres-ai-apply-slide-type: true;
-    in-out property <string> pres-ai-instruction: "";
-
-    // AI action callbacks
-    callback pres-ai-generate-deck(string);
-    callback pres-ai-structure-text(string);
-    callback pres-ai-generate-all-notes();
-    callback pres-ai-improve-slide();
-    callback pres-ai-generate-notes();
-    callback pres-ai-simplify(string);
-    callback pres-ai-split-slide();
-    callback pres-ai-suggest-layout();
-    callback pres-ai-freeform(string);
-    // Proposal navigation & apply
-    callback pres-ai-apply();
-    callback pres-ai-dismiss();
-    callback pres-ai-preview-slide(int);
-    callback pres-ai-regenerate();
-
-    // Template gallery + speaker notes callbacks
+    // Theme gallery callbacks
     callback pres-open-template-gallery();
     callback pres-select-template(int);
-    callback pres-save-speaker-note(string);
 
     // ══════════════════════════════════════════
     // Presenter mode: full-screen slide view
@@ -441,8 +423,6 @@ export component PresentationScreen inherits Rectangle {
                 ];
                 actions: [
                     { id: "find",    icon: Icons.search, label: "Find", active: root.show-search },
-                    { id: "ai",      icon: Icons.spark,  label: "AI", emphasis: 1,
-                      active: root.show-ai-panel },
                     { id: "present", icon: Icons.play,   label: "Present", emphasis: 2 },
                 ];
                 action(id) => {
@@ -450,8 +430,34 @@ export component PresentationScreen inherits Rectangle {
                     else if (id == "undo") { root.undo(); }
                     else if (id == "redo") { root.redo(); }
                     else if (id == "find") { root.show-search = !root.show-search; }
-                    else if (id == "ai") { root.show-ai-panel = !root.show-ai-panel; }
                     else if (id == "present") { root.toggle-present(); }
+                }
+            }
+
+            // ── Notice ──
+            //
+            // Under the header and above everything else, because it is always about why what
+            // is below it is not what was asked for: a save that could not be written, a deck
+            // this build will not open, a companion that did not answer.
+            if root.notice != "" : Rectangle {
+                height: notice-text.preferred-height + Theme.sp-4;
+                background: Theme.color-danger-dim;
+
+                Rectangle {
+                    x: 0;
+                    width: 2px;
+                    height: 100%;
+                    background: Theme.color-danger;
+                }
+
+                notice-text := Text {
+                    x: Theme.sp-4;
+                    width: parent.width - Theme.sp-4 * 2;
+                    y: Theme.sp-2;
+                    text: root.notice;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
                 }
             }
             // ═══ Row 1: Tab strip + Quick Actions (36px) ═══
@@ -478,8 +484,7 @@ export component PresentationScreen inherits Rectangle {
                     // Tab strip
                     RibbonTabButton { label: "Slides"; is-active: ribbon-tab == 0; clicked => { ribbon-tab = 0; } }
                     RibbonTabButton { label: "Design"; is-active: ribbon-tab == 1; clicked => { ribbon-tab = 1; } }
-                    RibbonTabButton { label: "Insert"; is-active: ribbon-tab == 2; clicked => { ribbon-tab = 2; } }
-                    RibbonTabButton { label: "Export"; is-active: ribbon-tab == 3; clicked => { ribbon-tab = 3; } }
+                    RibbonTabButton { label: "Export"; is-active: ribbon-tab == 2; clicked => { ribbon-tab = 2; } }
 
                     Rectangle {}
                 }
@@ -492,7 +497,7 @@ export component PresentationScreen inherits Rectangle {
                 height: 44px;
                 background: Theme.bg-card;
 
-                // ── SLIDES tab: Slide management + Format ──
+                // ── SLIDES tab: Slide management ──
                 if ribbon-tab == 0 : HorizontalLayout {
                     padding-left: 10px;
                     padding-right: 10px;
@@ -505,25 +510,9 @@ export component PresentationScreen inherits Rectangle {
                     RibbonToolButton { icon-path: Icons.trash; tooltip-text: "Delete"; clicked => { root.delete-slide(); } }
                     RibbonToolButton { icon-path: Icons.arrow-up; tooltip-text: "Move up"; clicked => { root.move-slide-up(); } }
                     RibbonToolButton { icon-path: Icons.arrow-down; tooltip-text: "Move down"; clicked => { root.move-slide-down(); } }
-
-                    RibbonSeparator {}
-
-                    RibbonGroupLabel { label: "FONT"; }
-                    RibbonToolButton { icon-path: Icons.bold; tooltip-text: "Bold"; clicked => { root.format-bold(); } }
-                    RibbonToolButton { icon-path: Icons.italic; tooltip-text: "Italic"; clicked => { root.format-italic(); } }
-
-                    RibbonSeparator {}
-
-                    RibbonGroupLabel { label: "NOTES"; }
-                    RibbonToolButtonWide {
-                        label: "Notes";
-                        is-active: root.pres-show-speaker-notes;
-                        tooltip-text: "Speaker notes";
-                        clicked => { root.pres-show-speaker-notes = !root.pres-show-speaker-notes; }
-                    }
                 }
 
-                // ── DESIGN tab: Layout + Theme + Transition + Templates ──
+                // ── DESIGN tab: Layout + Theme ──
                 if ribbon-tab == 1 : HorizontalLayout {
                     padding-left: 10px;
                     padding-right: 10px;
@@ -545,100 +534,42 @@ export component PresentationScreen inherits Rectangle {
 
                     RibbonSeparator {}
 
+                    // The dropdown says which theme is on and steps to the next one; Rust owns
+                    // the list and the wrap, so this file never has to know how many there are.
                     RibbonGroupLabel { label: "THEME"; }
                     RibbonDropdown {
                         label: "";
-                        value: "Theme";
+                        value: root.themes.length > 0 ? root.themes[0].name : "Theme";
                         tooltip-text: "Slide theme";
-                        clicked => { root.set-theme(0); }
+                        clicked => { root.set-theme(root.current-theme + 1); }
                     }
 
                     RibbonSeparator {}
 
-                    RibbonGroupLabel { label: "TRANSITION"; }
-                    RibbonDropdown {
-                        label: "";
-                        value: root.current-transition == 0 ? "None"
-                            : root.current-transition == 1 ? "Fade"
-                            : root.current-transition == 2 ? "Slide L"
-                            : root.current-transition == 3 ? "Slide R"
-                            : "Zoom";
-                        tooltip-text: "Transition effect";
-                        clicked => { root.set-transition(mod(root.current-transition + 1, 5)); }
-                    }
-
-                    RibbonSeparator {}
-
-                    RibbonGroupLabel { label: "TEMPLATES"; }
-                    RibbonToolButtonWide {
-                        label: "Template";
-                        is-active: root.show-templates;
-                        tooltip-text: "Quick templates";
-                        clicked => { root.show-templates = !root.show-templates; }
-                    }
+                    RibbonGroupLabel { label: "THEMES"; }
                     RibbonToolButtonWide {
                         label: "Gallery";
                         is-active: root.pres-template-gallery-open;
-                        tooltip-text: "Template gallery";
+                        tooltip-text: "Pick a theme";
                         clicked => { root.pres-open-template-gallery(); }
                     }
                 }
 
-                // ── INSERT tab: Objects ──
+                // ── EXPORT tab: File + Export ──
                 if ribbon-tab == 2 : HorizontalLayout {
                     padding-left: 10px;
                     padding-right: 10px;
                     spacing: 3px;
                     alignment: start;
 
-                    RibbonGroupLabel { label: "OBJECTS"; }
-                    RibbonToolButtonWide { label: "Text"; tooltip-text: "Text box"; clicked => { root.insert-object("text"); } }
-                    RibbonToolButtonWide { label: "Image"; tooltip-text: "Image"; clicked => { root.insert-object("image"); } }
-                    RibbonToolButtonWide { label: "Shape"; tooltip-text: "Shape"; clicked => { root.insert-object("shape"); } }
-                    RibbonToolButtonWide { label: "Chart"; tooltip-text: "Chart"; clicked => { root.insert-object("chart"); } }
-                    RibbonToolButtonWide { label: "Table"; tooltip-text: "Table"; clicked => { root.insert-object("table"); } }
-                    RibbonToolButtonWide { label: "Icon"; tooltip-text: "Icon"; clicked => { root.insert-object("icon"); } }
-                }
-
-                // ── EXPORT tab: File + Export ──
-                if ribbon-tab == 3 : HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 3px;
-                    alignment: start;
-
                     RibbonGroupLabel { label: "FILE"; }
-                    RibbonToolButtonWide { label: "Open"; tooltip-text: "Open file"; clicked => { root.load-presentation(); } }
+                    RibbonToolButtonWide { label: "Open"; tooltip-text: "Open the most recent deck"; clicked => { root.load-presentation(); } }
 
                     RibbonSeparator {}
 
                     RibbonGroupLabel { label: "EXPORT"; }
-                    RibbonToolButtonWide { label: "PDF"; tooltip-text: "Export PDF"; clicked => { root.export-pdf(); } }
                     RibbonToolButtonWide { label: "MD"; tooltip-text: "Export Markdown"; clicked => { root.export-markdown(); } }
                     RibbonToolButtonWide { label: "Outline"; tooltip-text: "Export outline"; clicked => { root.export-outline(); } }
-                }
-
-                Rectangle { y: parent.height - 1px; height: 1px; background: Theme.separator; }
-            }
-
-            // ── Template picker dropdown ──
-            Rectangle {
-                height: root.show-templates ? 38px : 0px;
-                visible: root.show-templates;
-                background: Theme.bg-card;
-
-                HorizontalLayout {
-                    padding-left: 12px;
-                    spacing: 8px;
-                    alignment: start;
-
-                    Text { text: "Templates:"; color: Theme.text-primary; font-size: Theme.fs-caption; font-weight: 600; vertical-alignment: center; }
-
-                    RibbonToolButtonWide { label: "Blank"; clicked => { root.use-template(0); root.show-templates = false; } }
-                    RibbonToolButtonWide { label: "Status"; clicked => { root.use-template(1); root.show-templates = false; } }
-                    RibbonToolButtonWide { label: "Proposal"; clicked => { root.use-template(2); root.show-templates = false; } }
-                    RibbonToolButtonWide { label: "Team"; clicked => { root.use-template(3); root.show-templates = false; } }
-                    RibbonToolButtonWide { label: "Quarterly"; clicked => { root.use-template(4); root.show-templates = false; } }
                 }
 
                 Rectangle { y: parent.height - 1px; height: 1px; background: Theme.separator; }
@@ -1112,6 +1043,22 @@ export component PresentationScreen inherits Rectangle {
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
+
+                                    // Where this deck lives.
+                                    //
+                                    // file-path was declared here and drawn by nothing, so a
+                                    // deck saved into ~/Documents/Presentations was saved
+                                    // somewhere the person had no way to find. Save always
+                                    // picks a destination; this is how they learn which one.
+                                    Text {
+                                        visible: root.file-path != "";
+                                        text: root.file-path;
+                                        color: Theme.text-dim;
+                                        font-size: Theme.fs-micro;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
+                                        overflow: elide;
+                                    }
                                 }
                             }
 
@@ -1151,608 +1098,6 @@ export component PresentationScreen inherits Rectangle {
         }
     }
 
-    // AI Assist Panel (right sidebar) — Proposal-based architecture
-    Rectangle {
-        visible: root.show-ai-panel;
-        x: parent.width - 300px;
-        y: 0px;
-        width: 300px;
-        height: parent.height;
-        background: Theme.bg-card;
-        border-width: 1px;
-        border-color: Theme.separator;
-
-        VerticalLayout {
-            padding: 10px;
-            spacing: 6px;
-
-            // ── Section A: Header ──
-            HorizontalLayout {
-                spacing: 6px;
-                height: 28px;
-
-                Text {
-                    text: "AI Assistant";
-                    color: Theme.accent;
-                    font-size: Theme.fs-body;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-                Rectangle { }
-                Rectangle {
-                    width: 24px; height: 24px; border-radius: 4px;
-                    background: close-pres-ai-ta.has-hover ? Theme.hover-fill : transparent;
-                    close-pres-ai-ta := TouchArea { clicked => { root.show-ai-panel = false; } }
-                    Text { text: "x"; color: Theme.text-dim; font-size: Theme.fs-body; horizontal-alignment: center; vertical-alignment: center; }
-                }
-            }
-
-            Rectangle { height: 1px; background: Theme.separator; }
-
-            // ── Section B: Global Actions ──
-            Text { text: "Global"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
-
-            HorizontalLayout {
-                spacing: 4px;
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: gen-deck-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    gen-deck-ta := TouchArea { clicked => { root.pres-ai-generate-deck(root.pres-ai-instruction); } }
-                    Text { text: "Generate Deck"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: struct-text-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    struct-text-ta := TouchArea { clicked => { root.pres-ai-structure-text(root.pres-ai-instruction); } }
-                    Text { text: "Structure Text"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
-            }
-
-            HorizontalLayout {
-                spacing: 4px;
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: all-notes-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    all-notes-ta := TouchArea { clicked => { root.pres-ai-generate-all-notes(); } }
-                    Text { text: "All Notes"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
-
-                // spacer to keep row balanced
-                Rectangle { height: 28px; background: transparent; }
-            }
-
-            Rectangle { height: 1px; background: Theme.separator; }
-
-            // ── Section C: Slide Actions ──
-            Text { text: "Current Slide"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
-
-            HorizontalLayout {
-                spacing: 4px;
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: improve-slide-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    improve-slide-ta := TouchArea { clicked => { root.pres-ai-improve-slide(); } }
-                    Text { text: "Improve Slide"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: gen-notes-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    gen-notes-ta := TouchArea { clicked => { root.pres-ai-generate-notes(); } }
-                    Text { text: "Generate Notes"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
-            }
-
-            HorizontalLayout {
-                spacing: 4px;
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: simplify-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    simplify-ta := TouchArea { clicked => { root.pres-ai-simplify(root.pres-ai-instruction); } }
-                    Text { text: "Simplify"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: split-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    split-ta := TouchArea { clicked => { root.pres-ai-split-slide(); } }
-                    Text { text: "Split Slide"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
-            }
-
-            HorizontalLayout {
-                spacing: 4px;
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: layout-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    layout-ta := TouchArea { clicked => { root.pres-ai-suggest-layout(); } }
-                    Text { text: "Suggest Layout"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
-
-                Rectangle { height: 28px; background: transparent; }
-            }
-
-            Rectangle { height: 1px; background: Theme.separator; }
-
-            // ── Section D: Instruction field ──
-            Rectangle {
-                height: 28px;
-                border-radius: 4px;
-                background: Theme.bg-elevated;
-                border-width: 1px;
-                border-color: Theme.separator;
-                clip: true;
-
-                pres-ai-instr-input := TextInput {
-                    x: 8px; y: 0px;
-                    width: parent.width - 16px;
-                    height: parent.height;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-micro;
-                    wrap: word-wrap;
-                    single-line: false;
-                    text <=> root.pres-ai-instruction;
-                    vertical-alignment: center;
-                }
-                // placeholder
-                Text {
-                    visible: root.pres-ai-instruction == "";
-                    x: 8px;
-                    text: "Optional: audience, tone, instructions...";
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-            }
-
-            // ── Section E: Status ──
-            HorizontalLayout {
-                visible: root.pres-ai-working;
-                spacing: 6px;
-                height: 20px;
-
-                Rectangle {
-                    width: 8px; height: 8px; border-radius: 4px;
-                    background: Theme.accent;
-                    y: 6px;
-
-                    animate background {
-                        duration: 800ms;
-                        iteration-count: -1;
-                    }
-                }
-                Text {
-                    text: root.pres-ai-status != "" ? root.pres-ai-status : "Working...";
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-micro;
-                    vertical-alignment: center;
-                }
-            }
-
-            // ── Section F: Proposal Preview ──
-            Rectangle {
-                visible: root.pres-ai-has-proposal;
-                background: transparent;
-
-                VerticalLayout {
-                    spacing: 6px;
-
-                    // Proposal header
-                    HorizontalLayout {
-                        height: 22px;
-                        spacing: 4px;
-
-                        Text {
-                            text: root.pres-ai-proposal.action-name;
-                            color: Theme.accent;
-                            font-size: Theme.fs-micro;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-                        Rectangle { }
-                        Text {
-                            visible: root.pres-ai-proposal.is-deck-proposal;
-                            text: root.pres-ai-proposal.slide-count + " slides";
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Deck navigation (only for multi-slide proposals)
-                    HorizontalLayout {
-                        visible: root.pres-ai-proposal.is-deck-proposal;
-                        height: 24px;
-                        spacing: 4px;
-
-                        Rectangle {
-                            width: 24px; height: 24px; border-radius: 4px;
-                            background: prev-preview-ta.has-hover ? Theme.hover-fill : transparent;
-                            prev-preview-ta := TouchArea {
-                                clicked => {
-                                    if root.pres-ai-proposal.current-preview-index > 0 {
-                                        root.pres-ai-preview-slide(root.pres-ai-proposal.current-preview-index - 1);
-                                    }
-                                }
-                            }
-                            Text { text: "<"; color: Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-
-                        Text {
-                            text: "Slide " + (root.pres-ai-proposal.current-preview-index + 1) + " of " + root.pres-ai-proposal.slide-count;
-                            color: Theme.text-secondary;
-                            font-size: Theme.fs-micro;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-
-                        Rectangle {
-                            width: 24px; height: 24px; border-radius: 4px;
-                            background: next-preview-ta.has-hover ? Theme.hover-fill : transparent;
-                            next-preview-ta := TouchArea {
-                                clicked => {
-                                    if root.pres-ai-proposal.current-preview-index < root.pres-ai-proposal.slide-count - 1 {
-                                        root.pres-ai-preview-slide(root.pres-ai-proposal.current-preview-index + 1);
-                                    }
-                                }
-                            }
-                            Text { text: ">"; color: Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                    }
-
-                    // Diff view — scrollable (stacked layout to avoid width loops)
-                    ScrollView {
-                        min-height: 80px;
-
-                        Rectangle {
-                            VerticalLayout {
-                                spacing: 6px;
-                                width: 260px;
-
-                                // Title diff
-                                VerticalLayout {
-                                    visible: root.pres-ai-proposal.title-changed;
-                                    spacing: 2px;
-
-                                    Text { text: "Title"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 600; }
-
-                                    Rectangle {
-                                        border-radius: 4px;
-                                        background: Theme.color-danger-dim;
-                                        clip: true;
-                                        VerticalLayout {
-                                            padding: 4px;
-                                            Text { text: "Current:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                            Text {
-                                                text: root.pres-ai-proposal.original-title;
-                                                color: Theme.text-secondary;
-                                                font-size: Theme.fs-micro;
-                                                overflow: elide;
-                                            }
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        border-radius: 4px;
-                                        background: Theme.color-success-dim;
-                                        clip: true;
-                                        VerticalLayout {
-                                            padding: 4px;
-                                            Text { text: "Proposed:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                            Text {
-                                                text: root.pres-ai-proposal.proposed-title;
-                                                color: Theme.text-primary;
-                                                font-size: Theme.fs-micro;
-                                                overflow: elide;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Body diff
-                                VerticalLayout {
-                                    visible: root.pres-ai-proposal.body-changed;
-                                    spacing: 2px;
-
-                                    Text { text: "Body"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 600; }
-
-                                    Rectangle {
-                                        border-radius: 4px;
-                                        background: Theme.color-danger-dim;
-                                        clip: true;
-                                        VerticalLayout {
-                                            padding: 4px;
-                                            Text { text: "Current:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                            Text {
-                                                text: root.pres-ai-proposal.original-body;
-                                                color: Theme.text-secondary;
-                                                font-size: Theme.fs-micro;
-                                                wrap: word-wrap;
-                                            }
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        border-radius: 4px;
-                                        background: Theme.color-success-dim;
-                                        clip: true;
-                                        VerticalLayout {
-                                            padding: 4px;
-                                            Text { text: "Proposed:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                            Text {
-                                                text: root.pres-ai-proposal.proposed-body;
-                                                color: Theme.text-primary;
-                                                font-size: Theme.fs-micro;
-                                                wrap: word-wrap;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Notes diff
-                                VerticalLayout {
-                                    visible: root.pres-ai-proposal.notes-changed;
-                                    spacing: 2px;
-
-                                    Text { text: "Notes"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 600; }
-
-                                    Rectangle {
-                                        border-radius: 4px;
-                                        background: Theme.color-danger-dim;
-                                        clip: true;
-                                        VerticalLayout {
-                                            padding: 4px;
-                                            Text { text: "Current:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                            Text {
-                                                text: root.pres-ai-proposal.original-notes;
-                                                color: Theme.text-secondary;
-                                                font-size: Theme.fs-micro;
-                                                wrap: word-wrap;
-                                            }
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        border-radius: 4px;
-                                        background: Theme.color-success-dim;
-                                        clip: true;
-                                        VerticalLayout {
-                                            padding: 4px;
-                                            Text { text: "Proposed:"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                            Text {
-                                                text: root.pres-ai-proposal.proposed-notes;
-                                                color: Theme.text-primary;
-                                                font-size: Theme.fs-micro;
-                                                wrap: word-wrap;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Slide type diff
-                                VerticalLayout {
-                                    visible: root.pres-ai-proposal.slide-type-changed;
-                                    spacing: 2px;
-
-                                    Text { text: "Layout"; color: Theme.accent; font-size: Theme.fs-micro; font-weight: 600; }
-
-                                    Rectangle {
-                                        height: 24px;
-                                        border-radius: 4px;
-                                        background: Theme.bg-elevated;
-
-                                        Text {
-                                            x: 6px;
-                                            text: root.pres-ai-proposal.proposed-slide-type;
-                                            color: Theme.text-primary;
-                                        font-size: Theme.fs-micro;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                        }
-                        }
-                    }
-
-                    Rectangle { height: 1px; background: Theme.separator; }
-
-                    // Field checkboxes
-                    Text { text: "Apply fields:"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
-
-                    HorizontalLayout {
-                        spacing: 8px;
-                        height: 18px;
-
-                        // Title checkbox
-                        HorizontalLayout {
-                            visible: root.pres-ai-proposal.title-changed;
-                            spacing: 4px;
-                            Rectangle {
-                                width: 16px; height: 16px; border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.accent;
-                                background: root.pres-ai-apply-title ? AppIdentity.accent : transparent;
-                                TouchArea { clicked => { root.pres-ai-apply-title = !root.pres-ai-apply-title; } }
-                                Text {
-                                    text: root.pres-ai-apply-title ? "✓" : "";
-                                    color: white; font-size: Theme.fs-micro;
-                                    horizontal-alignment: center; vertical-alignment: center;
-                                }
-                            }
-                            Text { text: "Title"; color: Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                        }
-
-                        // Body checkbox
-                        HorizontalLayout {
-                            visible: root.pres-ai-proposal.body-changed;
-                            spacing: 4px;
-                            Rectangle {
-                                width: 16px; height: 16px; border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.accent;
-                                background: root.pres-ai-apply-body ? AppIdentity.accent : transparent;
-                                TouchArea { clicked => { root.pres-ai-apply-body = !root.pres-ai-apply-body; } }
-                                Text {
-                                    text: root.pres-ai-apply-body ? "✓" : "";
-                                    color: white; font-size: Theme.fs-micro;
-                                    horizontal-alignment: center; vertical-alignment: center;
-                                }
-                            }
-                            Text { text: "Body"; color: Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        spacing: 8px;
-                        height: 18px;
-
-                        // Notes checkbox
-                        HorizontalLayout {
-                            visible: root.pres-ai-proposal.notes-changed;
-                            spacing: 4px;
-                            Rectangle {
-                                width: 16px; height: 16px; border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.accent;
-                                background: root.pres-ai-apply-notes ? AppIdentity.accent : transparent;
-                                TouchArea { clicked => { root.pres-ai-apply-notes = !root.pres-ai-apply-notes; } }
-                                Text {
-                                    text: root.pres-ai-apply-notes ? "✓" : "";
-                                    color: white; font-size: Theme.fs-micro;
-                                    horizontal-alignment: center; vertical-alignment: center;
-                                }
-                            }
-                            Text { text: "Notes"; color: Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                        }
-
-                        // Layout checkbox
-                        HorizontalLayout {
-                            visible: root.pres-ai-proposal.slide-type-changed;
-                            spacing: 4px;
-                            Rectangle {
-                                width: 16px; height: 16px; border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.accent;
-                                background: root.pres-ai-apply-slide-type ? AppIdentity.accent : transparent;
-                                TouchArea { clicked => { root.pres-ai-apply-slide-type = !root.pres-ai-apply-slide-type; } }
-                                Text {
-                                    text: root.pres-ai-apply-slide-type ? "✓" : "";
-                                    color: white; font-size: Theme.fs-micro;
-                                    horizontal-alignment: center; vertical-alignment: center;
-                                }
-                            }
-                            Text { text: "Layout"; color: Theme.text-secondary; font-size: Theme.fs-micro; vertical-alignment: center; }
-                        }
-                    }
-
-                    // Action buttons: Apply / Regenerate / Dismiss
-                    HorizontalLayout {
-                        spacing: 4px;
-                        height: 28px;
-
-                        Rectangle {
-                            border-radius: 4px;
-                            background: pres-apply-ta.has-hover ? Theme.color-success : Theme.color-success.transparentize(0.2);
-                            pres-apply-ta := TouchArea { clicked => { root.pres-ai-apply(); } }
-                            Text { text: "Apply"; color: Theme.text-on-accent; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                        Rectangle {
-                            border-radius: 4px;
-                            background: pres-regen-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2);
-                            pres-regen-ta := TouchArea { clicked => { root.pres-ai-regenerate(); } }
-                            Text { text: "Regenerate"; color: Theme.text-on-accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                        Rectangle {
-                            border-radius: 4px;
-                            background: pres-dismiss-ta.has-hover ? Theme.color-danger : Theme.color-danger.transparentize(0.2);
-                            pres-dismiss-ta := TouchArea { clicked => { root.pres-ai-dismiss(); } }
-                            Text { text: "Dismiss"; color: Theme.text-on-accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                    }
-                }
-            }
-
-            Rectangle { height: 1px; background: Theme.separator; }
-
-            // ── Section G: Freeform ──
-            Text { text: "Ask AI"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
-
-            HorizontalLayout {
-                spacing: 4px;
-                height: 28px;
-
-                Rectangle {
-                    border-radius: 4px;
-                    background: Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.separator;
-                    clip: true;
-
-                    pres-ai-freeform-input := TextInput {
-                        x: 8px; y: 0px;
-                        width: parent.width - 16px;
-                        height: parent.height;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-micro;
-                        wrap: word-wrap;
-                        single-line: false;
-                        vertical-alignment: center;
-                        accepted => { root.pres-ai-freeform(self.text); self.text = ""; }
-                    }
-                    Text {
-                        visible: pres-ai-freeform-input.text == "";
-                        x: 8px;
-                        text: "Ask anything about this deck...";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    width: 48px; height: 28px;
-                    border-radius: 4px;
-                    background: root.pres-ai-working ? Theme.text-dim : (freeform-ask-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2));
-                    freeform-ask-ta := TouchArea {
-                        enabled: !root.pres-ai-working;
-                        clicked => { root.pres-ai-freeform(pres-ai-freeform-input.text); pres-ai-freeform-input.text = ""; }
-                    }
-                    Text { text: "Ask"; color: white; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                }
-            }
-        }
-    }
-
     // ── Template gallery overlay ──
     Rectangle {
         visible: root.pres-template-gallery-open;
@@ -1784,7 +1129,7 @@ export component PresentationScreen inherits Rectangle {
                 spacing: 12px;
 
                 Text {
-                    text: "Template Gallery";
+                    text: "Themes";
                     color: Theme.accent;
                     font-size: Theme.fs-title-2;
                     font-weight: 700;
@@ -1792,7 +1137,7 @@ export component PresentationScreen inherits Rectangle {
                 }
 
                 Text {
-                    text: "Select a template to apply a theme to your presentation";
+                    text: "Pick a theme. It is kept with the deck.";
                     color: Theme.text-secondary;
                     font-size: Theme.fs-micro;
                     horizontal-alignment: center;
@@ -1805,13 +1150,22 @@ export component PresentationScreen inherits Rectangle {
                         spacing: 10px;
                         alignment: center;
 
-                        for tpl[idx] in root.pres-template-names: Rectangle {
+                        // The swatch is the theme.
+                        //
+                        // It used to be five hardcoded colours picked by position out of the
+                        // shell's own palette, so a card labelled "Creative" previewed a
+                        // colour the deck would never be drawn in. A swatch that is not the
+                        // thing it selects is the same lie as a reading nobody measured, in a
+                        // smaller place.
+                        for swatch[idx] in root.theme-swatches: Rectangle {
                             width: 70px;
                             height: 90px;
                             border-radius: 8px;
                             background: tpl-ta.has-hover ? AppIdentity.accent.transparentize(0.7) : Theme.hover-fill;
-                            border-width: 1px;
-                            border-color: tpl-ta.has-hover ? AppIdentity.accent.transparentize(0.4) : Theme.border-subtle;
+                            border-width: swatch.is-active ? 2px : 1px;
+                            border-color: swatch.is-active ? AppIdentity.accent
+                                : tpl-ta.has-hover ? AppIdentity.accent.transparentize(0.4)
+                                : Theme.border-subtle;
 
                             tpl-ta := TouchArea {
                                 mouse-cursor: pointer;
@@ -1826,26 +1180,25 @@ export component PresentationScreen inherits Rectangle {
                                 spacing: 6px;
                                 alignment: center;
 
-                                // Theme preview swatch
                                 Rectangle {
                                     width: 40px;
                                     height: 28px;
                                     border-radius: 4px;
-                                    background: idx == 0 ? Theme.bg-card
-                                        : idx == 1 ? AppIdentity.accent.transparentize(70%)
-                                        : idx == 2 ? Theme.color-danger.transparentize(50%)
-                                        : idx == 3 ? Theme.color-success.transparentize(70%)
-                                        : Theme.bg-elevated;
+                                    background: swatch.bg-color;
                                     border-width: 1px;
                                     border-color: Theme.border-subtle;
 
+                                    Rectangle {
+                                        x: 4px;
+                                        y: parent.height - 6px;
+                                        width: 14px;
+                                        height: 2px;
+                                        background: swatch.accent-color;
+                                    }
+
                                     Text {
                                         text: "Aa";
-                                        color: idx == 0 ? Theme.text-primary
-                                            : idx == 1 ? Theme.text-primary
-                                            : idx == 2 ? Theme.color-warning
-                                            : idx == 3 ? Theme.color-success
-                                            : Theme.color-danger;
+                                        color: swatch.text-color;
                                         font-size: Theme.fs-caption;
                                         font-weight: 600;
                                         horizontal-alignment: center;
@@ -1854,10 +1207,11 @@ export component PresentationScreen inherits Rectangle {
                                 }
 
                                 Text {
-                                    text: tpl;
-                                    color: tpl-ta.has-hover ? AppIdentity.accent : Theme.text-primary;
+                                    text: swatch.name;
+                                    color: swatch.is-active ? AppIdentity.accent
+                                        : tpl-ta.has-hover ? AppIdentity.accent : Theme.text-primary;
                                     font-size: Theme.fs-micro;
-                                    font-weight: 500;
+                                    font-weight: swatch.is-active ? 700 : 500;
                                     horizontal-alignment: center;
                                 }
                             }
@@ -1884,31 +1238,49 @@ export component PresentationScreen inherits Rectangle {
         }
     }
 
-    // Keyboard handler
+    // ── Keyboard ──
+    //
+    // This scope existed, was 0x0, and nothing ever focused it, so Present mode — the whole
+    // point of the app — could only be driven with the mouse. It is focused on start and again
+    // every time Present turns on, by the zero-sized `if` below: an `if` element is built when
+    // its condition becomes true, so its `init` runs on every entry into Present and not only
+    // once at startup.
+    //
+    // The navigation keys are gated on presenting, because in edit mode Space and the arrows
+    // belong to whichever TextInput the person is typing into. Escape is not gated: it is how
+    // you get out.
+    //
+    // Nothing is decided here. Each key is named and handed to the app, which routes all five
+    // through the same `go_to` the buttons use — this scope used to call next-slide and
+    // prev-slide itself, which made it a second navigation path to forget to fix.
     key-handler := FocusScope {
         width: 0px;
         height: 0px;
 
         key-pressed(event) => {
             if event.text == "\u{001b}" {
-                if root.is-presenting {
-                    root.toggle-present();
-                }
-                root.show-templates = false;
-                root.show-search = false;
-                root.pres-template-gallery-open = false;
+                root.key-pressed("escape");
                 accept
             } else if root.is-presenting {
                 if event.text == Key.RightArrow || event.text == Key.DownArrow || event.text == " " || event.text == Key.PageDown {
-                    root.next-slide();
+                    root.key-pressed("next");
                     accept
                 } else if event.text == Key.LeftArrow || event.text == Key.UpArrow || event.text == Key.PageUp {
-                    root.prev-slide();
+                    root.key-pressed("previous");
                     accept
-                } else if event.text == Key.Home { root.select-slide(0); accept }
-                else if event.text == Key.End { root.select-slide(root.slide-count - 1); accept }
+                } else if event.text == Key.Home { root.key-pressed("first"); accept }
+                else if event.text == Key.End { root.key-pressed("last"); accept }
                 else { reject }
             } else { reject }
         }
     }
+
+    // Focus follows Present. Zero-sized and drawn nowhere; it exists for its `init`.
+    if root.is-presenting : Rectangle {
+        width: 0px;
+        height: 0px;
+        init => { key-handler.focus(); }
+    }
+
+    init => { key-handler.focus(); }
 }
