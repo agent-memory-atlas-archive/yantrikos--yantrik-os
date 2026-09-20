@@ -46,8 +46,27 @@ pub struct Account {
     pub smtp_port: u16,
     #[serde(default)]
     pub use_oauth: bool,
+    /// The OAuth2 access token, which is what XOAUTH2 actually signs in with. Short-lived:
+    /// Google's last an hour.
     #[serde(default)]
     pub oauth_token: Option<String>,
+    /// What a new access token is obtained with when the one above has expired.
+    ///
+    /// This is the credential that matters on an OAuth account — an access token is an hour of
+    /// access and this is all of it, until it is revoked. It is in the same clear-text file as
+    /// the passwords, for the same reason and with the same 0600, and the decision about a
+    /// secret store in `design/email-2026-09-20.md` covers it.
+    #[serde(default)]
+    pub oauth_refresh_token: Option<String>,
+    /// Unix seconds at which [`Account::oauth_token`] stops working.
+    ///
+    /// Absolute rather than a lifetime, because it is written to a file and read back by another
+    /// process minutes or days later. `None` on an account written before this service stored
+    /// one, and `None` is treated as expired: refreshing a token that was still good costs one
+    /// HTTPS round trip, and not refreshing one that was not costs a sign-in failure that reads
+    /// as a broken account.
+    #[serde(default)]
+    pub oauth_expires_at: Option<i64>,
 }
 
 fn default_imap_port() -> u16 {
@@ -71,11 +90,30 @@ impl std::fmt::Debug for Account {
             .field("use_oauth", &self.use_oauth)
             .field("password", &"<redacted>")
             .field("oauth_token", &self.oauth_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "oauth_refresh_token",
+                &self.oauth_refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("oauth_expires_at", &self.oauth_expires_at)
             .finish()
     }
 }
 
 impl Account {
+    /// Every string on this account that must never reach a screen, a log or `describe`.
+    ///
+    /// A password was the only one until Google sign-in. An OAuth account has two more, and a
+    /// mail server is free to quote back the AUTHENTICATE line it was sent — so the sentence
+    /// built from a refusal is cleared of all of them rather than of whichever one the call site
+    /// remembered. Empty strings are harmless: `without_secret` ignores them.
+    pub fn secrets(&self) -> Vec<&str> {
+        vec![
+            self.password.as_str(),
+            self.oauth_token.as_deref().unwrap_or(""),
+            self.oauth_refresh_token.as_deref().unwrap_or(""),
+        ]
+    }
+
     /// What may leave this process about this account. No password, no token.
     pub fn summary(&self) -> EmailAccountSummary {
         EmailAccountSummary {
@@ -197,6 +235,8 @@ pub fn from_env() -> Vec<Account> {
         smtp_port: 587,
         use_oauth: false,
         oauth_token: None,
+        oauth_refresh_token: None,
+        oauth_expires_at: None,
     }]
 }
 
@@ -218,12 +258,94 @@ pub fn upsert(accounts: &mut Vec<Account>, settings: &AccountSettings) -> String
         smtp_port: settings.smtp_port,
         use_oauth: false,
         oauth_token: None,
+        oauth_refresh_token: None,
+        oauth_expires_at: None,
     };
     match accounts.iter().position(|a| a.id == id) {
         Some(at) => accounts[at] = account,
         None => accounts.push(account),
     }
     id
+}
+
+/// Gmail's servers, which are the only ones a Google sign-in can be for.
+///
+/// Spelled here rather than taken from the app, because nothing was typed into a form for this
+/// flow: the address came from Google and the servers follow from that. Port 587 is submission
+/// with STARTTLS, which is what `smtp_transport` reads the port to mean.
+pub const GOOGLE_SERVERS: (&str, u16, &str, u16) = ("imap.gmail.com", 993, "smtp.gmail.com", 587);
+
+/// Put a Google-signed-in account in the list, replacing one with the same address.
+///
+/// The display name is left as whatever was already stored for this address, if anything: a
+/// sign-in does not know what the person calls this account, and overwriting a name they typed
+/// with an empty string is a change nobody asked for.
+///
+/// Returns the id, like [`upsert`], so the caller answers with what it did.
+pub fn upsert_google(
+    accounts: &mut Vec<Account>,
+    email: &str,
+    access_token: &str,
+    refresh_token: &str,
+    expires_at: i64,
+) -> String {
+    let id = id_for(email);
+    let (imap_server, imap_port, smtp_server, smtp_port) = GOOGLE_SERVERS;
+    let display_name = accounts
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| a.display_name.clone())
+        .unwrap_or_default();
+    let account = Account {
+        id: id.clone(),
+        email: email.trim().to_string(),
+        display_name,
+        provider: "gmail".to_string(),
+        // Deliberately cleared. An address that had an App Password and now signs in with Google
+        // should not keep the password lying in the file: it is no longer used for anything, and
+        // a credential kept after it stops being needed is a credential kept for no reason.
+        password: String::new(),
+        imap_server: imap_server.to_string(),
+        imap_port,
+        smtp_server: smtp_server.to_string(),
+        smtp_port,
+        use_oauth: true,
+        oauth_token: Some(access_token.to_string()),
+        oauth_refresh_token: Some(refresh_token.to_string()),
+        oauth_expires_at: Some(expires_at),
+    };
+    match accounts.iter().position(|a| a.id == id) {
+        Some(at) => accounts[at] = account,
+        None => accounts.push(account),
+    }
+    id
+}
+
+/// Write a refreshed access token back onto the stored account.
+///
+/// Separate from [`upsert_google`] because a refresh must not touch anything else: it happens on
+/// the way to opening a mailbox, with no person watching, and a function that rebuilt the whole
+/// record would be one edit away from resetting a display name or a server on every poll.
+///
+/// Returns false when the address is not in the list any more — somebody removed the account
+/// while a mail call was in flight — so the caller can say that rather than report a write that
+/// did not happen.
+pub fn store_refreshed(
+    accounts: &mut [Account],
+    id: &str,
+    access_token: &str,
+    refresh_token: &str,
+    expires_at: i64,
+) -> bool {
+    match accounts.iter_mut().find(|a| a.id == id) {
+        Some(account) => {
+            account.oauth_token = Some(access_token.to_string());
+            account.oauth_refresh_token = Some(refresh_token.to_string());
+            account.oauth_expires_at = Some(expires_at);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Write the accounts file, and the directory above it, so that nobody but this user can read

@@ -11,7 +11,7 @@
 //! password: a server is free to quote back the line it was sent, and one `LOGIN` echo would put
 //! a credential on the screen and in `app.describe`.
 
-use yantrik_ipc_contracts::email::without_secret;
+use yantrik_ipc_contracts::email::without_secrets;
 
 /// Which half of the account is being tried, and where.
 pub struct Attempt<'a> {
@@ -40,7 +40,17 @@ impl<'a> Attempt<'a> {
 /// passed through in the server's own words rather than replaced with a generic sentence — an
 /// unfamiliar reply the person can search for beats a familiar one that says nothing.
 pub fn name_failure(attempt: &Attempt, raw: &str, secret: &str) -> String {
-    let safe = without_secret(raw, secret);
+    name_failure_secrets(attempt, raw, &[secret])
+}
+
+/// The same, for an account that has more than one secret in play.
+///
+/// A password was the only one until Google sign-in. An OAuth account signs in with an access
+/// token and renews with a refresh token, and IMAP's `AUTHENTICATE XOAUTH2` line carries the
+/// access token in it — so a server that quotes back what it was sent quotes back a credential
+/// here exactly as it did with `LOGIN`. Both call sites pass everything the account holds.
+pub fn name_failure_secrets(attempt: &Attempt, raw: &str, secrets: &[&str]) -> String {
+    let safe = without_secrets(raw, secrets);
     let lower = safe.to_lowercase();
     let at = attempt.where_();
 
@@ -82,6 +92,31 @@ pub fn name_failure(attempt: &Attempt, raw: &str, secret: &str) -> String {
         return format!("{at} — the sign-in was rejected: {}", first_line(&safe));
     }
     format!("{at} — {}", first_line(&safe))
+}
+
+/// The same again, for an account that signs in with Google rather than with a password.
+///
+/// The classifier above would call a rejected XOAUTH2 token "the sign-in was rejected", which is
+/// what a wrong password is called and is the wrong next step entirely: there is no password on
+/// this account and nothing in the settings to correct. A token this service has just refreshed
+/// and Gmail has just refused means the grant behind it is gone — revoked in the Google account,
+/// or expired, which for an unverified OAuth client is seven days. The person has to sign in
+/// again, and that is a different sentence.
+///
+/// Everything that is *not* an authentication failure — a host that does not resolve, a closed
+/// port, a TLS error — is named exactly as it is for a password account, because none of that has
+/// anything to do with how the account signs in.
+pub fn name_oauth_failure(attempt: &Attempt, raw: &str, secrets: &[&str]) -> String {
+    let named = name_failure_secrets(attempt, raw, secrets);
+    if named.contains("the sign-in was rejected") {
+        let at = attempt.where_();
+        return format!(
+            "{at} — Google sign-in expired \u{2014} sign in again. Google refused this \
+             account's access token; the mail server said: {}",
+            first_line(&without_secrets(raw, secrets))
+        );
+    }
+    named
 }
 
 /// What a success is said as, so a green answer is as specific as a red one.

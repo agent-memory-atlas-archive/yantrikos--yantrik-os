@@ -24,6 +24,19 @@ pub mod method {
     pub const TEST_ACCOUNT: &str = "email.test_account";
     /// Store an account the service will read from then on.
     pub const SAVE_ACCOUNT: &str = "email.save_account";
+    /// Start a Google sign-in: answers with the consent page to open, and a flow id.
+    ///
+    /// Three methods rather than one, because this flow cannot be a request and a reply. The
+    /// person leaves for a browser in the middle of it, and the service has to sit on a loopback
+    /// socket meanwhile — so `oauth_begin` returns immediately with somewhere to send them,
+    /// [`OAUTH_STATUS`] is asked afterwards, and [`OAUTH_CANCEL`] is what a Cancel button calls.
+    /// A single blocking method would hold the app's ten-second budget for the minutes a person
+    /// takes to choose an account, and the window would be frozen for all of them.
+    pub const OAUTH_BEGIN: &str = "email.oauth_begin";
+    /// Where a started sign-in has got to: waiting, done, or failed with a reason.
+    pub const OAUTH_STATUS: &str = "email.oauth_status";
+    /// Give up on a started sign-in and stop the socket that is waiting for it.
+    pub const OAUTH_CANCEL: &str = "email.oauth_cancel";
 }
 
 /// What the service will say about a configured account. There is no password on it, and there
@@ -58,6 +71,25 @@ pub struct AccountsResult {
     pub config_path: String,
     /// True while passwords are kept in that file rather than in a secret store.
     pub secrets_are_plaintext: bool,
+    /// Whether this build can start a Google sign-in at all, and what to say when it cannot.
+    ///
+    /// The screen has to know before it draws the button, because a "Sign in with Google" that
+    /// cannot work is the dead control this whole flow replaces. `#[serde(default)]` so that an
+    /// older service answering without it parses as "not available", which is the truth about an
+    /// older service.
+    #[serde(default)]
+    pub google_sign_in: GoogleSignIn,
+}
+
+/// Whether a Google sign-in can be started on this machine, and why not when it cannot.
+///
+/// `note` is written for a person to read on the setup screen, not for a log. When Google
+/// sign-in is unavailable it is the whole of the explanation — including what to do instead —
+/// because an unexplained missing button is indistinguishable from a broken one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoogleSignIn {
+    pub available: bool,
+    pub note: String,
 }
 
 /// Everything needed to sign in to one account, including the password.
@@ -112,6 +144,38 @@ pub struct TestAccountResult {
     pub smtp: String,
 }
 
+/// The answer to [`method::OAUTH_BEGIN`].
+///
+/// There is no secret on it. `auth_url` carries the client id — which is public by construction
+/// in a desktop OAuth client, since it ships inside the binary — and the PKCE *challenge*, which
+/// is a hash and is meant to be seen. The verifier behind it never leaves the service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthBeginResult {
+    /// What [`method::OAUTH_STATUS`] and [`method::OAUTH_CANCEL`] are asked about.
+    pub flow_id: String,
+    /// The Google consent page to open in a browser.
+    pub auth_url: String,
+    /// How long the service will keep the loopback socket open waiting for the browser to come
+    /// back. Said out loud so the screen can promise the person the same number.
+    pub expires_in_secs: u64,
+}
+
+/// The answer to [`method::OAUTH_STATUS`]: where a started sign-in has got to.
+///
+/// `Failed` carries the reason in words, for the same rule the rest of this contract follows —
+/// a sign-in that did not happen and a sign-in that was declined are different things and a
+/// person can act on the difference. No token is ever on this type: what a completed flow
+/// answers with is the same [`EmailAccountSummary`] that `save_account` answers with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OAuthStatus {
+    /// The browser has not come back yet.
+    Waiting,
+    /// Signed in, verified against IMAP, and written to the accounts file.
+    Done { account: EmailAccountSummary },
+    Failed { reason: String },
+}
+
 /// Take `secret` out of text that is about to be shown to someone.
 ///
 /// The failures this service reports are the mail server's own words, and a server is free to
@@ -127,6 +191,21 @@ pub fn without_secret(text: &str, secret: &str) -> String {
         return text.to_string();
     }
     text.replace(secret, "<redacted>")
+}
+
+/// The same, for an account that has more than one secret to lose.
+///
+/// A password was the only one until Google sign-in: an OAuth account carries an access token, a
+/// refresh token and, for the length of one exchange, an authorization code — and every one of
+/// them is a credential. A mail server or Google's own token endpoint can quote any of them back
+/// in a refusal, so the sentence built from that refusal has to be cleared of all of them rather
+/// than of whichever one the call site happened to remember.
+pub fn without_secrets(text: &str, secrets: &[&str]) -> String {
+    let mut out = text.to_string();
+    for secret in secrets {
+        out = without_secret(&out, secret);
+    }
+    out
 }
 
 /// An email message summary (for list views).

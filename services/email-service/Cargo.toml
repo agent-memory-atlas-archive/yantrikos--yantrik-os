@@ -20,3 +20,9 @@ lettre = { workspace = true, features = ["hostname"] }
 mailparse = { workspace = true }
 html2text = { workspace = true }
 base64 = { workspace = true }
+# Google sign-in. `ureq` for the token endpoint — the same client the app and the companion
+# already use — and `sha2` for the PKCE S256 challenge. The challenge has to be a real SHA-256:
+# the helper next door in the companion shells out to `sha256sum` and falls back to base64 of the
+# verifier itself, which is PKCE with the protection taken out.
+ureq = { workspace = true }
+sha2 = { workspace = true }

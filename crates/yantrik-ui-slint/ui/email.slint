@@ -112,6 +112,24 @@ export component EmailClient inherits Rectangle {
     in property <bool> setup-testing: false;
     // Where the account is kept and what happens to the password, in the service's own words.
     in property <string> setup-note: "";
+
+    // ── Sign in with Google ──
+    //
+    // Whether this build has a Google OAuth client at all, answered by the mail service on
+    // `email.accounts`. The screen has to know before it draws anything: a "Sign in with Google"
+    // that cannot work is the dead button this replaced, and drawing one and then apologising
+    // after the click is the same failure a moment later.
+    in property <bool> google-available: false;
+    // The whole explanation, in the service's words, either way: where the client id came from,
+    // or that there is not one and what to do instead. Never an empty string where a control
+    // would otherwise have been -- a missing button with no reason given is indistinguishable
+    // from a broken one.
+    in property <string> google-note: "";
+    // True between the click and the browser coming back.
+    in property <bool> google-waiting: false;
+    // The consent URL, set only when a browser could not be opened for it, so it can be read off
+    // the screen and typed somewhere that has one. Empty the rest of the time.
+    in property <string> google-url: "";
     // The setup form over an app that already has an account, for adding a second one.
     in-out property <bool> setup-open: false;
 
@@ -204,13 +222,17 @@ export component EmailClient inherits Rectangle {
 
     // Callbacks — account setup
     //
-    // There is no `oauth-google`. The button that called it is gone with it: the only OAuth2
-    // flow in this tree is the companion's `connect_service`, which mints Gmail-API tokens into
-    // the companion's own connector store under `gmail.readonly` scope. IMAP XOAUTH2 needs
-    // `https://mail.google.com/`, and `email-service` reads its token from its own config, which
-    // nothing writes to from there. A button that completed a flow the mail service cannot use
-    // would be a new fabricated success in place of the one being removed. Gmail works here
-    // through an App Password, which is what the form below asks for.
+    // `sign-in-with-google` replaces the `oauth-google` that was removed in September for
+    // calling a stub. It is not the same flow: the companion's `connect_service` mints
+    // Gmail-API tokens under `gmail.readonly` into the companion's own connector store, and IMAP
+    // XOAUTH2 needs `https://mail.google.com/` in a token this mail service can read. This one
+    // runs in `email-service` — PKCE, a loopback redirect, and an IMAP sign-in before anything
+    // is written — so the button completes something the mailbox can actually use.
+    //
+    // Neither callback carries a credential. The token never comes near this window: the app
+    // gets back an address and the servers behind it, exactly as it does from `save-account`.
+    callback sign-in-with-google();
+    callback cancel-google-sign-in();
     callback save-account(string, string, string, string, string, string, string, string);
     callback test-connection(string, string, string, string, string);
 
@@ -355,13 +377,7 @@ export component EmailClient inherits Rectangle {
                             }
                         }
 
-                        // "Sign in with Google" stood here and called `oauth-google`, which
-                        // logged a line. It is not replaced with a working one: see the note on
-                        // the callbacks above. Gmail, Outlook, Yahoo and iCloud all work from
-                        // this form with an app password, which is what the provider buttons
-                        // below explain how to get.
-
-                        // ── Provider Picker (App Password flow) ──
+                        // ── Provider Picker ──
                         VerticalLayout {
                             spacing: 8px;
 
@@ -411,7 +427,7 @@ export component EmailClient inherits Rectangle {
                             }
 
                             if root.setup-provider != "" && root.setup-provider != "advanced" : Text {
-                                text: root.setup-provider == "gmail" ? "Requires App Password: Google Account > Security > 2-Step Verification > App passwords. Custom domains on Gmail supported."
+                                text: root.setup-provider == "gmail" ? "Sign in with Google below, or fill in the form with an App Password: Google Account > Security > 2-Step Verification > App passwords. Custom domains on Gmail supported."
                                     : root.setup-provider == "outlook" ? "Use your Outlook/Office 365 password. Custom domains on Outlook supported."
                                     : root.setup-provider == "yahoo" ? "Requires App Password: Yahoo Account > Security > App passwords."
                                     : "Requires App-specific password: appleid.apple.com > Security > App passwords.";
@@ -419,6 +435,90 @@ export component EmailClient inherits Rectangle {
                                 font-size: Theme.fs-micro;
                                 wrap: word-wrap;
                             }
+                        }
+
+                        // ── Sign in with Google ──
+                        //
+                        // Only for Gmail, because that is the only account this flow can be
+                        // for: the scope is Google's and the servers behind it are Gmail's.
+                        //
+                        // Three states and never a dead control. With a client id configured:
+                        // a button, and then a waiting panel with a Cancel that is real. With
+                        // no client id: the service's own sentence saying so and pointing at
+                        // the App Password path below, which works on every build.
+                        if root.setup-provider == "gmail" : VerticalLayout {
+                            spacing: 8px;
+
+                            if root.google-available && !root.google-waiting : Rectangle {
+                                height: 44px; border-radius: 10px; background: Theme.bg-card;
+                                border-width: 1px; border-color: Theme.border-subtle;
+                                TouchArea {
+                                    clicked => { root.sign-in-with-google(); }
+                                    mouse-cursor: pointer;
+                                }
+                                Text {
+                                    text: "Sign in with Google";
+                                    color: Theme.text-primary; font-size: Theme.fs-body; font-weight: 600;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+
+                            // What is happening, while it is happening. The person has left for
+                            // a browser; this window says what it is waiting for and offers the
+                            // way out, rather than sitting on an unchanged form.
+                            if root.google-waiting : VerticalLayout {
+                                spacing: 8px;
+
+                                Text {
+                                    text: "Waiting for Google\u{2026}";
+                                    color: AppIdentity.accent; font-size: Theme.fs-body; font-weight: 600;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Choose the account in your browser and allow access to mail, then come back to this window.";
+                                    color: Theme.text-secondary; font-size: Theme.fs-micro;
+                                    horizontal-alignment: center; wrap: word-wrap;
+                                }
+                                // Only when a browser could not be opened. The address is long
+                                // and unlovely and it is the only way through on a machine with
+                                // no handler for it, so it is on the screen rather than in a log.
+                                if root.google-url != "" : Rectangle {
+                                    height: url-text.preferred-height + 16px;
+                                    border-radius: 8px; background: Theme.bg-deep;
+                                    border-width: 1px; border-color: Theme.border-subtle;
+                                    url-text := TextInput {
+                                        x: 8px; y: 8px; width: parent.width - 16px;
+                                        text: root.google-url;
+                                        read-only: true;
+                                        color: Theme.text-dim; font-size: Theme.fs-micro;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                Rectangle {
+                                    height: 38px; border-radius: 10px; background: Theme.bg-card;
+                                    border-width: 1px; border-color: Theme.border-subtle;
+                                    TouchArea {
+                                        clicked => { root.cancel-google-sign-in(); }
+                                        mouse-cursor: pointer;
+                                    }
+                                    Text {
+                                        text: "Cancel";
+                                        color: Theme.text-secondary; font-size: Theme.fs-body; font-weight: 500;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Said either way: where the OAuth client came from, or that there
+                            // is not one on this build and what works instead.
+                            if root.google-note != "" : Text {
+                                text: root.google-note;
+                                color: root.google-available ? Theme.text-dim : Theme.amber;
+                                font-size: Theme.fs-micro;
+                                horizontal-alignment: center; wrap: word-wrap;
+                            }
+
+                            Rectangle { height: 1px; background: Theme.border-subtle; }
                         }
 
                         // Display Name
@@ -563,7 +663,13 @@ export component EmailClient inherits Rectangle {
                         }
 
                         // Action buttons
-                        HorizontalLayout {
+                        //
+                        // Not while a Google sign-in is in flight. Both of these sign in to the
+                        // same mail server with a password the form does not have during that
+                        // flow, and a control that is drawn and refused in Rust is a dead
+                        // control with extra steps. The waiting panel above carries the only
+                        // thing there is to do, which is Cancel.
+                        if !root.google-waiting : HorizontalLayout {
                             spacing: 12px;
 
                             // Only when there is a mailbox to go back to. On first run this form

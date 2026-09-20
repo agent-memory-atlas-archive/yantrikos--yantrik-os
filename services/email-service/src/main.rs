@@ -7,6 +7,9 @@
 //!   email.accounts        { }                                      → AccountsResult
 //!   email.test_account    AccountSettings                          → TestAccountResult
 //!   email.save_account    AccountSettings                          → EmailAccountSummary
+//!   email.oauth_begin     { provider }                             → OAuthBeginResult
+//!   email.oauth_status    { flow_id }                              → OAuthStatus
+//!   email.oauth_cancel    { flow_id }                              → { cancelled }
 //!   email.list_folders    { account_id }                           → Vec<EmailFolder>
 //!   email.list_messages   { account_id, folder, page?, per_page? } → Vec<EmailSummary>
 //!   email.get_message     { account_id, message_id }               → EmailDetail
@@ -26,7 +29,10 @@
 
 mod accounts;
 mod connect;
+mod google;
+mod oauth;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use accounts::Account;
@@ -58,14 +64,20 @@ struct EmailHandler {
     /// Held only to serialise writes. Reads go to the file: it is a few hundred bytes, it can be
     /// edited by hand while this is running, and a cached copy is how a service comes to insist
     /// an account exists that somebody deleted an hour ago.
-    writing: std::sync::Mutex<()>,
+    ///
+    /// An `Arc` because the Google sign-in's background thread writes the account it just
+    /// verified, and it outlives the request that started it.
+    writing: Arc<Mutex<()>>,
+    /// The Google sign-ins this service is in the middle of.
+    flows: oauth::Flows,
 }
 
 impl EmailHandler {
     fn new() -> Self {
         Self {
             config_path: accounts::config_path(),
-            writing: std::sync::Mutex::new(()),
+            writing: Arc::new(Mutex::new(())),
+            flows: oauth::Flows::default(),
         }
     }
 
@@ -73,8 +85,15 @@ impl EmailHandler {
         accounts::load(&self.config_path).map_err(|message| ServiceError { code: -32000, message })
     }
 
-    /// The account a mail request is about, or a refusal that says which of the two things is
-    /// true: there is no account at all, or the one that was asked for is not among those there.
+    /// The account a mail request is about, ready to sign in with.
+    ///
+    /// Two things, not one, and the second is why this is not just a lookup: an OAuth account's
+    /// access token lasts an hour, so every mail method has to be able to find one that expired
+    /// while nobody was looking and renew it before the socket is opened. That happens here, once,
+    /// rather than in each of the nine IMAP functions below.
+    ///
+    /// The refusal says which of the two things is true: there is no account at all, or the one
+    /// that was asked for is not among those there.
     fn get_account(&self, account_id: &str) -> Result<Account, ServiceError> {
         let all = self.all_accounts()?;
         if all.is_empty() {
@@ -86,13 +105,167 @@ impl EmailHandler {
                 ),
             });
         }
-        accounts::pick(&all, Some(account_id)).cloned().ok_or_else(|| ServiceError {
+        let account =
+            accounts::pick(&all, Some(account_id)).cloned().ok_or_else(|| ServiceError {
+                code: -32000,
+                message: format!(
+                    "no account called `{account_id}`; this machine has: {}",
+                    all.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+            })?;
+        self.with_fresh_token(account)
+    }
+
+    /// Renew an OAuth account's access token if it is spent, and write the new one down.
+    ///
+    /// A password account passes straight through. For an OAuth one this is the difference
+    /// between a mailbox that works tomorrow morning and one that stopped an hour after it was
+    /// set up: Google's access tokens last 3600 seconds and nothing else in this service would
+    /// ever ask for another.
+    ///
+    /// The new token is persisted because the alternative is refreshing on every single call —
+    /// nine IMAP methods, each opening its own session — which would turn one sign-in into a
+    /// token request per click and get the client rate-limited.
+    fn with_fresh_token(&self, account: Account) -> Result<Account, ServiceError> {
+        if !account.use_oauth {
+            return Ok(account);
+        }
+        if !google::needs_refresh(account.oauth_expires_at, oauth::now()) {
+            return Ok(account);
+        }
+
+        let Some(refresh_token) = account.oauth_refresh_token.clone().filter(|t| !t.is_empty())
+        else {
+            return Err(ServiceError {
+                code: -32000,
+                message: format!(
+                    "Google sign-in expired \u{2014} sign in again. {} signs in with Google and \
+                     this machine has nothing to renew its access with.",
+                    account.email
+                ),
+            });
+        };
+
+        let client = google::client().map_err(|why| ServiceError {
             code: -32000,
             message: format!(
-                "no account called `{account_id}`; this machine has: {}",
-                all.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(", ")
+                "{} signs in with Google and this build cannot renew its access: {why}",
+                account.email
             ),
-        })
+        })?;
+
+        let tokens = oauth::refresh(&client, &refresh_token).map_err(|message| ServiceError {
+            code: -32000,
+            // Already named and already redacted by `oauth::refresh`. A revoked refresh token
+            // arrives here as "Google sign-in expired — sign in again", which is the whole point:
+            // it is not an authentication failure to be retried, it is a grant that is gone.
+            message,
+        })?;
+
+        let mut refreshed = account.clone();
+        refreshed.oauth_token = Some(tokens.access.clone());
+        refreshed.oauth_refresh_token = Some(tokens.refresh.clone());
+        refreshed.oauth_expires_at = Some(tokens.expires_at);
+
+        // Written down, and a failure to write is reported rather than swallowed: a service that
+        // kept renewing because it could not remember the answer would look like it was working
+        // while making a token request per mail click.
+        let _writing = self.writing.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.all_accounts()?;
+        if accounts::store_refreshed(
+            &mut all,
+            &account.id,
+            &tokens.access,
+            &tokens.refresh,
+            tokens.expires_at,
+        ) {
+            accounts::save(&self.config_path, &all)
+                .map_err(|message| ServiceError { code: -32000, message })?;
+            tracing::info!(account = %account.id, "Google access token renewed");
+        } else {
+            tracing::warn!(
+                account = %account.id,
+                "the account was removed while its Google token was being renewed"
+            );
+        }
+        Ok(refreshed)
+    }
+
+    /// What `email.accounts` says about Google sign-in, and what `oauth_begin` needs.
+    fn google_client(&self) -> Result<google::GoogleClient, String> {
+        google::client()
+    }
+
+    /// Start a Google sign-in.
+    ///
+    /// The closure handed to the flow is where this service's own rules live: sign in over IMAP
+    /// with the token *before* anything is written, then upsert and read back from disk, exactly
+    /// as `save_account` does. Nothing gets into the accounts file on the strength of a token
+    /// Google issued — a token is not a mailbox that opened.
+    fn begin_google(&self) -> Result<OAuthBeginResult, ServiceError> {
+        let client = self.google_client().map_err(|message| ServiceError {
+            code: -32000,
+            message,
+        })?;
+
+        let config_path = self.config_path.clone();
+        let writing = self.writing.clone();
+        let finish: oauth::Finish = Arc::new(move |email: &str, tokens: &google::Tokens| {
+            let (imap_server, imap_port, smtp_server, smtp_port) = accounts::GOOGLE_SERVERS;
+            let candidate = Account {
+                id: accounts::id_for(email),
+                email: email.to_string(),
+                provider: "gmail".to_string(),
+                imap_server: imap_server.to_string(),
+                imap_port,
+                smtp_server: smtp_server.to_string(),
+                smtp_port,
+                use_oauth: true,
+                oauth_token: Some(tokens.access.clone()),
+                oauth_refresh_token: Some(tokens.refresh.clone()),
+                oauth_expires_at: Some(tokens.expires_at),
+                ..Account::default()
+            };
+
+            // The mailbox, before the file. Gmail refuses XOAUTH2 with a token whose scope is
+            // wrong, and "Google said yes" and "the mailbox opened" are two different facts.
+            let attempt = connect::Attempt::new("IMAP", imap_server, imap_port);
+            match imap_session(&candidate) {
+                Ok(mut session) => {
+                    let _ = session.logout();
+                }
+                Err(raw) => {
+                    return Err(connect::name_oauth_failure(
+                        &attempt,
+                        &raw,
+                        &candidate.secrets(),
+                    ))
+                }
+            }
+
+            let _writing = writing.lock().unwrap_or_else(|e| e.into_inner());
+            let mut all = accounts::load(&config_path)?;
+            let id = accounts::upsert_google(
+                &mut all,
+                email,
+                &tokens.access,
+                &tokens.refresh,
+                tokens.expires_at,
+            );
+            accounts::save(&config_path, &all)?;
+
+            // Read back from disk, so the answer is the account as it is now stored.
+            let stored = accounts::load(&config_path)?;
+            let saved = stored.iter().find(|a| a.id == id).ok_or_else(|| {
+                format!("the account was written to {} and is not in it", config_path.display())
+            })?;
+            tracing::info!(account = %saved.id, "account saved from a Google sign-in");
+            Ok(saved.summary())
+        });
+
+        self.flows
+            .begin(client, finish)
+            .map_err(|message| ServiceError { code: -32000, message })
     }
 }
 
@@ -122,8 +295,55 @@ impl ServiceHandler for EmailHandler {
                     // `accounts.rs`: the password is in that file in clear text, and the app
                     // puts this on the screen beside the field it was typed into.
                     secrets_are_plaintext: true,
+                    // Answered here because this is the call the app already makes on every
+                    // load, and because the screen has to know before it draws the button. A
+                    // "Sign in with Google" that cannot work is the dead control this whole
+                    // flow replaces; when there is no client id the screen says so in words
+                    // and points at the App Password path, which does work.
+                    google_sign_in: google::availability(&self.google_client()),
                 })
                 .unwrap())
+            }
+
+            // Answers as soon as the loopback socket is bound, which is microseconds. Everything
+            // slow — the person at the browser, the token exchange, the IMAP sign-in — happens on
+            // a thread, and `oauth_status` is how the app finds out.
+            method::OAUTH_BEGIN => {
+                // There is one provider and it is named, rather than assumed, so a caller asking
+                // for something else is told no instead of being signed in to Google.
+                let provider = params["provider"].as_str().unwrap_or("google").trim().to_lowercase();
+                if provider != "google" && provider != "gmail" {
+                    return Err(ServiceError {
+                        code: -32602,
+                        message: format!(
+                            "there is no `{provider}` sign-in here; this service can start a \
+                             Google one. Other providers work from the account form with an app \
+                             password."
+                        ),
+                    });
+                }
+                Ok(serde_json::to_value(self.begin_google()?).unwrap())
+            }
+
+            method::OAUTH_STATUS => {
+                let flow_id = require_str(&params, "flow_id")?;
+                let status = self.flows.status(flow_id).ok_or_else(|| ServiceError {
+                    code: -32602,
+                    // Not "waiting". A flow this service has never heard of, or one it has
+                    // already forgotten, is a different thing from one that has not finished,
+                    // and an app told "waiting" for it would poll until its own deadline.
+                    message: "that sign-in is not one this service is waiting for; it may have \
+                              been cancelled, or finished long enough ago to be forgotten. Start \
+                              it again."
+                        .to_string(),
+                })?;
+                Ok(serde_json::to_value(status).unwrap())
+            }
+
+            method::OAUTH_CANCEL => {
+                let flow_id = require_str(&params, "flow_id")?;
+                let cancelled = self.flows.cancel(flow_id);
+                Ok(serde_json::json!({ "cancelled": cancelled }))
             }
 
             // Try the settings and store nothing. Both halves are reported: an account that can
@@ -309,6 +529,7 @@ fn smtp_try(settings: &AccountSettings) -> Result<(), String> {
         &settings.password,
         &settings.smtp_server,
         settings.smtp_port,
+        false,
     )?;
     match lettre::SmtpTransport::test_connection(&mailer) {
         Ok(true) => Ok(()),
@@ -368,7 +589,18 @@ fn imap_session(
     client.read_greeting().map_err(|e| e.to_string())?;
 
     if account.use_oauth {
-        let token = account.oauth_token.as_deref().unwrap_or("");
+        // Not `unwrap_or("")`. An empty bearer token produces a Gmail refusal that reads as bad
+        // credentials, which sends a person to check a password this account does not have.
+        let token = match account.oauth_token.as_deref().filter(|t| !t.is_empty()) {
+            Some(token) => token,
+            None => {
+                return Err(format!(
+                    "Google sign-in expired \u{2014} sign in again. {} signs in with Google and \
+                     there is no access token stored for it.",
+                    account.email
+                ))
+            }
+        };
         let auth_string = format!("user={}\x01auth=Bearer {}\x01\x01", account.email, token);
         client
             .authenticate("XOAUTH2", &XOAuth2Authenticator(auth_string))
@@ -386,7 +618,13 @@ fn imap_connect(
     let attempt = connect::Attempt::new("IMAP", &account.imap_server, account.imap_port);
     imap_session(account).map_err(|raw| ServiceError {
         code: -32000,
-        message: connect::name_failure(&attempt, &raw, &account.password),
+        // Every secret this account holds, not just the password: the XOAUTH2 line carries the
+        // access token, and a server is free to quote back the line it was sent.
+        message: if account.use_oauth {
+            connect::name_oauth_failure(&attempt, &raw, &account.secrets())
+        } else {
+            connect::name_failure_secrets(&attempt, &raw, &account.secrets())
+        },
     })
 }
 
@@ -681,8 +919,7 @@ fn extract_parts(
 }
 
 fn smtp_send(account: &Account, compose: &ComposeRequest) -> Result<(), ServiceError> {
-    use lettre::{Message, SmtpTransport, Transport};
-    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{Message, Transport};
 
     let mut email_builder = Message::builder()
         .from(account.email.parse().map_err(|e| ServiceError {
@@ -717,21 +954,37 @@ fn smtp_send(account: &Account, compose: &ComposeRequest) -> Result<(), ServiceE
             message: format!("Failed to build email: {e}"),
         })?;
 
+    // An OAuth account sends with its access token and no password. This was the missing half:
+    // IMAP learned XOAUTH2 and SMTP never did, so an account signed in with Google could read
+    // mail and could not send any — and the sentence for that failure was about a password the
+    // account does not have.
+    let secret = if account.use_oauth {
+        account.oauth_token.clone().unwrap_or_default()
+    } else {
+        account.password.clone()
+    };
+
     let attempt = connect::Attempt::new("SMTP", &account.smtp_server, account.smtp_port);
+    let name = |raw: &str| {
+        if account.use_oauth {
+            connect::name_oauth_failure(&attempt, raw, &account.secrets())
+        } else {
+            connect::name_failure_secrets(&attempt, raw, &account.secrets())
+        }
+    };
+
     let mailer = smtp_transport(
         &account.email,
-        &account.password,
+        &secret,
         &account.smtp_server,
         account.smtp_port,
+        account.use_oauth,
     )
-    .map_err(|raw| ServiceError {
-        code: -32000,
-        message: connect::name_failure(&attempt, &raw, &account.password),
-    })?;
+    .map_err(|raw| ServiceError { code: -32000, message: name(&raw) })?;
 
     mailer.send(&email).map_err(|e| ServiceError {
         code: -32000,
-        message: connect::name_failure(&attempt, &e.to_string(), &account.password),
+        message: name(&e.to_string()),
     })?;
 
     tracing::info!(to = ?compose.to, subject = %compose.subject, "Email sent");
@@ -746,13 +999,21 @@ fn smtp_send(account: &Account, compose: &ComposeRequest) -> Result<(), ServiceE
 /// over TLS; they are different handshakes, and picking by port is what every other mail client
 /// does. Anything else is treated as STARTTLS, which is what a hand-entered port on a private
 /// server almost always is.
+/// `use_oauth` picks the SASL mechanism: XOAUTH2 with the access token as the secret, rather
+/// than PLAIN or LOGIN with a password. lettre builds the same `user=…\x01auth=Bearer …` string
+/// the IMAP side builds by hand, so the two halves of an account sign in the same way.
+///
+/// The mechanism is named rather than left to the default, because lettre's default list is
+/// PLAIN then LOGIN and neither of those will take an OAuth token: Gmail answers `535` and the
+/// account looks like it has a bad password.
 fn smtp_transport(
     email: &str,
-    password: &str,
+    secret: &str,
     server: &str,
     port: u16,
+    use_oauth: bool,
 ) -> Result<lettre::SmtpTransport, String> {
-    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 
     let builder = if port == 465 {
         lettre::SmtpTransport::relay(server)
@@ -761,11 +1022,16 @@ fn smtp_transport(
     }
     .map_err(|e| e.to_string())?;
 
-    Ok(builder
+    let builder = builder
         .port(port)
         .timeout(Some(NET_TIMEOUT))
-        .credentials(Credentials::new(email.to_string(), password.to_string()))
-        .build())
+        .credentials(Credentials::new(email.to_string(), secret.to_string()));
+
+    Ok(if use_oauth {
+        builder.authentication(vec![Mechanism::Xoauth2]).build()
+    } else {
+        builder.build()
+    })
 }
 
 fn imap_mark_read(

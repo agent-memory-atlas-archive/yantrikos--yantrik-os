@@ -24,10 +24,10 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
 use yantrik_ipc_contracts::email::{
     method, AccountSettings, AccountsResult, EmailAccountSummary, EmailDetail, EmailFolder,
-    EmailSummary, TestAccountResult,
+    EmailSummary, OAuthBeginResult, OAuthStatus, TestAccountResult,
 };
 
-use state::{Draft, MailState, MessageRow, Triage};
+use state::{Draft, GoogleOutcome, MailState, MessageRow, Triage};
 
 slint::include_modules!();
 
@@ -314,6 +314,72 @@ fn save_account_via_service(settings: &AccountSettings) -> Result<EmailAccountSu
     call_typed(method::SAVE_ACCOUNT, params)
 }
 
+// ── The Google sign-in ───────────────────────────────────────────────
+//
+// Three calls, because there is a person in the middle of it. `begin` answers in microseconds
+// with somewhere to send them; the mail service sits on a loopback socket meanwhile; `status` is
+// asked on a worker thread until it stops saying "waiting". A single blocking call would hold
+// this app's ten-second budget for the minutes a person takes to choose a Google account, and
+// freeze the window for all of them.
+//
+// No token reaches this process. What comes back from a finished sign-in is the same account
+// summary `save_account` answers with — an address and the servers behind it.
+
+fn oauth_begin_via_service() -> Result<OAuthBeginResult, String> {
+    call_typed(method::OAUTH_BEGIN, serde_json::json!({ "provider": "google" }))
+}
+
+fn oauth_status_via_service(flow_id: &str) -> Result<OAuthStatus, String> {
+    call_typed(method::OAUTH_STATUS, serde_json::json!({ "flow_id": flow_id }))
+}
+
+fn oauth_cancel_via_service(flow_id: &str) -> Result<(), String> {
+    call(method::OAUTH_CANCEL, serde_json::json!({ "flow_id": flow_id })).map(|_| ())
+}
+
+/// Put the consent page in front of the person.
+///
+/// Detached, and bounded. `xdg-open` normally hands the URL to a handler and exits immediately;
+/// on a machine with no handler it exits non-zero, which is the case that has to be *said* rather
+/// than swallowed — a click that silently opens nothing is the report this whole change came
+/// from. So: spawn, wait a moment and a half for an exit code, and treat "still running" as a
+/// browser that is starting. The child is reaped on a thread either way, because a zombie for
+/// every sign-in is a small leak in a process that stays open all day.
+fn open_in_browser(url: &str) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("xdg-open could not be run: {e}"))?;
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "xdg-open exited {} \u{2014} this machine has no handler for a web address",
+                    status.code().map(|c| c.to_string()).unwrap_or_else(|| "on a signal".into())
+                ))
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                // Still running after a second and a half: it has a handler and is waiting on the
+                // browser it started. That is a success from here.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return Ok(());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(format!("xdg-open could not be waited for: {e}")),
+        }
+    }
+}
+
 // ── Conversion helpers ───────────────────────────────────────────────
 
 fn summary_to_list_item(s: &EmailSummary, idx: usize) -> EmailListItem {
@@ -456,6 +522,12 @@ struct Mail {
     setting_up: Cell<bool>,
     /// True while a sync worker is running, so Refresh cannot stack.
     syncing: Cell<bool>,
+    /// The Google sign-in this window is in the middle of, if any.
+    ///
+    /// Held so that a status answer arriving from a flow that was cancelled — or from one the
+    /// person abandoned and started again — is dropped rather than applied. A poll and a Cancel
+    /// race by a second at most, and the loser must not be the Cancel.
+    google_flow: RefCell<Option<String>>,
     draft_path: std::path::PathBuf,
 }
 
@@ -484,6 +556,7 @@ impl Mail {
             triage: Cell::new(Triage::All),
             setting_up: Cell::new(false),
             syncing: Cell::new(false),
+            google_flow: RefCell::new(None),
             draft_path: state::draft_path(),
         }
     }
@@ -564,6 +637,14 @@ fn apply_loaded(ui: &EmailApp, mail: &Rc<Mail>, loaded: Loaded) {
         )
         .into(),
     );
+
+    // Whether the setup screen can offer a Google sign-in at all, in the service's own words.
+    // The button is not drawn unless this is true, because a "Sign in with Google" that cannot
+    // work is the dead control this flow replaced — and the note is set either way, so a build
+    // with no OAuth client says so instead of showing an unexplained gap.
+    let google = loaded.state.google_sign_in();
+    ui.set_google_available(google.available);
+    ui.set_google_note(google.note.into());
 
     // The folder that is open, highlighted by name. `is_selected: idx == 0` was hardcoded, so
     // after switching mailboxes the sidebar still pointed at whichever folder came back first.
@@ -903,6 +984,178 @@ fn message_rows(ui: &EmailApp) -> Vec<MessageRow> {
         .collect()
 }
 
+// ── The Google sign-in, on this side of the wire ─────────────────────
+
+/// Start one: ask the service, open a browser, and leave a poll running.
+///
+/// Everything slow is on a worker. `oauth_begin` is a socket bind and answers at once, but it is
+/// still a service call, and opening a browser is a process spawn with a bounded wait on it —
+/// neither belongs on the thread that draws the window.
+fn start_google_sign_in(ui: &EmailApp, mail: &Rc<Mail>) -> Result<(), String> {
+    if mail.setting_up.get() || mail.google_flow.borrow().is_some() {
+        return Err("A sign-in is already in progress.".to_string());
+    }
+    if !ui.get_google_available() {
+        // The reason is already on the screen, from `email.accounts`. Returned as well, so a
+        // caller of the action gets the same sentence a person is reading.
+        return Err(ui.get_google_note().to_string());
+    }
+
+    mail.setting_up.set(true);
+    ui.set_google_waiting(true);
+    ui.set_google_url(SharedString::default());
+    ui.set_setup_ok(false);
+    ui.set_setup_status("Opening the Google sign-in\u{2026}".into());
+
+    let back = ui.as_weak();
+    std::thread::spawn(move || {
+        let begun = oauth_begin_via_service();
+        // The browser is opened here rather than after the hop back, so the window is never held
+        // waiting on a process spawn.
+        let opened = begun.as_ref().ok().map(|b| open_in_browser(&b.auth_url));
+        let _ = back.upgrade_in_event_loop(move |ui| {
+            let Some(mail) = with_mail(|m| m.clone()) else { return };
+            mail.setting_up.set(false);
+            match begun {
+                Err(e) => {
+                    ui.set_google_waiting(false);
+                    let text = format!("The Google sign-in could not be started: {e}");
+                    ui.set_setup_status(text.clone().into());
+                    say(&ui, text);
+                }
+                Ok(begun) => {
+                    *mail.google_flow.borrow_mut() = Some(begun.flow_id.clone());
+                    match opened {
+                        Some(Ok(())) => {
+                            ui.set_google_url(SharedString::default());
+                            ui.set_setup_status("Waiting for Google\u{2026}".into());
+                            clear_notice(&ui);
+                        }
+                        Some(Err(why)) => {
+                            // Not a dead end: the address goes on the screen so the sign-in can
+                            // be finished from anywhere with a browser.
+                            let text = state::browser_failed_note(&why);
+                            ui.set_google_url(begun.auth_url.clone().into());
+                            ui.set_setup_status(text.clone().into());
+                            say(&ui, text);
+                        }
+                        None => {}
+                    }
+                    watch_google(ui.as_weak(), begun.flow_id, begun.expires_in_secs);
+                }
+            }
+        });
+    });
+    Ok(())
+}
+
+/// Ask the mail service where a sign-in has got to, once a second, until it stops saying
+/// "waiting".
+///
+/// On a worker, always. The person is in a browser and this window has to stay alive — the
+/// control surface gives an action three seconds on the UI thread, and a poll loop there would
+/// blow that on the first iteration.
+fn watch_google(weak: slint::Weak<EmailApp>, flow_id: String, budget_secs: u64) {
+    std::thread::spawn(move || {
+        // A little past the service's own deadline, so the service's sentence about giving up
+        // is the one that is shown rather than this app's.
+        let deadline = std::time::Instant::now() + Duration::from_secs(budget_secs + 20);
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if std::time::Instant::now() >= deadline {
+                let id = flow_id.clone();
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    apply_google(
+                        &ui,
+                        &id,
+                        GoogleOutcome::Stopped(
+                            "The Google sign-in was not finished in time, so this window stopped \
+                             waiting for it. Nothing was saved."
+                                .to_string(),
+                        ),
+                    );
+                });
+                return;
+            }
+            let outcome = state::google_outcome(oauth_status_via_service(&flow_id));
+            if outcome == GoogleOutcome::Waiting {
+                continue;
+            }
+            let id = flow_id.clone();
+            let _ = weak
+                .upgrade_in_event_loop(move |ui| apply_google(&ui, &id, outcome));
+            return;
+        }
+    });
+}
+
+/// Put a finished sign-in on the screen.
+fn apply_google(ui: &EmailApp, flow_id: &str, outcome: GoogleOutcome) {
+    let Some(mail) = with_mail(|m| m.clone()) else { return };
+
+    // A flow the window is no longer waiting on: cancelled, or abandoned and restarted. Applying
+    // it would put an answer to an old question over the top of a new one.
+    if mail.google_flow.borrow().as_deref() != Some(flow_id) {
+        return;
+    }
+    *mail.google_flow.borrow_mut() = None;
+    ui.set_google_waiting(false);
+    ui.set_google_url(SharedString::default());
+
+    match outcome {
+        // Should not reach here — `watch_google` keeps polling on Waiting — and if it does, it is
+        // said rather than left as a window stuck on a spinner.
+        GoogleOutcome::Waiting => {
+            let text = "The Google sign-in is still waiting; this window stopped following it."
+                .to_string();
+            ui.set_setup_ok(false);
+            ui.set_setup_status(text.clone().into());
+            say(ui, text);
+        }
+        GoogleOutcome::SignedIn(email) => {
+            ui.set_setup_ok(true);
+            ui.set_setup_status(format!("Signed in as {email}").into());
+            ui.set_setup_password(SharedString::default());
+            ui.set_setup_open(false);
+            clear_notice(ui);
+            // Through the sync, which runs on a worker: loading a mailbox here would hold the UI
+            // thread for as long as the mail server takes, right after a sign-in.
+            ui.invoke_sync_emails();
+        }
+        // Said twice, like every other failure in this app: on the form the person is looking at,
+        // and in `describe.notice` for whatever is driving the window.
+        GoogleOutcome::Stopped(reason) => {
+            ui.set_setup_ok(false);
+            ui.set_setup_status(reason.clone().into());
+            say(ui, reason);
+        }
+    }
+}
+
+/// Give up on one, and tell the mail service to close the socket it is waiting on.
+fn cancel_google_sign_in(ui: &EmailApp, mail: &Rc<Mail>) {
+    let flow = mail.google_flow.borrow_mut().take();
+    ui.set_google_waiting(false);
+    ui.set_google_url(SharedString::default());
+    ui.set_setup_ok(false);
+    match flow {
+        Some(flow_id) => {
+            ui.set_setup_status("The Google sign-in was cancelled.".into());
+            clear_notice(ui);
+            // On a worker: the service stops a listener thread, which is fast, but this is still
+            // a socket call from a button handler.
+            std::thread::spawn(move || {
+                if let Err(e) = oauth_cancel_via_service(&flow_id) {
+                    tracing::warn!(error = %e, "the mail service could not be told to cancel");
+                }
+            });
+        }
+        // Nothing to cancel. The panel is closed anyway rather than left up, because the window
+        // saying it is waiting for something it is not waiting for is its own small lie.
+        None => ui.set_setup_status(SharedString::default()),
+    }
+}
+
 // ── The control surface ──────────────────────────────────────────────
 //
 // What the companion can see of Email, and what it can ask Email to do, without photographing
@@ -1037,13 +1290,15 @@ fn publish_control(app: &EmailApp, mail: &Rc<Mail>) {
     let search_ui = ui_for.clone();
     let read_ui = ui_for.clone();
     let flag_ui = ui_for.clone();
-    let compose_ui = ui_for;
+    let compose_ui = ui_for.clone();
+    let google_ui = ui_for;
 
     let open_mail = mail.clone();
     let folder_mail = mail.clone();
     let search_mail = mail.clone();
     let read_mail = mail.clone();
     let flag_mail = mail.clone();
+    let google_mail = mail.clone();
 
     App::new("email")
         .describe(describe)
@@ -1214,14 +1469,53 @@ fn publish_control(app: &EmailApp, mail: &Rc<Mail>) {
                 }))
             },
         )
+        .action(
+            // The one setup step that can be on this surface, because it is the one that takes
+            // no credential: it opens Google's own consent page and stops.
+            //
+            // `sensitive` rather than `standard`, and the grade is about what it does to the
+            // person rather than to the machine. By itself it changes nothing — no account is
+            // written, no mailbox is touched, and the flow cannot complete without somebody
+            // choosing an account and reading a consent screen that says full access to Gmail.
+            // But it puts that screen in front of them, unasked, on their own display, and a
+            // consent page a person did not go looking for is exactly the shape of the thing
+            // they should not be trained to click through. So it is above `standard`, where a
+            // `tool_permission: standard` ceiling refuses it, and the default ceiling allows it.
+            //
+            // It takes no arguments on purpose. There is nothing to parameterise: the provider
+            // is Google because the scope and the servers are Google's, and the address comes
+            // from the sign-in rather than from a caller.
+            Action::new(
+                "begin_google_sign_in",
+                "Open Google's sign-in page to add a Gmail account. Cannot finish on its own — \
+                 the user chooses the account and grants access in their browser.",
+            )
+            .risk("sensitive"),
+            move |_args| {
+                let ui = google_ui()?;
+                start_google_sign_in(&ui, &google_mail)?;
+                // What was observed, which is that a browser was asked to open. Not "signed in":
+                // whether this works is decided in a browser by a person, minutes from now, and
+                // `describe` carries the answer when it arrives.
+                Ok(serde_json::json!({
+                    "opened": true,
+                    "note": "Google's consent page was opened. The user has to choose an account \
+                             and allow access; ask describe again for the outcome.",
+                }))
+            },
+        )
         .serve();
 
-    // Setting an account up is deliberately absent from the list above.
+    // Setting an account up with a password is deliberately absent from the list above.
     //
-    // It takes a password, and `docs/app-control.md` is explicit that the transcript a mind
-    // works in is readable. An action that accepted one would put a mail credential in it, in
-    // the clear, for every caller of `app.describe` afterwards. Configuring an account is a
-    // person's act at the keyboard; there is no version of it that belongs on this surface.
+    // `docs/app-control.md` is explicit that the transcript a mind works in is readable. An
+    // action that accepted a password would put a mail credential in it, in the clear, for every
+    // caller of `app.describe` afterwards. `save_account` and `test_connection` are therefore not
+    // on this surface and never will be.
+    //
+    // `begin_google_sign_in` is the exception that proves the rule rather than a hole in it: it
+    // accepts nothing, carries nothing back, and the credential it ends in never enters this
+    // process at all — the mail service holds the token and the app is told an address.
 }
 
 /// An argument that may arrive as a string or as a number.
@@ -1277,6 +1571,7 @@ fn wire(app: &EmailApp) {
             },
             config_path: "(design fixture)".into(),
             secrets_are_plaintext: false,
+            google: Default::default(),
         };
         app.set_service_state("up".into());
     } else {
@@ -1773,12 +2068,53 @@ fn wire(app: &EmailApp) {
             ui.set_setup_display_name(SharedString::default());
             ui.set_setup_provider(SharedString::default());
             ui.set_setup_advanced_mode(false);
+            // A form opened fresh is not waiting for anything. Left over from a previous visit,
+            // the waiting panel would hide the fields and offer a Cancel for a flow that ended.
+            ui.set_google_waiting(false);
+            ui.set_google_url(SharedString::default());
+        });
+    }
+    // ── Sign in with Google ──
+    //
+    // The button that was removed in September for calling a stub. It is back because there is
+    // something behind it now: `email.oauth_begin` in the mail service, PKCE and a loopback
+    // redirect, and an IMAP sign-in with the token before any account is written.
+    //
+    // The whole of it is off the UI thread. A person goes to a browser in the middle of this and
+    // takes as long as they take; what this window does meanwhile is say so, and offer Cancel.
+    {
+        let weak = app.as_weak();
+        let mail = mail.clone();
+        app.on_sign_in_with_google(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Err(e) = start_google_sign_in(&ui, &mail) {
+                // Already on screen for the "no client id" case, because the note is drawn from
+                // `email.accounts`. Said again here so a refusal from a click is never silent.
+                ui.set_setup_ok(false);
+                ui.set_setup_status(e.clone().into());
+                say(&ui, e);
+            }
         });
     }
     {
         let weak = app.as_weak();
+        let mail = mail.clone();
+        app.on_cancel_google_sign_in(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            cancel_google_sign_in(&ui, &mail);
+        });
+    }
+
+    {
+        let weak = app.as_weak();
+        let mail = mail.clone();
         app.on_cancel_setup(move || {
             let Some(ui) = weak.upgrade() else { return };
+            // A setup form closed while a Google sign-in is in flight leaves a listener open on
+            // this machine and a consent page in a browser that leads nowhere. Closed properly.
+            if mail.google_flow.borrow().is_some() {
+                cancel_google_sign_in(&ui, &mail);
+            }
             ui.set_setup_open(false);
             // Not kept anywhere, on purpose: a password left in a property is a password in the
             // process for as long as the window is open.

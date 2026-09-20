@@ -8,7 +8,14 @@
 //! out of every sentence this app can produce, which is the kind of rule that only holds if
 //! something checks it.
 //!
-//! Three modules are included directly, all of them free of Slint, sockets and the network:
+//! The September rewrite left "Sign in with Google" off the screen rather than wired, because the
+//! only OAuth flow in the tree minted the wrong scope into the wrong store. There is a real one
+//! now, and it brought its own class of thing that is invisible from either side: a PKCE
+//! challenge that is not a hash of anything still looks like a challenge, a callback parser that
+//! does not check `state` still returns a code, an access token with no expiry beside it still
+//! signs in — until the hour is up. `google.rs` is the fourth module here for that reason.
+//!
+//! Four modules are included directly, all of them free of Slint, sockets and the network:
 
 /// The app's side: which of three states it is in, which message a caller means, the draft, and
 /// what the setup form makes of what was typed.
@@ -23,15 +30,22 @@ pub mod accounts;
 #[path = "../../services/email-service/src/connect.rs"]
 pub mod connect;
 
+/// The service's side: everything about a Google sign-in that is a decision rather than a socket.
+/// The flow itself lives in `oauth.rs`, which is not here because all of it opens something.
+#[path = "../../services/email-service/src/google.rs"]
+pub mod google;
+
 #[cfg(test)]
 mod tests {
     use super::accounts::{self, Account};
     use super::connect::{self, Attempt};
-    use super::state::{self, Draft, MailState, MessageRow, Triage};
+    use super::google;
+    use super::state::{self, Draft, GoogleOutcome, MailState, MessageRow, Triage};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use yantrik_ipc_contracts::email::{
-        without_secret, AccountSettings, AccountsResult, EmailAccountSummary,
+        without_secret, without_secrets, AccountSettings, AccountsResult, EmailAccountSummary,
+        OAuthBeginResult, OAuthStatus,
     };
 
     static ID: AtomicUsize = AtomicUsize::new(0);
@@ -127,6 +141,7 @@ mod tests {
             accounts: Vec::new(),
             config_path: "/home/p/.config/yantrik/email.json".into(),
             secrets_are_plaintext: true,
+            google_sign_in: Default::default(),
         }));
         assert_eq!(s.service_word(), "up");
         assert_eq!(s.has_account(), Some(false));
@@ -142,6 +157,7 @@ mod tests {
             accounts: vec![summary("someone@example.com")],
             config_path: "/tmp/email.json".into(),
             secrets_are_plaintext: true,
+            google_sign_in: Default::default(),
         }));
         assert_eq!(s.service_word(), "up");
         assert_eq!(s.has_account(), Some(true));
@@ -157,12 +173,14 @@ mod tests {
             accounts: Vec::new(),
             config_path: "/tmp/e.json".into(),
             secrets_are_plaintext: true,
+            google_sign_in: Default::default(),
         }))
         .summary();
         let ready = state::decide(Ok(AccountsResult {
             accounts: vec![summary("a@b.com")],
             config_path: "/tmp/e.json".into(),
             secrets_are_plaintext: true,
+            google_sign_in: Default::default(),
         }))
         .summary();
         assert_ne!(down, empty);
@@ -756,11 +774,13 @@ mod tests {
                 accounts: Vec::new(),
                 config_path: "/tmp/e.json".into(),
                 secrets_are_plaintext: true,
+                google_sign_in: Default::default(),
             })),
             state::decide(Ok(AccountsResult {
                 accounts: vec![summary("a@b.com")],
                 config_path: "/tmp/e.json".into(),
                 secrets_are_plaintext: true,
+                google_sign_in: Default::default(),
             })),
         ] {
             said.push(s.summary());
@@ -811,6 +831,7 @@ mod tests {
             accounts: accounts::summaries(&all),
             config_path: f.config().display().to_string(),
             secrets_are_plaintext: true,
+            google_sign_in: Default::default(),
         })
         .unwrap();
         assert!(!answered.contains(SENTINEL), "{answered}");
@@ -849,6 +870,7 @@ mod tests {
             accounts: accounts::summaries(&all),
             config_path: "/tmp/e.json".into(),
             secrets_are_plaintext: true,
+            google_sign_in: Default::default(),
         })
         .unwrap();
         let parsed: AccountsResult = serde_json::from_value(answered).unwrap();
@@ -874,5 +896,768 @@ mod tests {
         assert_eq!(all[0].smtp_port, 587);
         // And the app finds it, although its id is not the address slug.
         assert_eq!(accounts::pick(&all, Some("default")).unwrap().email, "a@b.com");
+    }
+
+    // ── Sign in with Google ──────────────────────────────────────────
+    //
+    // The button that was removed in September for calling a stub. What is checked here is the
+    // half of the flow that is a decision rather than a socket, because that is the half where a
+    // fault is invisible: a PKCE challenge that is not a hash of anything still looks like a
+    // challenge, a callback parser that skips the `state` check still returns a code, and an
+    // access token with no expiry stored beside it signs in perfectly — for an hour.
+    //
+    // Nothing here touches Google. A test that needed a live account, a rate limit and a person
+    // at a browser is a test nobody runs.
+
+    /// RFC 7636 appendix B, the worked example. The point of a published vector is that it
+    /// catches the fallback the companion's helper has: when its `sha256sum` subprocess fails it
+    /// returns base64 of the *verifier*, which is a valid-looking S256 challenge that is not a
+    /// hash of anything, and a flow using it has PKCE's protection taken out with no symptom.
+    const RFC_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const RFC_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+    /// Stand-ins for the three Google credentials. None of them may appear in anything this code
+    /// produces, exactly as the password sentinel may not.
+    const ACCESS_SENTINEL: &str = "ya29.ACCESS-SENTINEL-do-not-print";
+    const REFRESH_SENTINEL: &str = "1//REFRESH-SENTINEL-do-not-print";
+    const CODE_SENTINEL: &str = "4/0AX4-CODE-SENTINEL-do-not-print";
+    const CLIENT_SECRET_SENTINEL: &str = "GOCSPX-SECRET-SENTINEL";
+
+    fn pkce_of(verifier: &str, state: &str) -> google::Pkce {
+        google::Pkce {
+            challenge: google::code_challenge(verifier),
+            verifier: verifier.to_string(),
+            state: state.to_string(),
+        }
+    }
+
+    fn a_client() -> google::GoogleClient {
+        google::GoogleClient {
+            id: "1234.apps.googleusercontent.com".into(),
+            secret: Some(CLIENT_SECRET_SENTINEL.into()),
+            source: "a test".into(),
+        }
+    }
+
+    #[test]
+    fn the_code_challenge_is_a_real_sha256_of_the_verifier() {
+        assert_eq!(google::code_challenge(RFC_VERIFIER), RFC_CHALLENGE);
+        // And specifically not base64 of the verifier itself, which is the fallback next door.
+        assert_ne!(
+            google::code_challenge(RFC_VERIFIER),
+            google::base64url(RFC_VERIFIER.as_bytes())
+        );
+    }
+
+    #[test]
+    fn the_challenge_is_base64url_with_no_padding() {
+        let challenge = google::code_challenge("anything at all");
+        assert!(!challenge.contains('='), "{challenge}");
+        assert!(!challenge.contains('+'), "{challenge}");
+        assert!(!challenge.contains('/'), "{challenge}");
+    }
+
+    #[test]
+    fn two_sign_ins_do_not_share_a_verifier_or_a_state() {
+        let one = google::Pkce::new().expect("this machine has no /dev/urandom");
+        let two = google::Pkce::new().expect("this machine has no /dev/urandom");
+        assert_ne!(one.verifier, two.verifier);
+        assert_ne!(one.state, two.state);
+        assert_eq!(one.challenge, google::code_challenge(&one.verifier));
+        // Long enough to be worth having: RFC 7636 wants 43 characters minimum.
+        assert!(one.verifier.len() >= 43, "{}", one.verifier.len());
+    }
+
+    #[test]
+    fn the_consent_url_asks_for_the_scope_imap_actually_needs() {
+        let pkce = pkce_of(RFC_VERIFIER, "STATE-1");
+        let url = google::auth_url("client-1", &google::redirect_uri(41234), &pkce);
+
+        // The whole reason this flow exists rather than the companion's: `gmail.readonly` is the
+        // Gmail HTTP API and XOAUTH2 will not take it.
+        assert!(url.contains("https%3A%2F%2Fmail.google.com%2F"), "{url}");
+        assert!(!url.contains("gmail.readonly"), "{url}");
+        // The address comes from Google rather than from a box a person typed into.
+        assert!(url.contains("openid"), "{url}");
+        assert!(url.contains("code_challenge_method=S256"), "{url}");
+        assert!(url.contains(&format!("code_challenge={RFC_CHALLENGE}")), "{url}");
+        assert!(url.contains("state=STATE-1"), "{url}");
+        // Both, or Google returns no refresh token and the account dies in an hour.
+        assert!(url.contains("access_type=offline"), "{url}");
+        assert!(url.contains("prompt=consent"), "{url}");
+        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A41234"), "{url}");
+        assert!(url.starts_with(google::AUTH_ENDPOINT), "{url}");
+    }
+
+    #[test]
+    fn the_verifier_is_not_in_the_url_the_browser_is_given() {
+        let pkce = pkce_of(RFC_VERIFIER, "STATE-1");
+        let url = google::auth_url("client-1", &google::redirect_uri(1), &pkce);
+        // The whole of PKCE: the challenge travels and the verifier does not.
+        assert!(!url.contains(RFC_VERIFIER), "{url}");
+    }
+
+    #[test]
+    fn the_redirect_is_loopback_and_nothing_else() {
+        // Not `localhost`, which resolves through whatever the machine's hosts file says, and
+        // not a public address. The socket is bound to 127.0.0.1 and this must name it.
+        assert_eq!(google::redirect_uri(8080), "http://127.0.0.1:8080");
+    }
+
+    // ── What came back to the loopback socket ────────────────────────
+
+    #[test]
+    fn a_callback_with_the_right_state_is_the_code() {
+        let request = "GET /?code=abc123&state=STATE-1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        assert_eq!(
+            google::parse_callback(request, "STATE-1"),
+            google::Callback::Code("abc123".into())
+        );
+    }
+
+    #[test]
+    fn a_percent_encoded_code_arrives_decoded() {
+        // Google's codes contain `/` and are percent-encoded in the query.
+        let request = "GET /?code=4%2F0AX4&state=S HTTP/1.1\r\n\r\n";
+        assert_eq!(google::parse_callback(request, "S"), google::Callback::Code("4/0AX4".into()));
+    }
+
+    #[test]
+    fn declining_in_the_browser_is_said_as_declining() {
+        let request = "GET /?error=access_denied&state=S HTTP/1.1\r\n\r\n";
+        match google::parse_callback(request, "S") {
+            google::Callback::Refused(why) => {
+                assert!(why.to_lowercase().contains("declined"), "{why}");
+                // And it says nothing was saved, because that is the question a person has.
+                assert!(why.to_lowercase().contains("nothing was saved"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_code_under_the_wrong_state_is_refused_and_the_code_is_not_quoted() {
+        // Any page in any browser on this machine can GET 127.0.0.1:<port>?code=… . The state is
+        // the only thing that says the reply belongs to the flow this service started.
+        let request = format!("GET /?code={CODE_SENTINEL}&state=SOMEONE-ELSE HTTP/1.1\r\n\r\n");
+        match google::parse_callback(&request, "OURS") {
+            google::Callback::Refused(why) => {
+                assert!(why.contains("did not match"), "{why}");
+                assert!(!why.contains(CODE_SENTINEL), "the code reached a notice: {why}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_callback_with_no_state_at_all_is_refused() {
+        let request = "GET /?code=abc123 HTTP/1.1\r\n\r\n";
+        assert!(matches!(
+            google::parse_callback(request, "OURS"),
+            google::Callback::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn a_browser_asking_for_a_favicon_does_not_end_the_sign_in() {
+        // A flow that failed because the browser was tidy would be a sign-in that works on some
+        // browsers and not others, for no reason anyone could find.
+        for request in [
+            "GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET / HTTP/1.1\r\n\r\n",
+            "",
+            "\r\n\r\n",
+        ] {
+            assert_eq!(
+                google::parse_callback(request, "S"),
+                google::Callback::Ignore,
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn google_error_values_are_named_rather_than_echoed() {
+        assert!(google::name_consent_failure("admin_policy_enforced").contains("administrator"));
+        assert!(google::name_consent_failure("redirect_uri_mismatch").contains("Desktop app"));
+        // An unfamiliar one is passed through in Google's own words rather than replaced with a
+        // sentence that says nothing — the same rule `connect::name_failure` follows.
+        assert!(google::name_consent_failure("some_new_thing").contains("some_new_thing"));
+    }
+
+    #[test]
+    fn the_browser_page_escapes_what_it_is_given() {
+        let page = google::browser_page("Not signed in", "<script>alert(1)</script>");
+        assert!(!page.contains("<script>alert"), "{page}");
+        assert!(page.contains("&lt;script&gt;"), "{page}");
+    }
+
+    // ── When a token has run out ─────────────────────────────────────
+
+    #[test]
+    fn an_access_token_with_no_expiry_beside_it_is_treated_as_spent() {
+        // An account written before this service stored an expiry, or one whose token endpoint
+        // did not say. Refreshing a token that was still good costs one HTTPS round trip; not
+        // refreshing one that was not costs a sign-in failure that reads as a broken account.
+        assert!(google::needs_refresh(None, 1_000_000));
+    }
+
+    #[test]
+    fn a_token_with_an_hour_left_is_not_refreshed() {
+        let now = 1_000_000;
+        assert!(!google::needs_refresh(Some(now + 3600), now));
+    }
+
+    #[test]
+    fn a_token_about_to_expire_is_refreshed_before_it_does() {
+        let now = 1_000_000;
+        // Inside the skew: it would expire between this check and the IMAP greeting, which a
+        // person experiences as mail that stops working sometimes.
+        assert!(google::needs_refresh(Some(now + 30), now));
+        assert!(google::needs_refresh(Some(now), now));
+        assert!(google::needs_refresh(Some(now - 1), now));
+        // And just outside it is left alone.
+        assert!(!google::needs_refresh(Some(now + google::EXPIRY_SKEW_SECS + 1), now));
+    }
+
+    #[test]
+    fn an_expiry_is_stored_as_an_absolute_time() {
+        let json = serde_json::json!({ "access_token": "a", "expires_in": 3599 });
+        let tokens = google::tokens_from_json(&json, 1_700_000_000).unwrap();
+        assert_eq!(tokens.expires_at, 1_700_003_599);
+    }
+
+    #[test]
+    fn a_token_answer_with_no_access_token_is_an_error_rather_than_an_empty_one() {
+        let json = serde_json::json!({ "expires_in": 3600 });
+        assert!(google::tokens_from_json(&json, 0).is_err());
+    }
+
+    #[test]
+    fn a_token_answer_with_no_expiry_lands_already_expired() {
+        // Rather than a guessed 3600. The next use refreshes, which is a round trip; assuming an
+        // hour would be a sign-in failure at the mail server instead.
+        let json = serde_json::json!({ "access_token": "a" });
+        let tokens = google::tokens_from_json(&json, 1_700_000_000).unwrap();
+        assert!(google::needs_refresh(Some(tokens.expires_at), 1_700_000_000));
+    }
+
+    // ── A refusal from Google's token endpoint ───────────────────────
+
+    #[test]
+    fn a_revoked_refresh_token_is_named_and_is_not_called_an_auth_failure() {
+        let body =
+            r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#;
+        let said = google::name_token_failure(400, body);
+        assert!(said.contains("Google sign-in expired"), "{said}");
+        assert!(said.contains("sign in again"), "{said}");
+        // Not this. There is no password on the account and nothing in the settings to correct,
+        // so sending someone to check credentials is sending them nowhere.
+        assert!(!said.to_lowercase().contains("authentication failed"), "{said}");
+        assert!(!said.to_lowercase().contains("check your password"), "{said}");
+    }
+
+    #[test]
+    fn a_wrong_client_id_points_at_the_client_id() {
+        let said = google::name_token_failure(401, r#"{"error":"invalid_client"}"#);
+        assert!(said.contains("GOOGLE_CLIENT_ID"), "{said}");
+    }
+
+    #[test]
+    fn a_refused_scope_points_at_the_scope() {
+        let said = google::name_token_failure(400, r#"{"error":"invalid_scope"}"#);
+        assert!(said.contains("mail.google.com"), "{said}");
+    }
+
+    #[test]
+    fn an_unfamiliar_refusal_keeps_googles_own_words_and_the_status() {
+        let said = google::name_token_failure(503, "backend unavailable, try later");
+        assert!(said.contains("503"), "{said}");
+        assert!(said.contains("backend unavailable"), "{said}");
+    }
+
+    #[test]
+    fn a_very_long_refusal_is_cut_rather_than_pasted_into_a_notice() {
+        let said = google::name_token_failure(400, &"x".repeat(4000));
+        assert!(said.chars().count() < 400, "{}", said.chars().count());
+    }
+
+    #[test]
+    fn a_rejected_token_at_the_mail_server_is_named_as_a_sign_in_to_redo() {
+        // Gmail's own words when XOAUTH2 is refused. The password classifier would call this
+        // "the sign-in was rejected", which is what a wrong password is called.
+        let raw =
+            format!("NO [AUTHENTICATIONFAILED] Invalid credentials (Failure) {ACCESS_SENTINEL}");
+        let said = connect::name_oauth_failure(
+            &Attempt::new("IMAP", "imap.gmail.com", 993),
+            &raw,
+            &[ACCESS_SENTINEL, REFRESH_SENTINEL],
+        );
+        assert!(said.contains("Google sign-in expired"), "{said}");
+        assert!(said.contains("sign in again"), "{said}");
+        assert!(!said.contains(ACCESS_SENTINEL), "the token reached a notice: {said}");
+        assert!(said.contains("<redacted>"), "{said}");
+    }
+
+    #[test]
+    fn everything_that_is_not_an_auth_failure_is_named_the_same_way_for_both_kinds_of_account() {
+        let where_ = Attempt::new("IMAP", "imap.gmail.com", 993);
+        let raw = "Connection refused (os error 111)";
+        assert_eq!(
+            connect::name_oauth_failure(&where_, raw, &["t"]),
+            connect::name_failure_secrets(&where_, raw, &["t"]),
+        );
+    }
+
+    // ── Which client id this machine signs in with ───────────────────
+
+    #[test]
+    fn the_environment_wins_over_the_file() {
+        // The shell sets GOOGLE_CLIENT_ID from its own config before it starts any service, and
+        // a service started on demand inherits it. A machine configured once there does not need
+        // a second file.
+        let chosen = google::choose_client(
+            Some("from-env".into()),
+            Some("secret-env".into()),
+            Some(a_client()),
+        )
+        .unwrap();
+        assert_eq!(chosen.id, "from-env");
+        assert_eq!(chosen.secret.as_deref(), Some("secret-env"));
+        assert!(chosen.source.contains("GOOGLE_CLIENT_ID"));
+    }
+
+    #[test]
+    fn an_empty_environment_variable_is_not_a_client_id() {
+        // An exported-but-empty GOOGLE_CLIENT_ID is what a shell script that read a missing key
+        // produces, and treating it as configured means every sign-in fails at Google.
+        let chosen = google::choose_client(Some("   ".into()), None, Some(a_client())).unwrap();
+        assert_eq!(chosen.id, a_client().id);
+    }
+
+    #[test]
+    fn with_neither_the_refusal_says_where_to_put_one() {
+        let why = google::choose_client(None, None, None).unwrap_err();
+        assert!(why.contains("GOOGLE_CLIENT_ID"), "{why}");
+        assert!(why.contains("google-oauth.json"), "{why}");
+    }
+
+    #[test]
+    fn a_client_id_file_that_is_not_there_is_not_an_error() {
+        let f = Fixture::new();
+        assert!(google::client_in_file(&f.0.join("nothing.json")).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_client_id_file_that_is_broken_is_an_error_rather_than_a_shrug() {
+        // The same rule as the accounts file: a typo silently read as "nothing is configured" is
+        // how a working setup comes to look like an absent one.
+        let f = Fixture::new();
+        let path = f.0.join("google-oauth.json");
+        std::fs::write(&path, "{ this is not json").unwrap();
+        assert!(google::client_in_file(&path).is_err());
+
+        std::fs::write(&path, r#"{"google_client_secret":"s"}"#).unwrap();
+        let why = google::client_in_file(&path).unwrap_err();
+        assert!(why.contains("google_client_id"), "{why}");
+    }
+
+    #[test]
+    fn a_client_id_file_round_trips() {
+        let f = Fixture::new();
+        let path = f.0.join("google-oauth.json");
+        std::fs::write(
+            &path,
+            r#"{"google_client_id":"abc.apps.googleusercontent.com",
+                "google_client_secret":"GOCSPX-x"}"#,
+        )
+        .unwrap();
+        let found = google::client_in_file(&path).unwrap().unwrap();
+        assert_eq!(found.id, "abc.apps.googleusercontent.com");
+        assert_eq!(found.secret.as_deref(), Some("GOCSPX-x"));
+        assert!(found.source.contains("google-oauth.json"));
+    }
+
+    #[test]
+    fn a_build_with_no_client_id_says_so_and_says_what_works_instead() {
+        // The screen draws this instead of a button. "No button and no reason" is the state that
+        // makes a person think the app is broken when the truth is that this build has no client.
+        let told = google::availability(&google::choose_client(None, None, None));
+        assert!(!told.available);
+        assert!(told.note.contains("App Password"), "{}", told.note);
+        assert!(told.note.contains("not available"), "{}", told.note);
+    }
+
+    #[test]
+    fn a_build_with_a_client_id_names_where_it_came_from() {
+        let told = google::availability(&Ok(a_client()));
+        assert!(told.available);
+        assert!(told.note.contains("a test"), "{}", told.note);
+        // And never the secret.
+        assert!(!told.note.contains(CLIENT_SECRET_SENTINEL), "{}", told.note);
+    }
+
+    // ── Which address signed in ──────────────────────────────────────
+
+    #[test]
+    fn the_address_comes_out_of_the_id_token() {
+        // A JWT with an unsigned-looking signature: this code reads the payload and does not
+        // verify, deliberately, because the token came back over TLS from Google's own endpoint
+        // rather than from a browser.
+        let payload = google::base64url(br#"{"email":"someone@gmail.com","email_verified":true}"#);
+        let jwt = format!("header.{payload}.signature");
+        assert_eq!(google::email_from_id_token(&jwt).as_deref(), Some("someone@gmail.com"));
+    }
+
+    #[test]
+    fn an_id_token_that_says_nothing_useful_is_none_rather_than_a_guess() {
+        let no_email = format!("h.{}.s", google::base64url(br#"{"sub":"12345"}"#));
+        let not_an_address = format!("h.{}.s", google::base64url(br#"{"email":"nope"}"#));
+        for bad in ["", "not-a-jwt", "a.b.c", no_email.as_str(), not_an_address.as_str()] {
+            assert_eq!(google::email_from_id_token(bad), None, "{bad}");
+        }
+    }
+
+    // ── What is written down ─────────────────────────────────────────
+
+    #[test]
+    fn a_google_account_is_stored_with_gmails_servers_and_no_password() {
+        let mut all = Vec::new();
+        let id = accounts::upsert_google(
+            &mut all,
+            "someone@gmail.com",
+            ACCESS_SENTINEL,
+            REFRESH_SENTINEL,
+            1_700_000_000,
+        );
+        assert_eq!(id, "someone-gmail-com");
+        let account = &all[0];
+        assert!(account.use_oauth);
+        assert_eq!(account.imap_server, "imap.gmail.com");
+        assert_eq!(account.imap_port, 993);
+        assert_eq!(account.smtp_server, "smtp.gmail.com");
+        assert_eq!(account.smtp_port, 587);
+        assert_eq!(account.oauth_token.as_deref(), Some(ACCESS_SENTINEL));
+        assert_eq!(account.oauth_refresh_token.as_deref(), Some(REFRESH_SENTINEL));
+        assert_eq!(account.oauth_expires_at, Some(1_700_000_000));
+        // A credential kept after it stops being needed is a credential kept for no reason.
+        assert_eq!(account.password, "");
+    }
+
+    #[test]
+    fn signing_in_with_google_over_an_app_password_account_keeps_the_name_and_drops_the_password() {
+        let mut all = Vec::new();
+        let mut typed = settings();
+        typed.email = "someone@gmail.com".into();
+        typed.display_name = "Pranab".into();
+        accounts::upsert(&mut all, &typed);
+        assert_eq!(all.len(), 1);
+
+        accounts::upsert_google(&mut all, "someone@gmail.com", "a", "r", 1);
+        // One account, not two: the id is derived from the address either way.
+        assert_eq!(all.len(), 1);
+        // The name is a thing the person typed and a sign-in does not know it.
+        assert_eq!(all[0].display_name, "Pranab");
+        assert_eq!(all[0].password, "");
+    }
+
+    #[test]
+    fn a_refresh_writes_the_tokens_and_touches_nothing_else() {
+        let mut all = Vec::new();
+        accounts::upsert_google(&mut all, "someone@gmail.com", "old-access", "old-refresh", 1);
+        all[0].display_name = "Work".into();
+
+        assert!(accounts::store_refreshed(
+            &mut all,
+            "someone-gmail-com",
+            "new-access",
+            "new-refresh",
+            1_700_000_000
+        ));
+        assert_eq!(all[0].oauth_token.as_deref(), Some("new-access"));
+        assert_eq!(all[0].oauth_refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(all[0].oauth_expires_at, Some(1_700_000_000));
+        // A function that rebuilt the record would be one edit from resetting these on every poll.
+        assert_eq!(all[0].display_name, "Work");
+        assert_eq!(all[0].imap_server, "imap.gmail.com");
+    }
+
+    #[test]
+    fn a_refresh_for_an_account_somebody_removed_reports_that_rather_than_inventing_one() {
+        let mut all: Vec<Account> = Vec::new();
+        assert!(!accounts::store_refreshed(&mut all, "gone", "a", "r", 1));
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn a_google_account_survives_the_round_trip_through_the_file() {
+        let f = Fixture::new();
+        let mut all = Vec::new();
+        accounts::upsert_google(
+            &mut all,
+            "someone@gmail.com",
+            ACCESS_SENTINEL,
+            REFRESH_SENTINEL,
+            1_700_000_000,
+        );
+        accounts::save(&f.config(), &all).unwrap();
+
+        let read_back = accounts::load(&f.config()).unwrap();
+        assert_eq!(read_back.len(), 1);
+        assert!(read_back[0].use_oauth);
+        assert_eq!(read_back[0].oauth_refresh_token.as_deref(), Some(REFRESH_SENTINEL));
+        assert_eq!(read_back[0].oauth_expires_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn an_account_file_written_before_oauth_had_an_expiry_still_loads() {
+        // Deployments have one. Every new field defaults, and a missing expiry means "refresh
+        // before you use it" rather than a parse error.
+        let f = Fixture::new();
+        std::fs::create_dir_all(f.config().parent().unwrap()).unwrap();
+        std::fs::write(
+            f.config(),
+            r#"[{"id":"g","email":"a@gmail.com","imap_server":"imap.gmail.com",
+                "smtp_server":"smtp.gmail.com","use_oauth":true,"oauth_token":"ya29.old"}]"#,
+        )
+        .unwrap();
+        let all = accounts::load(&f.config()).unwrap();
+        assert_eq!(all[0].oauth_expires_at, None);
+        assert_eq!(all[0].oauth_refresh_token, None);
+        assert!(google::needs_refresh(all[0].oauth_expires_at, 0));
+    }
+
+    // ── What the window does with an answer ──────────────────────────
+
+    #[test]
+    fn a_sign_in_that_is_still_going_keeps_the_window_waiting() {
+        assert_eq!(state::google_outcome(Ok(OAuthStatus::Waiting)), GoogleOutcome::Waiting);
+    }
+
+    #[test]
+    fn a_finished_sign_in_carries_the_address_google_chose() {
+        let outcome = state::google_outcome(Ok(OAuthStatus::Done {
+            account: summary("someone@gmail.com"),
+        }));
+        assert_eq!(outcome, GoogleOutcome::SignedIn("someone@gmail.com".into()));
+    }
+
+    #[test]
+    fn a_failed_sign_in_carries_the_reason_to_the_screen() {
+        let outcome = state::google_outcome(Ok(OAuthStatus::Failed {
+            reason: "The Google sign-in was declined in the browser.".into(),
+        }));
+        match outcome {
+            GoogleOutcome::Stopped(why) => assert!(why.contains("declined"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_mail_service_that_stopped_answering_ends_the_wait_rather_than_spinning() {
+        // A window polling a service that is not there until its own deadline, and then saying
+        // nothing useful about why, is the silence this app spent September removing.
+        match state::google_outcome(Err("connection refused".into())) {
+            GoogleOutcome::Stopped(why) => {
+                assert!(why.contains("connection refused"), "{why}");
+                assert!(why.contains("mail service"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_machine_with_no_browser_is_given_the_address_instead_of_a_dead_end() {
+        let said = state::browser_failed_note("xdg-open exited 3");
+        assert!(said.contains("xdg-open exited 3"), "{said}");
+        assert!(said.contains("below"), "{said}");
+    }
+
+    #[test]
+    fn an_unreachable_service_is_not_the_same_as_a_build_with_no_google_client() {
+        // Both draw no button, and only one of them is fixed by setting a client id.
+        let down = MailState::Unreachable { reason: "no socket".into() }.google_sign_in();
+        assert!(!down.available);
+        assert!(down.note.contains("mail service"), "{}", down.note);
+
+        let up = state::decide(Ok(AccountsResult {
+            accounts: Vec::new(),
+            config_path: "/tmp/e.json".into(),
+            secrets_are_plaintext: true,
+            google_sign_in: google::availability(&Ok(a_client())),
+        }));
+        assert!(up.google_sign_in().available);
+        assert_ne!(down.note, up.google_sign_in().note);
+    }
+
+    // ── And the tokens, held to the password's rule ──────────────────
+
+    #[test]
+    fn nothing_a_google_sign_in_can_say_contains_a_token() {
+        let all_secrets =
+            [ACCESS_SENTINEL, REFRESH_SENTINEL, CODE_SENTINEL, CLIENT_SECRET_SENTINEL];
+        let mut said: Vec<String> = Vec::new();
+
+        // Every string the service builds about a token failure, from a body that quotes the
+        // credential back — which Google's `error_description` is free to do.
+        let echoing = format!(
+            "{{\"error\":\"invalid_grant\",\"error_description\":\"bad token {REFRESH_SENTINEL}\"}}"
+        );
+        said.push(without_secrets(&google::name_token_failure(400, &echoing), &all_secrets));
+
+        // A mail server echoing the AUTHENTICATE line it was sent — the XOAUTH2 equivalent of the
+        // LOGIN echo the password rule was written for.
+        let imap_echo = format!(
+            "BAD Invalid command: AUTHENTICATE XOAUTH2 user=a@b.com auth=Bearer {ACCESS_SENTINEL}"
+        );
+        said.push(connect::name_oauth_failure(
+            &Attempt::new("IMAP", "imap.gmail.com", 993),
+            &imap_echo,
+            &all_secrets,
+        ));
+        said.push(connect::name_failure_secrets(
+            &Attempt::new("SMTP", "smtp.gmail.com", 587),
+            &format!("535-5.7.8 Username and Password not accepted {ACCESS_SENTINEL}"),
+            &all_secrets,
+        ));
+
+        // The callback parser, handed a code and the wrong state.
+        if let google::Callback::Refused(why) = google::parse_callback(
+            &format!("GET /?code={CODE_SENTINEL}&state=X HTTP/1.1\r\n\r\n"),
+            "OURS",
+        ) {
+            said.push(why);
+        }
+
+        // The three `Debug`s. A `{:?}` in a tracing line is a file on disk that outlives the
+        // session, which is the whole reason none of these is derived.
+        let pkce = pkce_of(RFC_VERIFIER, "S");
+        said.push(format!("{pkce:?}"));
+        said.push(format!("{:?}", a_client()));
+        said.push(format!(
+            "{:?}",
+            google::tokens_from_json(
+                &serde_json::json!({
+                    "access_token": ACCESS_SENTINEL,
+                    "refresh_token": REFRESH_SENTINEL,
+                    "id_token": "header.payload.signature",
+                    "expires_in": 3600,
+                }),
+                0,
+            )
+            .unwrap()
+        ));
+
+        // The stored account, and what the service answers with about it.
+        let mut all = Vec::new();
+        accounts::upsert_google(&mut all, "someone@gmail.com", ACCESS_SENTINEL, REFRESH_SENTINEL, 1);
+        said.push(format!("{:?}", all[0]));
+        said.push(serde_json::to_string(&all[0].summary()).unwrap());
+        said.push(
+            serde_json::to_string(&AccountsResult {
+                accounts: accounts::summaries(&all),
+                config_path: "/tmp/e.json".into(),
+                secrets_are_plaintext: true,
+                google_sign_in: google::availability(&Ok(a_client())),
+            })
+            .unwrap(),
+        );
+
+        // And the two wire types the flow answers with. An `OAuthBeginResult` carries the URL a
+        // browser is given: the challenge is in it and must be, and the verifier must not.
+        said.push(
+            serde_json::to_string(&OAuthBeginResult {
+                flow_id: "f1".into(),
+                auth_url: google::auth_url("c", &google::redirect_uri(1), &pkce),
+                expires_in_secs: 300,
+            })
+            .unwrap(),
+        );
+        said.push(
+            serde_json::to_string(&OAuthStatus::Done { account: all[0].summary() }).unwrap(),
+        );
+
+        // And what the window does with each of those, which is where they reach a screen.
+        for reason in said.clone() {
+            if let GoogleOutcome::Stopped(text) = state::google_outcome(Err(reason)) {
+                said.push(text);
+            }
+        }
+
+        for sentence in &said {
+            for (name, secret) in [
+                ("the access token", ACCESS_SENTINEL),
+                ("the refresh token", REFRESH_SENTINEL),
+                ("the authorization code", CODE_SENTINEL),
+                ("the PKCE verifier", RFC_VERIFIER),
+                ("the client secret", CLIENT_SECRET_SENTINEL),
+            ] {
+                assert!(!sentence.contains(secret), "{name} reached: {sentence}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_stored_file_holds_the_tokens_and_the_answer_does_not() {
+        // The same shape as the password test above: the file on disk *does* hold them, because
+        // the service has to sign in with them tomorrow. What must never happen is that file
+        // being confused with what the service answers with.
+        let f = Fixture::new();
+        let mut all = Vec::new();
+        accounts::upsert_google(&mut all, "someone@gmail.com", ACCESS_SENTINEL, REFRESH_SENTINEL, 1);
+        accounts::save(&f.config(), &all).unwrap();
+
+        let on_disk = std::fs::read_to_string(f.config()).unwrap();
+        assert!(on_disk.contains(REFRESH_SENTINEL), "the service could not renew this account");
+
+        let answered = serde_json::to_string(&accounts::summaries(&all)).unwrap();
+        assert!(!answered.contains(ACCESS_SENTINEL), "{answered}");
+        assert!(!answered.contains(REFRESH_SENTINEL), "{answered}");
+        // And it still says the useful thing: this account signs in with Google.
+        assert!(answered.contains("\"uses_oauth\":true"), "{answered}");
+    }
+
+    #[test]
+    fn an_accounts_answer_from_an_older_service_still_parses() {
+        // `google_sign_in` is `#[serde(default)]`, so a binary that predates this change parses
+        // as "Google sign-in is not available" — which is the truth about that binary.
+        let older = serde_json::json!({
+            "accounts": [],
+            "config_path": "/tmp/e.json",
+            "secrets_are_plaintext": true,
+        });
+        let parsed: AccountsResult = serde_json::from_value(older).unwrap();
+        assert!(!parsed.google_sign_in.available);
+        assert!(!state::decide(Ok(parsed)).google_sign_in().available);
+    }
+
+    #[test]
+    fn the_flow_answers_round_trip_between_the_service_and_the_window() {
+        // The payload test, for the new pair. The calendar's two ends each spelled their own
+        // parameter names and disagreed, and every listing failed while both files looked right.
+        let begun = OAuthBeginResult {
+            flow_id: "f1".into(),
+            auth_url: "https://accounts.google.com/o/oauth2/v2/auth?x=1".into(),
+            expires_in_secs: 300,
+        };
+        let sent = serde_json::to_value(&begun).unwrap();
+        let received: OAuthBeginResult = serde_json::from_value(sent).unwrap();
+        assert_eq!(received.flow_id, "f1");
+        assert_eq!(received.expires_in_secs, 300);
+
+        for status in [
+            OAuthStatus::Waiting,
+            OAuthStatus::Done { account: summary("a@gmail.com") },
+            OAuthStatus::Failed { reason: "declined".into() },
+        ] {
+            let sent = serde_json::to_value(&status).unwrap();
+            let received: OAuthStatus = serde_json::from_value(sent).unwrap();
+            // The three arms stay three arms through the wire, which is the only thing the
+            // window's polling loop depends on.
+            assert_eq!(
+                std::mem::discriminant(&status),
+                std::mem::discriminant(&received)
+            );
+        }
     }
 }

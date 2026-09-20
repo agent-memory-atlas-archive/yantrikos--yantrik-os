@@ -51,6 +51,12 @@ export component EmailApp inherits Window {
     in property <string> setup-note <=> client.setup-note;
     in-out property <bool> setup-open <=> client.setup-open;
 
+    // ── Sign in with Google ──
+    in property <bool> google-available <=> client.google-available;
+    in property <string> google-note <=> client.google-note;
+    in property <bool> google-waiting <=> client.google-waiting;
+    in property <string> google-url <=> client.google-url;
+
     // ── Thread ──
     in property <[EmailThreadMessage]> email-thread-messages <=> client.email-thread-messages;
 
@@ -127,6 +133,8 @@ export component EmailApp inherits Window {
     callback ai-classify <=> client.ai-classify;
 
     // Account setup callbacks
+    callback sign-in-with-google <=> client.sign-in-with-google;
+    callback cancel-google-sign-in <=> client.cancel-google-sign-in;
     callback save-account <=> client.save-account;
     callback test-connection <=> client.test-connection;
     callback cancel-setup <=> client.cancel-setup;

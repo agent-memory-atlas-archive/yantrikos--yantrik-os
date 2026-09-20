@@ -2168,6 +2168,8 @@ dependencies = [
  "native-tls",
  "serde",
  "serde_json",
+ "sha2",
+ "ureq 2.12.1",
  "yantrik-ipc-contracts",
  "yantrik-service-sdk",
 ]
@@ -10401,6 +10403,7 @@ dependencies = [
  "tungstenite",
  "ureq 2.12.1",
  "yantrik-companion-core",
+ "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrikdb",
 ]
