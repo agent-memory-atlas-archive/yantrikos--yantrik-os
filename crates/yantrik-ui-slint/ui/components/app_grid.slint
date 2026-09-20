@@ -48,13 +48,17 @@ export component AppGrid inherits Rectangle {
     width: 100%;
     height: 100%;
 
-    property <int> columns: 5;
+    property <int> columns: max(1, min(5, floor((root.width - root.rail-w - 72px) / (root.cell-w + root.cell-gap))));
     property <length> cell-w: 118px;
-    property <length> cell-h: 96px;
+    property <length> cell-h: 106px;
     property <length> cell-gap: 6px;
-    property <length> rail-w: 176px;
+    property <length> rail-w: root.width < 700px ? 136px : 176px;
     property <length> grid-w: root.columns * root.cell-w + (root.columns - 1) * root.cell-gap;
     property <length> panel-w: root.rail-w + root.grid-w + 16px * 3;
+    property <int> selected-index: 0;
+
+    changed apps => { root.selected-index = 0; }
+    changed is-open => { if root.is-open { root.selected-index = 0; } }
 
     // Backdrop (click to close)
     if root.is-open : TouchArea {
@@ -80,18 +84,34 @@ export component AppGrid inherits Rectangle {
         background: Theme.bg-card;
         border-radius: Theme.r-xl;
         border-width: 1px;
-        border-color: Theme.border-strong;
+        border-color: Theme.glass-border-strong;
         clip: true;
 
         // Block click-through to the backdrop
         TouchArea { width: 100%; height: 100%; }
+
+        FocusScope {
+            // Keep typing in search while arrow keys select a result.
+            capture-key-pressed(event) => {
+                if (event.text == Key.Escape) { root.is-open = false; root.close(); return accept; }
+                if (event.text == Key.Tab && root.apps.length == 0) { return accept; }
+                if (root.apps.length > 0) {
+                    if (event.text == Key.Tab) { root.selected-index = mod(root.selected-index + (event.modifiers.shift ? root.apps.length - 1 : 1), root.apps.length); return accept; }
+                    if (event.text == Key.RightArrow && search-input.text == "") { root.selected-index = min(root.apps.length - 1, root.selected-index + 1); return accept; }
+                    if (event.text == Key.LeftArrow && search-input.text == "") { root.selected-index = max(0, root.selected-index - 1); return accept; }
+                    if (event.text == Key.DownArrow) { root.selected-index = min(root.apps.length - 1, root.selected-index + root.columns); return accept; }
+                    if (event.text == Key.UpArrow) { root.selected-index = max(0, root.selected-index - root.columns); return accept; }
+                    if (event.text == "\n") { root.launch-app(root.apps[root.selected-index].app-id); root.is-open = false; root.close(); return accept; }
+                }
+                reject
+            }
 
         VerticalLayout {
             spacing: 0;
 
             // ── Search ──
             Rectangle {
-                height: 54px;
+                height: 68px;
                 background: transparent;
                 Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Theme.separator; }
 
@@ -108,11 +128,13 @@ export component AppGrid inherits Rectangle {
                         y: (parent.height - self.height) / 2;
                     }
                     search-input := TextInput {
+                        init => { self.focus(); }
+                        single-line: true;
                         vertical-alignment: center;
                         font-size: Theme.fs-body;
                         color: Theme.text-primary;
                         horizontal-stretch: 1;
-                        edited => { root.search-changed(self.text); }
+                        edited => { root.selected-index = 0; root.search-changed(self.text); }
                     }
                     Rectangle {
                         width: esc.preferred-width + 12px;
@@ -133,7 +155,7 @@ export component AppGrid inherits Rectangle {
                 if search-input.text == "" : Text {
                     x: 18px + 16px + Theme.sp-3;
                     height: 100%;
-                    text: "Search " + root.apps.length + " applications";
+                    text: "Find an app…";
                     color: Theme.text-dim;
                     font-size: Theme.fs-body;
                     vertical-alignment: center;
@@ -147,7 +169,7 @@ export component AppGrid inherits Rectangle {
                 // ── Categories ──
                 Rectangle {
                     width: root.rail-w;
-                    background: transparent;
+                    background: Theme.glass-panel;
                     Rectangle { x: parent.width - 1px; width: 1px; height: 100%; background: Theme.separator; }
 
                     VerticalLayout {
@@ -156,7 +178,7 @@ export component AppGrid inherits Rectangle {
                         alignment: start;
 
                         for c in root.categories : cat := TouchArea {
-                            height: 30px;
+                            height: 36px;
                             mouse-cursor: pointer;
                             property <bool> active: c.id == root.active-category;
                             clicked => { root.category-selected(c.id); }
@@ -164,7 +186,7 @@ export component AppGrid inherits Rectangle {
                             Rectangle {
                                 width: 100%; height: 100%;
                                 border-radius: Theme.r-sm;
-                                background: cat.active ? Theme.hover-fill-strong
+                                background: cat.active ? Theme.tint-accent
                                           : cat.has-hover ? Theme.hover-fill
                                           : transparent;
                                 HorizontalLayout {
@@ -173,7 +195,7 @@ export component AppGrid inherits Rectangle {
                                     spacing: 8px;
                                     Text {
                                         text: c.name;
-                                        color: cat.active ? Theme.text-primary : Theme.text-secondary;
+                                        color: cat.active ? Theme.accent : Theme.text-secondary;
                                         font-size: Theme.font-label;
                                         font-weight: cat.active ? 500 : 400;
                                         vertical-alignment: center;
@@ -218,7 +240,11 @@ export component AppGrid inherits Rectangle {
 
                     if root.apps.length > 0 : Flickable {
                         vertical-stretch: 1;
-                        viewport-height: ((root.apps.length + root.columns - 1) / root.columns) * (root.cell-h + root.cell-gap);
+                        viewport-width: self.width;
+                        viewport-height: ceil(root.apps.length / root.columns) * (root.cell-h + root.cell-gap);
+                        // Selection stays visible even when the result list is longer than a page.
+                        viewport-y: -max(0px, min(self.viewport-height - self.height,
+                            floor(root.selected-index / root.columns) * (root.cell-h + root.cell-gap) - self.height + root.cell-h + root.cell-gap));
 
                         for app[idx] in root.apps : cell := TouchArea {
                             x: Math.mod(idx, root.columns) * (root.cell-w + root.cell-gap);
@@ -226,6 +252,9 @@ export component AppGrid inherits Rectangle {
                             width: root.cell-w;
                             height: root.cell-h;
                             mouse-cursor: pointer;
+                            accessible-role: button;
+                            accessible-label: app.name;
+                            accessible-action-default => { root.launch-app(app.app-id); root.is-open = false; root.close(); }
                             clicked => {
                                 root.launch-app(app.app-id);
                                 root.is-open = false;
@@ -235,7 +264,9 @@ export component AppGrid inherits Rectangle {
                             Rectangle {
                                 width: 100%; height: 100%;
                                 border-radius: Theme.r-md;
-                                background: cell.has-hover ? Theme.hover-fill : transparent;
+                                background: idx == root.selected-index ? Theme.tint-accent : cell.has-hover ? Theme.hover-fill : transparent;
+                                border-width: 1px;
+                                border-color: idx == root.selected-index ? Theme.accent.transparentize(55%) : transparent;
 
                                 VerticalLayout {
                                     alignment: center;
@@ -248,7 +279,7 @@ export component AppGrid inherits Rectangle {
                                             width: 44px;
                                             height: 44px;
                                             border-radius: Theme.r-md;
-                                            background: cell.has-hover ? Theme.bg-elevated : Theme.bg-surface;
+                                            background: AppColor.tint-for-app(app.icon-id);
                                             border-width: 1px;
                                             border-color: cell.has-hover ? Theme.border-strong : Theme.border-default;
 
@@ -280,7 +311,7 @@ export component AppGrid inherits Rectangle {
 
                                     Text {
                                         text: app.name;
-                                        color: cell.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                        color: Theme.text-primary;
                                         font-size: Theme.fs-caption;
                                         horizontal-alignment: center;
                                         overflow: elide;
@@ -341,6 +372,16 @@ export component AppGrid inherits Rectangle {
                     }
                 }
             }
+            Rectangle {
+                height: 34px;
+                background: Theme.glass-panel;
+                HorizontalLayout {
+                    padding-left: 20px; padding-right: 20px;
+                    Text { text: root.apps.length + " applications"; font-size: Theme.fs-caption; color: Theme.text-secondary; vertical-alignment: center; horizontal-stretch: 1; }
+                    Text { text: "Tab / ↑ ↓  Select     Enter  Open     Esc  Close"; font-size: Theme.fs-caption; color: Theme.text-secondary; vertical-alignment: center; }
+                }
+            }
+        }
         }
     }
 }

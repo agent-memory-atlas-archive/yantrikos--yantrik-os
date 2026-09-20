@@ -180,7 +180,7 @@ fn wire_selected(ui: &App, ctx: &AppContext) {
         } else if action == "system:quick-settings" {
             ui.set_quick_settings_open(true);
         } else if action == "system:toggle-dnd" {
-            ui.set_dnd_mode(!ui.get_dnd_mode());
+            ui.invoke_toggle_dnd_mode();
         } else if action == "system:power" {
             ui.set_power_menu_open(true);
         } else if action == "system:notifications" {

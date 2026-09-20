@@ -70,17 +70,17 @@ export component Taskbar inherits Rectangle {
             Rectangle {
                 width: 100%; height: 100%;
                 border-radius: Theme.r-sm;
-                background: launcher.pressed ? Theme.accent-dim
-                          : launcher.has-hover ? Theme.accent-light
+                background: launcher.pressed ? Theme.accent-button-pressed
+                          : launcher.has-hover ? Theme.accent-button-hover
                           : Theme.accent;
 
                 launcher-row := HorizontalLayout {
                     alignment: center;
                     spacing: 7px;
-                    Icon { commands: Icons.apps; tint: Theme.bg-deep; thickness: 1.8px; y: (parent.height - self.height) / 2; }
+                    Icon { commands: Icons.apps; tint: Theme.text-on-accent; thickness: 1.8px; y: (parent.height - self.height) / 2; }
                     Text {
                         text: root.launcher-label;
-                        color: Theme.bg-deep;
+                        color: Theme.text-on-accent;
                         font-size: Theme.font-label;
                         font-weight: 600;
                         vertical-alignment: center;
@@ -92,92 +92,100 @@ export component Taskbar inherits Rectangle {
         Rectangle { width: 1px; height: 20px; y: (parent.height - 20px) / 2; background: Theme.separator; }
 
         // ── Open windows ──
-        HorizontalLayout {
+        Flickable {
             horizontal-stretch: 1;
-            alignment: start;
-            spacing: 3px;
+            viewport-width: max(self.width, window-row.preferred-width);
+            viewport-height: self.height;
+            window-row := HorizontalLayout {
+                height: parent.height;
+                alignment: start;
+                spacing: 5px;
 
-            // Drawn first, because it was the first thing put away.
-            if root.minimized-screen != 0 : mini := TouchArea {
-                width: min(220px, mini-row.preferred-width + 22px);
-                mouse-cursor: pointer;
-                clicked => { root.restore-screen(); }
+                // Drawn first, because it was the first thing put away.
+                if root.minimized-screen != 0 : mini := TouchArea {
+                    width: min(220px, mini-row.preferred-width + 22px);
+                    mouse-cursor: pointer;
+                    clicked => { root.restore-screen(); }
 
-                Rectangle {
-                    width: 100%; height: 100%;
-                    border-radius: Theme.r-sm;
-                    background: mini.has-hover ? Theme.hover-fill : transparent;
-                    clip: true;
-
-                    mini-row := HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 8px;
-                        Icon {
-                            commands: Icons.app-or-window(root.minimized-app-id);
-                            size: 14px;
-                            tint: AppColor.for-app(root.minimized-app-id).transparentize(40%);
-                            y: (parent.height - self.height) / 2;
-                        }
-                        Text {
-                            text: root.minimized-title;
-                            color: Theme.text-secondary;
-                            font-size: Theme.fs-caption;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            max-width: 170px;
-                        }
-                    }
-                }
-            }
-
-            for w[i] in root.windows : win := TouchArea {
-                property <bool> is-active: i == 0;
-                width: min(220px, win-row.preferred-width + 22px);
-                mouse-cursor: pointer;
-                clicked => { root.activate-window(w.title); }
-
-                Rectangle {
-                    width: 100%; height: 100%;
-                    border-radius: Theme.r-sm;
-                    background: win.is-active ? Theme.hover-fill-strong
-                              : win.has-hover ? Theme.hover-fill
-                              : transparent;
-                    clip: true;
-
-                    // Active underline — the one piece of state on the bar
                     Rectangle {
-                        y: parent.height - 2px;
-                        width: 100%; height: 2px;
-                        background: win.is-active ? Theme.accent : transparent;
-                    }
+                        width: 100%; height: 100%;
+                        border-radius: Theme.r-sm;
+                        background: mini.has-hover ? Theme.hover-fill : transparent;
+                        clip: true;
 
-                    win-row := HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 8px;
-                        Icon {
-                            commands: Icons.app-or-window(w.app-id);
-                            size: 14px;
-                            // Colour says which app; brightness still says which one has focus,
-                            // so the active state survives them no longer all being grey.
-                            tint: win.is-active
-                                ? AppColor.for-app(w.app-id)
-                                : AppColor.for-app(w.app-id).transparentize(40%);
-                            y: (parent.height - self.height) / 2;
+                        mini-row := HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            Icon {
+                                commands: Icons.app-or-window(root.minimized-app-id);
+                                size: 14px;
+                                tint: AppColor.for-app(root.minimized-app-id).transparentize(40%);
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: root.minimized-title;
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-caption;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                max-width: 170px;
+                            }
                         }
-                        Text {
-                            text: w.title;
-                            color: win.is-active ? Theme.text-primary : Theme.text-secondary;
-                            font-size: Theme.fs-caption;
-                            font-weight: win.is-active ? 500 : 400;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            max-width: 170px;
+                    }
+                }
+
+                for w[i] in root.windows : win := TouchArea {
+                    property <bool> is-active: i == 0;
+                    width: min(220px, win-row.preferred-width + 22px);
+                    mouse-cursor: pointer;
+                    clicked => { root.activate-window(w.title); }
+
+                    Rectangle {
+                        width: 100%; height: 100%;
+                        border-radius: Theme.r-sm;
+                        background: win.is-active ? Theme.hover-fill-strong
+                                  : win.has-hover ? Theme.hover-fill
+                                  : transparent;
+                        clip: true;
+
+                        // Active underline — the one piece of state on the bar
+                        Rectangle {
+                            x: (parent.width - 24px) / 2;
+                            y: parent.height - 3px;
+                            width: 24px; height: 3px;
+                            border-radius: 1.5px;
+                            background: win.is-active ? Theme.accent : transparent;
+                        }
+
+                        win-row := HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            Icon {
+                                commands: Icons.app-or-window(w.app-id);
+                                size: 14px;
+                                // Colour says which app; brightness still says which one has focus,
+                                // so the active state survives them no longer all being grey.
+                                tint: win.is-active
+                                    ? AppColor.for-app(w.app-id)
+                                    : AppColor.for-app(w.app-id).transparentize(40%);
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: w.title;
+                                color: win.is-active ? Theme.text-primary : Theme.text-secondary;
+                                font-size: Theme.fs-caption;
+                                font-weight: win.is-active ? 500 : 400;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                max-width: 170px;
+                            }
                         }
                     }
                 }
             }
+
         }
 
         Rectangle { width: 1px; height: 20px; y: (parent.height - 20px) / 2; background: Theme.separator; }

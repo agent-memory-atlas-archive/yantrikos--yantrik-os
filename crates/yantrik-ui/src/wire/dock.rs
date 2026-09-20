@@ -40,8 +40,7 @@ pub enum Launch {
 /// Three rows carry history worth keeping:
 ///
 /// - `text_editor` is the name the binary carries and the name a person would try; `editor` is
-///   what the arm was always called. Both land on screen 12, the implementation
-///   `control_editor.rs` drives and the only one that can open and save a file.
+///   what the arm was always called. Both open the native Text Editor, which forwards repeated file opens to its existing window.
 /// - The image viewer had no arm, so yantrik-image-viewer sat in /opt/yantrik/bin unreachable.
 ///   Screen 11 is the viewer the file browser's "open" is wired to, so it is the one that
 ///   actually receives a picture.
@@ -53,7 +52,7 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["files"], Launch::Screen(8)),
     (&["settings"], Launch::Screen(7)),
     (&["notes"], Launch::Program { id: "notes", bin: "yantrik-notes" }),
-    (&["editor", "text_editor"], Launch::Editor),
+    (&["editor", "text_editor"], Launch::Program { id: "editor", bin: "yantrik-text-editor" }),
     (&["image_viewer", "images"], Launch::Screen(11)),
     (&["bond"], Launch::Screen(4)),
     (&["personality"], Launch::Screen(5)),
@@ -287,7 +286,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             if entry.exec != "__builtin__" {
                 let parts: Vec<&str> = entry.exec.split_whitespace().collect();
                 if let Some((bin, args)) = parts.split_first() {
-                    spawn_app_with_args(&app, bin, args);
+                    let id = super::app_grid::icon_id_for(&entry.app_id);
+                    spawn_app_with_args(&id, bin, args);
                 }
                 return;
             }
@@ -315,15 +315,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 }
                 show(7);
             }
-            Launch::Editor => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_editor_file_name("untitled".into());
-                    ui.set_editor_file_content("".into());
-                    ui.set_editor_is_modified(false);
-                    ui.set_editor_is_readonly(false);
-                }
-                show(12);
-            }
+            Launch::Editor => spawn_app("editor", "yantrik-text-editor"),
             Launch::Launchpad => {
                 show(1);
                 if let Some(ui) = ui_weak.upgrade() {

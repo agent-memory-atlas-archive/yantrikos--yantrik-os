@@ -22,6 +22,7 @@
 
 import { Theme, ThemeMode } from "theme.slint";
 import { ParticleField } from "components/particle_field.slint";
+import { DesktopHome } from "components/desktop_home.slint";
 import { StatusBar } from "components/status_bar.slint";
 import { DockItem } from "components/app_dock.slint";
 import { Icon, Icons } from "components/icon.slint";
@@ -200,6 +201,11 @@ export component DesktopScreen inherits Rectangle {
     // How much room the hero takes at the top of the centre column. One number, because the
     // ask bar and the column below it both have to start under it.
     property <length> hero-h: 84px;
+    // Rails yield to the working area on laptop and compact displays.
+    property <bool> show-work-rail: root.width >= 1360px && (root.active-project != "" || root.lens-recents.length > 0);
+    property <bool> show-machine-rail: root.width >= 1360px;
+    property <length> content-left: root.show-work-rail ? 316px : max(24px, (root.width - (root.show-machine-rail ? 338px : 0px) - 860px) / 2);
+    property <length> content-right: root.show-machine-rail ? 338px : root.content-left;
 
     property <bool> desktop-menu-open: false;
     property <length> desktop-menu-x: 0;
@@ -302,115 +308,12 @@ export component DesktopScreen inherits Rectangle {
             image-fit: cover;
         }
 
-        // ── Deep space backdrop (dark mode) — only when no wallpaper ──
-        if root.wallpaper-path == "" && ThemeMode.dark : Rectangle {
-            width: 100%; height: 100%;
-
-            // Animated phase for subtle backdrop movement
-            property <float> bg-phase: 0;
-            Timer {
-                interval: max(16, root.ambient-interval-ms) * 1ms;
-                running: root.ambient-interval-ms > 0;
-                triggered => {
-                    parent.bg-phase = mod(parent.bg-phase + 0.0008 * root.tick-scale, 1.0);
-                }
-            }
-
-            // Base gradient (deep blue-black abyss)
-            Rectangle {
-                width: 100%; height: 100%;
-                background: @radial-gradient(circle, #0a0a1c 0%, #050510 45%, #020206 100%);
-            }
-            // Nebula wash — upper right (cool cyan, breathing)
-            Rectangle {
-                x: parent.width * 0.6;
-                y: -parent.height * 0.05;
-                width: 600px; height: 500px;
-                border-radius: 250px;
-                background: @radial-gradient(circle, #5ac8d412 0%, #5ac8d406 40%, transparent 70%);
-                opacity: 0.8 + 0.2 * sin(bg-phase * 6.2832 * 1rad);
-            }
-            // Nebula wash — lower left (warm amber)
-            Rectangle {
-                x: -50px;
-                y: parent.height * 0.5;
-                width: 550px; height: 450px;
-                border-radius: 225px;
-                background: @radial-gradient(circle, #d4a57412 0%, #d4a57406 40%, transparent 70%);
-                opacity: 0.7 + 0.2 * sin(bg-phase * 4.712 * 1rad);
-            }
-            // Nebula wash — center (subtle purple, deeper)
-            Rectangle {
-                x: parent.width * 0.28;
-                y: parent.height * 0.15;
-                width: 800px; height: 600px;
-                border-radius: 300px;
-                background: @radial-gradient(circle, #c48bd40c 0%, #6040a008 30%, transparent 60%);
-            }
-            // Nebula wash — bottom center (holographic blue for orb area)
-            Rectangle {
-                x: parent.width * 0.3;
-                y: parent.height * 0.6;
-                width: 700px; height: 500px;
-                border-radius: 250px;
-                background: @radial-gradient(circle, #4ab8f008 0%, transparent 55%);
-                opacity: 0.6 + 0.3 * sin(bg-phase * 5.341 * 1rad);
-            }
-            // Horizon glow — subtle light at the bottom edge
-            Rectangle {
-                y: parent.height - 200px;
-                width: 100%;
-                height: 200px;
-                background: @linear-gradient(180deg,
-                    transparent 0%,
-                    #5ac8d406 60%,
-                    #5ac8d40c 100%
-                );
-            }
-            // Vignette overlay — deeper edges
-            Rectangle {
-                width: 100%; height: 100%;
-                background: @radial-gradient(circle, transparent 20%, #00000030 55%, #00000080 100%);
-            }
+        // A still background has no idle frame loop or per-frame blur passes.
+        if root.wallpaper-path == "" : Rectangle {
+            width: 100%; height: 100%; background: Theme.bg-deep;
         }
-
-        // ── Light mode backdrop — only when no wallpaper ──
-        if root.wallpaper-path == "" && !ThemeMode.dark : Rectangle {
-            width: 100%; height: 100%;
-            background: @radial-gradient(circle, #f0f0f4 0%, #e4e4ec 50%, #d8d8e0 100%);
-        }
-
-        // Particle field (neurons + nebula clouds + ambient intelligence).
-        //
-        // NOT INSTANTIATED when the ambient budget is 0, which is the default on the software
-        // rasteriser. This is a full-screen component carrying 18 blurs and 37 drop-shadows —
-        // multi-pass convolutions that are the most expensive thing a CPU rasteriser does — and
-        // it costs that on EVERY repaint, not only animated ones. Measured: a screen without it
-        // repaints for 0.6% of a core; the desktop with it sat at 97%.
-        //
-        // Stopping its Timer was not enough, and the reason is the `animate` blocks below. Those
-        // properties are re-set by system_poll every 3s while time-of-day eases over 5s, so the
-        // component is permanently mid-animation and repaints continuously with the Timer idle.
-        // An expensive full-screen layer has to be absent, not merely still.
-        //
-        // Nothing is lost functionally: this is pure backdrop with no TouchArea and no state the
-        // user can read. The orb keeps its click target, which lives in the wrapper below.
-        if root.ambient-interval-ms > 0 : ParticleField {
-            ambient-interval-ms: root.ambient-interval-ms;
-            width: 100%;
-            height: 100%;
-            active: true;
-            intensity: root.focus-mode ? 0.15 : 0.7;
-            is-thinking: root.is-thinking;
-            has-urges: root.has-urges;
-            sentiment: root.particle-sentiment;
-            cognitive-load: root.particle-cognitive-load;
-            time-of-day: root.particle-time-of-day;
-
-            animate intensity { duration: 300ms; }
-            animate sentiment { duration: 2000ms; }
-            animate cognitive-load { duration: 1000ms; }
-            animate time-of-day { duration: 5000ms; }
+        if !ThemeMode.dark && root.wallpaper-path != "" : Rectangle {
+            width: 100%; height: 100%; background: #f3f5f8b0;
         }
 
         // ── The desktop's own right-click ──
@@ -434,65 +337,28 @@ export component DesktopScreen inherits Rectangle {
             }
         }
 
-        // ── Desktop icons (human mode) ──
-        // A desktop a person can use: the pinned apps sit on the wallpaper and
-        // open on a click. Positioned rather than laid out, because a plain
-        // Rectangle does not size to its children and the grid must not be able
-        // to push the wallpaper around.
-        if !root.agent-mode && !root.focus-mode : Rectangle {
-            x: 0; y: 0;
-            width: parent.width;
-            height: parent.height - 40px;
-
-            for item[i] in root.dock-items : Rectangle {
-                // `row`/`col` are reserved (GridLayout attaches them to every element).
-                property <int> icon-row: Math.floor(i / 6);
-                property <int> icon-col: i - self.icon-row * 6;
-
-                x: 28px + self.icon-col * 108px;
-                y: 24px + self.icon-row * 104px;
-                width: 96px;
-                height: 92px;
-                border-radius: Theme.r-md;
-                background: icon-ta.has-hover ? Theme.hover-fill : transparent;
-                animate background { duration: Theme.dur-fast; }
-
-                icon-ta := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.launch-app(item.app-id); }
-                }
-
-                VerticalLayout {
-                    padding-top: 12px;
-                    spacing: 6px;
-
-                    HorizontalLayout {
-                        alignment: center;
-                        Icon {
-                            commands: Icons.app-or-window(item.app-id);
-                            size: 34px;
-                            thickness: 1.5px;
-                            tint: AppColor.for-app(item.app-id);
-                        }
-                    }
-
-                    Text {
-                        text: item.label;
-                        color: Theme.text-secondary;
-                        font-size: Theme.fs-micro;
-                        horizontal-alignment: center;
-                        overflow: elide;
-                    }
-                }
-
-                // A running app should say so without opening the switcher.
-                if item.is-running : Rectangle {
-                    x: (parent.width - 5px) / 2;
-                    y: parent.height - 7px;
-                    width: 5px;
-                    height: 5px;
-                    border-radius: 2.5px;
-                    background: Theme.accent;
+        // Everyday mode shares the same real launch and history callbacks as the Lens.
+        if !root.agent-mode && !root.focus-mode : DesktopHome {
+            x: (parent.width - self.width) / 2;
+            y: parent.height < 720px ? 24px : 56px;
+            width: min(760px, parent.width - 48px);
+            height: max(0px, parent.height - self.y - Theme.taskbar-height - 24px);
+            greeting: root.greeting-text;
+            date: root.date-text;
+            mind-name: root.active-harness-name;
+            online: root.companion-online;
+            pins: root.dock-items;
+            recents: root.lens-recents;
+            search => { root.lens-open = true; root.open-lens(); }
+            all-apps => { root.app-grid-open = true; }
+            launch(id) => { root.launch-app(id); }
+            open-recent(id) => { root.lens-result-selected(id); }
+            configure-mind => {
+                if root.companion-online {
+                    root.lens-open = true;
+                    root.open-lens();
+                } else {
+                    root.active-mind-clicked();
                 }
             }
         }
@@ -501,7 +367,7 @@ export component DesktopScreen inherits Rectangle {
         // What replaced the centred greeting. A desktop that shows the project, the recent
         // files and the memory count is a desktop that shows work; one that says "Good
         // evening" shows nothing. Every line here is data the shell already had.
-        if root.agent-mode && !root.focus-mode : Rectangle {
+        if root.agent-mode && root.show-work-rail && !root.focus-mode : Rectangle {
             x: Theme.sp-4;
             y: Theme.sp-4;
             width: 296px - Theme.sp-4;
@@ -516,7 +382,7 @@ export component DesktopScreen inherits Rectangle {
             // The clamp is what keeps a machine with forty recent files from growing a rail
             // taller than the screen.
             height: Math.min(work-body.preferred-height,
-                             parent.height - 40px - Theme.sp-4 * 3 - 96px);
+                             parent.height - Theme.taskbar-height - Theme.sp-4 * 3 - 96px);
             border-radius: Theme.r-lg;
             background: Theme.glass-rail;
             border-width: 1px;
@@ -594,9 +460,9 @@ export component DesktopScreen inherits Rectangle {
         // nothing to do with the project and the recent files above them. Joined to that panel
         // by a separator they read as the bottom of a list; separated, they read as a widget,
         // and the gap between the two is wallpaper rather than filler.
-        if root.agent-mode && !root.focus-mode : Rectangle {
+        if root.agent-mode && root.show-work-rail && !root.focus-mode : Rectangle {
             x: Theme.sp-4;
-            y: parent.height - 40px - Theme.sp-4 - vitals-body.preferred-height;
+            y: parent.height - Theme.taskbar-height - Theme.sp-4 - vitals-body.preferred-height;
             width: 296px - Theme.sp-4;
             height: vitals-body.preferred-height;
             border-radius: Theme.r-lg;
@@ -633,9 +499,9 @@ export component DesktopScreen inherits Rectangle {
         // two facts that are true on a machine which has never been used, so this cannot become
         // another panel that is empty on day one.
         if root.agent-mode && !root.focus-mode : VerticalLayout {
-            x: 296px + Theme.sp-5;
+            x: root.content-left;
             y: Theme.sp-4 + 4px;
-            width: parent.width - 296px - 318px - Theme.sp-5 * 2;
+            width: max(0px, parent.width - root.content-left - root.content-right);
             height: root.hero-h - 8px;
             spacing: 2px;
             alignment: start;
@@ -660,9 +526,9 @@ export component DesktopScreen inherits Rectangle {
         // The Lens is the primary interaction; it should look like one, not like an orb
         // to be discovered. Clicking opens the same overlay the orb used to.
         if root.agent-mode && !root.focus-mode : TouchArea {
-            x: 296px + Theme.sp-5;
+            x: root.content-left;
             y: Theme.sp-4 + root.hero-h;
-            width: parent.width - 296px - 318px - Theme.sp-5 * 2;
+            width: max(0px, parent.width - root.content-left - root.content-right);
             height: 38px;
             mouse-cursor: pointer;
             clicked => { root.lens-open = true; root.open-lens(); }
@@ -714,10 +580,10 @@ export component DesktopScreen inherits Rectangle {
         // be the confident lie this codebase keeps having to remove. What a fresh machine gets
         // instead is the one card at the bottom, which is true on day one and gone by day two.
         if root.agent-mode && !root.focus-mode : Flickable {
-            x: 296px + Theme.sp-5;
+            x: root.content-left;
             y: Theme.sp-4 + root.hero-h + 38px + Theme.sp-4;
-            width: parent.width - 296px - 318px - Theme.sp-5 * 2;
-            height: parent.height - 40px - (Theme.sp-4 + root.hero-h + 38px + Theme.sp-4) - Theme.sp-4;
+            width: max(0px, parent.width - root.content-left - root.content-right);
+            height: parent.height - Theme.taskbar-height - (Theme.sp-4 + root.hero-h + 38px + Theme.sp-4) - Theme.sp-4;
             // Both, or the column lays itself out at its own preferred width and the cards sit
             // in a narrow ribbon down the middle of the space they were supposed to fill.
             viewport-width: self.width;
@@ -944,7 +810,7 @@ export component DesktopScreen inherits Rectangle {
                         spacing: Theme.sp-2;
                         alignment: start;
                         Text {
-                            text: "Nothing is happening yet";
+                            text: "Ready when you are";
                             color: Theme.text-primary;
                             font-size: Theme.fs-headline;
                             font-weight: Theme.fw-headline;
@@ -952,7 +818,7 @@ export component DesktopScreen inherits Rectangle {
                         Text {
                             // No direction words. This said "open an app below" and the apps moved above it; copy
                             // that points at a place on the screen is copy the layout will make wrong.
-                            text: "This desktop fills itself in as it learns what you are doing. Ask it something with Ctrl K or open one of your apps, and it will start keeping track of the work rather than the icons.";
+                            text: "Open a pinned app to get started, or press Ctrl K to ask a question, find a file, or run a command.";
                             color: Theme.text-secondary;
                             font-size: Theme.fs-body;
                             wrap: word-wrap;
@@ -1018,12 +884,12 @@ export component DesktopScreen inherits Rectangle {
         }
 
         // ── Machine rail (right, hidden in focus mode) ──
-        if root.agent-mode && !root.focus-mode : MachineRail {
+        if root.agent-mode && root.show-machine-rail && !root.focus-mode : MachineRail {
             mind-name: root.active-harness-name;
             mind-detail: root.active-harness-detail;
             x: parent.width - self.width - Theme.sp-4;
             y: Theme.sp-4;
-            height-ceiling: parent.height - 40px - Theme.sp-4 * 2;
+            height-ceiling: parent.height - Theme.taskbar-height - Theme.sp-4 * 2;
             cpu-percent: root.bar-cpu-percent;
             mem-percent: root.bar-mem-percent;
             mem-text: root.bar-mem-text;
@@ -1144,7 +1010,7 @@ export component DesktopScreen inherits Rectangle {
         // part of the layout.
         x: root.agent-mode ? 296px + Theme.sp-5 : parent.width - self.width - 24px;
         y: root.agent-mode
-            ? parent.height - 40px - self.height - Theme.sp-4
+            ? parent.height - Theme.taskbar-height - self.height - Theme.sp-4
             : Theme.status-bar-height + 16px;
         // A child of a plain Rectangle fills its parent by default, so the card
         // ignored its own preferred-height and ran the whole height of the screen.

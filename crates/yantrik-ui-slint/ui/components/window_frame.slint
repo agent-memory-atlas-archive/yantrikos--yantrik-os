@@ -183,7 +183,7 @@ export component WindowFrame inherits Rectangle {
                     spacing: 8px;
                     alignment: start;
                     horizontal-stretch: 1;
-                    visible: !root.is-maximized;
+                    visible: !root.is-maximized || !root.content-has-controls;
 
                     if root.icon-char != "" || root.icon-path != "" : Rectangle {
                         width: 22px;

@@ -110,8 +110,10 @@ export component StatusBar inherits Rectangle {
                 }
             }
 
+            Text { text: "Yantrik"; font-size: Theme.fs-body; font-weight: 600; color: Theme.text-primary; vertical-alignment: center; }
+
             // Project indicator
-            if root.active-project != "" : Rectangle {
+            if root.active-project != "" && root.width >= 1000px : Rectangle {
                 width: proj-text.preferred-width + Theme.sp-3;
                 height: 20px;
                 y: (Theme.status-bar-height - self.height) / 2;
@@ -136,7 +138,7 @@ export component StatusBar inherits Rectangle {
             horizontal-stretch: 1;
             alignment: center;
 
-            if root.ai-context-text != "" : Text {
+            if root.ai-context-text != "" && root.width >= 1200px : Text {
                 text: root.ai-context-text;
                 color: Theme.text-dim;
                 font-size: Theme.fs-caption;
@@ -154,8 +156,8 @@ export component StatusBar inherits Rectangle {
             spacing: Theme.sp-3;
             alignment: end;
 
-            // Load readout — CPU and memory, always visible
-            HorizontalLayout {
+            // Detailed telemetry yields to essential controls on compact screens.
+            if root.width >= 1100px : HorizontalLayout {
                 spacing: Theme.sp-2;
                 Text {
                     text: "CPU";
@@ -224,6 +226,7 @@ export component StatusBar inherits Rectangle {
                         }
                         Text {
                             text: root.active-harness-name;
+                            max-width: 150px; overflow: elide;
                             color: Theme.accent;
                             font-size: Theme.fs-micro;
                             font-weight: 500;
@@ -275,6 +278,7 @@ export component StatusBar inherits Rectangle {
                         }
                         // The model name when we know it; the mode when we do not
                         Text {
+                            max-width: 150px; overflow: elide;
                             text: root.ai-provider-label != "" ? root.ai-provider-label
                                 : root.ai-privacy-mode == "local" ? "Local"
                                 : root.ai-privacy-mode == "cloud" ? "Cloud"
@@ -460,7 +464,7 @@ export component StatusBar inherits Rectangle {
                 font-weight: Theme.fw-body-strong;
                 vertical-alignment: center;
             }
-            if root.date-text != "" : Text {
+            if root.date-text != "" && root.width >= 1000px : Text {
                 text: root.date-text;
                 color: Theme.text-dim;
                 font-size: Theme.fs-caption;

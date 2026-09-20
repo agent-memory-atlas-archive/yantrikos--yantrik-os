@@ -1,0 +1,22 @@
+[package]
+name = "yantrik-ui-preview"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+slint = { version = "=1.17.1", features = ["renderer-femtovg", "renderer-software"] }
+png = "0.18"
+
+[build-dependencies]
+slint-build = "=1.17.1"
+
+[profile.fast]
+inherits = "dev"
+debug = false
+incremental = true
+
+[profile.fast.package."*"]
+opt-level = 3

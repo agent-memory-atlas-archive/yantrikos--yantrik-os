@@ -347,6 +347,12 @@ export component App inherits Window {
     in-out property <string> harness-error: "";
     callback use-harness(string);
     callback settings-search(string);
+    in-out property <string> settings-query;
+    in-out property <string> settings-save-status:"Preferences are saved automatically";
+    in-out property <bool> settings-save-error;
+    in-out property <bool> settings-save-can-retry:true;
+    callback retry-settings-save();
+    callback choose-accent(string);
     callback add-provider();
     callback save-provider(string, string, string, string, string);
     callback delete-provider(string);
@@ -408,6 +414,7 @@ export component App inherits Window {
     callback filter-skill-category(string);
 
     callback toggle-dark-mode();
+    callback set-agent-mode(bool);
     callback toggle-incognito-mode();
     callback cycle-accent-color();
     callback cycle-tool-permission();
@@ -417,6 +424,18 @@ export component App inherits Window {
     callback wallpaper-changed(string);
 
     // File browser state (screen 8)
+    in property <string> file-notice;
+    in property <bool> file-operation-busy;
+    in property <string> file-operation-text;
+    in property <float> file-operation-progress;
+    in property <bool> file-can-undo;
+    callback file-worker-event();
+    callback file-refresh();
+    callback file-cancel-operation();
+    callback file-undo-trash();
+    callback file-open-with(string);
+    callback file-dismiss-notice();
+
     in property <string> file-browser-path: "~";
     in property <[FileEntry]> file-browser-entries: [];
     in property <bool> file-browser-loading: false;
@@ -1500,6 +1519,8 @@ export component App inherits Window {
                 dnd-mode <=> root.dnd-mode;
                 accent-color <=> root.settings-accent-color;
                 toggle-dark-mode => { root.toggle-dark-mode(); }
+                agent-mode: root.agent-mode;
+                set-agent-mode(value) => { root.set-agent-mode(value); }
                 toggle-incognito-mode => { root.toggle-incognito-mode(); }
                 toggle-dnd-mode => { root.toggle-dnd-mode(); }
                 cycle-accent-color => { root.cycle-accent-color(); }
@@ -1525,6 +1546,11 @@ export component App inherits Window {
                 provider-test-result: root.settings-provider-test-result;
                 categories: root.settings-categories;
                 active-category <=> root.settings-category;
+                search-query <=> root.settings-query;
+                save-status:root.settings-save-status;save-error:root.settings-save-error;save-can-retry:root.settings-save-can-retry;
+                retry-save=>{root.retry-settings-save();}
+                open-network=>{root.launch-app("network");}
+                choose-accent(name)=>{root.choose-accent(name);}
                 harnesses: root.harnesses;
                 harness-error: root.harness-error;
                 use-harness(id) => { root.use-harness(id); }
@@ -1610,6 +1636,16 @@ export component App inherits Window {
 
             FileBrowser {
                 width: 100%; height: 100%;
+                notice: root.file-notice;
+                operation-busy: root.file-operation-busy;
+                operation-text: root.file-operation-text;
+                operation-progress: root.file-operation-progress;
+                can-undo: root.file-can-undo;
+                refresh => { root.file-refresh(); }
+                cancel-operation => { root.file-cancel-operation(); }
+                undo-trash => { root.file-undo-trash(); }
+                open-with(app) => { root.file-open-with(app); }
+                dismiss-notice => { root.file-dismiss-notice(); }
                 current-path: root.file-browser-path;
                 entries: root.file-browser-entries;
                 is-loading: root.file-browser-loading;

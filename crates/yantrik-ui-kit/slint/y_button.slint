@@ -24,11 +24,16 @@ export component YButton inherits Rectangle {
     in property <bool> loading: false;
     in property <bool> icon-only: false;
     callback clicked();
+    forward-focus: keyboard;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: !root.disabled && !root.loading;
+    accessible-action-default => { if (!root.disabled && !root.loading) { root.clicked(); } }
 
     property <bool> hovered: ta.has-hover && !root.disabled;
     property <bool> pressed: ta.pressed && !root.disabled;
     property <bool> on-accent: root.variant == 0 || root.variant == 3;
-    property <color> fg: root.on-accent ? Theme.bg-deep : Theme.text-primary;
+    property <color> fg: root.on-accent ? Theme.text-on-accent : Theme.text-primary;
     property <length> glyph: root.size == 0 ? 13px : 15px;
 
     height: root.size == 0 ? Theme.h-compact : root.size == 2 ? Theme.h-prominent : Theme.h-regular;
@@ -44,18 +49,31 @@ export component YButton inherits Rectangle {
         root.variant == 3 ? (root.pressed ? Theme.color-danger.darker(30%) : root.hovered ? Theme.color-danger.brighter(10%) : Theme.color-danger)
       : root.variant == 2 ? (root.pressed ? Theme.hover-fill-strong : root.hovered ? Theme.hover-fill : transparent)
       : root.variant == 1 ? (root.pressed ? Theme.hover-fill-strong : root.hovered ? Theme.bg-elevated.brighter(8%) : Theme.bg-elevated)
-      :                     (root.pressed ? Theme.accent-dim : root.hovered ? Theme.accent-light : Theme.accent);
+      :                     (root.pressed ? Theme.accent-button-pressed : root.hovered ? Theme.accent-button-hover : Theme.accent);
 
-    border-width: root.variant == 1 ? 1px : 0;
-    border-color: root.hovered ? Theme.border-strong : Theme.border-default;
+    border-width: keyboard.has-focus ? 2px : root.variant == 1 ? 1px : 0;
+    border-color: keyboard.has-focus ? Theme.text-primary : root.hovered ? Theme.border-strong : Theme.border-default;
 
     animate background { duration: Theme.dur-fast; }
     animate opacity { duration: Theme.dur-fast; }
 
+    keyboard := FocusScope {
+        enabled: !root.disabled && !root.loading;
+        key-pressed(event) => {
+            if (event.text == "\n" || event.text == " ") {
+                if (!event.repeat && !root.disabled && !root.loading) { root.clicked(); }
+                return accept;
+            }
+            reject
+        }
+    }
+
     ta := TouchArea {
         enabled: !root.disabled && !root.loading;
         mouse-cursor: root.disabled ? default : pointer;
-        clicked => { root.clicked(); }
+        clicked => {
+            if (!root.disabled && !root.loading) { keyboard.focus(); root.clicked(); }
+        }
     }
 
     HorizontalLayout {
@@ -86,7 +104,7 @@ export component YButton inherits Rectangle {
             vertical-alignment: center;
         }
 
-        if !root.icon-only && !root.loading : Text {
+        if !root.icon-only : Text {
             text: root.label;
             color: root.fg;
             font-size: root.size == 0 ? Theme.fs-caption : Theme.fs-body;

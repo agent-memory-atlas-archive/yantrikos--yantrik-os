@@ -1,0 +1,274 @@
+import { AppsScene } from "apps.slint";
+import { Theme, ThemeMode } from "theme.slint";
+import { DesktopHome } from "components/desktop_home.slint";
+import { DesktopScreen } from "desktop.slint";
+import { AppGrid, AppGridItem } from "components/app_grid.slint";
+import { Taskbar } from "components/taskbar.slint";
+import { StatusBar } from "components/status_bar.slint";
+import { AppHeader } from "app_header.slint";
+import { YButton } from "y_button.slint";
+import { YInput } from "y_input.slint";
+import { Icon, Icons } from "icon.slint";
+import { TerminalScreen } from "terminal.slint";
+
+export component Preview inherits Window {
+    in property <length> canvas-width: 1280px;
+    in property <length> canvas-height: 800px;
+    width: root.canvas-width; height: root.canvas-height;
+    default-font-family: Theme.font-ui;
+    background: Theme.bg-deep;
+    in-out property <string> app-action: "";
+    in-out property <int> app-action-count: 0;
+    in-out property <bool> notes-library: true;
+    in-out property <bool> notes-assistant: false;
+    in property <string> scene: "";
+    in property <bool> light: false;
+    in-out property <bool> launcher-open: false;
+    in property <bool> empty-launcher: false;
+    in property <bool> app-view: false;
+    in property <bool> actual-desktop: false;
+    in property <bool> agent-view: false;
+    in-out property <int> activations: 0;
+    in-out property <string> launched: "";
+    changed light => { ThemeMode.dark = !root.light; }
+
+    Image { width: 100%; height: 100%; source: @image-url("../../crates/yantrik-ui-slint/ui/wallpapers/serenity.png"); image-fit: cover; }
+    if root.light : Rectangle { width: 100%; height: 100%; background: #f3f5f8b0; }
+    if root.actual-desktop : DesktopScreen {
+        x: 0px; y: 0px; width: 100%; height: 100%;
+        agent-mode: root.agent-view;
+        ambient-interval-ms: 0;
+        wallpaper-path: "serenity";
+        greeting-text: "Good morning, Pranab";
+        date-text: "Saturday, September 19";
+        companion-online: true;
+        active-harness-name: "Yantrik Mind";
+        dock-items: [
+            { app-id: "files", icon-id: "files", label: "Files" },
+            { app-id: "notes", icon-id: "notes", label: "Notes", is-running: true },
+            { app-id: "terminal", icon-id: "terminal", label: "Terminal" },
+            { app-id: "calendar", icon-id: "calendar", label: "Calendar" },
+            { app-id: "music", icon-id: "music", label: "Music" },
+            { app-id: "settings", icon-id: "settings", label: "Settings" },
+        ];
+        lens-recents: [
+            { title: "Ideas for a quieter workspace", subtitle: "Notes", action-id: "note:1" },
+            { title: "Project overview.md", subtitle: "Documents", action-id: "file:1" },
+        ];
+    }
+    if root.scene == "" : StatusBar { y: 0px; clock-text: "10:24"; date-text: "Sat, Sep 19"; mem-text: "4.2 GB"; cpu-percent: 8; wifi-connected: true; active-harness-id: "mind"; active-harness-name: "Yantrik Mind"; harness-driving: true; }
+    if root.scene == "" && !root.app-view && !root.actual-desktop : DesktopHome {
+        width: min(760px, parent.width - 48px); x: (parent.width - self.width) / 2;
+        y: 76px; height: parent.height - 136px;
+        greeting: "Good morning, Pranab";
+        date: "SATURDAY, SEPTEMBER 19";
+        mind-name: "Yantrik Mind"; online: true;
+        pins: [
+            { app-id: "files", icon-id: "files", label: "Files" },
+            { app-id: "notes", icon-id: "notes", label: "Notes", is-running: true },
+            { app-id: "terminal", icon-id: "terminal", label: "Terminal" },
+            { app-id: "calendar", icon-id: "calendar", label: "Calendar" },
+            { app-id: "music", icon-id: "music", label: "Music" },
+            { app-id: "settings", icon-id: "settings", label: "Settings" },
+        ];
+        recents: [
+            { title: "Ideas for a quieter workspace", subtitle: "Notes", action-id: "note:1" },
+            { title: "Project overview.md", subtitle: "Documents", action-id: "file:1" },
+        ];
+        search => { root.activations += 1; }
+        all-apps => { root.launcher-open = true; }
+        launch(id) => { root.launched = id; }
+        open-recent(id) => { root.launched = id; }
+    }
+    if root.app-view : Rectangle {
+        x: 24px; y: 64px; width: parent.width - 48px; height: parent.height - 128px;
+        background: Theme.bg-card; border-radius: Theme.r-lg; clip: true;
+        border-width: 1px; border-color: Theme.border-strong;
+        VerticalLayout {
+            spacing: 0px;
+            AppHeader {
+                title: "Ideas for a quieter workspace"; subtitle: "Personal / Notes";
+                icon: Icons.notes; app-id: "notes"; modified: true;
+                show-search: true; search-placeholder: "Search notes";
+                actions: [
+                    {id: "export", icon: Icons.file, label: "Export"},
+                    {id: "new", icon: Icons.plus, label: "New note", emphasis: 2},
+                    {id: "save", icon: Icons.save, label: "Save"},
+                    {separator: true},
+                    {id: "delete", icon: Icons.trash, label: "Delete", disabled: true}
+                ];
+                action(id) => { root.launched = id; }
+            }
+            HorizontalLayout {
+                spacing: 0px;
+                Rectangle {
+                    width: 190px; background: Theme.bg-surface;
+                    VerticalLayout {
+                        padding: 16px; spacing: 12px; alignment: start;
+                        Text { text: "WORKSPACE"; color: Theme.text-dim; font-size: Theme.fs-micro; letter-spacing: 1px; }
+                        YButton { label: "All notes"; icon-path: Icons.notes; variant: 1; }
+                        YButton { label: "Favourites"; icon-path: Icons.pushpin; variant: 2; }
+                        YButton { label: "Archive"; icon-path: Icons.file; variant: 2; }
+                    }
+                }
+                VerticalLayout {
+                    padding: 32px; spacing: 20px; alignment: start;
+                    Text { text: "A place to think clearly."; font-size: 28px; font-weight: 600; color: Theme.text-primary; wrap: word-wrap; }
+                    Text { text: "Bring your ideas together. Keep what matters close, and let the rest find its place."; font-size: 16px; color: Theme.text-secondary; wrap: word-wrap; }
+                    YInput { placeholder: "Name your next idea"; }
+                    HorizontalLayout {
+                        alignment: start; spacing: 12px;
+                        YButton { label: "Create note"; clicked => { root.activations += 1; } }
+                        YButton { label: "Saving…"; loading: true; variant: 1; }
+                        YButton { label: "Unavailable"; disabled: true; variant: 1; }
+                    }
+                }
+            }
+        }
+    }
+    if root.scene == "" : Taskbar {
+        y: parent.height - self.height;
+        windows: [ { title: "Ideas for a quieter workspace", app-id: "notes" }, { title: "Terminal", app-id: "terminal" } ];
+        open-launcher => { root.launcher-open = true; }
+    }
+    AppGrid {
+        is-open <=> root.launcher-open;
+        categories: [{id: "all", name: "All apps", count: 12}, {id: "office", name: "Productivity", count: 4}, {id: "system", name: "System", count: 3}];
+        active-category: "all";
+        apps: root.empty-launcher ? [] : self.sample-apps;
+        property <[AppGridItem]> sample-apps: [
+            {app-id: "files", icon-id: "files", name: "Files", pinned: true, pinnable: true},
+            {app-id: "notes", icon-id: "notes", name: "Notes", pinned: true, pinnable: true},
+            {app-id: "terminal", icon-id: "terminal", name: "Terminal", pinnable: true},
+            {app-id: "calendar", icon-id: "calendar", name: "Calendar", pinnable: true},
+            {app-id: "email", icon-id: "email", name: "Email", pinnable: true},
+            {app-id: "music", icon-id: "music", name: "Music", pinnable: true},
+            {app-id: "images", icon-id: "images", name: "Images", pinnable: true},
+            {app-id: "weather", icon-id: "weather", name: "Weather", pinnable: true},
+            {app-id: "settings", icon-id: "settings", name: "Settings", pinnable: true},
+            {app-id: "editor", icon-id: "editor", name: "Editor", pinnable: true},
+            {app-id: "system-monitor", icon-id: "system-monitor", name: "System Monitor", pinnable: true},
+            {app-id: "downloads", icon-id: "downloads", name: "Downloads", pinnable: true}
+        ];
+        launch-app(id) => { root.launched = id; }
+    }
+    if root.scene != "" : AppsScene { width: 100%; height: 100%; scene: root.scene; notes-library <=> root.notes-library; notes-assistant <=> root.notes-assistant; action(id) => { root.app-action = id; root.app-action-count += 1; } }
+
+}
+
+// A fixed geometry probe for input dispatch through the real shared controls.
+export component ControlsProbe inherits Window {
+    width: 360px; height: 180px;
+    in-out property <bool> disabled: false;
+    in-out property <bool> loading: false;
+    in-out property <int> activations: 0;
+    in-out property <string> input-value: "Keep me";
+    public function focus-action() { action.focus(); }
+    action := YButton {
+        x: 20px; y: 20px; width: 140px;
+        label: "Test action";
+        disabled: root.disabled; loading: root.loading;
+        clicked => { root.activations += 1; }
+    }
+    YInput {
+        x: 20px; y: 100px; width: 300px;
+        value <=> root.input-value;
+        disabled: root.disabled;
+    }
+}
+
+export component HeaderProbe inherits Window {
+    width: 800px; height: 600px;
+    in-out property <string> chosen: "";
+    in-out property <int> count: 0;
+    background: Theme.bg-deep;
+    AppHeader {
+        y: 0px;
+        width: 100%;
+        title: "Notes"; icon: Icons.notes; app-id: "notes";
+        actions: [
+            {id: "new", label: "New", icon: Icons.plus, emphasis: 2},
+            {id: "save", label: "Save", icon: Icons.save},
+            {separator: true},
+            {id: "delete", label: "Delete", icon: Icons.trash, disabled: true},
+            {id: "export", label: "Export", icon: Icons.export},
+            {id: "import", label: "Import", icon: Icons.import},
+            {id: "close", label: "Close note", icon: Icons.close}
+        ];
+        action(id) => { root.chosen = id; root.count += 1; }
+    }
+}
+
+export component TerminalProbe inherits Window {
+    width: 800px; height: 600px;
+    TerminalScreen {
+        width: 100%; height: 100%;
+        current-directory: "~";
+        terminal-output: "Ready.";
+        is-alive: true;
+    }
+}
+
+import { FileBrowser, FileEntry } from "file_browser.slint";
+export component FilesProbe inherits Window {
+    width: 800px; height: 600px;
+    in property <[FileEntry]> entries;
+    in-out property <int> selected: -1;
+    in-out property <bool> grid: false;
+    in-out property <string> action;
+    in-out property <string> query;
+    in-out property <bool> loading: false;
+    in-out property <bool> control-selected;
+    in-out property <bool> shift-selected;
+    in-out property <bool> light: false;
+    changed light => { ThemeMode.dark = !root.light; }
+    FileBrowser {
+        entries: root.entries;
+        is-loading: root.loading;
+        current-path: "~/Documents";
+        breadcrumbs: [{label: "Home", full-path: "~"},{label:"Documents", full-path:"~/Documents"}];
+        selected-index <=> root.selected;
+        selection-count: root.selected < 0 ? 0 : 1;
+        grid-view <=> root.grid;
+        multi-select-clicked(index, control, shift) => { root.selected = index; root.control-selected = control; root.shift-selected = shift; }
+        create-folder(name) => { root.action = "folder:" + name; }
+        file-rename(old, name) => { root.action = "rename:" + name; }
+        navigate-to-path(path) => { root.action = "path:" + path; }
+        file-filter-changed(query) => { root.query = query; }
+        open-file(name) => { root.action = "open:" + name; }
+        copy-selected => { root.action = "copy"; }
+        cut-selected => { root.action = "cut"; }
+        file-paste => { root.action = "paste"; }
+        file-quick-look(index) => { root.action = "preview:" + index; }
+    }
+}
+
+import { SettingsScreen, SettingsCategoryItem } from "settings.slint";
+export component SettingsProbe inherits Window {
+    in property <length> canvas-width:800px;in property <length> canvas-height:600px;
+    width:root.canvas-width;height:root.canvas-height;background:Theme.bg-deep;
+    in-out property <int> category;
+    in-out property <string> query;
+    in property <[SettingsCategoryItem]> categories;
+    in-out property <string> action;
+    in-out property <string> accent:"cyan";
+    in-out property <bool> save-error;
+    in-out property <bool> dark:true;
+    callback search(string);
+    public function focus-search(){screen.focus-search();}
+    changed dark=>{ThemeMode.dark=root.dark;}
+    screen:=SettingsScreen {
+        width:100%;height:100%;
+        active-category<=>root.category;search-query<=>root.query;
+        categories:root.categories;settings-search(q)=>{root.search(q);}
+        accent-color:root.accent;dark-mode:root.dark;
+        choose-accent(a)=>{root.accent=a;root.action="accent:"+a;}
+        toggle-dark-mode=>{root.dark=!root.dark;}
+        wallpaper-path:"serenity";wallpaper-changed(id)=>{root.action="wallpaper:"+id;}
+        open-network=>{root.action="network";}
+        navigate-to(id)=>{root.action="screen:"+id;}
+        save-error:root.save-error;
+        save-status:root.save-error?"Not saved: Preferences are read-only; the original file was preserved.":"Changes saved on this device";
+        retry-save=>{root.action="retry";}
+    }
+}

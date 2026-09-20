@@ -21,6 +21,7 @@ export component YInput inherits Rectangle {
     callback edited(string);
     callback accepted(string);
     callback cleared();
+    forward-focus: input;
 
     property <bool> hovered: ta.has-hover;
     property <bool> focused: input.has-focus;
@@ -49,6 +50,7 @@ export component YInput inherits Rectangle {
             animate border-color { duration: Theme.dur-fast; }
 
             ta := TouchArea {
+                enabled: !root.disabled;
                 clicked => { input.focus(); }
             }
 
@@ -73,21 +75,22 @@ export component YInput inherits Rectangle {
                 }
 
                 input := TextInput {
+                    single-line: true;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                     font-size: Theme.fs-body;
                     color: root.disabled ? Theme.text-dim : Theme.text-primary;
                     input-type: root.mode == 2 && !root.password-visible ? password : text;
-                    text: root.value;
+                    text <=> root.value;
                     enabled: !root.disabled;
                     edited => {
-                        root.value = self.text;
                         root.edited(self.text);
                     }
                     accepted => { root.accepted(self.text); }
                 }
 
                 if root.value != "" && root.mode != 2 : TouchArea {
+                    enabled: !root.disabled;
                     width: 20px;
                     height: 20px;
                     y: (parent.height - 20px) / 2;
@@ -96,6 +99,7 @@ export component YInput inherits Rectangle {
                         root.value = "";
                         root.cleared();
                         root.edited("");
+                        input.focus();
                     }
                     Icon {
                         commands: "M5 5L15 15 M15 5L5 15";
@@ -106,6 +110,7 @@ export component YInput inherits Rectangle {
                 }
 
                 if root.mode == 2 : TouchArea {
+                    enabled: !root.disabled;
                     width: 20px;
                     height: 20px;
                     y: (parent.height - 20px) / 2;

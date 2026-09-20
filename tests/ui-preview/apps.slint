@@ -1,0 +1,68 @@
+// Production app components with deterministic sample data. No file-system writes.
+import { Theme, ThemeMode } from "theme.slint";
+import { NotesEditor } from "notes_editor.slint";
+import { FileBrowser, FileEntry } from "file_browser.slint";
+import { SettingsScreen } from "settings.slint";
+
+export component AppsScene inherits Rectangle {
+    in property <string> scene;
+    callback action(string);
+    in-out property <bool> notes-library: true;
+    in-out property <bool> notes-assistant: false;
+    in-out property <bool> overview: false;
+    background: Theme.bg-deep;
+    if root.scene == "notes" : NotesEditor {
+        width: 100%; height: 100%;
+        library-visible <=> root.notes-library;
+        assistant-visible <=> root.notes-assistant;
+        notes-list: [
+            { title: "A little room to think", filename: "room.md", preview: "Good tools leave space for the work.", modified: "Today, 10:24", tags: "ideas", is-pinned: true },
+            { title: "A weekend in the mountains", filename: "weekend.md", preview: "Pack light. Take the scenic route.", modified: "Yesterday", tags: "personal" },
+            { title: "Project journal", filename: "journal.md", preview: "Small decisions that make a difference.", modified: "September 17", tags: "work" },
+            { title: "Books worth returning to", filename: "books.md", preview: "A few pages at a time.", modified: "September 15" }
+        ];
+        import-md => { root.action("import"); }
+        new-note => { root.action("new-note"); }
+        save-note => { root.action("save-note"); }
+        select-note(i) => { root.action("note-" + i); }
+        selected-index: 0; current-title: "A little room to think";
+        note-count: 4; folder-all-count: 4; folder-fav-count: 1; folder-recent-count: 3;
+        agent-suggestions: [{ id: "summary", label: "Summarise this note", detail: "From the text in this note", icon: "template" }];
+        current-tags: "ideas"; meta-word-count: 72;
+        meta-created: "Sep 18"; meta-modified: "Today, 10:24";
+        current-content: "Good tools leave space for the work.\n\nA place to collect the small things before they become something bigger: a thought on the train, an idea for a project, a sentence worth keeping.\n\nToday’s intentions\n\n• Make time for focused work\n• Leave a little room for curiosity\n• Finish one thing with care\n\nRelated: [[Project journal]]\n\nThe best part of a fresh page is that it can become anything.";
+    }
+    if root.scene == "files" || root.scene == "files-grid" || root.scene == "files-empty" : FileBrowser {
+        width: 100%; height: 100%;
+        current-path: "/home/yantrik/Documents";
+        breadcrumbs: [{ label: "Home", full-path: "/home/yantrik" }, { label: "Documents", full-path: "/home/yantrik/Documents" }];
+        grid-view: root.scene == "files-grid";
+        can-go-back: true;
+        go-back => { root.action("back"); }
+        go-forward => { root.action("forward"); }
+        navigate-dir(name) => { root.action("folder:" + name); }
+        file-selection-changed(name) => { root.action("file:" + name); }
+        multi-select-clicked(index, control, shift) => { self.selected-index = index; root.action("file:" + self.entries[index].name); }
+        entries: root.scene == "files-empty" ? [] : self.sample-entries;
+        property <[FileEntry]> sample-entries: [
+            { name: "Projects", is-dir: true, modified-text: "Today, 09:42" },
+            { name: "Personal", is-dir: true, modified-text: "Yesterday" },
+            { name: "Reference", is-dir: true, modified-text: "Sep 17, 2026" },
+            { name: "Getting started.md", size-text: "2.4 KB", modified-text: "Today, 10:24", icon-char: "≡" },
+            { name: "Project brief.pdf", size-text: "184 KB", modified-text: "Yesterday", icon-char: "▤" },
+            { name: "Autumn landscape.png", size-text: "3.2 MB", modified-text: "Sep 17, 2026", icon-char: "▣" },
+            { name: "Ideas for next week.txt", size-text: "1.1 KB", modified-text: "Sep 16, 2026", icon-char: "≡" },
+            { name: "Budget.csv", size-text: "8.7 KB", modified-text: "Sep 15, 2026", icon-char: "◇" }
+        ];
+        free-space-text: "42.8 GB available";
+    }
+    if root.scene == "settings" : SettingsScreen {
+        width: 100%; height: 100%;
+        agent-mode: root.overview;
+        set-agent-mode(value) => { root.overview = value; root.action(value ? "overview" : "everyday"); }
+        dark-mode: ThemeMode.dark;
+        wallpaper-path: "serenity";
+        toggle-dark-mode => { ThemeMode.dark = !ThemeMode.dark; root.action("theme"); }
+        wallpaper-changed(id) => { root.action("wallpaper:" + id); }
+    }
+}

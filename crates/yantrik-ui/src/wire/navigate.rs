@@ -137,38 +137,8 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 });
                 *timer_inner.borrow_mut() = Some(timer);
             }
-            // File browser screen
-            8 => {
-                let path = browser_path.borrow().clone();
-                let show_hidden = *browser_show_hidden.borrow();
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_file_browser_path(slint::SharedString::from(&path));
-                    let entries = filebrowser::list_dir_filtered(&path, show_hidden);
-                    let items: Vec<FileEntry> = entries
-                        .into_iter()
-                        .map(|e| FileEntry {
-                            name: e.name.into(),
-                            is_dir: e.is_dir,
-                            size_text: e.size_text.into(),
-                            modified_text: e.modified_text.into(),
-                            icon_char: e.icon_char.into(),
-                            selected: false,
-                        })
-                        .collect();
-                    ui.set_file_browser_entries(ModelRc::new(VecModel::from(items)));
-
-                    // Update breadcrumbs
-                    let segments = filebrowser::breadcrumb_segments(&path);
-                    let crumbs: Vec<BreadcrumbSegment> = segments
-                        .into_iter()
-                        .map(|(label, full_path)| BreadcrumbSegment {
-                            label: label.into(),
-                            full_path: full_path.into(),
-                        })
-                        .collect();
-                    ui.set_file_breadcrumbs(ModelRc::new(VecModel::from(crumbs)));
-                }
-            }
+            // Directory I/O is owned by the asynchronous Files controller.
+            8 => { if let Some(ui)=ui_weak.upgrade() { ui.invoke_file_refresh(); } }
             // Notification Center — sync from store
             9 => {
                 let store = notification_store.borrow();

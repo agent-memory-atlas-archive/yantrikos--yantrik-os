@@ -14,6 +14,10 @@ use crate::{App, AppGridItem, CategoryItem};
 pub fn wire(ui: &App, ctx: &AppContext) {
     let catalogue = ctx.installed_apps.clone();
     let installed = catalogue.get();
+    // The visible search field is recreated on open. Reset both backing filters
+    // with it so category clicks cannot resurrect a previous search.
+    let query = Rc::new(RefCell::new(String::new()));
+    let category = Rc::new(RefCell::new(String::from("all")));
 
     // Rescan every time the launcher opens.
     //
@@ -24,11 +28,16 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     // on a keystroke and far cheaper than being wrong.
     {
         let catalogue = catalogue.clone();
+        let query = query.clone();
+        let category = category.clone();
         let weak = ui.as_weak();
         ui.on_app_grid_opened(move || {
             let count = catalogue.refresh();
             tracing::debug!(apps = count, "rescanned installed apps for the launcher");
             if let Some(ui) = weak.upgrade() {
+                query.borrow_mut().clear();
+                *category.borrow_mut() = "all".to_string();
+                ui.set_grid_active_category("all".into());
                 let apps = catalogue.get();
                 ui.set_grid_categories(ModelRc::new(VecModel::from(categories_for(&apps))));
                 populate_grid(&ui, &apps, "", "all");
@@ -37,9 +46,6 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     }
 
     // The two filters compose: whichever one changes, the other is re-applied from here.
-    let query = Rc::new(RefCell::new(String::new()));
-    let category = Rc::new(RefCell::new(String::from("all")));
-
     ui.set_grid_categories(ModelRc::new(VecModel::from(categories_for(&installed))));
     populate_grid(ui, &installed, "", "all");
 
