@@ -4,10 +4,10 @@
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
 import { AppIdentity } from "app_color.slint";
 import { EmailClient, EmailFolderData, EmailListItem, EmailDetailData,
-         EmailThreadMessage, EmailAttachmentData, EmailSignatureData } from "email.slint";
+         EmailThreadMessage, EmailAttachmentData } from "email.slint";
 
 export { EmailFolderData, EmailListItem, EmailDetailData, EmailThreadMessage,
-         EmailAttachmentData, EmailSignatureData, ThemeMode, AccentPreset }
+         EmailAttachmentData, ThemeMode, AccentPreset }
 
 export component EmailApp inherits Window {
     // What app this window is.
@@ -34,15 +34,22 @@ export component EmailApp inherits Window {
     in property <EmailDetailData> email-detail <=> client.email-detail;
     in property <bool> is-loading <=> client.is-loading;
     in property <bool> is-composing <=> client.is-composing;
-    in property <string> ai-summary-text <=> client.ai-summary-text;
     in property <bool> ai-is-working <=> client.ai-is-working;
     in property <int> selected-folder-index <=> client.selected-folder-index;
     in property <string> account-name <=> client.account-name;
 
+    // ── What went wrong, for the person at the window. describe.notice carries the same
+    // sentence to whatever is driving the app.
+    in property <string> notice <=> client.notice;
+
     // ── Account setup ──
     in property <bool> has-account <=> client.has-account;
+    in property <string> service-state <=> client.service-state;
     in property <string> setup-status <=> client.setup-status;
+    in property <bool> setup-ok <=> client.setup-ok;
     in property <bool> setup-testing <=> client.setup-testing;
+    in property <string> setup-note <=> client.setup-note;
+    in-out property <bool> setup-open <=> client.setup-open;
 
     // ── Thread ──
     in property <[EmailThreadMessage]> email-thread-messages <=> client.email-thread-messages;
@@ -88,10 +95,7 @@ export component EmailApp inherits Window {
 
     // ── Enterprise features ──
     in property <[EmailAttachmentData]> email-attachments <=> client.email-attachments;
-    in property <[EmailSignatureData]> email-signatures <=> client.email-signatures;
-    in property <int> email-active-signature <=> client.email-active-signature;
     in property <int> email-triage-view <=> client.email-triage-view;
-    in property <int> email-priority-count <=> client.email-priority-count;
     in property <string> email-draft-status <=> client.email-draft-status;
     in property <string> email-ai-intent <=> client.email-ai-intent;
 
@@ -114,14 +118,10 @@ export component EmailApp inherits Window {
     callback search-emails <=> client.search-emails;
     callback sync-emails <=> client.sync-emails;
     callback cancel-compose <=> client.cancel-compose;
-    callback back-pressed <=> client.back-pressed;
     callback add-account <=> client.add-account;
     callback toggle-thread-message <=> client.toggle-thread-message;
 
     // V41: Enterprise callbacks
-    callback download-attachment <=> client.download-attachment;
-    callback preview-attachment <=> client.preview-attachment;
-    callback set-signature <=> client.set-signature;
     callback triage-filter <=> client.triage-filter;
     callback save-draft <=> client.save-draft;
     callback ai-classify <=> client.ai-classify;
@@ -129,7 +129,7 @@ export component EmailApp inherits Window {
     // Account setup callbacks
     callback save-account <=> client.save-account;
     callback test-connection <=> client.test-connection;
-    callback oauth-google <=> client.oauth-google;
+    callback cancel-setup <=> client.cancel-setup;
 
     client := EmailClient {
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).

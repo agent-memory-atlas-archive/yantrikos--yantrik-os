@@ -73,12 +73,6 @@ export struct EmailAttachmentData {
     is-downloaded: bool,
 }
 
-export struct EmailSignatureData {
-    name: string,
-    content: string,
-    is-default: bool,
-}
-
 // ── Email Client Component ──
 
 export component EmailClient inherits Rectangle {
@@ -90,15 +84,36 @@ export component EmailClient inherits Rectangle {
     in property <EmailDetailData> email-detail: { id: 0 };
     in property <bool> is-loading: false;
     in property <bool> is-composing: false;
-    in property <string> ai-summary-text: "";
     in property <bool> ai-is-working: false;
     in property <int> selected-folder-index: 0;
     in property <string> account-name: "";
 
+    // What went wrong, in the words the app would give a caller.
+    //
+    // Every failure in this app used to be a discarded Option: a delete that failed changed
+    // nothing on screen and said nothing, a search that failed looked like a mailbox with no
+    // matches, and "Synced" was set whether or not anything synced. This strip is the person's
+    // half of contract point 4; `describe.notice` carries the same sentence to a mind.
+    in property <string> notice: "";
+
     // Account setup state
     in property <bool> has-account: false;
+    // "up" or "unreachable" — whether the mail service answered at all.
+    //
+    // This screen had two states and needed three. A service that was never started answered
+    // nothing, the app read nothing as no account, and the first thing anyone saw of Mail was a
+    // form asking them to add the account they already had.
+    in property <string> service-state: "up";
     in property <string> setup-status: "";
+    // Whether `setup-status` is good news. The screen used to decide by comparing the status to
+    // the literal "Connected!", so a server that answered anything else — including a success
+    // said differently — was drawn in the failure colour.
+    in property <bool> setup-ok: false;
     in property <bool> setup-testing: false;
+    // Where the account is kept and what happens to the password, in the service's own words.
+    in property <string> setup-note: "";
+    // The setup form over an app that already has an account, for adding a second one.
+    in-out property <bool> setup-open: false;
 
     // Thread messages for detail view
     in property <[EmailThreadMessage]> email-thread-messages: [];
@@ -143,12 +158,14 @@ export component EmailClient inherits Rectangle {
     in-out property <bool> compose-italic-active: false;
 
     // V41: Enterprise email enhancements
+    //
+    // The attachment list is what the open message actually carries. The signature picker that
+    // stood beside it is gone: it read a model nothing populated, so the list was always empty
+    // and the block never drew, and there is no signature editor anywhere in this app for it to
+    // have listed. `ComposeRequest.signature` is still on the wire for whoever builds one.
     in property <[EmailAttachmentData]> email-attachments: [];
-    in property <[EmailSignatureData]> email-signatures: [];
-    in property <int> email-active-signature: 0;
-    in property <int> email-triage-view: 0;  // 0=all, 1=priority, 2=unread, 3=flagged
-    in property <int> email-priority-count: 0;
-    in property <string> email-draft-status: "";  // "Saved" / "Saving..." / ""
+    in property <int> email-triage-view: 0;  // 0=all, 1=unread, 2=flagged
+    in property <string> email-draft-status: "";  // "Draft saved" / "Draft restored" / ""
     in property <string> email-ai-intent: "";  // "action-needed", "fyi", "meeting", "newsletter"
 
     // Callbacks — email operations
@@ -170,38 +187,54 @@ export component EmailClient inherits Rectangle {
     callback search-emails(string);
     callback sync-emails();
     callback cancel-compose();
-    callback back-pressed();
-    callback add-account();              // open setup for additional account
+    callback add-account();              // open setup for an additional account
+    callback cancel-setup();             // leave the setup form without saving
     callback toggle-thread-message(int); // collapse/expand a thread message
 
     // V41: Enterprise callbacks
-    callback download-attachment(int);
-    callback preview-attachment(int);
-    callback set-signature(int);
+    //
+    // Download and preview are gone with the buttons that called them. Fetching an attachment
+    // needs the bytes, and this service's `EmailAttachment` carries a filename, a MIME type and
+    // a size — there is no method on the wire that returns a part's content, so both buttons
+    // could only ever have logged a line. The chips list what the message has; opening one waits
+    // on a method that fetches it.
     callback triage-filter(int);
     callback save-draft();
     callback ai-classify();
 
     // Callbacks — account setup
+    //
+    // There is no `oauth-google`. The button that called it is gone with it: the only OAuth2
+    // flow in this tree is the companion's `connect_service`, which mints Gmail-API tokens into
+    // the companion's own connector store under `gmail.readonly` scope. IMAP XOAUTH2 needs
+    // `https://mail.google.com/`, and `email-service` reads its token from its own config, which
+    // nothing writes to from there. A button that completed a flow the mail service cannot use
+    // would be a new fabricated success in place of the one being removed. Gmail works here
+    // through an App Password, which is what the form below asks for.
     callback save-account(string, string, string, string, string, string, string, string);
     callback test-connection(string, string, string, string, string);
-    callback oauth-google();  // Sign in with Google (OAuth2)
 
-    // ── Account Setup View (shown when no account) ──
     // ── Account setup (shown until there is an account) ──
     //
     // With the header. This was the one screen in the OS that had no app shell at all: no
     // glyph, no name, no window chrome of its own -- a bare form on a dark field, and the FIRST
     // thing anyone sees of Mail, because it is what shows until an account exists. The app
     // introduced itself everywhere except at the door.
-    if !root.has-account : VerticalLayout {
+    //
+    // It also said "No account yet" when the mail service had never been started, which is a
+    // different thing and was the whole of what an audit found here. The subtitle reads the
+    // service's state now, and a service that could not be reached gets the panel below instead
+    // of a form: there is nothing to submit a form to.
+    if (!root.has-account || root.setup-open) : VerticalLayout {
         spacing: 0px;
 
         AppHeader {
             app-id: "email";
             icon: Icons.mail;
             title: "Email";
-            subtitle: "No account yet";
+            subtitle: root.service-state == "unreachable" ? "Mail service unreachable"
+                : root.setup-open ? "Add another account"
+                : "No account yet";
         }
 
         Rectangle {
@@ -211,7 +244,71 @@ export component EmailClient inherits Rectangle {
             alignment: center;
             spacing: 0px;
 
-            HorizontalLayout {
+            // ── The service is not there ──
+            //
+            // Not a form. Saving an account goes through the mail service, and offering eight
+            // fields and a Sign In button to something that cannot be reached is how a person
+            // comes to believe they have typed their password into a working machine.
+            if root.service-state == "unreachable" : HorizontalLayout {
+                alignment: center;
+
+                Rectangle {
+                    width: 440px;
+                    height: down-content.preferred-height + 48px;
+                    border-radius: 16px;
+                    background: Theme.bg-surface;
+                    border-width: 1px;
+                    border-color: Theme.amber.with-alpha(0.4);
+
+                    down-content := VerticalLayout {
+                        padding: 32px;
+                        spacing: 12px;
+
+                        Icon {
+                            commands: Icons.warning;
+                            size: 32px;
+                            tint: Theme.amber;
+                            thickness: 1.6px;
+                            x: (parent.width - self.width) / 2;
+                        }
+                        Text {
+                            text: "The mail service is not running";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-title-2;
+                            font-weight: Theme.fw-title-2;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: root.notice;
+                            color: Theme.amber;
+                            font-size: Theme.fs-caption;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: "This is not the same as having no account. Until the service "
+                                + "answers, this app cannot tell whether one is configured, and "
+                                + "there is nothing here to sign in to.";
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            alignment: center;
+                            YButton {
+                                label: "Try again";
+                                icon: Icons.refresh;
+                                clicked => { root.sync-emails(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.service-state != "unreachable" : HorizontalLayout {
                 alignment: center;
 
                 Rectangle {
@@ -258,60 +355,11 @@ export component EmailClient inherits Rectangle {
                             }
                         }
 
-                        // ── Sign in with Google (OAuth2) ──
-                        Rectangle {
-                            height: Theme.touch-target;
-                            border-radius: Theme.r-lg;
-                            // One surface, not three.
-                            //
-                            // This was a 90-degree gradient from teal through green to
-                            // Google red -- an attempt at the brand's four colours that, at
-                            // 13% alpha across a 380px button, renders as a muddy band and
-                            // reads as a rendering fault rather than as a logo. The G below
-                            // carries the brand; the button is a button.
-                            background: Theme.bg-elevated;
-                            border-width: 1px;
-                            border-color: Theme.border-strong;
-
-                            TouchArea {
-                                clicked => { root.oauth-google(); }
-                                mouse-cursor: pointer;
-                            }
-
-                            HorizontalLayout {
-                                alignment: center;
-                                spacing: Theme.sp-3;
-
-                                Text {
-                                    text: "G";
-                                    // Google's blue. The one place in this OS where a colour
-                                    // is somebody else's and has to stay theirs.
-                                    color: #4285f4;
-                                    font-size: Theme.fs-title-1;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    text: "Sign in with Google";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-headline;
-                                    font-weight: Theme.fw-headline;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            animate background { duration: Theme.dur-fast; }
-                        }
-
-                        // Separator
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 12px;
-
-                            Rectangle { height: 1px; background: Theme.hover-fill-strong; }
-                            Text { text: "or use App Password"; color: Theme.text-dim; font-size: Theme.fs-micro; vertical-alignment: center; }
-                            Rectangle { height: 1px; background: Theme.hover-fill-strong; }
-                        }
+                        // "Sign in with Google" stood here and called `oauth-google`, which
+                        // logged a line. It is not replaced with a working one: see the note on
+                        // the callbacks above. Gmail, Outlook, Yahoo and iCloud all work from
+                        // this form with an app password, which is what the provider buttons
+                        // below explain how to get.
 
                         // ── Provider Picker (App Password flow) ──
                         VerticalLayout {
@@ -491,16 +539,48 @@ export component EmailClient inherits Rectangle {
                             }
                         }
 
-                        // Status message
+                        // Where the password goes, in the service's own words.
+                        //
+                        // A form that asks a person for a mail password and will not say what is
+                        // done with it is asking them to trust something they cannot see. The
+                        // text comes from the service, so the day there is a secret store behind
+                        // this it stops saying there is not.
+                        if root.setup-note != "" : Text {
+                            text: root.setup-note;
+                            color: Theme.text-dim; font-size: Theme.fs-micro;
+                            horizontal-alignment: center; wrap: word-wrap;
+                        }
+
+                        // What happened, last time either button was pressed.
+                        //
+                        // This was compared against the literal string "Connected!" to choose its
+                        // colour, so anything the server actually said was drawn as a failure.
+                        // The app sets `setup-ok` alongside the words now.
                         if root.setup-status != "" : Text {
                             text: root.setup-status;
-                            color: root.setup-status == "Connected!" ? AppIdentity.accent : Theme.amber;
+                            color: root.setup-ok ? AppIdentity.accent : Theme.amber;
                             font-size: Theme.fs-caption; horizontal-alignment: center; wrap: word-wrap;
                         }
 
                         // Action buttons
                         HorizontalLayout {
                             spacing: 12px;
+
+                            // Only when there is a mailbox to go back to. On first run this form
+                            // is the whole app and a Cancel would lead nowhere.
+                            if root.setup-open : Rectangle {
+                                height: 44px; border-radius: 10px; background: Theme.bg-card;
+                                border-width: 1px; border-color: Theme.border-subtle;
+                                TouchArea {
+                                    clicked => { root.cancel-setup(); }
+                                    mouse-cursor: pointer;
+                                }
+                                Text {
+                                    text: "Cancel";
+                                    color: Theme.text-secondary; font-size: Theme.fs-body; font-weight: 500;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
 
                             Rectangle {
                                 height: 44px; border-radius: 10px; background: Theme.bg-card;
@@ -519,15 +599,23 @@ export component EmailClient inherits Rectangle {
                             }
 
                             Rectangle {
-                                height: 44px; border-radius: 10px; background: Theme.accent;
+                                height: 44px; border-radius: 10px;
+                                background: root.setup-testing ? Theme.bg-card : Theme.accent;
                                 TouchArea {
                                     clicked => {
-                                        root.save-account(root.setup-email, root.setup-password, root.setup-display-name, root.setup-provider, root.setup-imap-server, root.setup-imap-port, root.setup-smtp-server, root.setup-smtp-port);
+                                        // Not while a connection is being tried: both buttons go
+                                        // to the same server with the same credentials, and a
+                                        // second attempt on top of the first only makes the
+                                        // provider's rate limiter the thing being tested.
+                                        if (!root.setup-testing) {
+                                            root.save-account(root.setup-email, root.setup-password, root.setup-display-name, root.setup-provider, root.setup-imap-server, root.setup-imap-port, root.setup-smtp-server, root.setup-smtp-port);
+                                        }
                                     }
                                     mouse-cursor: pointer;
                                 }
                                 Text {
-                                    text: "Sign In"; color: Theme.bg-deep;
+                                    text: root.setup-testing ? "Working..." : "Sign In";
+                                    color: root.setup-testing ? Theme.text-dim : Theme.bg-deep;
                                     font-size: Theme.fs-body; font-weight: 600;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
@@ -541,7 +629,7 @@ export component EmailClient inherits Rectangle {
         }
 
     // ── Main Email View (shown when account is configured) ──
-    if root.has-account : VerticalLayout {
+    if (root.has-account && !root.setup-open) : VerticalLayout {
         // -- Header --
         AppHeader {
             app-id: "email";
@@ -567,6 +655,31 @@ export component EmailClient inherits Rectangle {
             }
         }
         spacing: 0px;
+
+        // ── The notice strip ──
+        //
+        // Failure said twice: this, and `describe.notice`, which carries the same sentence to
+        // whatever is driving the app. A delete that the mail server refused used to leave the
+        // list exactly as it was and say nothing at all, which reads as a delete that worked.
+        if root.notice != "" : Rectangle {
+            height: notice-text.preferred-height + Theme.sp-4;
+            background: Theme.tint-amber;
+
+            Rectangle {
+                x: 0; width: 3px; height: 100%;
+                background: Theme.amber;
+            }
+
+            notice-text := Text {
+                x: Theme.sp-4;
+                width: parent.width - Theme.sp-4 * 2;
+                y: Theme.sp-2;
+                text: root.notice;
+                color: Theme.amber;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+        }
 
         HorizontalLayout {
             spacing: 0px;
@@ -864,11 +977,15 @@ export component EmailClient inherits Rectangle {
                             padding-bottom: Theme.sp-1;
                             spacing: Theme.sp-1;
 
+                            // Three, not four. The fourth was Priority, and nothing in this app
+                            // or on its wire says a message is important: `email-priority-count`
+                            // was an `in` property nothing ever set, so the badge never drew and
+                            // the tab filtered on a quality no message had. These three are read
+                            // off the rows already in hand.
                             for triage-item[tidx] in [
                                 { label: "All", idx: 0 },
-                                { label: "Priority", idx: 1 },
-                                { label: "Unread", idx: 2 },
-                                { label: "Flagged", idx: 3 },
+                                { label: "Unread", idx: 1 },
+                                { label: "Flagged", idx: 2 },
                             ] : Rectangle {
                                 property <bool> is-active: root.email-triage-view == triage-item.idx;
                                 property <bool> hovered: triage-ta.has-hover;
@@ -902,22 +1019,6 @@ export component EmailClient inherits Rectangle {
                                         vertical-alignment: center;
                                     }
 
-                                    // Show priority count badge next to Priority tab
-                                    if triage-item.idx == 1 && root.email-priority-count > 0 : Rectangle {
-                                        width: 18px;
-                                        height: 16px;
-                                        border-radius: 8px;
-                                        background: Theme.tint-amber;
-
-                                        Text {
-                                            text: root.email-priority-count;
-                                            color: Theme.amber;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -1436,58 +1537,12 @@ export component EmailClient inherits Rectangle {
                         }
                     }
 
-                    // Signature selector (V41)
-                    if root.email-signatures.length > 0 : Rectangle {
-                        height: 36px;
-                        border-radius: 8px;
-                        background: Theme.bg-card;
-                        border-width: 1px;
-                        border-color: Theme.border-subtle;
-
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 8px;
-                            spacing: 6px;
-
-                            Text {
-                                text: "Signature:";
-                                color: Theme.text-dim;
-                                font-size: Theme.fs-micro;
-                                font-weight: 500;
-                                vertical-alignment: center;
-                                width: 65px;
-                            }
-
-                            Rectangle { width: 1px; height: 20px; background: Theme.border-subtle; }
-
-                            for sig[sidx] in root.email-signatures : Rectangle {
-                                height: 26px;
-                                border-radius: 6px;
-                                background: root.email-active-signature == sidx
-                                    ? AppIdentity.accent.with-alpha(0.15)
-                                    : Theme.border-subtle;
-                                border-width: root.email-active-signature == sidx ? 1px : 0px;
-                                border-color: Theme.accent.with-alpha(0.3);
-                                width: sig-label.preferred-width + 16px;
-
-                                TouchArea {
-                                    clicked => { root.set-signature(sidx); }
-                                    mouse-cursor: pointer;
-                                }
-
-                                sig-label := Text {
-                                    text: sig.name;
-                                    color: root.email-active-signature == sidx
-                                        ? AppIdentity.accent
-                                        : Theme.text-secondary;
-                                    font-size: Theme.fs-micro;
-                                    font-weight: root.email-active-signature == sidx ? 600 : 400;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
+                    // The signature picker stood here. It read `email-signatures`, an `in`
+                    // property nothing in the repository ever set, so the list was always empty
+                    // and the block never drew; `set-signature` logged a line. There is no
+                    // signature editor in this app for it to have listed, and inventing one is
+                    // not what this pass is for. `ComposeRequest.signature` is still on the
+                    // wire for whoever builds it.
                 }
 
                 // ══ EMAIL DETAIL VIEW ══
@@ -1762,45 +1817,13 @@ export component EmailClient inherits Rectangle {
                                                 vertical-alignment: center;
                                             }
 
-                                            // Download button
-                                            if !att.is-downloaded : Rectangle {
-                                                width: 22px;
-                                                height: 22px;
-                                                border-radius: 4px;
-                                                background: Theme.accent.with-alpha(0.12);
-
-                                                TouchArea {
-                                                    clicked => { root.download-attachment(aidx); }
-                                                    mouse-cursor: pointer;
-                                                }
-
-                                                Icon {
-                                                    commands: Icons.download;
-                                                    size: 12px;
-                                                    tint: Theme.accent;
-                                                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                                                }
-                                            }
-
-                                            // Preview button (when downloaded)
-                                            if att.is-downloaded : Rectangle {
-                                                width: 22px;
-                                                height: 22px;
-                                                border-radius: 4px;
-                                                background: Theme.accent.with-alpha(0.12);
-
-                                                TouchArea {
-                                                    clicked => { root.preview-attachment(aidx); }
-                                                    mouse-cursor: pointer;
-                                                }
-
-                                                Icon {
-                                                    commands: Icons.eye;
-                                                    size: 12px;
-                                                    tint: Theme.accent;
-                                                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                                                }
-                                            }
+                                            // A download button and a preview button stood
+                                            // here. Neither could work: the mail service's
+                                            // `EmailAttachment` carries a filename, a MIME type
+                                            // and a size, and there is no method on this wire
+                                            // that returns a part's bytes, so both handlers
+                                            // logged a line. The chip says what the message
+                                            // carries, which is true, and stops there.
                                         }
                                     }
                                 }

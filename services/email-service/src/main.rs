@@ -4,6 +4,9 @@
 //! Supports Gmail, Outlook, Yahoo, iCloud, and custom IMAP/SMTP servers.
 //!
 //! Methods:
+//!   email.accounts        { }                                      → AccountsResult
+//!   email.test_account    AccountSettings                          → TestAccountResult
+//!   email.save_account    AccountSettings                          → EmailAccountSummary
 //!   email.list_folders    { account_id }                           → Vec<EmailFolder>
 //!   email.list_messages   { account_id, folder, page?, per_page? } → Vec<EmailSummary>
 //!   email.get_message     { account_id, message_id }               → EmailDetail
@@ -13,9 +16,34 @@
 //!   email.move_message    { account_id, message_id, target_folder } → ()
 //!   email.delete_message  { account_id, message_id }               → ()
 //!   email.search          { account_id, query }                    → Vec<EmailSummary>
+//!
+//! `email.accounts` is the one that had to exist. Everything else here needs a mail server, so
+//! the only question the app could ask was one whose failure meant three different things at
+//! once — no account, a bad password, or an IMAP host that is down — and the app read all three
+//! as "no account configured". `accounts` answers from the config file alone, without a socket
+//! to anywhere, so "nothing is configured" is a different answer from "the mailbox would not
+//! open", and both are different from this service not running at all.
 
+mod accounts;
+mod connect;
+
+use std::time::Duration;
+
+use accounts::Account;
 use yantrik_ipc_contracts::email::*;
 use yantrik_service_sdk::prelude::*;
+
+/// How long any single network step may take: the TCP connect, and then each read and write on
+/// the socket afterwards.
+///
+/// There was no bound at all before this, which meant a mail server that accepted a connection
+/// and then said nothing held the request until the operating system gave up minutes later. The
+/// app calls this service from a window; a person watching one is owed an answer.
+const NET_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Nothing is configured, as distinct from something being wrong. The app tells these apart by
+/// asking `email.accounts`; this code is for the callers that do not.
+const NO_ACCOUNT: i32 = -32001;
 
 fn main() {
     ServiceBuilder::new("email")
@@ -25,42 +53,46 @@ fn main() {
 
 // ── Account configuration ────────────────────────────────────────────
 
-#[derive(Clone)]
-struct AccountConfig {
-    id: String,
-    email: String,
-    password: String,
-    imap_server: String,
-    imap_port: u16,
-    smtp_server: String,
-    smtp_port: u16,
-    use_oauth: bool,
-    oauth_token: Option<String>,
-}
-
 struct EmailHandler {
-    accounts: std::sync::Mutex<Vec<AccountConfig>>,
+    config_path: std::path::PathBuf,
+    /// Held only to serialise writes. Reads go to the file: it is a few hundred bytes, it can be
+    /// edited by hand while this is running, and a cached copy is how a service comes to insist
+    /// an account exists that somebody deleted an hour ago.
+    writing: std::sync::Mutex<()>,
 }
 
 impl EmailHandler {
     fn new() -> Self {
-        // Load accounts from config file or environment
-        let accounts = load_accounts();
         Self {
-            accounts: std::sync::Mutex::new(accounts),
+            config_path: accounts::config_path(),
+            writing: std::sync::Mutex::new(()),
         }
     }
 
-    fn get_account(&self, account_id: &str) -> Result<AccountConfig, ServiceError> {
-        let accounts = self.accounts.lock().unwrap();
-        accounts
-            .iter()
-            .find(|a| a.id == account_id)
-            .cloned()
-            .ok_or_else(|| ServiceError {
-                code: -32000,
-                message: format!("Unknown account: {account_id}"),
-            })
+    fn all_accounts(&self) -> Result<Vec<Account>, ServiceError> {
+        accounts::load(&self.config_path).map_err(|message| ServiceError { code: -32000, message })
+    }
+
+    /// The account a mail request is about, or a refusal that says which of the two things is
+    /// true: there is no account at all, or the one that was asked for is not among those there.
+    fn get_account(&self, account_id: &str) -> Result<Account, ServiceError> {
+        let all = self.all_accounts()?;
+        if all.is_empty() {
+            return Err(ServiceError {
+                code: NO_ACCOUNT,
+                message: format!(
+                    "no email account is configured; add one in the Email app, or write {}",
+                    self.config_path.display()
+                ),
+            });
+        }
+        accounts::pick(&all, Some(account_id)).cloned().ok_or_else(|| ServiceError {
+            code: -32000,
+            message: format!(
+                "no account called `{account_id}`; this machine has: {}",
+                all.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        })
     }
 }
 
@@ -79,6 +111,69 @@ impl ServiceHandler for EmailHandler {
             .unwrap_or("default");
 
         match method {
+            // Answers from the config file, never from a mail server. The whole point is that it
+            // can answer on a machine with no network at all.
+            method::ACCOUNTS => {
+                let all = self.all_accounts()?;
+                Ok(serde_json::to_value(AccountsResult {
+                    accounts: accounts::summaries(&all),
+                    config_path: self.config_path.display().to_string(),
+                    // Said out loud rather than assumed. See the note at the head of
+                    // `accounts.rs`: the password is in that file in clear text, and the app
+                    // puts this on the screen beside the field it was typed into.
+                    secrets_are_plaintext: true,
+                })
+                .unwrap())
+            }
+
+            // Try the settings and store nothing. Both halves are reported: an account that can
+            // read mail and cannot send it is a real state, and one word for both hides it.
+            method::TEST_ACCOUNT => {
+                let settings = parse_settings(&params)?;
+                accounts::refuse_bad_settings(&settings)
+                    .map_err(|message| ServiceError { code: -32602, message })?;
+                Ok(serde_json::to_value(try_account(&settings)).unwrap())
+            }
+
+            // Verified before it is written. An account that cannot sign in is not an account,
+            // and storing it would move the app to "configured" while every later call failed —
+            // which is the fault this whole file was opened for, one layer up.
+            method::SAVE_ACCOUNT => {
+                let settings = parse_settings(&params)?;
+                accounts::refuse_bad_settings(&settings)
+                    .map_err(|message| ServiceError { code: -32602, message })?;
+
+                let attempt = connect::Attempt::new(
+                    "IMAP",
+                    &settings.imap_server,
+                    settings.imap_port,
+                );
+                if let Err(raw) = imap_try(&settings) {
+                    return Err(ServiceError {
+                        code: -32000,
+                        message: connect::name_failure(&attempt, &raw, &settings.password),
+                    });
+                }
+
+                let _writing = self.writing.lock().unwrap_or_else(|e| e.into_inner());
+                let mut all = self.all_accounts()?;
+                let id = accounts::upsert(&mut all, &settings);
+                accounts::save(&self.config_path, &all)
+                    .map_err(|message| ServiceError { code: -32000, message })?;
+
+                // Read back from disk, so the answer is the account as it is now stored rather
+                // than the one this process just built in memory.
+                let stored = accounts::load(&self.config_path)
+                    .map_err(|message| ServiceError { code: -32000, message })?;
+                let saved = stored.iter().find(|a| a.id == id).ok_or_else(|| ServiceError {
+                    code: -32000,
+                    message: format!("the account was written to {} and is not in it",
+                                     self.config_path.display()),
+                })?;
+                tracing::info!(account = %saved.id, "account saved");
+                Ok(serde_json::to_value(saved.summary()).unwrap())
+            }
+
             "email.list_folders" => {
                 let account = self.get_account(account_id)?;
                 let folders = imap_list_folders(&account)?;
@@ -156,114 +251,143 @@ fn require_str<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str, 
     })
 }
 
-// ── Account loading ──────────────────────────────────────────────────
+// ── Setting an account up ────────────────────────────────────────────
 
-fn load_accounts() -> Vec<AccountConfig> {
-    // Try config file first
-    let config_path = std::env::var("YANTRIK_EMAIL_CONFIG")
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            format!("{home}/.config/yantrik/email.json")
-        });
-
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        if let Ok(accounts) = serde_json::from_str::<Vec<AccountConfigJson>>(&content) {
-            return accounts
-                .into_iter()
-                .map(|a| AccountConfig {
-                    id: a.id,
-                    email: a.email,
-                    password: a.password.unwrap_or_default(),
-                    imap_server: a.imap_server,
-                    imap_port: a.imap_port.unwrap_or(993),
-                    smtp_server: a.smtp_server,
-                    smtp_port: a.smtp_port.unwrap_or(587),
-                    use_oauth: a.use_oauth.unwrap_or(false),
-                    oauth_token: a.oauth_token,
-                })
-                .collect();
-        }
-    }
-
-    // Fallback: environment variables for a single account
-    if let (Ok(email), Ok(password), Ok(imap)) = (
-        std::env::var("YANTRIK_EMAIL"),
-        std::env::var("YANTRIK_EMAIL_PASSWORD"),
-        std::env::var("YANTRIK_EMAIL_IMAP"),
-    ) {
-        let smtp = std::env::var("YANTRIK_EMAIL_SMTP")
-            .unwrap_or_else(|_| imap.replace("imap.", "smtp."));
-        return vec![AccountConfig {
-            id: "default".to_string(),
-            email,
-            password,
-            imap_server: imap,
-            imap_port: 993,
-            smtp_server: smtp,
-            smtp_port: 587,
-            use_oauth: false,
-            oauth_token: None,
-        }];
-    }
-
-    Vec::new()
+fn parse_settings(params: &serde_json::Value) -> Result<AccountSettings, ServiceError> {
+    serde_json::from_value(params.clone()).map_err(|e| ServiceError {
+        code: -32602,
+        // `e` is serde's account of which field is missing or mistyped. It never contains a
+        // value, only a field name and a type, so there is no password in it.
+        message: format!("these are not account settings: {e}"),
+    })
 }
 
-#[derive(serde::Deserialize)]
-struct AccountConfigJson {
-    id: String,
-    email: String,
-    password: Option<String>,
-    imap_server: String,
-    imap_port: Option<u16>,
-    smtp_server: String,
-    smtp_port: Option<u16>,
-    use_oauth: Option<bool>,
-    oauth_token: Option<String>,
+/// Sign in to both halves of an account and say what each one did.
+///
+/// Nothing is stored and nothing is sent. The password is passed to
+/// [`connect::name_failure`] so that a server quoting the line it was sent cannot put it on a
+/// screen.
+fn try_account(settings: &AccountSettings) -> TestAccountResult {
+    let imap_where =
+        connect::Attempt::new("IMAP", &settings.imap_server, settings.imap_port);
+    let (imap_ok, imap) = match imap_try(settings) {
+        Ok(()) => (true, connect::name_success(&imap_where)),
+        Err(raw) => (false, connect::name_failure(&imap_where, &raw, &settings.password)),
+    };
+
+    let smtp_where =
+        connect::Attempt::new("SMTP", &settings.smtp_server, settings.smtp_port);
+    let (smtp_ok, smtp) = match smtp_try(settings) {
+        Ok(()) => (true, connect::name_success(&smtp_where)),
+        Err(raw) => (false, connect::name_failure(&smtp_where, &raw, &settings.password)),
+    };
+
+    TestAccountResult { imap_ok, imap, smtp_ok, smtp }
+}
+
+/// One IMAP sign-in with the supplied settings, and straight back out.
+fn imap_try(settings: &AccountSettings) -> Result<(), String> {
+    let account = Account {
+        email: settings.email.clone(),
+        password: settings.password.clone(),
+        imap_server: settings.imap_server.clone(),
+        imap_port: settings.imap_port,
+        smtp_server: settings.smtp_server.clone(),
+        smtp_port: settings.smtp_port,
+        ..Account::default()
+    };
+    let mut session = imap_session(&account)?;
+    let _ = session.logout();
+    Ok(())
+}
+
+/// One SMTP sign-in with the supplied settings. `test_connection` in lettre opens the
+/// connection, which is where authentication happens, then sends NOOP and quits.
+fn smtp_try(settings: &AccountSettings) -> Result<(), String> {
+    let mailer = smtp_transport(
+        &settings.email,
+        &settings.password,
+        &settings.smtp_server,
+        settings.smtp_port,
+    )?;
+    match lettre::SmtpTransport::test_connection(&mailer) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("the server accepted the connection and then dropped it".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 // ── IMAP operations ──────────────────────────────────────────────────
 
-fn imap_connect(account: &AccountConfig) -> Result<imap::Session<native_tls::TlsStream<std::net::TcpStream>>, ServiceError> {
+/// A TCP connection that gives up rather than hanging, and that keeps giving up afterwards.
+///
+/// `TcpStream::connect` — which `imap::connect` uses — has no timeout, so a host that swallows
+/// SYNs held this service for the operating system's own retry budget. The read and write
+/// timeouts matter as much: a server that completes the handshake and then stops talking is the
+/// commoner failure, and it is invisible to a connect timeout.
+fn tcp_to(host: &str, port: u16) -> Result<std::net::TcpStream, String> {
+    use std::net::ToSocketAddrs;
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("failed to lookup address for {host}: {e}"))?;
+    let mut last = String::new();
+    for addr in addrs {
+        match std::net::TcpStream::connect_timeout(&addr, NET_TIMEOUT) {
+            Ok(stream) => {
+                let _ = stream.set_read_timeout(Some(NET_TIMEOUT));
+                let _ = stream.set_write_timeout(Some(NET_TIMEOUT));
+                return Ok(stream);
+            }
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(if last.is_empty() {
+        format!("failed to lookup address for {host}: it resolved to nothing")
+    } else {
+        last
+    })
+}
+
+/// Connect and sign in, reporting the underlying library's own words.
+///
+/// The caller decides what to make of them: [`connect::name_failure`] turns them into a sentence
+/// for a person, and the mail operations below wrap them in a [`ServiceError`].
+fn imap_session(
+    account: &Account,
+) -> Result<imap::Session<native_tls::TlsStream<std::net::TcpStream>>, String> {
     let tls = native_tls::TlsConnector::builder()
         .build()
-        .map_err(|e| ServiceError {
-            code: -32000,
-            message: format!("TLS error: {e}"),
-        })?;
+        .map_err(|e| format!("TLS error: {e}"))?;
 
-    let client = imap::connect(
-        (account.imap_server.as_str(), account.imap_port),
-        &account.imap_server,
-        &tls,
-    )
-    .map_err(|e| ServiceError {
-        code: -32000,
-        message: format!("IMAP connect failed: {e}"),
-    })?;
+    let tcp = tcp_to(&account.imap_server, account.imap_port)?;
+    let stream = tls
+        .connect(&account.imap_server, tcp)
+        .map_err(|e| format!("TLS handshake failed: {e}"))?;
 
-    let session = if account.use_oauth {
+    let mut client = imap::Client::new(stream);
+    client.read_greeting().map_err(|e| e.to_string())?;
+
+    if account.use_oauth {
         let token = account.oauth_token.as_deref().unwrap_or("");
-        let auth_string = format!(
-            "user={}\x01auth=Bearer {}\x01\x01",
-            account.email, token
-        );
+        let auth_string = format!("user={}\x01auth=Bearer {}\x01\x01", account.email, token);
         client
             .authenticate("XOAUTH2", &XOAuth2Authenticator(auth_string))
-            .map_err(|e| ServiceError {
-                code: -32000,
-                message: format!("IMAP OAuth2 auth failed: {}", e.0),
-            })?
+            .map_err(|(e, _)| e.to_string())
     } else {
         client
             .login(&account.email, &account.password)
-            .map_err(|e| ServiceError {
-                code: -32000,
-                message: format!("IMAP login failed: {}", e.0),
-            })?
-    };
+            .map_err(|(e, _)| e.to_string())
+    }
+}
 
-    Ok(session)
+fn imap_connect(
+    account: &Account,
+) -> Result<imap::Session<native_tls::TlsStream<std::net::TcpStream>>, ServiceError> {
+    let attempt = connect::Attempt::new("IMAP", &account.imap_server, account.imap_port);
+    imap_session(account).map_err(|raw| ServiceError {
+        code: -32000,
+        message: connect::name_failure(&attempt, &raw, &account.password),
+    })
 }
 
 struct XOAuth2Authenticator(String);
@@ -275,7 +399,7 @@ impl imap::Authenticator for XOAuth2Authenticator {
     }
 }
 
-fn imap_list_folders(account: &AccountConfig) -> Result<Vec<EmailFolder>, ServiceError> {
+fn imap_list_folders(account: &Account) -> Result<Vec<EmailFolder>, ServiceError> {
     let mut session = imap_connect(account)?;
 
     let folders = session
@@ -316,7 +440,7 @@ fn imap_list_folders(account: &AccountConfig) -> Result<Vec<EmailFolder>, Servic
 }
 
 fn imap_list_messages(
-    account: &AccountConfig,
+    account: &Account,
     folder: &str,
     page: u32,
     per_page: u32,
@@ -412,7 +536,7 @@ fn imap_list_messages(
 }
 
 fn imap_get_message(
-    account: &AccountConfig,
+    account: &Account,
     message_id: &str,
 ) -> Result<EmailDetail, ServiceError> {
     let uid: u32 = message_id.parse().map_err(|_| ServiceError {
@@ -434,6 +558,12 @@ fn imap_get_message(
         code: -32000,
         message: format!("Message not found: {message_id}"),
     })?;
+
+    // The FLAGS this fetch already asks for. They were read off the wire and dropped, so the app
+    // had nothing to show a message's read or flagged state from and hardcoded both.
+    let flags = msg.flags();
+    let is_read = flags.iter().any(|f| matches!(f, imap::types::Flag::Seen));
+    let is_starred = flags.iter().any(|f| matches!(f, imap::types::Flag::Flagged));
 
     let body = msg.body().unwrap_or(&[]);
     let parsed = mailparse::parse_mail(body).map_err(|e| ServiceError {
@@ -502,6 +632,8 @@ fn imap_get_message(
         date,
         attachments,
         thread_messages: Vec::new(),
+        is_read,
+        is_starred,
     })
 }
 
@@ -548,7 +680,7 @@ fn extract_parts(
     }
 }
 
-fn smtp_send(account: &AccountConfig, compose: &ComposeRequest) -> Result<(), ServiceError> {
+fn smtp_send(account: &Account, compose: &ComposeRequest) -> Result<(), ServiceError> {
     use lettre::{Message, SmtpTransport, Transport};
     use lettre::transport::smtp::authentication::Credentials;
 
@@ -585,27 +717,59 @@ fn smtp_send(account: &AccountConfig, compose: &ComposeRequest) -> Result<(), Se
             message: format!("Failed to build email: {e}"),
         })?;
 
-    let creds = Credentials::new(account.email.clone(), account.password.clone());
-
-    let mailer = SmtpTransport::relay(&account.smtp_server)
-        .map_err(|e| ServiceError {
-            code: -32000,
-            message: format!("SMTP relay error: {e}"),
-        })?
-        .credentials(creds)
-        .build();
+    let attempt = connect::Attempt::new("SMTP", &account.smtp_server, account.smtp_port);
+    let mailer = smtp_transport(
+        &account.email,
+        &account.password,
+        &account.smtp_server,
+        account.smtp_port,
+    )
+    .map_err(|raw| ServiceError {
+        code: -32000,
+        message: connect::name_failure(&attempt, &raw, &account.password),
+    })?;
 
     mailer.send(&email).map_err(|e| ServiceError {
         code: -32000,
-        message: format!("SMTP send failed: {e}"),
+        message: connect::name_failure(&attempt, &e.to_string(), &account.password),
     })?;
 
     tracing::info!(to = ?compose.to, subject = %compose.subject, "Email sent");
     Ok(())
 }
 
+/// An SMTP transport that goes to the port the account says.
+///
+/// `SmtpTransport::relay` opens an implicitly-TLS connection on 465 regardless of what is
+/// configured, so every account on the default 587 was sent to the wrong port and the
+/// configured one was never read at all. 587 is submission with STARTTLS and 465 is submission
+/// over TLS; they are different handshakes, and picking by port is what every other mail client
+/// does. Anything else is treated as STARTTLS, which is what a hand-entered port on a private
+/// server almost always is.
+fn smtp_transport(
+    email: &str,
+    password: &str,
+    server: &str,
+    port: u16,
+) -> Result<lettre::SmtpTransport, String> {
+    use lettre::transport::smtp::authentication::Credentials;
+
+    let builder = if port == 465 {
+        lettre::SmtpTransport::relay(server)
+    } else {
+        lettre::SmtpTransport::starttls_relay(server)
+    }
+    .map_err(|e| e.to_string())?;
+
+    Ok(builder
+        .port(port)
+        .timeout(Some(NET_TIMEOUT))
+        .credentials(Credentials::new(email.to_string(), password.to_string()))
+        .build())
+}
+
 fn imap_mark_read(
-    account: &AccountConfig,
+    account: &Account,
     message_id: &str,
     read: bool,
 ) -> Result<(), ServiceError> {
@@ -631,7 +795,7 @@ fn imap_mark_read(
 }
 
 fn imap_mark_starred(
-    account: &AccountConfig,
+    account: &Account,
     message_id: &str,
     starred: bool,
 ) -> Result<(), ServiceError> {
@@ -657,7 +821,7 @@ fn imap_mark_starred(
 }
 
 fn imap_move_message(
-    account: &AccountConfig,
+    account: &Account,
     message_id: &str,
     target_folder: &str,
 ) -> Result<(), ServiceError> {
@@ -681,7 +845,7 @@ fn imap_move_message(
 }
 
 fn imap_delete_message(
-    account: &AccountConfig,
+    account: &Account,
     message_id: &str,
 ) -> Result<(), ServiceError> {
     let uid: u32 = message_id.parse().map_err(|_| ServiceError {
@@ -708,7 +872,7 @@ fn imap_delete_message(
 }
 
 fn imap_search(
-    account: &AccountConfig,
+    account: &Account,
     query: &str,
 ) -> Result<Vec<EmailSummary>, ServiceError> {
     let mut session = imap_connect(account)?;
