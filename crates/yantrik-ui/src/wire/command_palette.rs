@@ -31,14 +31,12 @@ fn build_commands() -> Vec<CommandItem> {
     nav(&mut cmds, "Go to Email", "17", "@", "nav:17");
     nav(&mut cmds, "Go to Calendar", "18", "▦", "nav:18");
     nav(&mut cmds, "Go to Weather", "19", "W", "nav:19");
-    nav(&mut cmds, "Go to Music", "20", "♪", "nav:20");
     nav(&mut cmds, "Go to Packages", "21", "P", "nav:21");
     nav(&mut cmds, "Go to Network", "22", "N", "nav:22");
     nav(&mut cmds, "Go to System Monitor", "23", "◉", "nav:23");
     nav(&mut cmds, "Go to Image Viewer", "11", "I", "nav:11");
     nav(&mut cmds, "Go to Text Editor", "12", "≡", "nav:12");
     nav(&mut cmds, "Go to Media Player", "13", "▶", "nav:13");
-    nav(&mut cmds, "Go to Spreadsheet", "29", "YS", "nav:29");
     nav(&mut cmds, "Go to Document Editor", "30", "YD", "nav:30");
     nav(&mut cmds, "Go to Presentation", "31", "YP", "nav:31");
 
@@ -62,10 +60,10 @@ fn build_commands() -> Vec<CommandItem> {
     cmd(&mut cmds, "New Editor Tab", "Editor", "≡", "editor:new-tab", "");
     cmd(&mut cmds, "Open File in Editor", "Editor", "≡", "editor:open", "");
 
-    // ── Spreadsheet ──
-    cmd(&mut cmds, "New Spreadsheet", "Sheets", "YS", "spreadsheet:new", "");
-    cmd(&mut cmds, "Import CSV", "Sheets", "YS", "spreadsheet:import-csv", "");
-
+    // Music and ySheets are shelved, so the palette does not offer them. "Go to Music",
+    // "Go to Spreadsheet", "New Spreadsheet" and "Import CSV" were here; see
+    // wire::dock::SHELVED for why, and put them back with the apps.
+    //
     // ── Document ──
     cmd(&mut cmds, "New Document", "Document", "YD", "document:new", "");
 
@@ -204,9 +202,6 @@ fn wire_selected(ui: &App, ctx: &AppContext) {
         } else if action.starts_with("editor:") {
             ui.set_current_screen(12);
             ui.invoke_navigate(12);
-        } else if action.starts_with("spreadsheet:") {
-            ui.set_current_screen(29);
-            ui.invoke_navigate(29);
         } else if action.starts_with("document:") {
             ui.set_current_screen(30);
             ui.invoke_navigate(30);
@@ -272,4 +267,43 @@ fn cmd(
         icon_char: SharedString::from(icon),
         action_id: SharedString::from(action),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The palette does not offer a shelved app, by any of its names.
+    ///
+    /// The palette is a hardcoded list rather than a view of the catalogue, so nothing filters it
+    /// on the way to the screen: a row here is shown whatever the shelf says. This is the check
+    /// that stands in for that filter.
+    #[test]
+    fn no_command_offers_a_shelved_app() {
+        for item in build_commands() {
+            let label = item.label.to_string();
+            let action = item.action_id.to_string();
+            for word in label.split_whitespace().chain(action.split(':')) {
+                assert!(
+                    crate::wire::dock::shelved(word).is_none(),
+                    "the palette offers `{label}` ({action}), and `{word}` is shelved"
+                );
+            }
+        }
+    }
+
+    /// Every command goes somewhere. A palette row that navigates to a screen nothing renders is
+    /// the same broken promise as a tile that opens nothing.
+    #[test]
+    fn every_navigation_command_names_a_screen_the_shell_has() {
+        // Screens the shell renders, from the `if current-screen == N` branches in app.slint.
+        // Checked here for the rows this change touched; the rest of the list is older debt.
+        for item in build_commands() {
+            let action = item.action_id.to_string();
+            if let Some(n) = action.strip_prefix("nav:") {
+                let screen: i32 = n.parse().expect("a nav command carries a screen id");
+                assert!(screen != 20 && screen != 29, "`{}` opens a blank screen", item.label);
+            }
+        }
+    }
 }

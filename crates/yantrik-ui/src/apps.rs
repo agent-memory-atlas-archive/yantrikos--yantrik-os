@@ -58,8 +58,11 @@ impl Catalogue {
     /// installed something goes looking for it.
     ///
     /// Only what can actually open is kept. Every surface that lists apps reads this — the
-    /// launcher, the Lens, `open_app` — so an entry whose program is gone, or a built-in tile
-    /// nothing routes to, is left out here once rather than at each of them.
+    /// launcher, the Lens, `open_app` — so an entry whose program is gone, a built-in tile
+    /// nothing routes to, or an app this build has shelved is left out here once rather than at
+    /// each of them. The shelf matters most on a machine updated from an older release: the
+    /// binary and its .desktop file are both still on the disk, so the scan finds them every
+    /// time and it is this filter that keeps the tile off the screen.
     pub fn refresh(&self) -> usize {
         let (kept, dropped): (Vec<DesktopEntry>, Vec<DesktopEntry>) =
             scan().into_iter().partition(crate::wire::dock::entry_is_launchable);
@@ -104,6 +107,26 @@ mod tests {
         let after = b.refresh();
         assert_eq!(a.get().len(), after, "a refresh through one handle is visible through both");
         assert!(before > 0 || after == 0, "built-in apps are always present once scanned");
+    }
+
+    /// A shelved app never reaches the catalogue, so no surface that reads it can offer one.
+    ///
+    /// The machine this matters on is one that installed a release with these apps in it: the
+    /// scan will keep finding /opt/yantrik/share/applications/yantrik-music-player.desktop until
+    /// something removes it, and the launcher, the Lens and `open_app` all read this list.
+    #[test]
+    fn the_catalogue_leaves_shelved_apps_out() {
+        let c = Catalogue::shared();
+        c.refresh();
+        for entry in c.get().iter() {
+            assert!(
+                crate::wire::dock::shelved(&entry.app_id).is_none()
+                    && crate::wire::dock::shelved_exec(&entry.exec).is_none(),
+                "the catalogue lists `{}` ({}), which this build has shelved",
+                entry.name,
+                entry.exec
+            );
+        }
     }
 
     #[test]

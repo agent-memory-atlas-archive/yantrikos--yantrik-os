@@ -86,6 +86,10 @@ skill_store_screenshot.png
 test-*.sh
 test_*.sh
 test_*.py
+# ...except the lints' own tests. They assert that named faults in the real tree are still
+# caught, which is the only thing standing between a change to the lint and a lint that has
+# quietly stopped seeing. The rule above kept them out of version control for a day.
+!tests/app-lints/test_*.py
 # ...but not the unit tests that ship with a harness plugin.
 !harnesses/*/tests/test_*.py
 

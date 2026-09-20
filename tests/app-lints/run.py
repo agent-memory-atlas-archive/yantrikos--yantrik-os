@@ -22,6 +22,14 @@ An allowlist is the other exit, and a narrower one: `allowlist.toml` holds
 items that are deliberately as they are, each with a written reason. An entry
 without a reason is itself an error. The reason is the point -- a dead control
 has to be argued for in prose before it is exempted.
+
+`shelved.toml` is the third register, and it is about whole apps rather than
+items. A shelved app is in the tree and not in the build -- removed from the
+launcher, the Lens, the palette and the release bundle, but still compiling and
+still carrying its debt. It is linted and reported under its own heading with
+the reason it is on the shelf, it is left out of the shipping totals, and it
+does not fail the run: nobody has been asked to fix it. An app named there that
+does not exist under apps/ is an error.
 """
 
 import argparse
@@ -38,6 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BASELINE_PATH = os.path.join(HERE, "baseline.json")
 ALLOWLIST_TOML = os.path.join(HERE, "allowlist.toml")
 ALLOWLIST_JSON = os.path.join(HERE, "allowlist.json")
+SHELVED_TOML = os.path.join(HERE, "shelved.toml")
 
 LINTS = {
     lint_unset_properties.LINT: ("unset in properties", lint_unset_properties),
@@ -112,6 +121,48 @@ def _load_table(path, problems):
     return None
 
 
+# -- the shelf ----------------------------------------------------------------
+
+
+def load_shelved(path=None, apps=None):
+    """{app: reason} for the apps this build does not ship, plus problems.
+
+    `apps` is the discovered app list. An app named on the shelf that is not
+    there is a problem, not a silent no-op: the shelf is read by whoever asks
+    "why is this app not in the launcher", and a row for something that has been
+    deleted answers a question nobody asked.
+    """
+    problems = []
+    path = path or SHELVED_TOML
+    if not os.path.isfile(path):
+        return {}, problems
+    raw = _load_table(path, problems)
+    if raw is None:
+        return {}, problems
+
+    known = {a.name for a in apps} if apps is not None else None
+    entries = {}
+    for app, item in raw.items():
+        if not isinstance(item, dict):
+            problems.append("shelved: [%s] must be a table with a reason" % app)
+            continue
+        reason = (item.get("reason") or "").strip()
+        if not reason:
+            problems.append(
+                "shelved: %s has no reason -- taking an app off the shelf has to be "
+                "argued for in prose" % app
+            )
+            continue
+        if known is not None and app not in known:
+            problems.append(
+                "shelved: there is no apps/%s -- a shelf entry for an app that is gone "
+                "explains nothing" % app
+            )
+            continue
+        entries[app] = reason
+    return entries, problems
+
+
 # -- the baseline -------------------------------------------------------------
 
 
@@ -167,8 +218,15 @@ def write_baseline(findings, apps, allowlist=None, path=BASELINE_PATH):
 # -- grading ------------------------------------------------------------------
 
 
-def grade(findings, apps, baseline, allowlist):
-    """Split every finding into allowed / known / new, and find stale baseline rows."""
+def grade(findings, apps, baseline, allowlist, shelved=None):
+    """Split every finding into allowed / known / new, and find stale baseline rows.
+
+    A shelved app is graded exactly like any other -- it is still linted and its
+    debt is still counted and printed -- but its findings go into the `shelved_*`
+    lists rather than the ones the exit code is computed from. The debt stays
+    visible; it just is not held against a build the app is not in.
+    """
+    shelved = shelved or {}
     result = {
         "apps": {},
         "new": [],
@@ -177,11 +235,19 @@ def grade(findings, apps, baseline, allowlist):
         "warnings": [],
         "stale": [],
         "unused_allowlist": [],
+        "shelved": dict(shelved),
+        "shelved_new": [],
+        "shelved_known": [],
+        "shelved_allowed": [],
+        "shelved_warnings": [],
+        "shelved_stale": [],
     }
     used_allow = set()
 
     for app in apps:
-        per_app = {"name": app.name, "lints": {}}
+        on_shelf = app.name in shelved
+        prefix = "shelved_" if on_shelf else ""
+        per_app = {"name": app.name, "shelved": on_shelf, "lints": {}}
         for lint in LINT_ORDER:
             mine = [f for f in findings if f["app"] == app.name and f["lint"] == lint]
             errors = [f for f in mine if f["severity"] == "error"]
@@ -214,11 +280,11 @@ def grade(findings, apps, baseline, allowlist):
                 "warnings": warnings,
                 "stale": stale,
             }
-            result["new"] += new
-            result["known"] += known
-            result["allowed"] += allowed
-            result["warnings"] += warnings
-            result["stale"] += stale
+            result[prefix + "new"] += new
+            result[prefix + "known"] += known
+            result[prefix + "allowed"] += allowed
+            result[prefix + "warnings"] += warnings
+            result[prefix + "stale"] += stale
         result["apps"][app.name] = per_app
 
     checked = {a.name for a in apps}
@@ -246,8 +312,7 @@ def report(result, problems, show_known=False, show_warnings=False, baseline_dat
     out = []
     width = max([len(label) for label, _ in LINTS.values()] + [4])
 
-    for app_name in sorted(result["apps"]):
-        per_app = result["apps"][app_name]
+    def app_rows(per_app):
         rows = []
         for lint in LINT_ORDER:
             bucket = per_app["lints"][lint]
@@ -271,9 +336,30 @@ def report(result, problems, show_known=False, show_warnings=False, baseline_dat
             and not per_app["lints"][l]["stale"]
             for l in LINT_ORDER
         )
+        return rows, clean
+
+    for app_name in sorted(result["apps"]):
+        per_app = result["apps"][app_name]
+        if per_app.get("shelved"):
+            continue
+        rows, clean = app_rows(per_app)
         out.append(app_name + ("   clean" if clean else ""))
         if not clean:
             out += rows
+
+    # The shelf, under its own heading. These apps are linted and their debt is
+    # counted and printed; it is simply not debt against a build they are not in.
+    shelf = sorted(n for n in result.get("shelved", {}) if n in result["apps"])
+    if shelf:
+        out.append("")
+        out.append("SHELVED -- in the tree, not in this build. Not counted, does not fail.")
+        for app_name in shelf:
+            out.append("")
+            out.append("  " + app_name)
+            for line in _wrap(result["shelved"][app_name], 74):
+                out.append("    " + line)
+            rows, clean = app_rows(result["apps"][app_name])
+            out += ["  " + r for r in (["  clean"] if clean else rows)]
 
     def block(title, items, render):
         if not items:
@@ -342,7 +428,32 @@ def report(result, problems, show_known=False, show_warnings=False, baseline_dat
             (" (baseline written %s)" % baseline_date) if baseline_date else "",
         )
     )
+    if shelf:
+        out.append(
+            "shelved (not counted above): %d known debt, %d new, across %d app%s"
+            % (
+                len(result["shelved_known"]),
+                len(result["shelved_new"]),
+                len(shelf),
+                "" if len(shelf) == 1 else "s",
+            )
+        )
     return "\n".join(out)
+
+
+def _wrap(text, width):
+    """The reason, as lines. One paragraph; the file writes them as prose."""
+    words = " ".join(text.split()).split(" ")
+    lines, line = [], ""
+    for word in words:
+        if line and len(line) + 1 + len(word) > width:
+            lines.append(line)
+            line = word
+        else:
+            line = (line + " " + word).strip()
+    if line:
+        lines.append(line)
+    return lines
 
 
 # -- entry point --------------------------------------------------------------
@@ -387,6 +498,10 @@ def main(argv=None):
 
     findings = collect(apps)
     allowlist, problems = load_allowlist()
+    # Validated against every app in the tree, not against the filtered list, so
+    # `--app notes` does not report the shelf as naming apps that are not there.
+    shelved, shelf_problems = load_shelved(apps=discover_apps(root))
+    problems = problems + shelf_problems
 
     if args.baseline:
         if args.app:
@@ -404,8 +519,12 @@ def main(argv=None):
         return 0
 
     baseline = {} if args.ignore_baseline else load_baseline()
-    result = grade(findings, apps, baseline, allowlist)
+    result = grade(findings, apps, baseline, allowlist, shelved)
 
+    # A shelved app's findings are deliberately not in these lists. Nobody has been
+    # asked to fix an app that is not in the build, and a check that goes red every
+    # day about work nobody is doing is a check that gets switched off -- which is
+    # the whole reason these lints are graded against a baseline in the first place.
     failed = bool(result["new"] or result["stale"] or problems)
     if args.json:
         print(json.dumps({"ok": not failed, **result, "allowlist_problems": problems}, indent=2))

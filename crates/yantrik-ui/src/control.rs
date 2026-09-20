@@ -46,6 +46,19 @@ fn check_launchable(name: &str, installed: &[crate::apps::DesktopEntry]) -> Resu
             "`{name}` is not installed on this machine: {what} was not found. It can open: {}",
             launchable_app_ids(installed).join(", ")
         )),
+        // Not "unknown" and not "not installed", because it is neither, and both of those
+        // invite the caller to try again — to rescan, to install a package, to guess at another
+        // spelling. This build does not have the app and no action on this machine will produce
+        // it, so the refusal says that, says what is missing under the screen, and says what
+        // would have to be built. An agent reading it can stop, or go and write the missing half.
+        Availability::Shelved(shelf) => Err(format!(
+            "`{name}` is not part of this build. {} is shelved: {}. It comes back when {} \
+             — see design/shelved-2026-09-20.md. It can open: {}",
+            shelf.name,
+            shelf.reason,
+            shelf.returns_when,
+            launchable_app_ids(installed).join(", ")
+        )),
         Availability::Unknown => Err(format!(
             "no app `{name}` on this machine; it can open: {}",
             launchable_app_ids(installed).join(", ")
@@ -725,7 +738,7 @@ pub fn publish(
 
 #[cfg(test)]
 mod screen_table_tests {
-    use super::{SCREENS, SETTINGS_SECTIONS, screen_name};
+    use super::{SCREENS, SETTINGS_SECTIONS, check_launchable, screen_name};
     use std::path::Path;
 
     /// Elements that wrap a screen rather than being one.
@@ -864,6 +877,31 @@ mod screen_table_tests {
              `if current-screen == N` branch that renders it.",
             wrong.join("\n  ")
         );
+    }
+
+    /// Asking to open a shelved app is refused, and the refusal says why and what would fix it.
+    ///
+    /// The three refusals have to read differently, because they ask different things of the
+    /// caller. "Not installed" means install it. "No app by that name" means try another name.
+    /// "Not part of this build" means neither will help — the app is in the tree and nothing on
+    /// this machine will produce it — so the refusal carries the reason and what would have to be
+    /// built, and an agent reading it can stop instead of retrying four spellings.
+    #[test]
+    fn opening_a_shelved_app_is_refused_with_its_reason() {
+        for name in ["music", "music-player", "Music Player", "spreadsheet", "ySheets"] {
+            let err = check_launchable(name, &[]).expect_err("a shelved app must not open");
+            assert!(err.contains("not part of this build"), "{name}: {err}");
+            assert!(err.contains("shelved"), "{name}: {err}");
+            assert!(err.contains("It comes back when"), "{name}: {err}");
+            assert!(err.contains("design/shelved-2026-09-20.md"), "{name}: {err}");
+            // And the list it offers instead never names the app it has just refused.
+            let offered = err.split("It can open: ").nth(1).unwrap_or("");
+            assert!(
+                !offered.split(", ").any(|id| crate::wire::dock::shelved(id).is_some()),
+                "{name} was refused and then offered something shelved: {offered}"
+            );
+        }
+        assert!(check_launchable("files", &[]).is_ok(), "a shipped app still opens");
     }
 
     /// The settings sections a caller can name are the ones the sidebar has.

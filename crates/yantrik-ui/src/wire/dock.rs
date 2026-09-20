@@ -71,17 +71,99 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["network", "network_manager"], Launch::Program { id: "network", bin: "yantrik-network-manager" }),
     (&["sysmonitor", "system_monitor"], Launch::Program { id: "sysmonitor", bin: "yantrik-system-monitor" }),
     (&["weather"], Launch::Program { id: "weather", bin: "yantrik-weather" }),
-    (&["music", "music_player"], Launch::Program { id: "music", bin: "yantrik-music-player" }),
     (&["downloads", "download_manager"], Launch::Program { id: "downloads", bin: "yantrik-download-manager" }),
     (&["snippets", "snippet_manager"], Launch::Program { id: "snippets", bin: "yantrik-snippet-manager" }),
     (&["containers", "container_manager"], Launch::Program { id: "containers", bin: "yantrik-container-manager" }),
     (&["devices", "device_dashboard"], Launch::Screen(27)),
     (&["permissions", "permission_dashboard"], Launch::Screen(28)),
-    (&["spreadsheet"], Launch::Program { id: "spreadsheet", bin: "yantrik-spreadsheet" }),
     (&["documents", "document_editor"], Launch::Program { id: "documents", bin: "yantrik-document-editor" }),
     (&["presentation", "slides"], Launch::Program { id: "presentation", bin: "yantrik-presentation" }),
     (&["launchpad"], Launch::Launchpad),
 ];
+
+/// An app that is in this tree and not in this build.
+///
+/// `reason` is a sentence a person reads; `returns_when` is what somebody would have to build.
+/// Both are quoted verbatim to whoever asked to open the app, so they are written to be read by
+/// a person or by a mind that has just been refused and needs to know whether to try something
+/// else or to go and write the missing half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shelved {
+    /// Every canonical spelling the app arrives under, `canonical_id`-folded.
+    pub ids: &'static [&'static str],
+    /// What the app is called on screen, from `windows::APP_NAMES`.
+    pub name: &'static str,
+    /// The binary it would have run. A .desktop entry naming this is dropped from the catalogue.
+    pub binary: &'static str,
+    /// Why it is not in this build.
+    pub reason: &'static str,
+    /// The minimum real thing that would put it back.
+    pub returns_when: &'static str,
+}
+
+/// The apps that are not shipped, and what each is waiting on.
+///
+/// The rule this table enforces: an app with nothing under its screen is not shipped. Music and
+/// ySheets were both complete drawings over nothing — Music has no playback engine, no scanner
+/// and no library, so only `YANTRIK_MUSIC_DEMO=1` could ever put a song on screen; ySheets never
+/// sets `cell-grid`, `row-count` or `col-count`, so its 50x26 grid has no cells and every guard
+/// in cell-click, cell-edit and the formula bar fails. The decision and its reasoning are in
+/// design/apps-plan-2026-09-20.md, Wave 3: build it or take it off the shelf. Shipping the
+/// drawing is the option that plan rules out.
+///
+/// Shelved is not deleted. Both crates stay workspace members so they keep compiling and cannot
+/// rot in silence, both keep their entry in the lints' debt, and the `.desktop` files stay in the
+/// tree — they are simply not packaged, not routed, and not offered to anybody.
+///
+/// This table is the whole of the shelf. Routes, the catalogue filter, the Lens and the launch
+/// refusal all consult it rather than each carrying their own list of names to omit, because a
+/// shelf spread over seven files is one a future contributor undoes one line at a time without
+/// ever deciding to. Un-shelving an app is deleting one entry here and putting its row back in
+/// ROUTES.
+const SHELVED: &[Shelved] = &[
+    Shelved {
+        ids: &["music", "music_player"],
+        name: "Music",
+        binary: "yantrik-music-player",
+        reason: "nothing plays audio yet — there is no playback engine, no scanner and no \
+                 library behind the screen",
+        returns_when: "mpv is driven over its JSON IPC socket, a folder scan fills a small \
+                       library store, and play/pause/next/queue and `open <file>` work",
+    },
+    Shelved {
+        ids: &["spreadsheet", "ysheets"],
+        name: "ySheets",
+        binary: "yantrik-spreadsheet",
+        reason: "there is no cell model behind the grid, so nothing can be typed into it, by \
+                 mouse or by mind",
+        returns_when: "a cell model, CSV load and save, and arithmetic with references plus \
+                       SUM/AVG/MIN/MAX/COUNT are there",
+    },
+];
+
+/// The shelved app a name refers to, matched the way the dispatch matches a route.
+///
+/// Every spelling has to reach it, because a refusal that only fires for one of them is not a
+/// refusal: a caller reads `music-player` off the binary, `Music Player` off the window title and
+/// `music` off the dock, and the launcher used to treat those as three different questions.
+pub fn shelved(app: &str) -> Option<&'static Shelved> {
+    let id = canonical_id(app);
+    // The catalogue names this OS's own apps by their .desktop filename, so `yantrik_music_player`
+    // arrives here the same way `music` does.
+    let id = id.strip_prefix("yantrik_").unwrap_or(&id);
+    SHELVED.iter().find(|s| s.ids.contains(&id))
+}
+
+/// The shelved app an Exec line would run, if any.
+///
+/// This is what keeps the shelf honest on a machine that already has the binary and its .desktop
+/// file on disk from an earlier release. Nothing removes those on update, so the catalogue will
+/// keep finding the entry; matching on the program it would run means the tile never comes back.
+pub fn shelved_exec(exec: &str) -> Option<&'static Shelved> {
+    let bin = exec.split_whitespace().next()?;
+    let name = bin.rsplit('/').next()?;
+    SHELVED.iter().find(|s| s.binary == name)
+}
 
 /// One spelling of an app id, from whatever a caller had to hand.
 ///
@@ -119,6 +201,8 @@ pub enum Availability {
     Ready,
     /// The shell knows the app, but what it runs is not on this machine. Carries what is missing.
     Missing(String),
+    /// The app is in the tree and not in this build. Carries why, and what would bring it back.
+    Shelved(&'static Shelved),
     /// Nothing answers to that name.
     Unknown,
 }
@@ -132,7 +216,15 @@ pub enum Availability {
 /// which checks the same two sources the dispatch uses, in the same order, down to whether the
 /// program they would run exists.
 pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
+    // Asked first, and before the catalogue, so a stale .desktop file and a stale binary left on
+    // disk by an earlier release cannot answer Ready for something this build does not ship.
+    if let Some(shelf) = shelved(app) {
+        return Availability::Shelved(shelf);
+    }
     if let Some(entry) = catalogue_entry(app, installed) {
+        if let Some(shelf) = shelved_exec(&entry.exec) {
+            return Availability::Shelved(shelf);
+        }
         if entry.exec != "__builtin__" {
             return program_availability(&entry.exec);
         }
@@ -183,7 +275,16 @@ pub fn is_launchable(app: &str, installed: &[DesktopEntry]) -> bool {
 /// A tile is a promise that clicking it opens something. A .desktop file can outlive its package,
 /// and a built-in tile can name a screen nothing routes to — both were in the launcher, and both
 /// did nothing when clicked.
+///
+/// A shelved app is the third case, and the only one where the program on the disk works
+/// perfectly well: an installed machine keeps `/opt/yantrik/bin/yantrik-music-player` and its
+/// .desktop entry from whatever release put them there, because the updater installs binaries
+/// over binaries and never removes one the new bundle does not carry. Matching the shelf by the
+/// program the Exec line runs is what keeps that stale pair out of the launcher.
 pub fn entry_is_launchable(entry: &DesktopEntry) -> bool {
+    if shelved(&entry.app_id).is_some() || shelved_exec(&entry.exec).is_some() {
+        return false;
+    }
     if entry.exec == "__builtin__" {
         return route(&entry.app_id).is_some();
     }
@@ -278,6 +379,20 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let app = app_id.to_string();
         tracing::info!(app = %app, "Launching app");
 
+        // The shelf, before anything that could run a program. `check_launchable` already
+        // refuses `open_app`, but this callback is also reached by a tile, a pin and by
+        // `invoke_launch_app` from anywhere in the shell, and the binary is still on the disk of
+        // every machine that installed an earlier release — so the last gate before spawn says no
+        // as well, and says why.
+        if let Some(shelf) = shelved(&app) {
+            tracing::warn!(
+                app = %app,
+                "{} is not part of this build: {}. It comes back when {}.",
+                shelf.name, shelf.reason, shelf.returns_when
+            );
+            return;
+        }
+
         // Installed .desktop apps first; a built-in entry falls through to its route.
         //
         // A pin or the Lens can name an app ("notes") that ALSO has a .desktop entry (Name=Notes);
@@ -285,6 +400,13 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         // resolution, same environment scrubbing.
         let installed = catalogue.get();
         if let Some(entry) = catalogue_entry(&app, &installed) {
+            if let Some(shelf) = shelved_exec(&entry.exec) {
+                tracing::warn!(
+                    app = %app, exec = %entry.exec,
+                    "{} is not part of this build: {}", shelf.name, shelf.reason
+                );
+                return;
+            }
             if entry.exec != "__builtin__" {
                 let parts: Vec<&str> = entry.exec.split_whitespace().collect();
                 if let Some((bin, args)) = parts.split_first() {
@@ -536,9 +658,38 @@ mod tests {
     #[test]
     fn every_app_we_ship_opens_by_the_name_of_its_binary() {
         for app in SHIPPED_APPS {
+            if shelved(app).is_some() {
+                continue;
+            }
             assert!(
                 route(app).is_some(),
                 "apps/{app} ships a binary that `open_app name={app}` cannot launch"
+            );
+        }
+    }
+
+    /// Every app under `apps/` is either shipped or shelved, and never both.
+    ///
+    /// The two lists are what a reader compares to answer "what is in this build", so a name that
+    /// is in neither, or in both, is the drift this whole table exists to prevent.
+    #[test]
+    fn an_app_is_either_shipped_or_shelved() {
+        for app in SHIPPED_APPS {
+            let on_shelf = shelved(app).is_some();
+            let routed = route(app).is_some();
+            assert!(
+                on_shelf != routed,
+                "apps/{app} is {}",
+                if on_shelf { "both shelved and routed" } else { "neither shelved nor routed" }
+            );
+        }
+        // And every shelf entry names an app that is really there. A shelf row for something
+        // that has been deleted refuses a name nothing would ever ask for.
+        for shelf in SHELVED {
+            assert!(
+                SHIPPED_APPS.iter().any(|a| shelved(a).map(|s| s.binary) == Some(shelf.binary)),
+                "the shelf names {}, which is not one of the apps in apps/",
+                shelf.binary
             );
         }
     }
@@ -558,7 +709,7 @@ mod tests {
         // These all have arms in `wire()` and were all refused by `is_known_app` as unknown,
         // which is the failure mode this list's own comment claimed to prevent.
         for id in [
-            "containers", "downloads", "music", "snippets", "documents", "presentation",
+            "containers", "downloads", "snippets", "documents", "presentation",
             "sysmonitor", "devices", "permissions", "slides", "text_editor", "image_viewer",
         ] {
             assert!(is_known_app(id, &[]), "the dispatch launches `{id}` but the guard refuses it");
@@ -670,5 +821,155 @@ mod tests {
         // The guard must not have become a rubber stamp on the way to being more generous.
         assert!(!is_known_app("nonexistent-app", &[]));
         assert!(!is_known_app("", &[]));
+    }
+
+    // ── The shelf ──
+
+    /// A shelved .desktop entry, as an installed machine still has one on disk.
+    fn stale_entry(app_id: &str, name: &str, exec: &str) -> DesktopEntry {
+        DesktopEntry {
+            name: name.into(),
+            exec: exec.into(),
+            icon: String::new(),
+            categories: String::new(),
+            comment: String::new(),
+            app_id: app_id.into(),
+            icon_char: String::new(),
+        }
+    }
+
+    /// Every spelling a caller could arrive with is refused, and refused for the same reason.
+    ///
+    /// A shelf that only catches one spelling is not a shelf: `music-player` is what the binary
+    /// is called, `Music Player` is the window title, `music` is what the dock says, and an agent
+    /// reads whichever of those it saw last.
+    #[test]
+    fn every_spelling_of_a_shelved_app_reaches_the_shelf() {
+        for spelling in [
+            "music", "music_player", "music-player", "Music Player", "MUSIC",
+            "  music  ", "yantrik-music-player",
+        ] {
+            let shelf = shelved(spelling).unwrap_or_else(|| panic!("`{spelling}` is not shelved"));
+            assert_eq!(shelf.binary, "yantrik-music-player", "{spelling}");
+        }
+        for spelling in ["spreadsheet", "Spreadsheet", "ySheets", "ysheets", "yantrik-spreadsheet"] {
+            let shelf = shelved(spelling).unwrap_or_else(|| panic!("`{spelling}` is not shelved"));
+            assert_eq!(shelf.binary, "yantrik-spreadsheet", "{spelling}");
+        }
+    }
+
+    /// Opening a shelved app is refused, and never answered "launching".
+    ///
+    /// Checked against a catalogue that still holds the app, because that is the state of every
+    /// machine updated from a release that had it: the binary and the .desktop file are both
+    /// still on the disk, and the updater removes neither.
+    #[test]
+    fn a_shelved_app_does_not_open_even_with_its_desktop_file_on_disk() {
+        let stale = [
+            stale_entry("yantrik-music-player", "Music", "/opt/yantrik/bin/yantrik-music-player"),
+            stale_entry("yantrik-spreadsheet", "ySheets", "/opt/yantrik/bin/yantrik-spreadsheet"),
+        ];
+        for name in ["music", "music-player", "Music", "spreadsheet", "ySheets"] {
+            assert!(!is_launchable(name, &stale), "`{name}` must not open");
+            assert!(
+                matches!(availability(name, &stale), Availability::Shelved(_)),
+                "`{name}` must be refused as shelved, not as unknown or missing"
+            );
+        }
+    }
+
+    /// The catalogue filter drops a shelved entry, whichever way it is named.
+    ///
+    /// Matched on the program the Exec line runs as well as on the id, because a .desktop file
+    /// left on disk by an earlier release is the case this has to survive and nothing says its
+    /// basename will still be one the shelf recognises.
+    #[test]
+    fn the_catalogue_drops_a_shelved_desktop_entry() {
+        assert!(!entry_is_launchable(&stale_entry(
+            "yantrik-music-player", "Music", "/opt/yantrik/bin/yantrik-music-player"
+        )));
+        assert!(!entry_is_launchable(&stale_entry(
+            "yantrik-spreadsheet", "ySheets", "/opt/yantrik/bin/yantrik-spreadsheet"
+        )));
+        // Renamed by hand, or installed somewhere else: the program is what gives it away.
+        assert!(!entry_is_launchable(&stale_entry(
+            "sheets-old", "Sheets", "/usr/local/bin/yantrik-spreadsheet %f"
+        )));
+        // And an app that is not shelved is untouched by any of it.
+        assert!(entry_is_launchable(&stale_entry("shell", "Shell", "/bin/sh")));
+    }
+
+    /// No route points at a shelved binary, and no shelved name is offered as something to open.
+    #[test]
+    fn nothing_routes_to_a_shelved_app() {
+        for (names, launch) in ROUTES {
+            for name in *names {
+                assert!(shelved(name).is_none(), "`{name}` is both routed and shelved");
+            }
+            if let Launch::Program { bin, .. } = launch {
+                assert!(
+                    shelved_exec(bin).is_none(),
+                    "a route runs {bin}, which is a shelved binary"
+                );
+            }
+        }
+        // The list a refusal hands back must not name something that would itself be refused.
+        let offered = launchable_app_ids(&[]);
+        for id in &offered {
+            assert!(shelved(id).is_none(), "`{id}` is offered as launchable and is shelved");
+        }
+    }
+
+    /// Every shelf entry says why, and says what would bring it back.
+    ///
+    /// Both strings are quoted straight into the refusal a person or a mind reads, so an empty
+    /// one is a refusal that explains nothing.
+    #[test]
+    fn a_shelf_entry_argues_for_itself() {
+        for shelf in SHELVED {
+            assert!(!shelf.reason.trim().is_empty(), "{} has no reason", shelf.binary);
+            assert!(
+                !shelf.returns_when.trim().is_empty(),
+                "{} does not say what would bring it back",
+                shelf.binary
+            );
+            assert!(!shelf.ids.is_empty(), "{} answers to no name", shelf.binary);
+            for id in shelf.ids {
+                assert_eq!(canonical_id(id), *id, "`{id}` is not canonical, so it can never match");
+            }
+        }
+    }
+
+    /// The apps that ship are untouched by the shelf.
+    #[test]
+    fn un_shelved_apps_are_unaffected() {
+        for id in ["notes", "terminal", "files", "calendar", "email", "documents", "presentation"] {
+            assert!(shelved(id).is_none(), "`{id}` is not shelved");
+            assert!(route(id).is_some(), "`{id}` still routes");
+            assert!(is_known_app(id, &[]), "`{id}` is still known");
+        }
+    }
+
+    /// The release is packaged from one list of exclusions, and it is this one.
+    ///
+    /// build-release.sh discovers the binaries to ship by looking at what the build produced, so
+    /// a shelved crate that is still a workspace member would be packaged simply because it
+    /// compiled. The script therefore carries the same two binary names, and a shelf that grows
+    /// an entry the script does not know about would ship the app it just refused to open.
+    #[test]
+    fn the_release_script_excludes_every_shelved_binary() {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/yantrik-os/build-release.sh");
+        let Ok(text) = std::fs::read_to_string(&script) else {
+            return; // Packaged source without the deploy tree; nothing to check against.
+        };
+        for shelf in SHELVED {
+            assert!(
+                text.contains(shelf.binary),
+                "{} is shelved but {} does not exclude it, so a release would ship it",
+                shelf.binary,
+                script.display()
+            );
+        }
     }
 }

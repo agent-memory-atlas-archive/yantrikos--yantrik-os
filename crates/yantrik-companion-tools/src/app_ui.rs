@@ -111,7 +111,7 @@ impl Tool for ListAppsTool {
                 "name": "list_apps",
                 "description": "List the Yantrik apps that are open, with a one-line summary of \
                                 what each is showing. Use this instead of a screenshot when the \
-                                question is about our own apps (notes, email, calendar, music, \
+                                question is about our own apps (notes, email, calendar, weather, \
                                 files...). Follow up with describe_app for detail.",
                 "parameters": { "type": "object", "properties": {} }
             }
@@ -187,7 +187,7 @@ impl Tool for DescribeAppTool {
                     "properties": {
                         "app": {
                             "type": "string",
-                            "description": "App id, e.g. notes, email, calendar, music"
+                            "description": "App id, e.g. notes, email, calendar, weather"
                         }
                     },
                     "required": ["app"]

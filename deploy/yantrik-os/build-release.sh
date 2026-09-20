@@ -93,14 +93,30 @@ fi
 
 [ -d "$TARGET_DIR" ] || fail "no release directory at $TARGET_DIR (set CARGO_TARGET_DIR)"
 
+# The apps that are in the tree and not in this build.
+#
+# Discovery is the right default and it has one blind spot: a shelved app is still a workspace
+# member, on purpose — it keeps compiling and cannot rot in silence — so `cargo build --workspace`
+# produces its binary and `find` packages it because it exists. Shipping it would put the app back
+# on every machine while the launcher refuses to open it.
+#
+# The list that decides what is shelved is SHELVED in crates/yantrik-ui/src/wire/dock.rs, where
+# each entry carries the reason and what would bring the app back; design/shelved-2026-09-20.md
+# is the account. These two names are the same names, and a test in dock.rs reads this file and
+# fails if the two stop agreeing. Un-shelving an app is deleting it from both.
+SHELVED_BINS="yantrik-music-player yantrik-spreadsheet"
+
 say "Discovering what the OS is made of"
 echo "   from $TARGET_DIR"
 mapfile -t BINS < <(
   find "$TARGET_DIR" -maxdepth 1 -type f -executable \
     ! -name "*.so" ! -name "*.d" ! -name "*.rlib" ! -name "build-script*" ! -name "test-*" ! -name "*-test" ! -name "bench-*" \
-    -printf '%f\n' | sort
+    -printf '%f\n' | sort | grep -vxF "$(printf '%s\n' $SHELVED_BINS)"
 )
 [ "${#BINS[@]}" -gt 0 ] || fail "no binaries found in $TARGET_DIR"
+for b in $SHELVED_BINS; do
+  if [ -f "$TARGET_DIR/$b" ]; then echo "   (shelved, not shipped: $b)"; fi
+done
 printf '   %s\n' "${BINS[@]}" | paste -sd' ' - | fold -sw 76 | sed 's/^/   /'
 echo "   ${#BINS[@]} binaries"
 
@@ -175,8 +191,25 @@ cp "$PROJECT_ROOT/crates/yantrik-design-tokens/slint/fonts/"*.ttf "$ROOT/share/f
 # They go under $ROOT/share so the session can add /opt/yantrik/share to XDG_DATA_DIRS and the
 # ordinary freedesktop scan finds them. No root, no writing into /usr, and the same mechanism
 # every other application on the machine uses.
+#
+# A shelved app's entry stays in the repository and is not installed. An installed entry is all
+# the launcher needs to list an app -- the catalogue rescans the applications directories every
+# time it opens -- so shipping one for an app the shell refuses to open would put the tile back
+# on the screen and leave the click doing nothing.
 mkdir -p "$ROOT/share/applications"
-cp "$PROJECT_ROOT"/apps/desktop-files/*.desktop "$ROOT/share/applications/" 2>/dev/null \
+for f in "$PROJECT_ROOT"/apps/desktop-files/*.desktop; do
+  [ -f "$f" ] || continue
+  shelf=0
+  for b in $SHELVED_BINS; do
+    if grep -q "^Exec=.*$b" "$f"; then shelf=1; fi
+  done
+  if [ "$shelf" = 1 ]; then
+    echo "   (shelved, not installed: $(basename "$f"))"
+    continue
+  fi
+  cp "$f" "$ROOT/share/applications/"
+done
+[ -n "$(ls -A "$ROOT/share/applications" 2>/dev/null)" ] \
   || fail "no .desktop files to ship — the launcher would not list this OS's own apps"
 echo "   + $(ls "$ROOT/share/applications" | wc -l) application entries"
 

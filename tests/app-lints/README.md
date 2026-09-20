@@ -188,6 +188,38 @@ run reports the overlap as a stale baseline entry.
 Names are as the lints print them: Slint spelling for properties (`doc-file-path`), the generated
 Rust spelling without the `on_` for callbacks (`snip_save`).
 
+## The shelf
+
+`shelved.toml` is the third register, and it is about whole apps rather than items:
+
+```toml
+[music-player]
+reason = """
+Nothing plays audio. There is no playback engine, no scanner and no library behind the screen...
+"""
+```
+
+A shelved app is in the tree and not in the build. Music and ySheets were taken off the shelf on
+20 September 2026 -- removed from the launcher, the Lens, the command palette, the pins, the
+release bundle and every name a mind could open them by, because neither had anything under its
+screen. See `design/shelved-2026-09-20.md`, and `SHELVED` in
+`crates/yantrik-ui/src/wire/dock.rs`, which is the list the shell itself consults.
+
+They are still workspace members, they still compile, and they are still linted. What this file
+changes is where their debt is reported:
+
+- their findings print under a **SHELVED** heading with the reason the app is on the shelf,
+- they are left out of the shipping totals, so "how much debt is in this build" is a true number,
+- and they do not fail the run. Nobody has been asked to fix an app that is not shipped, and a
+  check that goes red every day about work nobody is doing is a check that gets switched off --
+  which is why these lints are graded against a baseline to begin with.
+
+An app named on the shelf that does not exist under `apps/` is an error, as is an entry with no
+reason. Taking an app off the shelf has to be argued for in prose, the same way exempting a dead
+control does.
+
+The two apps carry 98 of the 203 findings the lints see, so the shipping total reads 105.
+
 ## What these lints cannot see
 
 They are heuristics over source text. They do not build anything, they do not run anything, and they

@@ -103,6 +103,24 @@ pub fn resolve_action(action_id: &str, installed_apps: &[DesktopEntry]) -> LensA
     if action_id.starts_with("copy-result:") {
         return LensAction::CopyToClipboard(action_id["copy-result:".len()..].to_string());
     }
+    // The shelf, checked on the way out rather than only on the way in.
+    //
+    // The Lens builds its app results from the catalogue, which already drops a shelved entry, so
+    // in the normal case there is nothing here to refuse. What this catches is an action_id that
+    // outlived the list it came from — a result still on screen from before a rescan, or one a
+    // caller kept — which would otherwise run the binary an installed machine still has on disk.
+    if let Some(app) = action_id
+        .strip_prefix("launch:")
+        .or_else(|| action_id.strip_prefix("exec:"))
+    {
+        if let Some(shelf) = super::wire::dock::shelved(app).or_else(|| super::wire::dock::shelved_exec(app)) {
+            tracing::warn!(
+                action = %action_id,
+                "{} is not part of this build: {}", shelf.name, shelf.reason
+            );
+            return LensAction::Noop;
+        }
+    }
     if action_id.starts_with("launch:") {
         let app_id = &action_id[7..];
         // First check installed / built-in apps
