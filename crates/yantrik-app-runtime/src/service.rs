@@ -13,10 +13,16 @@ use std::time::{Duration, Instant};
 
 use yantrik_ipc_transport::{RpcServer, SyncRpcClient};
 
-/// How long to wait for a service to come up before giving up on it. A service is a local
-/// process opening a socket; if it has not managed that in this long, something is wrong and
-/// the caller should hear so rather than keep hanging.
-const START_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long starting a service may take, in total: asking the shell, and then waiting for the
+/// socket. A service is a local process opening a socket; if it has not managed that in this
+/// long, something is wrong and the caller should hear so.
+///
+/// Two seconds, because this runs inside control-surface actions and the surface gives an action
+/// three on the UI thread before telling the caller the app did not answer — while the work
+/// carries on. At the five seconds this used to allow for each half, a slow start would have had
+/// the calendar save an appointment and the caller told it had not: the fabricated outcome this
+/// module exists to remove, pointing the other way.
+const START_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often to look for the socket while waiting.
 const POLL: Duration = Duration::from_millis(100);
@@ -42,8 +48,11 @@ pub fn ensure(service_id: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    // One deadline for both halves, so the budget above is the budget.
+    let deadline = Instant::now() + START_TIMEOUT;
+
     SyncRpcClient::for_service("app-shell")
-        .with_timeout(START_TIMEOUT)
+        .with_timeout(START_TIMEOUT / 2)
         .call(
             "app.act",
             serde_json::json!({
@@ -56,7 +65,6 @@ pub fn ensure(service_id: &str) -> Result<(), String> {
         })?;
 
     // The shell answers when it has spawned the process; the socket appears a moment later.
-    let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
         if is_up(service_id) {
             // The address failed a moment ago, when the service was genuinely down, and the

@@ -39,11 +39,14 @@ export struct CalendarTimeEvent {
     color: color,
 }
 
-export struct CalendarAttendee {
-    name: string,
-    email: string,
-    rsvp-status: string,  // "accepted", "declined", "tentative", "pending"
-}
+// CalendarAttendee was here, with an attendee chip list and an add-attendee field in the event
+// form. Nothing could ever be done with what was typed into it: `CreateEventParams` in
+// yantrik_ipc_contracts::calendar carries no attendees, `UpdateEventParams` carries none either,
+// and the store writes `attendees: Vec::new()` on every event it creates. The wire type
+// `CalendarEvent` does have an `attendees` field, which is what made the screen look backed.
+// Bringing the section back means carrying attendees on the create and update params and having
+// the store keep them; until then a person typing an address into this form was typing into
+// nothing.
 
 export struct CalendarTemplate {
     name: string,
@@ -75,7 +78,12 @@ export component CalendarScreen inherits Rectangle {
     in property <[CalendarDay]> days: [];
     in property <[CalendarEvent]> events-today: [];
     in property <int> selected-day: 0;
-    in property <bool> is-loading: false;
+
+    // `is-loading` was here and nothing read it -- not one element in this file -- and nothing
+    // set it. It could not have been read usefully either: every fetch the app makes is a
+    // blocking call on the UI thread, so the flag would go up and come down inside one callback
+    // and no frame could ever be drawn while it was true. A spinner belongs here on the day the
+    // fetch moves off the UI thread, and not before.
 
     /// What went wrong with the last thing the person asked for, in their words.
     ///
@@ -91,7 +99,15 @@ export component CalendarScreen inherits Rectangle {
     // Week view data
     in property <[CalendarTimeEvent]> week-events: [];
     in property <[string]> week-day-labels: [];
+
+    // Where "now" is on the hour grid.
+    //
+    // `current-hour` alone put the line on the top of the hour, which is up to fifty-nine
+    // minutes from where the person is standing; both views draw the line at
+    // (current-hour * 60 + current-minute) px now, since the grid is one pixel to the minute.
+    // Both were zero until today, so the line sat on midnight in every session.
     in property <int> current-hour: 0;
+    in property <int> current-minute: 0;
 
     // Day view data
     in property <[CalendarTimeEvent]> day-events: [];
@@ -116,30 +132,44 @@ export component CalendarScreen inherits Rectangle {
 
     // AI Assist
     in property <bool> ai-is-working: false;
-    in property <string> ai-response: "";
     in-out property <bool> ai-panel-open: false;
     callback ai-explain-pressed();
     callback ai-dismiss();
 
-    // Event templates & attendees
-    in property <[CalendarAttendee]> cal-event-attendees: [];
-    in property <[CalendarTemplate]> cal-templates: [
+    // `ai-response` and the panel that drew it were here. The companion's answer arrives in
+    // `proposal` and is drawn by AgentProposalCard over the grid, the way every app shows one;
+    // this second panel was never given a line of text by anything, so `ai-panel-open` opened an
+    // empty box that the `!= ""` guard then declined to draw.
+
+    // ── Event templates ──
+    //
+    // The list is the screen's own: four shapes of meeting with their durations, no more
+    // configurable than the weekday headers above the month. It used to be an `in` property with
+    // this same list as its default, which read as data the app supplies and never did. Pressing
+    // one hands the app the two things it needs -- the title to start from and how long the
+    // thing runs -- rather than an index into a list the app cannot see.
+    private property <[CalendarTemplate]> cal-templates: [
         { name: "1-on-1", title-template: "1:1 with ", duration-min: 30, icon: Icons.people },
         { name: "Standup", title-template: "Daily Standup", duration-min: 15, icon: Icons.arrow-up },
         { name: "Team Meeting", title-template: "Team Meeting", duration-min: 60, icon: Icons.people },
         { name: "Focus Time", title-template: "Focus Block", duration-min: 120, icon: Icons.spark },
     ];
-    in property <int> cal-reminder-minutes: 15;
     in property <string> cal-timezone-display: "";
     in-out property <bool> cal-template-panel-open: false;
-    in-out property <bool> cal-attendee-input-visible: false;
-    in-out property <string> cal-attendee-email-input: "";
 
-    callback cal-add-attendee(string, string);  // name, email
-    callback cal-remove-attendee(int);
-    callback cal-set-reminder(int);
-    callback cal-use-template(int);
-    callback cal-toggle-template-panel();
+    callback cal-use-template(string, int);  // title to start from, minutes
+
+    // `cal-reminder-minutes` and `cal-set-reminder` were here, drawing a None/5m/15m/30m/1h
+    // selector in the event form. A reminder has nowhere to live: neither `CreateEventParams`
+    // nor the stored `CalendarEvent` has a field for one, and nothing on this machine would fire
+    // it if they did. The selector remembered a choice for as long as the form was open and threw
+    // it away on Save. It comes back when the event model carries a reminder and something
+    // watches the clock for it.
+    //
+    // `cal-toggle-template-panel` went with them. The panel's open state is this component's own
+    // in-out property and the header action flips it directly; routing that through Rust meant a
+    // callback whose only correct body would have been to set a property it does not own -- and
+    // whose actual body was empty, so the template button did nothing at all.
 
     VerticalLayout {
         spacing: 0px;
@@ -179,7 +209,7 @@ export component CalendarScreen inherits Rectangle {
                     else { root.ai-explain-pressed(); root.ai-panel-open = true; }
                 }
                 else if (id == "new") { root.add-event(); }
-                else if (id == "templates") { root.cal-toggle-template-panel(); }
+                else if (id == "templates") { root.cal-template-panel-open = !root.cal-template-panel-open; }
             }
         }
 
@@ -213,40 +243,6 @@ export component CalendarScreen inherits Rectangle {
                 // the same seven controls in the same order: one row apart, both live, both
                 // working. The only thing the header did not have is the template panel, which
                 // is now an action on it like everything else.
-                // AI Response Panel
-                if root.ai-panel-open && root.ai-response != "" : Rectangle {
-                    height: min(140px, ai-cal-resp.preferred-height + Theme.sp-4);
-                    border-radius: Theme.r-lg;
-                    background: Theme.bg-overlay-panel;
-                    border-width: 1px;
-                    border-color: Theme.accent-glow;
-                    Flickable {
-                        viewport-height: ai-cal-resp.preferred-height + Theme.sp-4;
-                        ai-cal-resp := VerticalLayout {
-                            alignment: start;
-                            padding: Theme.sp-3;
-                            spacing: Theme.sp-2;
-                            HorizontalLayout {
-                                spacing: Theme.sp-2;
-                                Icon {
-                                    commands: Icons.spark;
-                                    size: 14px;
-                                    tint: Theme.text-secondary;
-                                    y: (parent.height - self.height) / 2;
-                                }
-                                Text { text: "AI Insights"; color: Theme.accent; font-size: Theme.fs-caption; font-weight: Theme.fw-headline; vertical-alignment: center; }
-                                Rectangle { horizontal-stretch: 1; }
-                                YIconButton {
-                                    icon-path: Icons.close;
-                                    variant: 2;
-                                    clicked => { root.ai-panel-open = false; root.ai-dismiss(); }
-                                }
-                            }
-                            Text { text: root.ai-response; color: Theme.text-primary; font-size: Theme.fs-caption; wrap: word-wrap; }
-                        }
-                    }
-                }
-
                 // ── Event Templates Panel ──
                 if root.cal-template-panel-open : Rectangle {
                     height: tpl-layout.preferred-height + Theme.sp-6;
@@ -289,7 +285,10 @@ export component CalendarScreen inherits Rectangle {
                                 border-color: tpl-touch.has-hover ? AppIdentity.accent.transparentize(60%) : transparent;
 
                                 tpl-touch := TouchArea {
-                                    clicked => { root.cal-use-template(idx); }
+                                    clicked => {
+                                        root.cal-use-template(tpl.title-template, tpl.duration-min);
+                                        root.cal-template-panel-open = false;
+                                    }
                                     mouse-cursor: pointer;
                                 }
 
@@ -474,8 +473,14 @@ export component CalendarScreen inherits Rectangle {
                             height: 36px;
                             border-width: 1px;
                             border-color: Theme.hover-fill;
+                            clip: true;
 
                             Text {
+                                // A label carrying an all-day count is longer than "Sun 20" and
+                                // a seventh of the pane is all it gets, so it elides inside its
+                                // own column rather than spilling over the next one.
+                                width: 100%;
+                                overflow: elide;
                                 text: root.week-day-labels.length > idx ? root.week-day-labels[idx] : "";
                                 color: Theme.text-secondary;
                                 font-size: Theme.fs-micro;
@@ -538,7 +543,7 @@ export component CalendarScreen inherits Rectangle {
                             // Current hour indicator line
                             Rectangle {
                                 x: 50px;
-                                y: root.current-hour * 60px;
+                                y: (root.current-hour * 60 + root.current-minute) * 1px;
                                 width: parent.width - 50px;
                                 height: 2px;
                                 background: Theme.accent;
@@ -546,7 +551,7 @@ export component CalendarScreen inherits Rectangle {
                             // Current hour dot
                             Rectangle {
                                 x: 44px;
-                                y: root.current-hour * 60px - 4px;
+                                y: (root.current-hour * 60 + root.current-minute) * 1px - 4px;
                                 width: 10px;
                                 height: 10px;
                                 border-radius: 5px;
@@ -591,6 +596,38 @@ export component CalendarScreen inherits Rectangle {
                 // ═══════════════════════════════════════
                 if root.view-mode == 2 : VerticalLayout {
                     spacing: 0px;
+
+                    // Which day this is.
+                    //
+                    // The day view drew twenty-four unlabelled hours and no date at all, so the
+                    // one view that shows a single day was the one that never said which. The
+                    // gutter matches the hour column below it, so the title starts on the same
+                    // axis the events do.
+                    HorizontalLayout {
+                        spacing: 0px;
+                        height: 36px;
+
+                        Rectangle {
+                            width: 50px;
+                            height: 36px;
+                        }
+
+                        Rectangle {
+                            height: 36px;
+                            clip: true;
+
+                            Text {
+                                width: 100%;
+                                overflow: elide;
+                                text: root.day-view-title;
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-caption;
+                                font-weight: 600;
+                                horizontal-alignment: left;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
 
                     // Scrollable time grid — single day
                     Flickable {
@@ -644,7 +681,7 @@ export component CalendarScreen inherits Rectangle {
                             // Current hour indicator line
                             Rectangle {
                                 x: 50px;
-                                y: root.current-hour * 60px;
+                                y: (root.current-hour * 60 + root.current-minute) * 1px;
                                 width: parent.width - 50px;
                                 height: 2px;
                                 background: Theme.accent;
@@ -652,7 +689,7 @@ export component CalendarScreen inherits Rectangle {
                             // Current hour dot
                             Rectangle {
                                 x: 44px;
-                                y: root.current-hour * 60px - 4px;
+                                y: (root.current-hour * 60 + root.current-minute) * 1px - 4px;
                                 width: 10px;
                                 height: 10px;
                                 border-radius: 5px;
@@ -891,200 +928,10 @@ export component CalendarScreen inherits Rectangle {
                     font-size: Theme.fs-micro;
                 }
 
-                // ── Reminder selector ──
-                VerticalLayout {
-                    spacing: 4px;
-
-                    Text {
-                        text: "Reminder";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                    }
-
-                    HorizontalLayout {
-                        spacing: 4px;
-
-                        for rm in [
-                            { label: "None", mins: 0 },
-                            { label: "5m", mins: 5 },
-                            { label: "15m", mins: 15 },
-                            { label: "30m", mins: 30 },
-                            { label: "1h", mins: 60 },
-                        ] : Rectangle {
-                            height: 28px;
-                            min-width: 38px;
-                            border-radius: 6px;
-                            background: root.cal-reminder-minutes == rm.mins ? AppIdentity.accent : Theme.border-subtle;
-
-                            TouchArea {
-                                clicked => { root.cal-set-reminder(rm.mins); }
-                                mouse-cursor: pointer;
-                            }
-
-                            Text {
-                                text: rm.label;
-                                color: root.cal-reminder-minutes == rm.mins ? Theme.text-on-accent : Theme.text-secondary;
-                                font-size: Theme.fs-micro;
-                                font-weight: root.cal-reminder-minutes == rm.mins ? 600 : 400;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-
-                // ── Attendees section ──
-                VerticalLayout {
-                    spacing: 4px;
-
-                    HorizontalLayout {
-                        spacing: 6px;
-
-                        Text {
-                            text: "Attendees";
-                            color: Theme.text-dim;
-                            font-size: Theme.fs-micro;
-                            vertical-alignment: center;
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                        Rectangle {
-                            width: 24px;
-                            height: 24px;
-                            border-radius: 6px;
-                            background: root.cal-attendee-input-visible ? AppIdentity.accent : Theme.bg-card;
-
-                            TouchArea {
-                                clicked => { root.cal-attendee-input-visible = !root.cal-attendee-input-visible; }
-                                mouse-cursor: pointer;
-                            }
-
-                            Text {
-                                text: "+";
-                                color: root.cal-attendee-input-visible ? Theme.text-on-accent : Theme.text-secondary;
-                                font-size: Theme.fs-body;
-                                font-weight: 600;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    // Add attendee input
-                    if root.cal-attendee-input-visible : HorizontalLayout {
-                        spacing: 6px;
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 32px;
-                            border-radius: 8px;
-                            background: Theme.bg-card;
-                            clip: true;
-
-                            HorizontalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-
-                                TextInput {
-                                    text <=> root.cal-attendee-email-input;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-caption;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        Rectangle {
-                            width: 48px;
-                            height: 32px;
-                            border-radius: 8px;
-                            background: Theme.accent;
-
-                            TouchArea {
-                                clicked => {
-                                    root.cal-add-attendee(root.cal-attendee-email-input, root.cal-attendee-email-input);
-                                    root.cal-attendee-email-input = "";
-                                }
-                                mouse-cursor: pointer;
-                            }
-
-                            Text {
-                                text: "Add";
-                                color: Theme.text-on-accent;
-                                font-size: Theme.fs-micro;
-                                font-weight: 600;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    // Attendee chips
-                    for idx in root.cal-event-attendees.length : HorizontalLayout {
-                        property <CalendarAttendee> att: root.cal-event-attendees[idx];
-                        spacing: 0px;
-                        height: 28px;
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 28px;
-                            border-radius: 6px;
-                            background: Theme.border-subtle;
-                            border-width: 1px;
-                            border-color: att.rsvp-status == "accepted" ? Theme.color-success-dim
-                                : att.rsvp-status == "declined" ? Theme.color-danger-dim
-                                : att.rsvp-status == "tentative" ? Theme.color-warning-dim
-                                : Theme.hover-fill-strong;
-
-                            HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 4px;
-                                spacing: 4px;
-                                alignment: start;
-
-                                // RSVP status dot
-                                Rectangle {
-                                    width: 6px;
-                                    height: 6px;
-                                    border-radius: 3px;
-                                    y: parent.height / 2 - 3px;
-                                    background: att.rsvp-status == "accepted" ? Theme.color-success
-                                        : att.rsvp-status == "declined" ? Theme.color-danger
-                                        : att.rsvp-status == "tentative" ? Theme.color-warning
-                                        : Theme.text-dim;
-                                }
-
-                                Text {
-                                    text: att.email;
-                                    color: Theme.text-secondary;
-                                    font-size: Theme.fs-micro;
-                                    overflow: elide;
-                                    vertical-alignment: center;
-                                }
-
-                                Rectangle { horizontal-stretch: 1; }
-
-                                // Remove button
-                                TouchArea {
-                                    width: 20px;
-                                    height: 20px;
-                                    clicked => { root.cal-remove-attendee(idx); }
-                                    mouse-cursor: pointer;
-                                    Rectangle {
-                                        width: 20px; height: 20px; border-radius: 10px;
-                                        background: parent.has-hover ? Theme.hover-fill : transparent;
-                                        Icon {
-                                            commands: Icons.close;
-                                            size: 12px;
-                                            tint: Theme.text-dim;
-                                            x: (parent.width - self.width) / 2;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // The reminder selector and the attendees section were here. Both are
+                // recorded at the top of this file: neither had anywhere to put what was typed
+                // into it, and a control that cannot keep what it is given is worse than no
+                // control, because the person believes they set something.
 
                 // Save button
                 Rectangle {

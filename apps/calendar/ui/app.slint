@@ -5,10 +5,9 @@ import { Theme, ThemeMode, AccentPreset } from "theme.slint";
 import { AppIdentity } from "app_color.slint";
 import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
 import { AgentProposal } from "components/agent_proposal.slint";
-import { CalendarScreen, CalendarEvent, CalendarDay, CalendarTimeEvent,
-         CalendarAttendee, CalendarTemplate } from "calendar.slint";
+import { CalendarScreen, CalendarEvent, CalendarDay, CalendarTimeEvent } from "calendar.slint";
 
-export { CalendarEvent, CalendarDay, CalendarTimeEvent, CalendarAttendee, CalendarTemplate, ThemeMode, AccentPreset }
+export { CalendarEvent, CalendarDay, CalendarTimeEvent, ThemeMode, AccentPreset }
 export { AgentContextItem, AgentSuggestion, AgentProposal }
 
 export component CalendarApp inherits Window {
@@ -45,7 +44,6 @@ export component CalendarApp inherits Window {
     in property <[CalendarDay]> days <=> cal.days;
     in property <[CalendarEvent]> events-today <=> cal.events-today;
     in property <int> selected-day <=> cal.selected-day;
-    in property <bool> is-loading <=> cal.is-loading;
     in property <string> notice <=> cal.notice;
 
     // ── View mode ──
@@ -55,6 +53,7 @@ export component CalendarApp inherits Window {
     in property <[CalendarTimeEvent]> week-events <=> cal.week-events;
     in property <[string]> week-day-labels <=> cal.week-day-labels;
     in property <int> current-hour <=> cal.current-hour;
+    in property <int> current-minute <=> cal.current-minute;
 
     // ── Day view ──
     in property <[CalendarTimeEvent]> day-events <=> cal.day-events;
@@ -69,17 +68,16 @@ export component CalendarApp inherits Window {
 
     // ── AI ──
     in property <bool> ai-is-working <=> cal.ai-is-working;
-    in property <string> ai-response <=> cal.ai-response;
     in-out property <bool> ai-panel-open <=> cal.ai-panel-open;
 
-    // ── V41: Enterprise features ──
-    in property <[CalendarAttendee]> cal-event-attendees <=> cal.cal-event-attendees;
-    in property <[CalendarTemplate]> cal-templates <=> cal.cal-templates;
-    in property <int> cal-reminder-minutes <=> cal.cal-reminder-minutes;
+    // ── Event templates ──
+    //
+    // What is left of the row that used to be here. The attendee list, the attendee input and
+    // the reminder selector were removed with the controls they fed; calendar.slint records why
+    // at each site. The template list is the screen's own property now, so there is nothing to
+    // alias -- pressing a template hands its title and duration to the app through the callback.
     in property <string> cal-timezone-display <=> cal.cal-timezone-display;
     in-out property <bool> cal-template-panel-open <=> cal.cal-template-panel-open;
-    in-out property <bool> cal-attendee-input-visible <=> cal.cal-attendee-input-visible;
-    in-out property <string> cal-attendee-email-input <=> cal.cal-attendee-email-input;
 
     // ── Callbacks (forwarded via alias — no parens allowed) ──
     callback switch-view <=> cal.switch-view;
@@ -94,12 +92,7 @@ export component CalendarApp inherits Window {
     callback ai-explain-pressed <=> cal.ai-explain-pressed;
     callback ai-dismiss <=> cal.ai-dismiss;
 
-    // V41: Enterprise callbacks
-    callback cal-add-attendee <=> cal.cal-add-attendee;
-    callback cal-remove-attendee <=> cal.cal-remove-attendee;
-    callback cal-set-reminder <=> cal.cal-set-reminder;
     callback cal-use-template <=> cal.cal-use-template;
-    callback cal-toggle-template-panel <=> cal.cal-toggle-template-panel;
 
     cal := CalendarScreen {
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).
