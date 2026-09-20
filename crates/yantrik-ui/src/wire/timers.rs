@@ -1,4 +1,11 @@
-//! Background timers — clock, think cycle, card tick, morning brief.
+//! Background timers — clock, think cycle, card tick, frecency flush, hourly snapshot.
+//!
+//! The morning brief is not here any more. It was: five seconds after every shell start this
+//! module asked the companion to compose one, with tools, and the companion runs one thing at
+//! a time — so for the minutes that took, every `companion.tool` and `companion.ask` sat in
+//! the queue behind it. The shell restarts on every deploy and every crash, which made the
+//! machine's mind unreachable after each one. `wire::morning_brief` owns the brief now, both
+//! the card and the conversational half, behind one once-a-day claim that survives restarts.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -13,7 +20,6 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     wire_clock(ui, &ctx.user_name);
     wire_think(ctx);
     wire_card_tick(ui, ctx);
-    wire_morning_brief(ui, ctx);
     wire_frecency_persist(ctx);
     wire_hourly_snapshot(ctx);
 }
@@ -62,33 +68,6 @@ fn wire_think(ctx: &AppContext) {
         };
 
         bridge.think(interruptibility, win_title, proc_name, idle_secs);
-    });
-    std::mem::forget(timer);
-}
-
-/// Morning brief — fires once 5s after boot.
-/// Sends a natural prompt to the companion, which uses its own tools and memory
-/// to compose a personalized morning brief. The companion decides what to include
-/// based on available tools, user preferences (remembered via memory), and context.
-fn wire_morning_brief(_ui: &App, ctx: &AppContext) {
-    let bridge = ctx.bridge.clone();
-    let user_name = ctx.user_name.clone();
-    let timer = Timer::default();
-    timer.start(TimerMode::SingleShot, Duration::from_secs(5), move || {
-        if !bridge.is_online() {
-            tracing::info!("Morning brief skipped — companion offline");
-            return;
-        }
-        tracing::info!("Composing morning brief");
-        let prompt = format!(
-            "You just started up. Compose a morning brief for {user_name}. \
-             Use your tools to check email, calendar, weather, system status, \
-             and recall recent topics of interest. Skip any sources that fail \
-             or that {user_name} has asked you not to include. \
-             Keep it natural and concise — a few flowing sentences, no bullet points."
-        );
-        // Fire-and-forget: the response flows through the normal notification path
-        let _rx = bridge.send_message(prompt);
     });
     std::mem::forget(timer);
 }

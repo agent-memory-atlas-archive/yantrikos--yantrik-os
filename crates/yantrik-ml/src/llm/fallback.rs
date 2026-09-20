@@ -34,6 +34,36 @@ pub enum FallbackConfig {
     },
 }
 
+/// Longest system prompt the fallback is handed, in characters, when slimming.
+const SLIM_SYSTEM_CHARS: usize = 600;
+
+/// How many preceding plain turns are carried into a slimmed conversation.
+/// Only plain chat is walked back over — never into a tool round, because half a
+/// tool round is a tool result with nothing that asked for it.
+const SLIM_HISTORY_TURNS: usize = 4;
+
+/// Ceiling on the fallback's generation budget.
+///
+/// It was 512, which is below what a tool round can need: the reply to a tool round is a JSON
+/// tool call whose arguments carry whatever the model is passing — a path, a query, the body of
+/// a note — and a budget that runs out mid-object reaches the caller as a reply with no tool
+/// call in it rather than as an error. 2048 is `GenerationConfig`'s own default, so this now
+/// only trims callers that asked for more than the ordinary budget and never cuts below it.
+const FALLBACK_MAX_TOKENS: usize = 2048;
+
+/// Assumed context window of the primary, in tokens, when nothing says otherwise.
+///
+/// Nothing reports this: `LLMBackend` has no context-size method and neither construction site
+/// (`yantrik/src/main.rs`, `yantrik-ui/src/bridge.rs`) passes one. So it is a knob with a
+/// deliberately large default — the primary is normally the cloud or CLI model — which keeps
+/// slimming switched on for an unconfigured deployment, exactly as before.
+const DEFAULT_PRIMARY_CONTEXT_TOKENS: usize = 32_768;
+
+/// Assumed context window of the fallback, in tokens, when the config does not carry one.
+/// `FallbackConfig::LlamaCpp` does carry a real `context_size` and is believed; the `Api`
+/// variant carries nothing, and a local llama-server is started small by default.
+const DEFAULT_FALLBACK_CONTEXT_TOKENS: usize = 4_096;
+
 /// An LLM backend that wraps a primary + fallback.
 ///
 /// On every call, tries the primary backend first. If it fails,
@@ -44,6 +74,11 @@ pub struct FallbackLLM {
     fallback_config: Option<FallbackConfig>,
     /// Track consecutive primary failures to avoid slow retries
     primary_failures: Mutex<u32>,
+    /// Believed context windows of the two backends. Slimming exists only to fit a big
+    /// conversation into a small model; when the fallback is not the smaller one it is a
+    /// mutilation for nothing, so these decide whether it happens at all.
+    primary_context_tokens: usize,
+    fallback_context_tokens: usize,
 }
 
 impl FallbackLLM {
@@ -55,11 +90,19 @@ impl FallbackLLM {
         primary: Arc<dyn LLMBackend>,
         fallback_config: Option<FallbackConfig>,
     ) -> Self {
+        // The llama.cpp variant is told its context size by the caller, so use it rather than
+        // the default guess. Nothing tells us the API variant's, or the primary's at all.
+        let fallback_context_tokens = match fallback_config {
+            Some(FallbackConfig::LlamaCpp { context_size, .. }) => context_size as usize,
+            _ => DEFAULT_FALLBACK_CONTEXT_TOKENS,
+        };
         Self {
             primary,
             fallback: Mutex::new(None),
             fallback_config,
             primary_failures: Mutex::new(0),
+            primary_context_tokens: DEFAULT_PRIMARY_CONTEXT_TOKENS,
+            fallback_context_tokens,
         }
     }
 
@@ -73,7 +116,20 @@ impl FallbackLLM {
             fallback: Mutex::new(Some(fallback)),
             fallback_config: None,
             primary_failures: Mutex::new(0),
+            primary_context_tokens: DEFAULT_PRIMARY_CONTEXT_TOKENS,
+            fallback_context_tokens: DEFAULT_FALLBACK_CONTEXT_TOKENS,
         }
+    }
+
+    /// Tell the wrapper how big each side's context window really is.
+    ///
+    /// Without this it guesses, and the guess is "the fallback is the smaller model". A
+    /// deployment whose fallback is a peer of the primary should say so here: slimming then
+    /// stops entirely and the fallback is handed the conversation and the tools as they came.
+    pub fn with_context_tokens(mut self, primary_tokens: usize, fallback_tokens: usize) -> Self {
+        self.primary_context_tokens = primary_tokens;
+        self.fallback_context_tokens = fallback_tokens;
+        self
     }
 
     /// Get or initialize the fallback backend.
@@ -167,52 +223,118 @@ impl FallbackLLM {
         }
     }
 
-    /// Slim down messages for the tiny fallback model.
-    /// Keeps system prompt (truncated), last user message, and at most 2 history turns.
-    fn slim_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
-        let mut slim = Vec::with_capacity(4);
+    /// Whether the conversation is worth cutting down before the fallback sees it.
+    ///
+    /// Only when the fallback is the smaller of the two. A fallback with as much context as the
+    /// primary is a peer, and handing it a truncated system prompt and a conversation with its
+    /// history removed made it answer worse than it had to, for no reason at all.
+    fn should_slim(&self) -> bool {
+        self.fallback_context_tokens < self.primary_context_tokens
+    }
 
-        // System message: truncate to ~600 chars
-        if let Some(sys) = messages.first() {
-            if sys.role == "system" {
-                let content = if sys.content.len() > 600 {
-                    // Find a safe truncation point
-                    let mut end = 600;
-                    while end > 0 && !sys.content.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    format!("{}\nBe concise. Answer directly.", &sys.content[..end])
-                } else {
-                    sys.content.clone()
-                };
-                slim.push(ChatMessage::system(content));
+    /// The conversation and config to hand the fallback, given what each side can hold.
+    fn for_fallback(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+    ) -> (Vec<ChatMessage>, GenerationConfig) {
+        if self.should_slim() {
+            (Self::slim_messages(messages), Self::slim_config(config))
+        } else {
+            (messages.to_vec(), config.clone())
+        }
+    }
+
+    /// Slim down messages for the tiny fallback model.
+    ///
+    /// Keeps the system messages (truncated) and everything from the last user turn onward.
+    ///
+    /// It used to keep the system prompt plus "the last message, if it is a user message", and
+    /// nothing at all otherwise. During a tool round the last message is a tool result or an
+    /// assistant tool call, never a user message — so when the primary returned 429 or 500
+    /// mid-round, the fallback was handed a system prompt and nothing else. Qwen's chat template
+    /// rejects that outright ("no user query"), the llama-server answered 500, the fallback was
+    /// counted as failed too, and the companion came up marked offline. The user's question was
+    /// sitting three messages back the whole time.
+    ///
+    /// Anchoring on the last *user* message instead of the last message keeps that question, and
+    /// keeps the whole tool round that followed it — so every tool result still has the assistant
+    /// tool call that asked for it immediately above it, which is the other thing a chat template
+    /// will refuse. Preceding plain turns are carried too, but the walk back stops at the first
+    /// message belonging to an earlier tool round rather than slicing one in half.
+    ///
+    /// A conversation with no user message anywhere is passed through whole. Inventing a user
+    /// turn would put words in the user's mouth, and dropping everything is what produced the
+    /// fault above.
+    fn slim_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        let Some(last_user) = messages.iter().rposition(|m| m.role == "user") else {
+            tracing::warn!(
+                count = messages.len(),
+                "Fallback given a conversation with no user turn — sending it unslimmed"
+            );
+            return messages.to_vec();
+        };
+
+        // Walk back over plain chat only. `tool` results and assistant messages carrying
+        // tool_calls belong to a round that started before this point; cutting into one leaves
+        // an orphan.
+        let mut start = last_user;
+        while start > 0 && last_user - start < SLIM_HISTORY_TURNS {
+            let prev = &messages[start - 1];
+            let plain = (prev.role == "user" || prev.role == "assistant")
+                && prev.tool_calls.is_none();
+            if !plain {
+                break;
             }
+            start -= 1;
         }
 
-        // Last user message (always keep)
-        if let Some(last) = messages.last() {
-            if last.role == "user" {
-                // Keep at most 2 preceding history turns
-                let history_start = if messages.len() > 5 { messages.len() - 5 } else { 1 };
-                for msg in &messages[history_start..messages.len() - 1] {
-                    slim.push(msg.clone());
-                }
-                slim.push(last.clone());
-            }
+        // System messages live at the top and are dropped by the slice, so they are collected
+        // back. All of them: a second system message is usually the tool or memory preamble,
+        // and losing it silently changes what the model thinks it can do.
+        let mut slim: Vec<ChatMessage> = messages[..start]
+            .iter()
+            .filter(|m| m.role == "system")
+            .cloned()
+            .chain(messages[start..].iter().cloned())
+            .collect();
+
+        for msg in slim.iter_mut().filter(|m| m.role == "system") {
+            msg.content = truncate_on_char_boundary(&msg.content, SLIM_SYSTEM_CHARS);
+        }
+        // Once, on the last one — it is the instruction that matters to a small model, and
+        // repeating it on every system message spends the context this is trying to save.
+        if let Some(last_sys) = slim.iter_mut().filter(|m| m.role == "system").last() {
+            last_sys.content.push_str("\nBe concise. Answer directly.");
         }
 
         slim
     }
 
-    /// Reduced generation config for fallback: fewer tokens, lower temp.
+    /// Reduced generation config for fallback: bounded tokens, lower temp.
+    ///
+    /// Built from the caller's config rather than from `Default`, which used to drop the stop
+    /// sequences, top_k, repeat penalty and max_context on the floor — and stop sequences are
+    /// how a local GGUF backend is told when to stop talking.
     fn slim_config(config: &GenerationConfig) -> GenerationConfig {
         GenerationConfig {
-            max_tokens: config.max_tokens.min(512),
+            max_tokens: config.max_tokens.min(FALLBACK_MAX_TOKENS),
             temperature: config.temperature.min(0.5),
-            top_p: config.top_p,
-            ..Default::default()
+            ..config.clone()
         }
     }
+}
+
+/// Truncate to at most `max` bytes without splitting a UTF-8 character.
+fn truncate_on_char_boundary(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 impl LLMBackend for FallbackLLM {
@@ -222,11 +344,17 @@ impl LLMBackend for FallbackLLM {
         config: &GenerationConfig,
         tools: Option<&[serde_json::Value]>,
     ) -> Result<LLMResponse> {
-        // If primary has been failing consistently, skip to fallback
+        // If primary has been failing consistently, skip to fallback.
+        //
+        // Through the same preparation as the failure path below. These two routes to the same
+        // backend used to disagree — this one sent the conversation whole, the other cut it to
+        // pieces — so which of the two a request took changed what the model was asked.
         if self.should_skip_primary() {
             if let Ok(fb) = self.get_fallback() {
                 tracing::debug!("Skipping primary (consecutive failures), using fallback");
-                return fb.chat(messages, config, tools);
+                let (msgs, cfg) = self.for_fallback(messages, config);
+                let tools = if self.should_slim() { None } else { tools };
+                return fb.chat(&msgs, &cfg, tools);
             }
         }
 
@@ -245,9 +373,12 @@ impl LLMBackend for FallbackLLM {
 
                 match self.get_fallback() {
                     Ok(fb) => {
-                        let slim = Self::slim_messages(messages);
-                        let slim_cfg = Self::slim_config(config);
-                        fb.chat(&slim, &slim_cfg, None)
+                        // Tools go with the conversation when it is not being slimmed: a
+                        // fallback that can hold the round can answer it, and stripping the
+                        // definitions leaves it explaining in prose what it was asked to call.
+                        let (msgs, cfg) = self.for_fallback(messages, config);
+                        let tools = if self.should_slim() { None } else { tools };
+                        fb.chat(&msgs, &cfg, tools)
                     }
                     Err(fb_err) => {
                         tracing::error!(
@@ -271,7 +402,9 @@ impl LLMBackend for FallbackLLM {
         if self.should_skip_primary() {
             if let Ok(fb) = self.get_fallback() {
                 tracing::debug!("Skipping primary (consecutive failures), using fallback streaming");
-                return fb.chat_streaming(messages, config, tools, on_token);
+                let (msgs, cfg) = self.for_fallback(messages, config);
+                let tools = if self.should_slim() { None } else { tools };
+                return fb.chat_streaming(&msgs, &cfg, tools, on_token);
             }
         }
 
@@ -290,9 +423,9 @@ impl LLMBackend for FallbackLLM {
 
                 match self.get_fallback() {
                     Ok(fb) => {
-                        let slim = Self::slim_messages(messages);
-                        let slim_cfg = Self::slim_config(config);
-                        fb.chat_streaming(&slim, &slim_cfg, None, on_token)
+                        let (msgs, cfg) = self.for_fallback(messages, config);
+                        let tools = if self.should_slim() { None } else { tools };
+                        fb.chat_streaming(&msgs, &cfg, tools, on_token)
                     }
                     Err(_) => Err(primary_err),
                 }
@@ -322,5 +455,250 @@ impl LLMBackend for FallbackLLM {
 
     fn model_id(&self) -> &str {
         self.primary.model_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ApiToolCall, ApiToolCallFunction};
+
+    /// A backend that is never called — the slimming tests only need a `FallbackLLM` to exist.
+    struct NullBackend;
+
+    impl LLMBackend for NullBackend {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _config: &GenerationConfig,
+            _tools: Option<&[serde_json::Value]>,
+        ) -> Result<LLMResponse> {
+            anyhow::bail!("NullBackend is not meant to be called")
+        }
+
+        fn chat_streaming(
+            &self,
+            _messages: &[ChatMessage],
+            _config: &GenerationConfig,
+            _tools: Option<&[serde_json::Value]>,
+            _on_token: &mut dyn FnMut(&str),
+        ) -> Result<LLMResponse> {
+            anyhow::bail!("NullBackend is not meant to be called")
+        }
+
+        fn count_tokens(&self, text: &str) -> Result<usize> {
+            Ok(text.len())
+        }
+
+        fn backend_name(&self) -> &str {
+            "null"
+        }
+    }
+
+    fn tool_call(id: &str, name: &str) -> ApiToolCall {
+        ApiToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: ApiToolCallFunction {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }
+    }
+
+    fn roles(messages: &[ChatMessage]) -> Vec<&str> {
+        messages.iter().map(|m| m.role.as_str()).collect()
+    }
+
+    #[test]
+    fn slim_keeps_last_user_and_preceding_plain_turns() {
+        let messages = vec![
+            ChatMessage::system("you are the machine's mind"),
+            ChatMessage::user("first question"),
+            ChatMessage::assistant("first answer"),
+            ChatMessage::user("second question"),
+        ];
+
+        let slim = FallbackLLM::slim_messages(&messages);
+
+        assert_eq!(roles(&slim), vec!["system", "user", "assistant", "user"]);
+        assert_eq!(slim.last().unwrap().content, "second question");
+    }
+
+    #[test]
+    fn slim_mid_tool_round_keeps_the_user_turn_and_the_pair() {
+        // The shape the primary 429s in the middle of: the last message is a tool result, so
+        // the old rule ("keep the last message if it is a user message") kept nothing and the
+        // fallback was sent a system prompt with no user query in it.
+        let messages = vec![
+            ChatMessage::system("you are the machine's mind"),
+            ChatMessage::user("what is on my calendar"),
+            ChatMessage::assistant_with_tool_calls("", vec![tool_call("call_1", "calendar.list")]),
+            ChatMessage::tool("call_1", "calendar.list", "{\"events\":[]}"),
+        ];
+
+        let slim = FallbackLLM::slim_messages(&messages);
+
+        assert_eq!(roles(&slim), vec!["system", "user", "assistant", "tool"]);
+        assert!(
+            slim.iter().any(|m| m.role == "user" && m.content == "what is on my calendar"),
+            "the user's question must survive a tool round"
+        );
+
+        // Every tool result still has the assistant tool call that asked for it above it.
+        let offered: Vec<&str> = slim
+            .iter()
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flatten()
+            .map(|c| c.id.as_str())
+            .collect();
+        for result in slim.iter().filter(|m| m.role == "tool") {
+            let id = result.tool_call_id.as_deref().unwrap();
+            assert!(offered.contains(&id), "orphan tool result {id}");
+        }
+    }
+
+    #[test]
+    fn slim_does_not_cut_into_an_earlier_tool_round() {
+        // Walking back for history must stop at the round boundary, not halfway through it.
+        let messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("older question"),
+            ChatMessage::assistant_with_tool_calls("", vec![tool_call("call_1", "weather.now")]),
+            ChatMessage::tool("call_1", "weather.now", "rain"),
+            ChatMessage::assistant("it is raining"),
+            ChatMessage::user("and tomorrow?"),
+        ];
+
+        let slim = FallbackLLM::slim_messages(&messages);
+
+        // The plain assistant reply is carried; the tool result above it is not, because its
+        // assistant tool call would have had to come with it.
+        assert_eq!(roles(&slim), vec!["system", "assistant", "user"]);
+        assert!(slim.iter().all(|m| m.role != "tool"));
+        assert_eq!(slim.last().unwrap().content, "and tomorrow?");
+    }
+
+    #[test]
+    fn slim_with_no_user_message_sends_the_conversation_whole() {
+        let messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::assistant_with_tool_calls("", vec![tool_call("call_1", "sys.status")]),
+            ChatMessage::tool("call_1", "sys.status", "ok"),
+        ];
+
+        let slim = FallbackLLM::slim_messages(&messages);
+
+        // No user turn is invented and nothing is dropped — a fabricated question would be
+        // words put in the user's mouth, and an empty list is the fault this replaced.
+        assert_eq!(roles(&slim), vec!["system", "assistant", "tool"]);
+        assert_eq!(slim[0].content, "sys");
+    }
+
+    #[test]
+    fn slim_keeps_every_system_message() {
+        let messages = vec![
+            ChatMessage::system("identity preamble"),
+            ChatMessage::system("tool preamble"),
+            ChatMessage::user("hello"),
+        ];
+
+        let slim = FallbackLLM::slim_messages(&messages);
+
+        assert_eq!(roles(&slim), vec!["system", "system", "user"]);
+        assert!(slim[0].content.starts_with("identity preamble"));
+        assert!(slim[1].content.starts_with("tool preamble"));
+        // The concision instruction is appended once, to the last system message.
+        assert!(!slim[0].content.contains("Be concise"));
+        assert!(slim[1].content.ends_with("Be concise. Answer directly."));
+    }
+
+    #[test]
+    fn slim_truncates_a_long_system_prompt_on_a_char_boundary() {
+        // Multi-byte, so a blind byte slice would panic rather than truncate.
+        let long = "\u{092E}\u{0928}".repeat(2000);
+        let messages = vec![ChatMessage::system(long), ChatMessage::user("hi")];
+
+        let slim = FallbackLLM::slim_messages(&messages);
+
+        let sys = &slim[0].content;
+        let body = sys.strip_suffix("\nBe concise. Answer directly.").unwrap();
+        assert!(body.len() <= SLIM_SYSTEM_CHARS);
+        assert!(body.chars().all(|c| c == '\u{092E}' || c == '\u{0928}'));
+    }
+
+    #[test]
+    fn slim_config_leaves_room_for_a_tool_call_and_keeps_stop_sequences() {
+        let config = GenerationConfig {
+            max_tokens: 8192,
+            temperature: 0.9,
+            stop: vec!["<|im_end|>".to_string()],
+            ..Default::default()
+        };
+
+        let slim = FallbackLLM::slim_config(&config);
+
+        // 512 used to cut a tool call off mid-JSON.
+        assert_eq!(slim.max_tokens, FALLBACK_MAX_TOKENS);
+        assert!(slim.max_tokens >= 2048);
+        assert_eq!(slim.temperature, 0.5);
+        assert_eq!(slim.stop, vec!["<|im_end|>".to_string()]);
+    }
+
+    #[test]
+    fn slim_config_does_not_raise_a_caller_that_asked_for_less() {
+        let config = GenerationConfig {
+            max_tokens: 64,
+            temperature: 0.1,
+            ..Default::default()
+        };
+
+        let slim = FallbackLLM::slim_config(&config);
+
+        assert_eq!(slim.max_tokens, 64);
+        assert_eq!(slim.temperature, 0.1);
+    }
+
+    #[test]
+    fn a_fallback_with_as_much_context_as_the_primary_is_not_slimmed() {
+        let primary: Arc<dyn LLMBackend> = Arc::new(NullBackend);
+        let fallback: Arc<dyn LLMBackend> = Arc::new(NullBackend);
+
+        let small = FallbackLLM::with_fallback(primary.clone(), fallback.clone())
+            .with_context_tokens(32_768, 4_096);
+        assert!(small.should_slim());
+
+        let peer = FallbackLLM::with_fallback(primary, fallback)
+            .with_context_tokens(32_768, 32_768);
+        assert!(!peer.should_slim());
+
+        let messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("q"),
+            ChatMessage::assistant_with_tool_calls("", vec![tool_call("call_1", "t")]),
+            ChatMessage::tool("call_1", "t", "r"),
+        ];
+        let config = GenerationConfig { max_tokens: 8192, ..Default::default() };
+        let (msgs, cfg) = peer.for_fallback(&messages, &config);
+
+        assert_eq!(msgs.len(), messages.len());
+        assert_eq!(msgs[0].content, "sys", "no truncation, no appended instruction");
+        assert_eq!(cfg.max_tokens, 8192, "no clamp when the fallback can hold the round");
+    }
+
+    #[test]
+    fn a_llamacpp_fallback_reports_its_own_context_size() {
+        let primary: Arc<dyn LLMBackend> = Arc::new(NullBackend);
+        let llm = FallbackLLM::new(
+            primary,
+            Some(FallbackConfig::LlamaCpp {
+                model_path: std::path::PathBuf::from("/nonexistent.gguf"),
+                n_gpu_layers: 0,
+                context_size: 65_536,
+            }),
+        );
+
+        // Configured larger than the assumed primary, so nothing is cut.
+        assert!(!llm.should_slim());
     }
 }
