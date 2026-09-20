@@ -15,6 +15,44 @@ pub mod method {
     pub const DELETE_EVENT: &str = "calendar.delete_event";
     /// Store a remote calendar's event under the id it already has out there.
     pub const UPSERT_REMOTE: &str = "calendar.upsert_remote";
+    /// "Has anything changed here?", in two numbers. Takes no parameters. See
+    /// [`super::CalendarRevision`].
+    pub const REVISION: &str = "calendar.revision";
+}
+
+/// The answer to [`method::REVISION`]: what the store is at, in two numbers.
+///
+/// It exists so that an open window does not have to re-list a month to find out whether anything
+/// moved. The Calendar app re-read the store only when the date range on screen changed, which was
+/// correct while the app was the only writer and stopped being correct the day this machine got one
+/// calendar with several: an event the mind created through its own tools, or one Google sync
+/// pulled in, or one a second caller added through the app's own surface, did not appear in an open
+/// window until it navigated away and came back.
+///
+/// Both numbers are needed. `events` alone misses an edit in place, which changes no file's
+/// existence; `newest_nanos` alone misses a create and a delete that land inside one filesystem
+/// timestamp. `newest_nanos` covers the store directory's own modification time as well as every
+/// event file's, because adding or removing an event touches the directory rather than any
+/// surviving file.
+///
+/// Reading it never changes it, which is the property the whole arrangement rests on: a window
+/// polling this must never be the reason it moves. It is also a `stat` per file and no parse, so
+/// asking it is cheaper than the listing it exists to avoid.
+///
+/// What it cannot see: two writes that leave the count unchanged and land inside one filesystem
+/// timestamp tick — an edit undone and redone within the same nanosecond. Nothing writes a
+/// calendar that fast, and the alternative is a counter the service would have to keep, which a
+/// file written by hand or restored from a backup would then be invisible to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalendarRevision {
+    /// How many events the store holds.
+    pub events: u64,
+    /// The newest modification time under the store, in nanoseconds since the Unix epoch.
+    ///
+    /// Zero when nothing is stored, or when the times cannot be read at all — which compares
+    /// equal to itself, so a machine that cannot answer this half reports changes on the count
+    /// alone rather than reporting one every time it is asked.
+    pub newest_nanos: u64,
 }
 
 /// Parameters for [`method::EVENTS`].

@@ -494,13 +494,135 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].title, "Real");
     }
+
+    // ── The token an open window follows ─────────────────────────────
+    //
+    // The Calendar app re-read the store only when the date range on screen changed, which was
+    // right while it was the only writer and stopped being right the day this machine got one
+    // calendar with several. `calendar.revision` is the cheap question it asks instead, and
+    // everything below is about the one property the arrangement rests on: it moves when the
+    // stored events move, and never otherwise.
+
+    /// Long enough that two writes are not the same modification time.
+    ///
+    /// Half the token is an mtime, and a filesystem that keeps them to the second cannot tell two
+    /// writes inside one tick apart. A calendar is written at human speed and this is not a
+    /// property worth designing a counter for — see the type's own doc — but a test that wrote
+    /// twice in a microsecond would be measuring the clock's resolution rather than the token.
+    fn settle() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    #[test]
+    fn the_revision_moves_when_an_event_is_created() {
+        let f = Fixture::new();
+        let store = f.store();
+        let empty = store.revision();
+        assert_eq!(empty.events, 0);
+
+        settle();
+        store.create(&create("Standup", "2026-09-22T09:00:00", "2026-09-22T09:15:00")).unwrap();
+        let after = store.revision();
+        assert_ne!(after, empty, "a created event has to move the token");
+        assert_eq!(after.events, 1);
+    }
+
+    #[test]
+    fn the_revision_moves_when_an_event_is_edited_in_place() {
+        // The half the file count cannot see: nothing is added and nothing is removed, and the
+        // window would go on showing the old time.
+        let f = Fixture::new();
+        let store = f.store();
+        let event =
+            store.create(&create("Standup", "2026-09-22T09:00:00", "2026-09-22T09:15:00")).unwrap();
+        let before = store.revision();
+
+        settle();
+        store
+            .update(&UpdateEventParams {
+                id: event.id.clone(),
+                start: Some("2026-09-22T10:00:00".into()),
+                end: Some("2026-09-22T10:15:00".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let after = store.revision();
+        assert_ne!(after, before, "an edit in place has to move the token");
+        assert_eq!(after.events, before.events, "and it is not the count that moved");
+    }
+
+    #[test]
+    fn the_revision_moves_when_an_event_is_deleted() {
+        let f = Fixture::new();
+        let store = f.store();
+        let event =
+            store.create(&create("Standup", "2026-09-22T09:00:00", "2026-09-22T09:15:00")).unwrap();
+        let before = store.revision();
+
+        settle();
+        store.delete(&event.id).unwrap();
+        let after = store.revision();
+        assert_ne!(after, before);
+        assert_eq!(after.events, 0);
+    }
+
+    #[test]
+    fn reading_the_calendar_does_not_move_the_revision() {
+        // The property the whole arrangement rests on. A window polling this must never be the
+        // reason it changes, or it would re-list the month every time it asked whether it had to.
+        let f = Fixture::new();
+        let store = f.store();
+        let event =
+            store.create(&create("Standup", "2026-09-22T09:00:00", "2026-09-22T09:15:00")).unwrap();
+        let before = store.revision();
+
+        settle();
+        store.list(&month(2026, 9, 30)).unwrap();
+        store.get(&event.id).unwrap();
+        store.revision();
+        assert_eq!(store.revision(), before, "listing, getting and asking change nothing");
+    }
+
+    #[test]
+    fn a_refused_write_does_not_move_the_revision() {
+        // A calendar that refuses what it cannot keep must also not claim to have changed. An
+        // open window re-listing a month because somebody sent an unparseable time would be
+        // work for nothing, every time.
+        let f = Fixture::new();
+        let store = f.store();
+        store.create(&create("Standup", "2026-09-22T09:00:00", "2026-09-22T09:15:00")).unwrap();
+        let before = store.revision();
+
+        settle();
+        assert!(store.create(&create("", "2026-09-22T11:00:00", "2026-09-22T12:00:00")).is_err());
+        assert!(store.create(&create("Nope", "half past two", "2026-09-22T12:00:00")).is_err());
+        assert!(store.delete("01a0-not-a-real-event").is_err());
+        assert_eq!(store.revision(), before);
+    }
+
+    #[test]
+    fn a_machine_with_no_calendar_directory_still_answers() {
+        // `list` treats a missing directory as an empty calendar rather than an error, and this
+        // has to agree with it: the first event stored on a fresh machine must move the token,
+        // and it cannot do that if asking before it existed was a failure.
+        let f = Fixture::new();
+        let store = f.store();
+        assert!(!f.0.exists());
+        let empty = store.revision();
+        assert_eq!(empty.events, 0);
+
+        settle();
+        store.create(&create("First", "2026-09-22T09:00:00", "2026-09-22T10:00:00")).unwrap();
+        assert_ne!(store.revision(), empty);
+    }
 }
 
 #[cfg(test)]
 mod view_tests {
     use super::views::{
-        day_view, last_day_of_month, selected_date, start_and_end, timezone_label, visible_range,
-        week_bounds, week_view, SourceEvent, ViewMode,
+        all_day_bounds, day_view, last_day_of_month, named_on, rescheduled, selected_date,
+        start_and_end, timezone_label, visible_range, week_bounds, week_view, EventRef, Named,
+        SourceEvent, ViewMode,
     };
     use chrono::NaiveDate;
 
@@ -508,8 +630,11 @@ mod view_tests {
         NaiveDate::from_ymd_opt(y, m, d).expect("a real date")
     }
 
+    // The id is the title here. The store's is a uuid7 and nothing in these cases turns on its
+    // shape, while a readable one makes a failed assertion say which event it was about.
     fn event(title: &str, start: &str, end: &str) -> SourceEvent {
         SourceEvent {
+            id: title.into(),
             title: title.into(),
             start: start.into(),
             end: end.into(),
@@ -520,6 +645,7 @@ mod view_tests {
 
     fn all_day(title: &str, day: &str) -> SourceEvent {
         SourceEvent {
+            id: title.into(),
             title: title.into(),
             start: format!("{day}T00:00:00"),
             end: format!("{day}T23:59:59"),
@@ -759,5 +885,216 @@ mod view_tests {
         assert_eq!(timezone_label(5 * 3600 + 1800), "Times are local, UTC+05:30");
         assert_eq!(timezone_label(0), "Times are local, UTC+00:00");
         assert_eq!(timezone_label(-(7 * 3600 + 1800)), "Times are local, UTC-07:30");
+    }
+
+    // ── Naming an event a caller did not store ───────────────────────
+    //
+    // `delete_event` and `update_event` take the store's id, which a mind has after `add_event`
+    // or after reading `describe`. A person's instruction does not carry one — "drop the dentist
+    // on Thursday" — so a title and a date are the other way in, and the whole risk of that way
+    // is picking the wrong one silently.
+
+    fn stored(id: &str, title: &str, start: &str, end: &str) -> EventRef {
+        EventRef {
+            id: id.into(),
+            title: title.into(),
+            start: start.into(),
+            end: end.into(),
+            is_all_day: false,
+        }
+    }
+
+    fn a_day() -> Vec<EventRef> {
+        vec![
+            stored("a", "Standup", "2026-09-22T09:00:00", "2026-09-22T09:15:00"),
+            stored("b", "Dentist", "2026-09-22T11:00:00", "2026-09-22T12:00:00"),
+            stored("c", "Dentist", "2026-09-23T11:00:00", "2026-09-23T12:00:00"),
+        ]
+    }
+
+    #[test]
+    fn a_title_and_a_date_that_name_one_event_name_that_one() {
+        match named_on(&a_day(), "Dentist", "2026-09-22") {
+            Named::One(event) => assert_eq!(event.id, "b", "not the one on the next day"),
+            other => panic!("expected exactly one, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_title_is_matched_without_case_or_surrounding_space() {
+        // What a person types, and what a model passes on from what a person typed.
+        match named_on(&a_day(), "  dentist ", "2026-09-22") {
+            Named::One(event) => assert_eq!(event.id, "b"),
+            other => panic!("expected exactly one, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_title_that_is_only_part_of_one_names_nothing() {
+        // Deliberately not a substring match. "Stand" removing "Standup" is the beginning of
+        // "standup" removing "standup with the platform team" on a day that has both.
+        assert_eq!(named_on(&a_day(), "Stand", "2026-09-22"), Named::None);
+        assert_eq!(named_on(&a_day(), "Standup", "2026-09-24"), Named::None);
+    }
+
+    #[test]
+    fn two_events_of_one_name_on_one_day_are_ambiguous_and_both_are_handed_back() {
+        // The refusal that matters. Picking either would remove the wrong appointment half the
+        // time and report success — which is the trash-icon bug 617dac9 fixed, rebuilt on the
+        // control surface. The candidates come back so the caller can say which by id.
+        let mut day = a_day();
+        day.push(stored("d", "Dentist", "2026-09-22T16:00:00", "2026-09-22T17:00:00"));
+        match named_on(&day, "Dentist", "2026-09-22") {
+            Named::Ambiguous(candidates) => {
+                let ids: Vec<&str> = candidates.iter().map(|e| e.id.as_str()).collect();
+                assert_eq!(ids, vec!["b", "d"]);
+                // And the times, because two ids alone do not tell a caller which is which.
+                assert_eq!(candidates[0].start, "2026-09-22T11:00:00");
+                assert_eq!(candidates[1].start, "2026-09-22T16:00:00");
+            }
+            other => panic!("expected an ambiguity, got {other:?}"),
+        }
+    }
+
+    // ── Moving an appointment ────────────────────────────────────────
+
+    #[test]
+    fn moving_an_event_to_another_time_keeps_how_long_it_runs() {
+        // "Move the standup to 10:00" says nothing about length. An update that reset it to the
+        // default hour would be changing something nobody asked about.
+        let moved = rescheduled(
+            "2026-09-22T09:00:00",
+            "2026-09-22T09:15:00",
+            false,
+            None,
+            Some("10:00"),
+            None,
+        )
+        .unwrap()
+        .expect("a time was given, so it moves");
+        assert_eq!(moved, ("2026-09-22T10:00:00".into(), "2026-09-22T10:15:00".into()));
+    }
+
+    #[test]
+    fn moving_an_event_to_another_day_keeps_its_time_and_its_length() {
+        let moved =
+            rescheduled("2026-09-22T09:00:00", "2026-09-22T09:15:00", false, Some("2026-10-01"), None, None)
+                .unwrap()
+                .expect("a date was given, so it moves");
+        assert_eq!(moved, ("2026-10-01T09:00:00".into(), "2026-10-01T09:15:00".into()));
+    }
+
+    #[test]
+    fn a_length_given_is_the_length_it_gets_and_the_start_stays() {
+        let moved =
+            rescheduled("2026-09-22T09:00:00", "2026-09-22T09:15:00", false, None, None, Some(45))
+                .unwrap()
+                .expect("a duration was given, so it changes");
+        assert_eq!(moved, ("2026-09-22T09:00:00".into(), "2026-09-22T09:45:00".into()));
+    }
+
+    #[test]
+    fn an_update_that_says_nothing_about_when_leaves_the_times_alone() {
+        // A rename is an update too, and rebuilding the timestamps for one is how a rename comes
+        // to move a meeting.
+        assert_eq!(
+            rescheduled("2026-09-22T09:00:00", "2026-09-22T09:15:00", false, None, None, None)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_event_moved_late_in_the_day_ends_at_the_end_of_it_rather_than_at_a_time_that_is_not_one() {
+        // The same clamp `start_and_end` applies on create: 23:30 plus an hour used to be
+        // "24:30", which the store refuses outright.
+        let moved = rescheduled(
+            "2026-09-22T09:00:00",
+            "2026-09-22T10:00:00",
+            false,
+            None,
+            Some("23:30"),
+            None,
+        )
+        .unwrap()
+        .expect("a time was given");
+        assert_eq!(moved.1, "2026-09-22T23:59:00");
+    }
+
+    #[test]
+    fn an_all_day_event_moved_to_another_day_is_still_all_day() {
+        let moved =
+            rescheduled("2026-09-22T00:00:00", "2026-09-22T23:59:00", true, Some("2026-09-25"), None, None)
+                .unwrap()
+                .expect("a date was given");
+        assert_eq!(moved, ("2026-09-25T00:00:00".into(), "2026-09-25T23:59:00".into()));
+        assert_eq!(all_day_bounds("2026-09-25").unwrap(), moved);
+    }
+
+    #[test]
+    fn a_time_on_an_all_day_event_is_refused_rather_than_quietly_making_it_a_timed_one() {
+        // Applying it would turn a day-long event into a one-hour appointment at a time nobody
+        // chose, and the caller would be told it had been moved.
+        let refused =
+            rescheduled("2026-09-22T00:00:00", "2026-09-22T23:59:00", true, None, Some("09:00"), None)
+                .unwrap_err();
+        assert!(refused.contains("all day"), "{refused}");
+        let refused =
+            rescheduled("2026-09-22T00:00:00", "2026-09-22T23:59:00", true, None, None, Some(30))
+                .unwrap_err();
+        assert!(refused.contains("all day"), "{refused}");
+    }
+
+    #[test]
+    fn an_update_that_cannot_be_worked_out_says_which_part_it_could_not_read() {
+        // A file edited by hand can hold anything. The caller gets the reason rather than a
+        // guessed time or a panic in a dispatch.
+        let refused =
+            rescheduled("2026-09-22T09:00:00", "whenever", false, None, Some("10:00"), None)
+                .unwrap_err();
+        assert!(refused.contains("duration_min"), "it has to name the way out: {refused}");
+
+        let refused =
+            rescheduled("whenever", "2026-09-22T10:00:00", false, None, Some("10:00"), None)
+                .unwrap_err();
+        assert!(refused.contains("starts at"), "{refused}");
+
+        let refused =
+            rescheduled("2026-09-22T09:00:00", "2026-09-22T10:00:00", false, Some("next friday"), None, None)
+                .unwrap_err();
+        assert!(refused.contains("next friday"), "{refused}");
+
+        let refused =
+            rescheduled("2026-09-22T09:00:00", "2026-09-22T10:00:00", false, None, None, Some(-5))
+                .unwrap_err();
+        assert!(refused.contains("negative"), "{refused}");
+    }
+
+    #[test]
+    fn a_whole_day_runs_from_midnight_to_the_last_minute_of_it() {
+        assert_eq!(
+            all_day_bounds("2026-09-22").unwrap(),
+            ("2026-09-22T00:00:00".to_string(), "2026-09-22T23:59:00".to_string())
+        );
+        assert!(all_day_bounds("the 22nd").is_none());
+    }
+
+    #[test]
+    fn an_all_day_event_the_app_stores_is_one_the_grid_leaves_alone() {
+        // The two halves agreeing: what `all_day_bounds` writes is what `all_day_columns` reads,
+        // so an all-day event added through the surface is on its day's header and not given an
+        // hour it never had.
+        let (start, end) = all_day_bounds("2026-09-22").unwrap();
+        let event = SourceEvent {
+            id: "a".into(),
+            title: "Conference".into(),
+            start,
+            end,
+            is_all_day: true,
+            color_index: 0,
+        };
+        let week = week_view(&[event], date(2026, 9, 22));
+        assert!(week.events.is_empty(), "an all-day event is not on the hour grid");
+        assert_eq!(week.all_day[2], vec!["Conference".to_string()], "Tuesday's column");
     }
 }

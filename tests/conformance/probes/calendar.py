@@ -19,11 +19,19 @@ other check here: the week's range, its column labels and the number of blocks o
 worked out from the store on disk by this file, and the app's answer is compared against
 that — never the other way round.
 
-Two things about this app cannot be measured from here and are named rather than left to
-be inferred from a green table. Deletion is a Slint callback the window calls with a row
-index; the control surface has nothing that removes an event, so the data-loss bug 617dac9
-fixed — every row of a day carried the id 0, so the trash icon on any of them deleted the
-first — is NOT EXERCISED, and `notes.delete_not_exercised` says so with the reason.
+Deleting used to be the thing this file could not measure. The control surface published
+nothing that removed an event — `delete-event` was a Slint callback taking a row index,
+reachable only from the window — so the data-loss bug 617dac9 fixed, where every row of a
+day carried the id 0 and the trash icon on any of them deleted the first, was NOT EXERCISED
+and said so in a note. `delete_event` and `update_event` are on the surface now and go
+through the same path the trash icon does, so the checks below are the ones that note
+listed as missing: two events on one day, the one asked for removed and the other still in
+the store on disk.
+
+`delete_event` is graded `sensitive`, which this machine's ceiling allows — only
+`dangerous` is refused by policy here. It is still classified with `lib.refusal_kind`
+rather than assumed: if the ceiling is ever tightened, a policy refusal is not the app
+declining, and the honest record is that the check was not exercised.
 """
 
 import datetime
@@ -63,6 +71,16 @@ SECOND_TITLE = "conformance-morning-standup"
 LATE_TITLE = "conformance-evening-walk"
 NEIGHBOUR_TITLE = "conformance-month-edge"
 REFUSED_TITLE = "conformance-should-not-exist"
+
+# The delete pair. Both go on the 24th, between the 09:00 and the 14:00 already there, so the
+# one that is removed is not the first event of its day — which is the whole of the bug: the
+# trash icon on any row deleted the first. DOOMED is deleted by its id and KEPT must survive it.
+DOOMED_TITLE = "conformance-delete-this-one"
+KEPT_TITLE = "conformance-leave-this-one"
+# Two events of one name on one day, which is an ordinary thing for a calendar to hold and the
+# reason `delete_event` refuses a title it cannot resolve to exactly one event.
+AMBIGUOUS_TITLE = "conformance-two-of-these"
+NO_SUCH_ID = "conformance-no-such-event-id"
 
 # Written out rather than taken from `strftime`, which answers in the machine's locale. The
 # app builds these names from tables of its own in `views.rs`, and a probe that asked the C
@@ -487,42 +505,162 @@ def run():
             #
             # `events_for_day` gave every row of a day the id 0, the screen passes `event.id` to
             # `delete-event` and the handler uses it as an index, so the trash icon on any row of
-            # a day deleted the first event on it. It is fixed in 617dac9 and it is not checked
-            # here: `delete-event` is a Slint callback taking a row index, and the control surface
-            # publishes nothing that removes an event. This probe drives the control surface, so
-            # the delete path is NOT EXERCISED, and `notes.delete_not_exercised` says so.
+            # a day deleted the first event on it (617dac9). Until today that could not be checked
+            # from out here: `delete-event` is a Slint callback taking a row index and the control
+            # surface published nothing that removed anything, so this section was a note saying
+            # NOT EXERCISED. `delete_event` now goes through the same path the trash icon does.
             surface = lib.actions(APP)
-            removers = [a for a in surface if a and ("delete" in a or "remove" in a)]
-            if removers:
+            probe.check(
+                "the control surface publishes a way to take an event off the calendar",
+                "delete_event" in surface and "update_event" in surface,
+                contract=2, evidence={"actions": surface})
+
+            # Two more on the 24th, between the 09:00 and the 14:00 already on it. The one that
+            # is deleted is second of four by time, so a handler that still indexed from zero
+            # would take the 09:00 and this would fail on the event that survived.
+            lib.act(APP, "add_event", title=DOOMED_TITLE, date=iso(DATE), time="11:00")
+            lib.act(APP, "add_event", title=KEPT_TITLE, date=iso(DATE), time="12:00")
+            lib.wait_for(lambda: DOOMED_TITLE in stored() and KEPT_TITLE in stored(), timeout=15)
+            doomed = (stored().get(DOOMED_TITLE) or {}).get("id")
+            kept_before = stored().get(KEPT_TITLE) or {}
+
+            removed = lib.act(APP, "delete_event", id=doomed or "")
+            how_refused = lib.refusal_kind(removed)
+            if how_refused == "policy":
+                # The ceiling refused on the grade before the app was asked, so nothing below
+                # would be the app's account of anything. See README, "The third outcome".
+                probe.note("delete_not_exercised", {
+                    "delete_path_exercised": False,
+                    "statement": "Deleting an event was NOT EXERCISED on this machine. A green "
+                                 "result for calendar is not evidence that the trash icon "
+                                 "removes the event it is sitting on.",
+                    "why": "`calendar.delete_event` is graded `sensitive` and this machine's "
+                           "ceiling is below it, so the control surface refused on the grade "
+                           "alone, before dispatch. The app never ran.",
+                    "the_refusal_in_full": removed.get("refused"),
+                    "checks_not_exercised": [
+                        "delete_event by id removes the event it was asked for",
+                        "every other event of that day is still in the store on disk",
+                        "an ambiguous title is refused with its candidates",
+                        "an unknown id is refused",
+                    ],
+                    "what_was_still_measured": "that two events on one day arrive as two "
+                                               "separate entries in time order — the list the "
+                                               "deleted row is an index into",
+                    "actions_the_surface_publishes": surface,
+                })
+            else:
+                gone = lib.wait_until(
+                    lambda: DOOMED_TITLE not in stored(), timeout=15,
+                    what="the deleted event to leave the store on disk")
+                after_delete = stored()
                 probe.check(
-                    "the control surface has gained a way to remove an event and this probe has "
-                    "not been taught to call it: the delete path is still unmeasured",
-                    False, severity=lib.ADVISORY, contract=2,
-                    evidence={"actions": surface, "the_ones_that_look_like_a_delete": removers})
-            probe.note("delete_not_exercised", {
-                "delete_path_exercised": False,
-                "statement": "Deleting an event was NOT EXERCISED on this machine. A green result "
-                             "for calendar is not evidence that the trash icon removes the event "
-                             "it is sitting on.",
-                "why": "`delete-event` is a Slint callback the window invokes with a row index. "
-                       "The control surface publishes %s and nothing that removes, so a mind can "
-                       "put something on this calendar and cannot take it off — and a probe that "
-                       "speaks only to the control surface cannot delete anything either."
-                       % ", ".join(surface),
-                "the_bug_it_would_have_caught": "events_for_day gave every row of a day the id 0 "
-                                                "while the screen passes event.id to delete-event "
-                                                "and the handler indexes the day's events with "
-                                                "it, so the trash icon on any row deleted the "
-                                                "first event of that day (617dac9).",
-                "checks_not_exercised": [
-                    "deleting one of two events on a day removes the one that was asked for",
-                    "the event that was not asked for is still in the store afterwards",
-                ],
-                "what_was_still_measured": "that two events on one day arrive as two separate "
-                                           "entries in time order — the list the deleted row is "
-                                           "an index into",
-                "actions_the_surface_publishes": surface,
-            })
+                    "delete_event removes the event whose id it was given",
+                    bool(gone) and DOOMED_TITLE not in after_delete,
+                    contract=2, evidence=gone.evidence(
+                        answer=removed.get("result"), refused=removed.get("refused"),
+                        id_asked_for=doomed, titles_on_disk=sorted(after_delete)))
+                probe.check(
+                    "and the other events of that day are still in the store on disk — the "
+                    "regression 617dac9 fixed, where the trash icon on any row deleted the first",
+                    KEPT_TITLE in after_delete
+                    and (after_delete.get(KEPT_TITLE) or {}).get("id") == kept_before.get("id")
+                    and SECOND_TITLE in after_delete and TITLE in after_delete,
+                    contract=2, evidence={
+                        "deleted": DOOMED_TITLE, "deleted_id": doomed,
+                        "id_of_the_one_that_had_to_survive": kept_before.get("id"),
+                        "its_id_now": (after_delete.get(KEPT_TITLE) or {}).get("id"),
+                        "titles_on_disk": sorted(after_delete),
+                        "the_day_in_time_order": ["09:00 " + SECOND_TITLE,
+                                                  "11:00 " + DOOMED_TITLE + " (deleted)",
+                                                  "12:00 " + KEPT_TITLE,
+                                                  "14:00 " + TITLE]})
+                probe.check(
+                    "the action answers with what it removed, not with what it was asked to",
+                    (removed.get("result") or {}).get("deleted") == DOOMED_TITLE
+                    and (removed.get("result") or {}).get("id") == doomed,
+                    contract=3, evidence={"answer": removed.get("result"),
+                                          "accepted": removed.get("accepted"),
+                                          "settled": removed.get("settled")})
+
+                # A title that names two events on one day. Never a guess: picking either would
+                # remove the wrong appointment half the time and report success.
+                lib.act(APP, "add_event", title=AMBIGUOUS_TITLE, date=iso(DATE), time="15:00")
+                lib.act(APP, "add_event", title=AMBIGUOUS_TITLE, date=iso(DATE), time="16:00")
+                lib.wait_for(
+                    lambda: len([r for r in records()
+                                 if r.get("title") == AMBIGUOUS_TITLE]) == 2, timeout=15)
+                twins = [r for r in records() if r.get("title") == AMBIGUOUS_TITLE]
+                twin_ids = sorted(str(r.get("id")) for r in twins)
+                titles_before_ambiguity = sorted(stored())
+                ambiguous = lib.act(APP, "delete_event", title=AMBIGUOUS_TITLE, date=iso(DATE))
+                refusal = str(ambiguous.get("refused") or "")
+                probe.check(
+                    "a title that names two events on one day is refused, with both candidates "
+                    "and their ids, rather than one of them being guessed at",
+                    lib.refusal_kind(ambiguous) == "app"
+                    and all(i in refusal for i in twin_ids)
+                    and "15:00" in refusal and "16:00" in refusal,
+                    contract=4, evidence={"refusal": refusal,
+                                          "refused_by": lib.refusal_kind(ambiguous),
+                                          "the_two_on_disk": twin_ids})
+                probe.check(
+                    "and nothing was removed while it was refusing",
+                    sorted(stored()) == titles_before_ambiguity,
+                    contract=4, evidence={"titles_before": titles_before_ambiguity,
+                                          "titles_after": sorted(stored())})
+
+                phantom = lib.act(APP, "delete_event", id=NO_SUCH_ID)
+                probe.check(
+                    "deleting an id that is not on this machine is refused in words naming it",
+                    lib.refusal_kind(phantom) == "app" and NO_SUCH_ID in str(phantom.get("refused")),
+                    contract=4, evidence={"refusal": phantom.get("refused"),
+                                          "refused_by": lib.refusal_kind(phantom)})
+
+            # ── Moving an appointment ─────────────────────────────────────────
+            #
+            # The contract has had `update_event` all along and nothing on the surface could
+            # change an appointment, so a mind could put something on this calendar at the wrong
+            # time and had to delete it and make it again. The check is the file on disk, not the
+            # action's answer: KEPT_TITLE runs 12:00-13:00, and moving it to 15:30 must keep the
+            # hour it already runs for, because the instruction said nothing about length.
+            moved_id = (stored().get(KEPT_TITLE) or {}).get("id")
+            moved = lib.act(APP, "update_event", id=moved_id or "", time="15:30")
+            how_refused = lib.refusal_kind(moved)
+            if how_refused == "policy":
+                probe.note("update_not_exercised", {
+                    "update_path_exercised": False,
+                    "statement": "Moving an event was NOT EXERCISED on this machine.",
+                    "why": "the control surface refused `update_event` on its grade, before "
+                           "dispatch. The app never ran.",
+                    "the_refusal_in_full": moved.get("refused"),
+                    "checks_not_exercised": ["update_event moves an event and the file on disk "
+                                             "agrees, keeping the length it already ran for"],
+                })
+            else:
+                landed = lib.wait_until(
+                    lambda: str((stored().get(KEPT_TITLE) or {}).get("start", "")).endswith(
+                        "T15:30:00"),
+                    timeout=15, what="the moved event to be at its new time on disk")
+                record = stored().get(KEPT_TITLE) or {}
+                probe.check(
+                    "update_event moves the event on disk, and keeps how long it runs",
+                    bool(landed)
+                    and record.get("start") == iso(DATE) + "T15:30:00"
+                    and record.get("end") == iso(DATE) + "T16:30:00"
+                    and record.get("id") == moved_id,
+                    contract=2, evidence=landed.evidence(
+                        answer=moved.get("result"), refused=moved.get("refused"),
+                        on_disk={"id": record.get("id"), "start": record.get("start"),
+                                 "end": record.get("end")},
+                        it_used_to_run="12:00 to 13:00, one hour"))
+                probe.check(
+                    "and answers with what the store holds now, read back after the write",
+                    (moved.get("result") or {}).get("start") == record.get("start")
+                    and (moved.get("result") or {}).get("end") == record.get("end"),
+                    contract=3, evidence={"answer": moved.get("result"),
+                                          "on_disk": {"start": record.get("start"),
+                                                      "end": record.get("end")}})
 
             # ── 6. It survives a restart ──────────────────────────────────────
             killed = lib.kill_app(APP_BIN)

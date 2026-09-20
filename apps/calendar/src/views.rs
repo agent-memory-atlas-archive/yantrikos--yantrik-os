@@ -50,8 +50,14 @@ impl ViewMode {
 ///
 /// `color_index` rather than a colour: the palette is a Slint concern and this module has no
 /// Slint in it. `main.rs` holds the five colours and looks the index back up.
+///
+/// `id` is the store's own, carried through because `describe` is derived from these and a caller
+/// that is told an event's title and time and not its id has no way to name it back. Until today
+/// the only id anywhere near the screen was a row position, which is the whole of the trash-icon
+/// bug 617dac9 fixed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceEvent {
+    pub id: String,
     pub title: String,
     /// ISO 8601 as the store keeps it, `YYYY-MM-DDTHH:MM:SS`.
     pub start: String,
@@ -61,8 +67,12 @@ pub struct SourceEvent {
 }
 
 /// One block on a time grid, in the shape `CalendarTimeEvent` wants.
+///
+/// An event running past midnight becomes two blocks carrying the same `id`, which is the truth:
+/// it is one appointment drawn twice because a grid of hours has nowhere else to put it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TimeEvent {
+    pub id: String,
     pub title: String,
     pub start_hour: i32,
     pub start_min: i32,
@@ -70,6 +80,39 @@ pub struct TimeEvent {
     /// Column, 0 = the first day of the range shown. In the day view there is one column.
     pub day_index: i32,
     pub color_index: usize,
+}
+
+/// A stored event as an action that names one has to see it.
+///
+/// Separate from [`SourceEvent`] because naming an event and drawing it are different jobs: this
+/// one carries no colour and is never placed on a grid, and it exists so that resolving a name can
+/// be tested without a desktop.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EventRef {
+    /// The id the store gave the event.
+    pub id: String,
+    pub title: String,
+    /// ISO 8601 as the store keeps it.
+    pub start: String,
+    pub end: String,
+    pub is_all_day: bool,
+}
+
+/// What a `title` and a `date` named.
+///
+/// `Ambiguous` exists because the alternative is a guess, and a guess in a delete removes the
+/// wrong appointment — the same shape as the bug 617dac9 fixed from the other side, where every
+/// row of a day carried the id 0 and the trash icon on any of them deleted the first. Two events
+/// called "standup" on one Tuesday is an ordinary thing for a calendar to hold, and the only
+/// honest answer is to hand both back with their ids and let the caller say which.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Named {
+    /// Exactly one event answers to that name on that day.
+    One(EventRef),
+    /// Nothing does.
+    None,
+    /// More than one does, in the order the store returned them.
+    Ambiguous(Vec<EventRef>),
 }
 
 /// Everything the week view draws, for one week.
@@ -232,6 +275,114 @@ pub fn start_and_end(date: &str, time: &str, duration_min: i32) -> Option<(Strin
     Some((iso(start), iso(end)))
 }
 
+/// The ISO start and end of a whole day.
+///
+/// An all-day event has no hour, so it is stored spanning its day: midnight to the last minute of
+/// it, which is the same clamp [`start_and_end`] puts on a timed event that would otherwise run
+/// past midnight. Nothing reads a clock off either end — `all_day_columns` reads the two dates —
+/// so what matters is only that the pair is a real day and that it parses.
+pub fn all_day_bounds(date: &str) -> Option<(String, String)> {
+    let day = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").ok()?;
+    let iso = |t: NaiveDateTime| t.format("%Y-%m-%dT%H:%M:%S").to_string();
+    Some((iso(day.and_hms_opt(0, 0, 0)?), iso(day.and_hms_opt(23, 59, 0)?)))
+}
+
+/// The events on `date` whose title is `title`, compared without case or surrounding space.
+///
+/// `date` is matched as a prefix of the stored start, which is what the rest of this app does with
+/// a day; it has to arrive as a full `YYYY-MM-DD` or it will match a range of days instead of one,
+/// and the action that calls this checks that before asking.
+///
+/// Exact titles only. A substring match would make "delete standup" remove "standup with the
+/// platform team" on a day holding both, and the caller who meant the other one would have no way
+/// to tell that from the answer.
+pub fn named_on(events: &[EventRef], title: &str, date: &str) -> Named {
+    let wanted = title.trim().to_lowercase();
+    let day = date.trim();
+    let mut found: Vec<EventRef> = events
+        .iter()
+        .filter(|e| e.start.starts_with(day) && e.title.trim().to_lowercase() == wanted)
+        .cloned()
+        .collect();
+    match found.len() {
+        0 => Named::None,
+        1 => Named::One(found.remove(0)),
+        _ => Named::Ambiguous(found),
+    }
+}
+
+/// Where an update moves an event to: its new start and end, or the reason it cannot go there.
+///
+/// `Ok(None)` means the update said nothing about when the event is, so its stored times are left
+/// exactly as they are — the contract's rule for every optional field, applied to the three fields
+/// that together describe one thing.
+///
+/// Moving a meeting keeps how long it runs. "Move the standup to 10:00" says nothing about length,
+/// and an update that quietly reset it to the default hour would be changing something nobody
+/// asked about, which is the same mistake as dropping an argument, one size smaller.
+///
+/// An all-day event has no time to move and no length to change, so a `time` or a `duration_min`
+/// given for one is refused rather than applied to a clock it does not have. Applying it would
+/// silently turn a day-long event into a timed one, and the caller would be told it had moved
+/// something.
+pub fn rescheduled(
+    current_start: &str,
+    current_end: &str,
+    is_all_day: bool,
+    date: Option<&str>,
+    time: Option<&str>,
+    duration_min: Option<i32>,
+) -> Result<Option<(String, String)>, String> {
+    if is_all_day {
+        if time.is_some() || duration_min.is_some() {
+            return Err(
+                "that event is all day: it has no time to move and no length to change, so only \
+                 its `date` can be given"
+                    .into(),
+            );
+        }
+        let Some(date) = date else { return Ok(None) };
+        return all_day_bounds(date)
+            .map(Some)
+            .ok_or_else(|| format!("`{}` is not a date", date.trim()));
+    }
+
+    if date.is_none() && time.is_none() && duration_min.is_none() {
+        return Ok(None);
+    }
+
+    let start = parse_datetime(current_start).ok_or_else(|| {
+        format!("the stored event starts at `{current_start}`, which is not a date and a time")
+    })?;
+    let duration = match duration_min {
+        Some(minutes) if minutes < 0 => {
+            return Err(format!("`duration_min` cannot be negative, and was {minutes}"))
+        }
+        Some(minutes) => minutes,
+        // Read off the event rather than defaulted, which is the whole point: this is how long
+        // the appointment already runs, and the update did not ask to change it.
+        None => {
+            let end = parse_datetime(current_end).ok_or_else(|| {
+                format!(
+                    "the stored event ends at `{current_end}`, which is not a date and a time, so \
+                     how long it runs cannot be worked out — give `duration_min` as well"
+                )
+            })?;
+            (end - start).num_minutes().max(0) as i32
+        }
+    };
+
+    let day = date
+        .map(|d| d.trim().to_string())
+        .unwrap_or_else(|| start.format("%Y-%m-%d").to_string());
+    let clock = time
+        .map(|t| t.trim().to_string())
+        .unwrap_or_else(|| start.format("%H:%M").to_string());
+    start_and_end(&day, &clock, duration)
+        .map(Some)
+        .ok_or_else(|| format!("`{day} {clock}` is not a date and a time"))
+}
+
 /// How the timezone strip in the new-event form reads.
 ///
 /// The offset is all the app can honestly know: `chrono::Local` carries no zone name, and there
@@ -290,6 +441,7 @@ fn segments(event: &SourceEvent, first: NaiveDate, last: NaiveDate) -> Vec<TimeE
         let minutes = (to - from).num_minutes() as i32;
         if minutes > 0 || is_moment {
             out.push(TimeEvent {
+                id: event.id.clone(),
                 title: event.title.clone(),
                 start_hour: from.hour() as i32,
                 start_min: from.minute() as i32,

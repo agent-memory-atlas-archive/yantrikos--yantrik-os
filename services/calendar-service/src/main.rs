@@ -9,6 +9,7 @@
 //!   calendar.update_event  { id, title?, start?, ... }     → CalendarEvent
 //!   calendar.delete_event  { id }                          → ()
 //!   calendar.upsert_remote { remote_id, title, start, ... } → CalendarEvent
+//!   calendar.revision      { }                             → CalendarRevision
 //!
 //! Those parameter names are not written out here any more. They come from
 //! `yantrik_ipc_contracts::calendar`, which the calendar app builds its requests from, because
@@ -19,6 +20,11 @@
 //! app would never show. They call these methods now, which is what the last three exist for:
 //! a mind needs to read one event before changing it, and a sync needs a way in that does not
 //! store the same Google event twice.
+//!
+//! `calendar.revision` is the consequence of there being one owner and several writers. An open
+//! window cannot re-list a month every few seconds to find out whether somebody else wrote
+//! something, and it cannot go on showing what it read when it last navigated either. So it asks
+//! this instead: two numbers, a `stat` per file and no parse, and a listing only when they move.
 
 mod store;
 
@@ -115,6 +121,13 @@ impl ServiceHandler for CalendarHandler {
                     "Stored event from a remote calendar"
                 );
                 Ok(serde_json::to_value(event).unwrap())
+            }
+            method::REVISION => {
+                // No parameters, and whatever arrived is ignored rather than refused: this is the
+                // cheapest question on the socket and a caller that sends `{}`, `null` or nothing
+                // at all should get the same answer. Nothing here writes, touches or creates, so
+                // asking repeatedly cannot be what makes the answer change.
+                Ok(serde_json::to_value(self.store.revision()).unwrap())
             }
             _ => Err(ServiceError {
                 code: -1,

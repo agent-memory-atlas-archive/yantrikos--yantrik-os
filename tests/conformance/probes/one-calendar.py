@@ -16,21 +16,23 @@ are supposed to be talking about.
 The mind's tools are reached over `companion.sock`, not through a conversation. The shell serves
 `companion.tool {name, args}` there (`crates/yantrik-ui/src/companion_rpc.rs`), which runs one
 tool by name with no language model in the loop — so what is measured here is the tool, not a
-model's willingness to choose it.
+model's willingness to choose it. That helper was local to this file; it is `lib.companion_tool`
+now, because the calendar probe wanted it too.
 
-`lib.py` has no helper for that socket. The one below is local to this probe and should move into
-`lib.py` once a second probe wants it: it is the same newline-delimited JSON-RPC every service on
-this machine speaks, and `C:\\Users\\sync\\tour-frames\\wake.py` has been framing it by hand for
-the same reason.
+One thing this file used to do and no longer does, because it is the second half of what today's
+round fixed. Every read of the app went through a month forward and a month back first: `refresh`
+re-read the store only when the visible date range changed, so an event written or removed by
+something else while the window sat on one month was not on screen, and a check that read it
+without navigating would have been measuring the app's cache rather than the calendar. The window
+follows the store now — `describe` asks `calendar.revision` before it answers — so the reads below
+are made where they land, and the bound they are given is stated at `FRESHNESS_BOUND_S`.
 """
 
 import datetime
 import json
 import os
 import pathlib
-import socket
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -45,7 +47,7 @@ APP_BIN = "/opt/yantrik/bin/yantrik-calendar"
 SERVICE_BIN = "/opt/yantrik/bin/calendar-service"
 STORE = pathlib.Path.home() / ".local/share/yantrik/calendar"
 SERVICE_SOCK = lib.SOCKET_DIR / "calendar.sock"
-COMPANION_SOCK = lib.SOCKET_DIR / "companion.sock"
+COMPANION_SOCK = lib.COMPANION_SOCK
 
 # Today, because `calendar_today` is one of the two tools that has to see the app's event and it
 # only ever looks at today. The store is snapshotted and restored, so a day that already has the
@@ -55,70 +57,25 @@ TODAY = datetime.date.today()
 # Titles nothing else on this machine would write.
 MIND_TITLE = "conformance-one-calendar-from-the-mind"
 APP_TITLE = "conformance-one-calendar-from-the-app"
+WHILE_OPEN_TITLE = "conformance-one-calendar-while-the-window-is-open"
 
-
-# ── The mind's own socket ────────────────────────────────────────────────────
+# How long an open window may take to show what somebody else wrote, and where the number comes
+# from.
 #
-# Belongs in lib.py when something else needs it. Kept here while this is the only caller, so the
-# toolkit does not grow a helper with one user.
-
-class CompanionUnreachable(RuntimeError):
-    """The shell is not serving the companion, so none of the mind's tools can be run."""
-
-
-def companion_call(method, params, timeout=180):
-    """One newline-delimited JSON-RPC round trip to `companion.sock`.
-
-    The framing is the one every service on this machine uses: one JSON object, one newline, one
-    JSON object back. The timeout is generous because the companion worker is a single lane — a
-    tool call arriving while an answer is being generated waits for the whole answer.
-    """
-    if not COMPANION_SOCK.exists():
-        raise CompanionUnreachable("no %s on this machine" % COMPANION_SOCK)
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    try:
-        sock.connect(str(COMPANION_SOCK))
-        request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-        sock.sendall((request + "\n").encode())
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-    except OSError as exc:
-        raise CompanionUnreachable("%s: %s" % (COMPANION_SOCK, exc))
-    finally:
-        sock.close()
-    if not buf.strip():
-        raise CompanionUnreachable("the companion closed the connection without answering")
-    return json.loads(buf.decode("utf-8", "replace"))
+# Two mechanisms carry it, and this bound is a claim about the first. `describe` asks
+# `calendar.revision` before it answers and re-lists the month when that has moved, so the first
+# read after a write already carries it: no waiting at all in principle, and five seconds of slack
+# for the socket and for the three the control surface allows an action on the UI thread. The
+# second is a twenty-second timer in the window, which re-checks the same token while the window
+# is visible — that is the fallback for a window nobody is asking about, and it is deliberately
+# outside this bound. So a wait here that takes more than five seconds and less than about
+# twenty-five means the timer answered and the check before `describe` is not working.
+FRESHNESS_BOUND_S = 5
 
 
 def tool(name, **args):
-    """Run one of the mind's tools by name. Always a dict, whichever way it went.
-
-        text     str          what the tool said
-        error    str or None  why it could not be run at all
-
-    A tool that refuses says so in `text`: these tools answer prose, which is what they were
-    written to do. `error` is the transport or the registry — no such tool, the worker gone.
-    """
-    try:
-        reply = companion_call(
-            "companion.tool",
-            {"name": name, "args": args, "timeout_ms": 90_000},
-        )
-    except CompanionUnreachable as exc:
-        return {"text": "", "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001 - a crash here is a result, not a stack trace
-        return {"text": "", "error": "%s: %s" % (type(exc).__name__, exc)}
-    if isinstance(reply, dict) and reply.get("error"):
-        message = reply["error"]
-        return {"text": "", "error": message.get("message") if isinstance(message, dict) else str(message)}
-    result = (reply or {}).get("result") or {}
-    return {"text": str(result.get("result", "")), "error": None}
+    """One of the mind's tools, by name. `lib.companion_tool` with the arguments spelled out."""
+    return lib.companion_tool(name, args)
 
 
 # ── The store on disk, which is what both ends are talking about ─────────────
@@ -170,24 +127,26 @@ def stop_the_service():
 
 
 def app_sees():
-    """Titles the app publishes for the selected day, after making it read the store again.
+    """Titles the app publishes for the selected day, and the whole state block beside them.
 
-    The month forward and back first, deliberately. `refresh` in the app only re-reads when the
-    visible range has changed, so an event written or removed by something else while the app sat
-    on one month would still be on screen — and a check that read it would be measuring the app's
-    cache rather than the calendar. Stepping the month twice changes the range twice and puts it
-    back where it was.
+    No navigation first, and that is the change today's round makes checkable. This used to step
+    the month forward and back before every read, because `refresh` re-read the store only when
+    the visible range changed and stepping twice was the cheapest way to change it twice — a
+    workaround that made every check below a check of the app after being prodded rather than of
+    the app. `describe` asks the store whether anything moved before it answers now, so what comes
+    back is what the app would tell anyone asking at that moment.
 
-    Two values: the titles, and the whole state block, so a check can show what else the app
-    thought was true at the same moment — the month's count, the days it marked, its notice.
+    The state block comes back too, so a check can show what else the app thought was true at the
+    same time — the month's count, the days it marked, its notice.
     """
-    lib.act(APP, "show_month", direction="next")
-    lib.act(APP, "show_month", direction="previous")
-    lib.act(APP, "select_day", day=TODAY.day)
-    time.sleep(1)
     view = lib.state(APP)
     return [e.get("title") if isinstance(e, dict) else e
             for e in view.get("events_on_selected_day") or []], view
+
+
+def app_shows(title):
+    """Is that title among the events the app publishes for the day it has selected?"""
+    return any(title in str(t) for t in app_sees()[0])
 
 
 def run():
@@ -258,6 +217,33 @@ def run():
                                       "events_this_month": view.get("events_this_month"),
                                       "notice": view.get("notice")})
 
+            # ── 2a. And it keeps up with one made while it is open ───────────
+            #
+            # The event above was already on disk when the window opened, so showing it only
+            # proves the first read. This one is written by the mind while the window sits on
+            # this month with nothing touching it, which is the case that used to need a month
+            # stepped forward and back before anything would see it. Nothing navigates here.
+            while_open = tool("calendar_create_event",
+                              summary=WHILE_OPEN_TITLE,
+                              start="%sT10:00:00" % iso(TODAY),
+                              end="%sT10:30:00" % iso(TODAY))
+            lib.wait_for(lambda: WHILE_OPEN_TITLE in stored(), timeout=20)
+            appeared = lib.wait_until(
+                lambda: app_shows(WHILE_OPEN_TITLE), timeout=FRESHNESS_BOUND_S,
+                what="the open window to show an event the mind created behind it")
+            probe.check(
+                "an open Calendar shows an appointment the mind makes while it is open, inside "
+                "%ds, without being navigated" % FRESHNESS_BOUND_S,
+                bool(appeared),
+                contract=2, evidence=appeared.evidence(
+                    tool_answer=while_open["text"], tool_error=while_open["error"],
+                    titles_on_disk=sorted(stored()),
+                    events_on_selected_day=app_sees()[0],
+                    bound_comes_from="describe asks calendar.revision before answering, so the "
+                                     "first read after the write should carry it; the window's "
+                                     "own twenty-second timer is the fallback and is outside "
+                                     "this bound"))
+
             # ── 3. The app puts something on the calendar ────────────────────
             added = lib.act(APP, "add_event", title=APP_TITLE, date=iso(TODAY), time="16:00")
             lib.wait_for(lambda: APP_TITLE in stored(), timeout=20)
@@ -300,13 +286,18 @@ def run():
                 contract=2, evidence={"answer": removed["text"], "error": removed["error"],
                                       "titles_on_disk": sorted(stored())})
 
+            vanished = lib.wait_until(
+                lambda: not app_shows(MIND_TITLE), timeout=FRESHNESS_BOUND_S,
+                what="the open window to stop showing an event the mind deleted behind it")
             titles_after, view_after = app_sees()
             probe.check(
-                "and the Calendar app stops showing it",
-                not any(MIND_TITLE in str(t) for t in titles_after),
-                contract=2, evidence={"events_on_selected_day": titles_after,
-                                      "days_with_events": view_after.get("days_with_events"),
-                                      "notice": view_after.get("notice")})
+                "and the open Calendar stops showing it inside %ds, without being navigated"
+                % FRESHNESS_BOUND_S,
+                bool(vanished) and not any(MIND_TITLE in str(t) for t in titles_after),
+                contract=2, evidence=vanished.evidence(
+                    events_on_selected_day=titles_after,
+                    days_with_events=view_after.get("days_with_events"),
+                    notice=view_after.get("notice")))
 
             # ── 6. A delete that cannot happen is said, not fabricated ───────
             #
@@ -328,6 +319,12 @@ def run():
                 cleanup = tool("calendar_delete_event", event_id=str(app_record.get("id")))
                 lib.wait_for(lambda: APP_TITLE not in stored(), timeout=20)
                 probe.note("cleanup_delete", cleanup["text"] or cleanup["error"])
+            while_open_record = stored().get(WHILE_OPEN_TITLE)
+            if while_open_record:
+                cleanup = tool("calendar_delete_event",
+                               event_id=str(while_open_record.get("id")))
+                lib.wait_for(lambda: WHILE_OPEN_TITLE not in stored(), timeout=20)
+                probe.note("cleanup_delete_while_open", cleanup["text"] or cleanup["error"])
 
             # Only what this probe started. A Calendar window the person already had open is
             # theirs, and `open_app` focuses one rather than starting a second.
@@ -353,14 +350,27 @@ def run():
             evidence={"before": probe.notes["processes_before"], "after": leftover})
 
         probe.note("companion_socket_helper", {
-            "where": "local to this probe",
+            "where": "lib.companion_tool",
             "what": "newline-delimited JSON-RPC over %s, calling companion.tool" % COMPANION_SOCK,
-            "should_move_to_lib": True,
-            "why": "lib.py speaks the same framing to every app and service through `yos`, but "
-                   "has nothing for the companion's own socket. The second probe that wants to "
-                   "run one of the mind's tools without a language model should find it there "
-                   "rather than write this again — the two copies of verify_calendar.py are why "
-                   "lib.py exists.",
+            "moved": "it was local to this probe. probes/calendar.py is the second caller, which "
+                     "is the condition the old note set for moving it — the two copies of "
+                     "verify_calendar.py are why lib.py exists.",
+        })
+
+        probe.note("how_the_window_follows_the_store", {
+            "bound_asserted_s": FRESHNESS_BOUND_S,
+            "mechanism": "calendar-service answers `calendar.revision` — the event count and the "
+                         "newest modification time under the store — and the app asks it before "
+                         "every describe and on a twenty-second timer while its window is "
+                         "visible, re-listing the month only when the token has moved.",
+            "what_this_probe_no_longer_does": "step the month forward and back before every read. "
+                                              "`refresh` re-read only when the visible range "
+                                              "changed, so that was the cheapest way to change it "
+                                              "twice — and it made every check here a check of "
+                                              "the app after being prodded.",
+            "what_would_show_the_check_before_describe_had_stopped_working":
+                "a wait that settles between %ds and about 25s: that is the timer answering "
+                "rather than the revision check." % FRESHNESS_BOUND_S,
         })
 
 

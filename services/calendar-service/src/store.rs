@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDateTime;
 use yantrik_ipc_contracts::calendar::{
-    CalendarEvent, CreateEventParams, EventsParams, UpdateEventParams, UpsertRemoteEventParams,
+    CalendarEvent, CalendarRevision, CreateEventParams, EventsParams, UpdateEventParams,
+    UpsertRemoteEventParams,
 };
 use yantrik_ipc_contracts::email::ServiceError;
 
@@ -30,6 +31,20 @@ pub fn parse_iso_datetime(s: &str) -> Option<NaiveDateTime> {
         return d.and_hms_opt(0, 0, 0);
     }
     None
+}
+
+/// A path's modification time in nanoseconds since the Unix epoch, or 0 when it has none.
+///
+/// Zero for anything unreadable rather than an error: this feeds [`EventStore::revision`], whose
+/// whole job is to be the cheapest question on the socket, and a filesystem that will not report a
+/// time is a reason to fall back to the event count, not a reason to fail.
+fn modified_nanos(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 /// The events on disk.
@@ -87,6 +102,36 @@ impl EventStore {
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
             .filter_map(|p| self.read_event(&p))
             .collect()
+    }
+
+    /// What the store is at: how many events it holds, and the newest modification time under it.
+    ///
+    /// The question an open window asks instead of re-listing a month. It stats, it does not
+    /// read: parsing every file to answer "has anything changed" would cost more than the listing
+    /// it exists to avoid. The directory's own time is in the maximum because creating or removing
+    /// an event touches the directory rather than any surviving file, and every file's is in it
+    /// because editing one touches only that file.
+    ///
+    /// A missing directory is a calendar with nothing in it rather than an error, the same rule
+    /// [`Self::list`] follows — and the token it answers with is the same one an empty directory
+    /// gives, so the first event stored moves it.
+    ///
+    /// Reading never changes it. That is the property a caller polling this depends on, and the
+    /// reason nothing here writes, touches or creates anything.
+    pub fn revision(&self) -> CalendarRevision {
+        let mut newest = modified_nanos(&self.dir);
+        let mut events = 0u64;
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                events += 1;
+                newest = newest.max(modified_nanos(&path));
+            }
+        }
+        CalendarRevision { events, newest_nanos: newest }
     }
 
     /// The stored event carrying this remote id, if the machine has already seen it.

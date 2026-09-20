@@ -32,6 +32,7 @@ import pathlib
 import runpy
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -195,6 +196,85 @@ def state(app):
 def actions(app):
     """The action names an app publishes."""
     return [a.get("name") for a in describe(app).get("actions") or [] if isinstance(a, dict)]
+
+
+# ── Talking to the mind ──────────────────────────────────────────────────────
+#
+# `yos` reaches apps and services. The companion is neither: it runs on a worker thread inside
+# the shell and serves its own socket, and `companion.tool {name, args}` runs one of the mind's
+# tools by name with no language model in the loop. That distinction is the point — a probe that
+# went through a conversation would be measuring a model's willingness to pick the tool rather
+# than the tool.
+#
+# This lived in `probes/one-calendar.py` while it had one caller. It is here now because the
+# calendar has a second, and because `C:\Users\sync\tour-frames\wake.py` has been framing the
+# same socket by hand for the same reason. Two copies of verify_calendar.py are why lib.py exists.
+
+COMPANION_SOCK = SOCKET_DIR / "companion.sock"
+
+
+class CompanionUnreachable(RuntimeError):
+    """The shell is not serving the companion, so none of the mind's tools can be run."""
+
+
+def companion_call(method, params, timeout=180):
+    """One newline-delimited JSON-RPC round trip to `companion.sock`.
+
+    The framing is the one every service on this machine uses: one JSON object, one newline, one
+    JSON object back. The timeout is generous because the companion worker is a single lane — a
+    tool call arriving while an answer is being generated waits for the whole answer.
+    """
+    if not COMPANION_SOCK.exists():
+        raise CompanionUnreachable("no %s on this machine" % COMPANION_SOCK)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(str(COMPANION_SOCK))
+        request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        sock.sendall((request + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as exc:
+        raise CompanionUnreachable("%s: %s" % (COMPANION_SOCK, exc))
+    finally:
+        sock.close()
+    if not buf.strip():
+        raise CompanionUnreachable("the companion closed the connection without answering")
+    return json.loads(buf.decode("utf-8", "replace"))
+
+
+def companion_tool(name, args=None, timeout=180, tool_timeout_ms=90_000):
+    """Run one of the mind's tools by name. Always a dict, whichever way it went.
+
+        text     str          what the tool said
+        error    str or None  why it could not be run at all
+
+    A tool that refuses says so in `text`: these tools answer prose, which is what they were
+    written to do, and the refusal is the thing under test. `error` is the transport or the
+    registry — no such tool, the worker gone, no socket on this machine — and a check written
+    against `text` must look at `error` first or it will read "the shell is not running" as
+    "the tool declined".
+    """
+    try:
+        reply = companion_call(
+            "companion.tool",
+            {"name": name, "args": args or {}, "timeout_ms": tool_timeout_ms},
+            timeout=timeout,
+        )
+    except CompanionUnreachable as exc:
+        return {"text": "", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - a crash here is a result, not a stack trace
+        return {"text": "", "error": "%s: %s" % (type(exc).__name__, exc)}
+    if isinstance(reply, dict) and reply.get("error"):
+        message = reply["error"]
+        return {"text": "",
+                "error": message.get("message") if isinstance(message, dict) else str(message)}
+    result = (reply or {}).get("result") or {}
+    return {"text": str(result.get("result", "")), "error": None}
 
 
 # ── Processes and windows ────────────────────────────────────────────────────
