@@ -1,48 +1,55 @@
-//! Network service — reads /proc for interface stats, connectivity, and DNS.
+//! Network service — interfaces, connectivity and resolvers from `/proc`, Wi-Fi and the firewall
+//! from the tools this OS ships.
 //!
-//! This service is Linux-only (reads /proc, /etc/resolv.conf). On non-Unix
-//! platforms it compiles but returns stub data for development purposes.
+//! Methods, all of them named by `yantrik_ipc_contracts::network::method` rather than spelled out
+//! here, because a list in a doc comment is exactly what the app's five calls disagreed with:
 //!
-//! Methods:
-//!   network.interfaces  {}  -> Vec<NetworkInterfaceInfo>
-//!   network.status      {}  -> NetworkStatus
-//!   network.dns         {}  -> DnsConfig
+//! ```text
+//!   network.interfaces     {}                        -> Vec<NetworkInterfaceInfo>
+//!   network.status         {}                        -> NetworkStatus
+//!   network.dns            {}                        -> DnsConfig
+//!   network.wifi_state     {}                        -> WifiState
+//!   network.wifi_known     {}                        -> Vec<KnownNetwork>
+//!   network.firewall       {}                        -> FirewallState
+//!   network.wifi_radio     { enabled }               -> WifiState      (re-read)
+//!   network.wifi_scan      { rescan }                -> Vec<ScannedNetwork>
+//!   network.wifi_connect   { ssid, password? }       -> WifiState      (re-read)
+//!   network.wifi_disconnect{}                        -> WifiState      (re-read)
+//!   network.wifi_forget    { ssid }                  -> WifiForgetResult (re-read)
+//! ```
+//!
+//! # The half that was never written
+//!
+//! `apps/network-manager` called `network.wifi_toggle`, `network.wifi_scan`,
+//! `network.wifi_connect`, `network.wifi_disconnect` and `network.wifi_forget`. This service
+//! implemented `network.interfaces`, `network.status` and `network.dns` and answered everything
+//! else `Unknown method`. Not one name in common. The read half was repaired in an earlier pass —
+//! the window used to show "Not connected" on a machine with a routable address because nothing
+//! ever asked — and the write half was left exactly as it was, five verbs into a wall.
+//!
+//! The six write and read methods below are that half. Every one of them re-reads the machine
+//! after it acts and answers with what it then saw, and returns nmcli's own first line of stderr
+//! when it failed. An action that cannot be verified is an error, not a success: `wifi_radio`
+//! with the radio still off afterwards fails, rather than reporting the request back as a result.
+//!
+//! # No secret reaches a log line
+//!
+//! The one method that takes a password hands it to nmcli on stdin (see `nmcli::run_with_secret`)
+//! and never puts it in `argv`, in an error, or in a trace. `WifiConnectParams` has a hand-written
+//! `Debug` so that a `{:?}` cannot leak it either.
 
-use serde::{Deserialize, Serialize};
+mod firewall;
+mod nmcli;
+
 use yantrik_ipc_contracts::control_surface::{describe_json, Action, View};
-use yantrik_ipc_contracts::network::*;
+use yantrik_ipc_contracts::network::{
+    method, ConnectionType, DnsConfig, FirewallState, KnownNetwork, NetworkInterfaceInfo,
+    NetworkStatus, RadioState, ScannedNetwork, WifiConnectParams, WifiForgetParams,
+    WifiForgetResult, WifiRadioParams, WifiScanParams, WifiState,
+};
 use yantrik_service_sdk::prelude::*;
 
-// ── Response types (not in contracts yet) ──────────────────────────────
-
-/// Extended interface info combining /proc/net/dev stats with ip-addr metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkInterfaceInfo {
-    pub name: String,
-    pub mac_address: String,
-    pub ip_address: Option<String>,
-    pub rx_bytes: u64,
-    pub tx_bytes: u64,
-    pub state: String,
-    pub conn_type: ConnectionType,
-}
-
-/// Overall connectivity status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkStatus {
-    pub connected: bool,
-    #[serde(rename = "type")]
-    pub conn_type: String,
-    pub ssid: Option<String>,
-    pub ip_address: Option<String>,
-}
-
-/// DNS resolver configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DnsConfig {
-    pub nameservers: Vec<String>,
-    pub search_domains: Vec<String>,
-}
+use nmcli::Trouble;
 
 fn main() {
     ServiceBuilder::new("network")
@@ -52,6 +59,20 @@ fn main() {
 
 struct NetworkHandler;
 
+/// Read the parameters of one method, naming the method when they do not fit.
+///
+/// The same helper calendar-service grew for the same reason: a caller that sends the wrong shape
+/// hears which method rejected it, instead of the request quietly deserialising to a default.
+fn params_for<T: serde::de::DeserializeOwned>(
+    method_name: &str,
+    params: serde_json::Value,
+) -> Result<T, ServiceError> {
+    serde_json::from_value(params).map_err(|e| ServiceError {
+        code: -32602,
+        message: format!("{method_name}: {e}"),
+    })
+}
+
 impl ServiceHandler for NetworkHandler {
     fn service_id(&self) -> &str {
         "network"
@@ -59,47 +80,445 @@ impl ServiceHandler for NetworkHandler {
 
     fn handle(
         &self,
-        method: &str,
-        _params: serde_json::Value,
+        method_name: &str,
+        params: serde_json::Value,
     ) -> Result<serde_json::Value, ServiceError> {
-        match method {
-            "network.interfaces" => {
-                let ifaces = read_interfaces()?;
-                Ok(serde_json::to_value(ifaces).unwrap())
+        match method_name {
+            method::INTERFACES => Ok(serde_json::to_value(read_interfaces()?).unwrap()),
+            method::STATUS => Ok(serde_json::to_value(read_status()?).unwrap()),
+            method::DNS => Ok(serde_json::to_value(read_dns()?).unwrap()),
+            method::WIFI_STATE => Ok(serde_json::to_value(wifi_state()).unwrap()),
+            method::WIFI_KNOWN => Ok(serde_json::to_value(wifi_known()?).unwrap()),
+            method::FIREWALL => Ok(serde_json::to_value(firewall_state()).unwrap()),
+
+            method::WIFI_RADIO => {
+                let p: WifiRadioParams = params_for(method_name, params)?;
+                Ok(serde_json::to_value(wifi_radio(p.enabled)?).unwrap())
             }
-            "network.status" => {
-                let status = read_status()?;
-                Ok(serde_json::to_value(status).unwrap())
+            method::WIFI_SCAN => {
+                let p: WifiScanParams = params_for(method_name, params)?;
+                Ok(serde_json::to_value(wifi_scan(p.rescan)?).unwrap())
             }
-            "network.dns" => {
-                let dns = read_dns()?;
-                Ok(serde_json::to_value(dns).unwrap())
+            method::WIFI_CONNECT => {
+                let p: WifiConnectParams = params_for(method_name, params)?;
+                Ok(serde_json::to_value(wifi_connect(&p)?).unwrap())
             }
-            // The agent-facing surface: connectivity, interfaces and resolvers in one read, so
-            // "am I online, and how" is answerable without a screenshot of the network applet.
+            method::WIFI_DISCONNECT => Ok(serde_json::to_value(wifi_disconnect()?).unwrap()),
+            method::WIFI_FORGET => {
+                let p: WifiForgetParams = params_for(method_name, params)?;
+                Ok(serde_json::to_value(wifi_forget(&p.ssid)?).unwrap())
+            }
+
             "app.describe" => Ok(describe_json("network", &describe_view()?, &network_actions())),
             _ => Err(ServiceError {
                 code: -1,
-                message: format!("Unknown method: {method}"),
+                message: format!("Unknown method: {method_name}"),
             }),
         }
     }
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// Failures, as codes a caller can branch on
+// ══════════════════════════════════════════════════════════════════════
+
+/// One code per distinguishable trouble, so a caller does not have to read English to tell a
+/// missing adapter from a wrong password. The sentence is nmcli's wherever nmcli wrote one.
+fn service_error(trouble: &Trouble) -> ServiceError {
+    let code = match trouble {
+        Trouble::NmcliMissing => -32020,
+        Trouble::NmcliUnstartable(_) => -32021,
+        Trouble::NetworkManagerDown => -32022,
+        Trouble::NoWifiAdapter => -32023,
+        Trouble::PermissionDenied(_) => -32024,
+        Trouble::WrongPassword(_) => -32025,
+        Trouble::SsidNotFound(_) => -32026,
+        Trouble::TimedOut(_) => -32027,
+        Trouble::Said(_) => -32028,
+    };
+    ServiceError {
+        code,
+        message: trouble.message(),
+    }
+}
+
+/// A change that ran without error and did not do what it was asked.
+///
+/// `docker rm` exiting zero on a container that is still listed is the same shape of bug, and it
+/// is the one this whole pass exists to remove: an action must not report what it asked for as
+/// what happened.
+fn disagreed(what: &str) -> ServiceError {
+    ServiceError {
+        code: -32029,
+        message: what.to_string(),
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Wi-Fi
+// ══════════════════════════════════════════════════════════════════════
+
+/// Whether this machine has a Wi-Fi adapter, read from the kernel rather than from nmcli.
+///
+/// `/sys/class/net/<iface>/wireless` exists for a wireless interface and for nothing else. Asked
+/// here rather than of NetworkManager because it answers on a machine where NetworkManager is not
+/// running, is not installed, or has the device marked unmanaged — and "there is no adapter" and
+/// "I could not ask" are the two answers that must never be confused. It is also exactly the test
+/// `tests/conformance/probes/network-manager.py` uses for its own ground truth, so the app and the
+/// probe are reading the same thing.
+fn wifi_adapter_name() -> Option<String> {
+    let entries = std::fs::read_dir("/sys/class/net").ok()?;
+    let mut found: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let wireless = e.path().join("wireless");
+            wireless.exists().then_some(name)
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+/// The device list, or the trouble that stopped it being read.
+fn devices() -> Result<Vec<nmcli::Device>, Trouble> {
+    let exit = nmcli::run(
+        nmcli::QUICK_WAIT_SECS,
+        &["-t", "-f", nmcli::DEVICE_FIELDS, "device", "status"],
+    );
+    nmcli::outcome(&exit).map(|text| nmcli::parse_devices(&text))
+}
+
+/// Everything the window and `describe` say about Wi-Fi, gathered once.
+///
+/// Never returns an error. The absence of an adapter, an absent nmcli and a stopped
+/// NetworkManager are all *states of this machine* worth reporting, and turning them into a
+/// failed read would put the app back where it started: a blank pane and a default drawn as a
+/// fact.
+fn wifi_state() -> WifiState {
+    let adapter = wifi_adapter_name();
+    let Some(device_name) = adapter else {
+        return WifiState {
+            adapter_present: false,
+            reason: Some(Trouble::NoWifiAdapter.message()),
+            ..WifiState::default()
+        };
+    };
+
+    let mut state = WifiState {
+        adapter_present: true,
+        device: Some(device_name.clone()),
+        radio: RadioState::Unknown,
+        ..WifiState::default()
+    };
+
+    let device_rows = match devices() {
+        Ok(rows) => rows,
+        Err(trouble) => {
+            // The adapter is in the machine and its state could not be read. Both halves are
+            // said: `adapter_present` stays true, and the radio stays `unknown` rather than
+            // becoming the `false` this app used to draw.
+            state.reason = Some(trouble.message());
+            return state;
+        }
+    };
+
+    state.radio = match nmcli::outcome(&nmcli::run(nmcli::QUICK_WAIT_SECS, &["-t", "radio", "wifi"]))
+    {
+        Ok(text) => match nmcli::parse_radio(&text) {
+            Some(true) => RadioState::On,
+            Some(false) => RadioState::Off,
+            None => RadioState::Unknown,
+        },
+        Err(trouble) => {
+            state.reason = Some(trouble.message());
+            RadioState::Unknown
+        }
+    };
+
+    let device = nmcli::wifi_device(&device_rows);
+    // The scan list is read from NetworkManager's cache — no rescan — because this runs on every
+    // three-second refresh and a rescan every three seconds would keep the radio off the air.
+    let scanned = read_scan_cached(&[]).unwrap_or_default();
+    state.connected_ssid = nmcli::connected_ssid(&scanned, device);
+    if let Some(row) = scanned.iter().find(|n| n.is_connected) {
+        state.signal = Some(row.signal);
+        if !row.rate.is_empty() {
+            state.rate = Some(row.rate.clone());
+        }
+    }
+
+    if let Ok(text) = nmcli::outcome(&nmcli::run(
+        nmcli::QUICK_WAIT_SECS,
+        &["-t", "-f", nmcli::DEVICE_SHOW_FIELDS, "device", "show", device_name.as_str()],
+    )) {
+        let detail = nmcli::parse_device_show(&text);
+        state.ip_address = detail.address;
+        state.gateway = detail.gateway;
+        state.subnet = detail.prefix.and_then(nmcli::prefix_to_mask);
+    }
+
+    state
+}
+
+/// The saved SSIDs, as plain strings, for marking the scan list.
+fn saved_ssids() -> Vec<String> {
+    wifi_known()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|k| k.ssid)
+        .collect()
+}
+
+/// NetworkManager's cached access-point list, with no rescan.
+///
+/// `saved` is passed in rather than read here so the caller decides whether the extra
+/// `nmcli connection show` is worth it. It is, for the list the window draws, which marks the
+/// rows that will be joined without a password; it is not for [`wifi_state`], which runs on every
+/// three-second refresh and wants only the in-use row.
+fn read_scan_cached(saved: &[String]) -> Result<Vec<ScannedNetwork>, Trouble> {
+    let exit = nmcli::run(
+        nmcli::QUICK_WAIT_SECS,
+        &["-t", "-f", nmcli::SCAN_FIELDS, "device", "wifi", "list"],
+    );
+    let text = nmcli::outcome(&exit)?;
+    Ok(nmcli::parse_scan(&text, saved))
+}
+
+/// The SSID one Wi-Fi device is joined to, in as few calls as it takes.
+///
+/// [`read_status`] is on the same three-second path and needs nothing else about the radio, so it
+/// asks this rather than building a whole [`WifiState`]. What it replaces returned `None`
+/// unconditionally under a comment saying a future version could use nl80211 — so the header said
+/// "WiFi" and never which network, on the one screen whose job is to say which network.
+fn connected_ssid_for(device: &str) -> Option<String> {
+    let rows = read_scan_cached(&[]).unwrap_or_default();
+    if let Some(row) = rows.iter().find(|n| n.is_connected) {
+        if !row.ssid.is_empty() {
+            return Some(row.ssid.clone());
+        }
+    }
+    // No in-use row in the scan cache: fall back to the profile name on the device, which is the
+    // SSID for a profile NetworkManager made and is not for one somebody renamed.
+    let text = nmcli::outcome(&nmcli::run(
+        nmcli::QUICK_WAIT_SECS,
+        &["-t", "-f", "GENERAL.CONNECTION", "device", "show", device],
+    ))
+    .ok()?;
+    nmcli::parse_device_show(&text).connection
+}
+
+fn wifi_known() -> Result<Vec<KnownNetwork>, ServiceError> {
+    let exit = nmcli::run(
+        nmcli::QUICK_WAIT_SECS,
+        &["-t", "-f", nmcli::CONNECTION_FIELDS, "connection", "show"],
+    );
+    nmcli::outcome(&exit)
+        .map(|text| nmcli::parse_known(&text))
+        .map_err(|t| service_error(&t))
+}
+
+/// The adapter, or a refusal naming its absence.
+///
+/// Every mutation starts here. A machine with no Wi-Fi hardware refuses before nmcli is run at
+/// all, which is both faster and the only way to give the caller the one sentence that is
+/// actually true about it.
+fn require_adapter() -> Result<String, ServiceError> {
+    wifi_adapter_name().ok_or_else(|| service_error(&Trouble::NoWifiAdapter))
+}
+
+fn wifi_scan(rescan: bool) -> Result<Vec<ScannedNetwork>, ServiceError> {
+    require_adapter()?;
+    if rescan {
+        // A rescan that fails is reported and the cached list is not returned in its place: a
+        // stale list presented as the result of a scan is a small version of the same lie.
+        let exit = nmcli::run(nmcli::SCAN_WAIT_SECS, &["device", "wifi", "rescan"]);
+        nmcli::outcome(&exit).map_err(|t| service_error(&t))?;
+    }
+    // The saved list is read here and not in `wifi_state`: the window's network list marks the
+    // rows that need no password, and this is the one call that wants it.
+    let saved = saved_ssids();
+    read_scan_cached(&saved).map_err(|t| service_error(&t))
+}
+
+fn wifi_radio(enabled: bool) -> Result<WifiState, ServiceError> {
+    require_adapter()?;
+    let word = if enabled { "on" } else { "off" };
+    let exit = nmcli::run(nmcli::QUICK_WAIT_SECS, &["radio", "wifi", word]);
+    nmcli::outcome(&exit).map_err(|t| service_error(&t))?;
+
+    // What the machine says now, not what was asked for.
+    let state = wifi_state();
+    let want = if enabled { RadioState::On } else { RadioState::Off };
+    if state.radio != want {
+        return Err(disagreed(&format!(
+            "nmcli accepted `radio wifi {word}` and the radio reads {} afterwards{}",
+            state.radio.as_str(),
+            state
+                .reason
+                .as_ref()
+                .map(|r| format!(": {r}"))
+                .unwrap_or_default()
+        )));
+    }
+    Ok(state)
+}
+
+/// Join a network. The password, when there is one, never touches `argv`.
+fn wifi_connect(params: &WifiConnectParams) -> Result<WifiState, ServiceError> {
+    require_adapter()?;
+    let ssid = params.ssid.trim();
+    if ssid.is_empty() {
+        return Err(ServiceError {
+            code: -32602,
+            message: "a network name is needed to connect".to_string(),
+        });
+    }
+
+    let exit = match params.password.as_deref().filter(|p| !p.is_empty()) {
+        // `--ask` plus the secret on stdin. The alternative, `… password <pw>`, leaves the
+        // passphrase in /proc/<pid>/cmdline for the twenty-five seconds the connect may run,
+        // readable by every other user on the machine.
+        Some(secret) => nmcli::run_with_secret(
+            nmcli::CONNECT_WAIT_SECS,
+            &["device", "wifi", "connect", ssid],
+            secret,
+        ),
+        // No secret: an open network, or one this machine already has credentials for.
+        None => nmcli::run(
+            nmcli::CONNECT_WAIT_SECS,
+            &["device", "wifi", "connect", ssid],
+        ),
+    };
+    nmcli::outcome(&exit).map_err(|t| service_error(&t))?;
+
+    let state = wifi_state();
+    match state.connected_ssid.as_deref() {
+        Some(joined) if joined == ssid => Ok(state),
+        Some(joined) => Err(disagreed(&format!(
+            "nmcli reported success for \"{ssid}\" and this machine is on \"{joined}\""
+        ))),
+        None => Err(disagreed(&format!(
+            "nmcli reported success for \"{ssid}\" and this machine is not joined to any network"
+        ))),
+    }
+}
+
+fn wifi_disconnect() -> Result<WifiState, ServiceError> {
+    let device = require_adapter()?;
+    let before = wifi_state();
+    if before.connected_ssid.is_none() {
+        return Err(ServiceError {
+            code: -32030,
+            message: "this machine is not joined to a Wi-Fi network".to_string(),
+        });
+    }
+    let exit = nmcli::run(
+        nmcli::QUICK_WAIT_SECS,
+        &["device", "disconnect", device.as_str()],
+    );
+    nmcli::outcome(&exit).map_err(|t| service_error(&t))?;
+
+    let state = wifi_state();
+    if let Some(still) = state.connected_ssid.as_deref() {
+        return Err(disagreed(&format!(
+            "nmcli accepted the disconnect and this machine is still joined to \"{still}\""
+        )));
+    }
+    Ok(state)
+}
+
+/// Delete a saved network.
+///
+/// Refused for the network this machine is currently joined to. `nmcli connection delete` on the
+/// active profile takes the link down as a side effect, which would make a `sensitive` action do
+/// a `dangerous` thing without saying so. Disconnect first, deliberately, and then forget.
+fn wifi_forget(ssid: &str) -> Result<WifiForgetResult, ServiceError> {
+    require_adapter()?;
+    let ssid = ssid.trim();
+    let known = wifi_known()?;
+    let Some(entry) = known.iter().find(|k| k.ssid == ssid) else {
+        return Err(ServiceError {
+            code: -32031,
+            message: format!("this machine has no saved network called \"{ssid}\""),
+        });
+    };
+    if entry.is_active {
+        return Err(ServiceError {
+            code: -32032,
+            message: format!(
+                "\"{ssid}\" is the network this machine is using; deleting it would take the \
+                 connection down. Disconnect first, then forget it."
+            ),
+        });
+    }
+
+    let exit = nmcli::run(
+        nmcli::QUICK_WAIT_SECS,
+        &["connection", "delete", "uuid", entry.uuid.as_str()],
+    );
+    nmcli::outcome(&exit).map_err(|t| service_error(&t))?;
+
+    let after = wifi_known()?;
+    if after.iter().any(|k| k.ssid == ssid) {
+        return Err(disagreed(&format!(
+            "nmcli accepted the delete and \"{ssid}\" is still in the saved list"
+        )));
+    }
+    Ok(WifiForgetResult {
+        forgotten: ssid.to_string(),
+        known: after,
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Firewall
+// ══════════════════════════════════════════════════════════════════════
+
+/// Which firewall is on this machine and what it is doing — read, never assumed.
+///
+/// Like [`wifi_state`] this never fails: "there is no firewall tool here" and "I was not allowed
+/// to read the ruleset" are both answers, and the one thing that must not come back is a
+/// confident `false`.
+fn firewall_state() -> FirewallState {
+    for (kind, binary) in firewall::CANDIDATES {
+        let exit = match kind {
+            "nftables" => firewall::run(binary, &["list", "ruleset"]),
+            "ufw" => firewall::run(binary, &["status", "verbose"]),
+            _ => firewall::run(binary, &["--state"]),
+        };
+        // A tool that is not installed is not this machine's firewall; try the next one.
+        if matches!(exit, nmcli::Exit::Missing) {
+            continue;
+        }
+        return match kind {
+            "nftables" => firewall::read_nftables(&exit),
+            "ufw" => firewall::read_ufw(&exit),
+            _ => firewall::read_firewalld(&exit),
+        };
+    }
+    // None of the three is installed. `absent`, with the list of what was looked for, comes back
+    // from any of the three readers given a `Missing`; nftables is asked for the sentence.
+    firewall::read_nftables(&nmcli::Exit::Missing)
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // Control surface (app.describe)
 // ══════════════════════════════════════════════════════════════════════
 
-/// Connectivity as data: the one-line "am I online, and how", plus interfaces and resolvers.
+/// Connectivity as data: "am I online, and how", plus interfaces, resolvers, Wi-Fi and firewall.
 ///
-/// Reading is the whole job here. Changing the connection — joining a wifi network, bringing a
-/// link up or down — is not implemented in this service yet, so no actions are advertised: an
-/// empty action list is the honest statement that this surface is read-only, and it is better
-/// than offering a verb that would fail.
+/// Read-only, deliberately. The verbs live on the Network Manager app's own surface (`app-network`
+/// — `apps/network-manager/src/main.rs`), where they are graded, where a refusal reaches a person
+/// on screen as well as the caller, and where there is exactly one path behind each button. A
+/// service that published the same verbs unstated would be a second way into the same domain,
+/// which is the split this fleet has been closing everywhere else.
 fn describe_view() -> Result<View, ServiceError> {
     let status = read_status()?;
     let ifaces = read_interfaces().unwrap_or_default();
     let dns = read_dns().ok();
+    let wifi = wifi_state();
+    let fw = firewall_state();
 
     let summary = if status.connected {
         let where_ = status.ssid.clone().unwrap_or_else(|| status.conn_type.clone());
@@ -116,7 +535,7 @@ fn describe_view() -> Result<View, ServiceError> {
         .map(|i| {
             serde_json::json!({
                 "name": i.name,
-                "type": conn_type_str(&i.conn_type),
+                "type": i.conn_type.as_str(),
                 "state": i.state,
                 "ip": i.ip_address,
                 "mac": i.mac_address,
@@ -129,7 +548,9 @@ fn describe_view() -> Result<View, ServiceError> {
         .with("type", status.conn_type)
         .with("ssid", status.ssid.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
         .with("ip_address", status.ip_address.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
-        .with("interfaces", serde_json::Value::Array(interfaces));
+        .with("interfaces", serde_json::Value::Array(interfaces))
+        .with("wifi", serde_json::to_value(&wifi).unwrap_or(serde_json::Value::Null))
+        .with("firewall", serde_json::to_value(&fw).unwrap_or(serde_json::Value::Null));
     if let Some(dns) = dns {
         view = view
             .with("nameservers", serde_json::json!(dns.nameservers))
@@ -138,20 +559,10 @@ fn describe_view() -> Result<View, ServiceError> {
     Ok(view)
 }
 
-/// This surface is read-only for now; see the note on `describe_view`.
+/// See the note on [`describe_view`]: an empty action list is the honest statement that this
+/// socket is for reading, and that the verbs are published by the app.
 fn network_actions() -> Vec<Action> {
     Vec::new()
-}
-
-/// The connection type as the short word the rest of the UI uses.
-fn conn_type_str(t: &ConnectionType) -> &'static str {
-    match t {
-        ConnectionType::Wifi => "wifi",
-        ConnectionType::Ethernet => "ethernet",
-        ConnectionType::Vpn => "vpn",
-        ConnectionType::Bridge => "bridge",
-        ConnectionType::Other(_) => "other",
-    }
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -224,23 +635,17 @@ mod platform {
 
         for iface in &interfaces {
             if iface.state == "up" && iface.ip_address.is_some() {
-                let type_str = match &iface.conn_type {
-                    ConnectionType::Wifi => "wifi",
-                    ConnectionType::Ethernet => "ethernet",
-                    ConnectionType::Vpn => "vpn",
-                    ConnectionType::Bridge => "bridge",
-                    ConnectionType::Other(_) => "other",
-                };
-
+                // Read through NetworkManager now, rather than the `None` the stub this replaces
+                // returned for every machine. See `connected_ssid_for`.
                 let ssid = if matches!(iface.conn_type, ConnectionType::Wifi) {
-                    read_wifi_ssid(&iface.name)
+                    super::connected_ssid_for(&iface.name)
                 } else {
                     None
                 };
 
                 return Ok(NetworkStatus {
                     connected: true,
-                    conn_type: type_str.to_string(),
+                    conn_type: iface.conn_type.as_str().to_string(),
                     ssid,
                     ip_address: iface.ip_address.clone(),
                 });
@@ -297,9 +702,8 @@ mod platform {
     fn detect_interface_type(name: &str) -> ConnectionType {
         // Check sysfs type field (1 = ethernet, 801 = wifi, etc.)
         if let Ok(content) = std::fs::read_to_string(format!("/sys/class/net/{name}/type")) {
-            match content.trim() {
-                "801" => return ConnectionType::Wifi,
-                _ => {}
+            if content.trim() == "801" {
+                return ConnectionType::Wifi;
             }
         }
 
@@ -327,28 +731,13 @@ mod platform {
         }
     }
 
-    /// Try to read the IP address for an interface from /proc/net/fib_trie or
-    /// by parsing the output format of ip-addr. We use /proc/net/if_inet6 and
-    /// a simpler /proc-based approach to avoid shelling out.
+    /// The interface's IPv4 address, via `SIOCGIFADDR`, without shelling out.
     fn read_interface_ip(name: &str) -> Option<String> {
-        // Try reading from /proc/net/fib_trie — parse is complex, so we use
-        // a simpler approach: read the route table for interface-specific IPs.
-        let content = std::fs::read_to_string("/proc/net/fib_trie").ok()?;
-
-        // The fib_trie format is complex; use a simpler fallback:
-        // Read /proc/net/route to find the interface, then try to get its
-        // configured address from the ioctl-less /sys approach.
-        // Actually, the cleanest /proc-only approach is to parse
-        // /proc/net/if_inet6 for IPv6 or use SIOCGIFADDR via libc.
-        drop(content);
-
-        // Use libc ioctl to get IPv4 address without shelling out
         get_ipv4_addr(name)
     }
 
     /// Get IPv4 address for an interface using libc ioctl.
     fn get_ipv4_addr(iface_name: &str) -> Option<String> {
-        use std::ffi::CString;
         use std::mem;
         use std::os::unix::io::RawFd;
 
@@ -387,15 +776,6 @@ mod platform {
         let ip = sin.sin_addr.s_addr.to_ne_bytes();
         Some(format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]))
     }
-
-    /// Try to read the current WiFi SSID from /proc/net/wireless or iwconfig.
-    fn read_wifi_ssid(iface: &str) -> Option<String> {
-        // Try reading from /proc — limited info available without iw/iwconfig.
-        // As a fallback, try to read the wireless essid via ioctl.
-        // For now, return None; a future version can use nl80211.
-        let _ = iface;
-        None
-    }
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -411,19 +791,11 @@ mod platform {
     }
 
     pub fn read_status() -> Result<NetworkStatus, ServiceError> {
-        Ok(NetworkStatus {
-            connected: false,
-            conn_type: "none".to_string(),
-            ssid: None,
-            ip_address: None,
-        })
+        Ok(NetworkStatus::default())
     }
 
     pub fn read_dns() -> Result<DnsConfig, ServiceError> {
-        Ok(DnsConfig {
-            nameservers: Vec::new(),
-            search_domains: Vec::new(),
-        })
+        Ok(DnsConfig::default())
     }
 }
 

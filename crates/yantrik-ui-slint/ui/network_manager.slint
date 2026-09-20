@@ -1,5 +1,11 @@
-// Network Manager — comprehensive network settings app.
-// Screen 22. Six tabs: WiFi, Ethernet, Bluetooth, VPN, Firewall, Diagnostics.
+// Network Manager — how this machine is connected, and changing it.
+//
+// Three sections: Wi-Fi, Ethernet, Firewall. There were six, and 2506 lines of this file were
+// driven by 235 of Rust. Bluetooth, VPN and Diagnostics drew panes for eighteen callbacks whose
+// whole bodies were `tracing::info!`, and the Firewall pane drew a toggle, three profile buttons
+// and an allow/block port box over four more. They are gone; what is left is backed by
+// services/network-service and by nmcli underneath it, and every reading on this screen is set
+// from Rust. design/network-2026-09-20.md is the account of what was wrong.
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
@@ -30,48 +36,18 @@ export struct EthernetInterface {
     dns: string,
 }
 
-export struct BluetoothDevice {
-    name: string,
-    address: string,      // MAC
-    device-type: string,  // "headphones", "keyboard", "mouse", "phone", "speaker", "unknown"
-    is-paired: bool,
-    is-connected: bool,
-}
-
-export struct VpnConnection {
-    name: string,
-    vpn-type: string,     // "WireGuard", "OpenVPN"
-    status: string,       // "connected", "disconnected"
-    ip-address: string,
-    traffic: string,      // "1.2 GB / 340 MB"
-}
+// BluetoothDevice, VpnConnection, DiagTestResult, ConnectionEvent and NetAIProviderStatus stood
+// here. Nothing ever filled any of them: their five, three and five handlers were `tracing::info!`
+// and nothing else, and a row type with no producer is a promise the screen keeps making on the
+// app's behalf. They are gone with the panes that drew them.
 
 export struct FirewallRule {
-    id: int,
-    description: string,  // "tcp/22 ACCEPT", "DROP 10.0.0.5"
-    chain: string,        // "INPUT", "OUTPUT", "FORWARD"
-    action: string,       // "ACCEPT", "DROP", "REJECT"
-}
-
-export struct DiagTestResult {
-    name: string,         // "Gateway", "DNS", "Internet"
-    status: string,       // "ok", "fail", "running", "idle"
-    latency: string,      // "12ms" or "unreachable" or ""
-}
-
-export struct ConnectionEvent {
-    description: string,  // "WiFi connected to HomeNet"
-    timestamp: string,    // "14:32:05"
-}
-
-export struct NetAIProviderStatus {
-    name: string,
-    provider-type: string,
-    base-url: string,
-    status: string,       // "reachable", "unreachable", "testing"
-    latency-ms: int,      // -1 = unknown
-    is-primary: bool,
-    is-fallback: bool,
+    // The firewall's own words for the rule, not ours. A person comparing this pane against
+    // `nft list ruleset` has to see the same text; rewording it would make the screen a second,
+    // less reliable account of the machine.
+    description: string,  // "tcp dport 22 accept"
+    chain: string,        // "input", "forward", "ufw"
+    action: string,       // "accept", "drop", "reject", "unknown"
 }
 
 // ── Signal bar component ──
@@ -216,11 +192,32 @@ export component NetworkManager inherits Rectangle {
 
     background: Theme.bg-deep;
 
-    // Active tab: 0=WiFi, 1=Ethernet, 2=Bluetooth, 3=VPN, 4=Firewall, 5=Diagnostics
+    // Active tab: 0=Wi-Fi, 1=Ethernet, 2=Firewall.
+    //
+    // There were six. Bluetooth, VPN and Diagnostics are gone, with their eighteen handlers:
+    // every one of them logged a line and returned, and a screen that draws a pairing list
+    // nothing can pair is worse than a screen that does not offer to. See
+    // design/network-2026-09-20.md for what each would need to come back.
     in-out property <int> active-tab: 0;
 
-    // WiFi state
-    in property <bool> wifi-enabled: false;
+    // ── What went wrong on the last thing this app was asked to do ──
+    //
+    // Empty when nothing is wrong. Rendered as a strip under the header, and carried in the
+    // app's `describe` as `notice`, so a person and a mind read the same failure. Three of this
+    // app's five Wi-Fi calls used to go into a `let _ =` and there was nowhere for a failure to
+    // be said even if one had been noticed.
+    in property <string> notice: "";
+
+    // ── Wi-Fi state ──
+    //
+    // `wifi-enabled` stood here as `in property <bool>` that Rust never wrote, so the window drew
+    // "Wi-Fi: Off" on a machine that has no Wi-Fi adapter in it. Three properties in its place,
+    // because there are three answers and a bool holds two: is there an adapter at all, what is
+    // the radio doing, and — when the answer is thin — why.
+    in property <bool> wifi-adapter-present: false;
+    // "on", "off", "unknown". Never blank: unknown is a value, not an absence.
+    in property <string> wifi-radio: "unknown";
+    in property <string> wifi-state-reason: "";
     in property <string> wifi-current-ssid: "";
     in property <int> wifi-signal-strength: 0;
     in property <string> wifi-ip-address: "";
@@ -238,21 +235,23 @@ export component NetworkManager inherits Rectangle {
     // Ethernet state
     in property <[EthernetInterface]> ethernet-interfaces: [];
 
-    // Bluetooth state
-    in property <bool> bt-enabled: false;
-    in property <[BluetoothDevice]> bt-paired-devices: [];
-    in property <[BluetoothDevice]> bt-available-devices: [];
-    in property <bool> bt-scanning: false;
-
-    // VPN state
-    in property <[VpnConnection]> vpn-connections: [];
-
-    // Firewall state
-    in property <bool> firewall-enabled: false;
+    // ── Firewall state ──
+    //
+    // `firewall-enabled: false` was the other unset `in` property, drawn as
+    // `firewall-enabled ? "{rule-count} rules" : "Off"` in warning colour — and an audit of this
+    // OS recorded "Firewall: Off" as a security finding about a machine nothing had looked at.
+    // A word rather than a bool, because "no firewall tool is installed", "it is installed and
+    // not filtering" and "I was not allowed to read the ruleset" are three different statements
+    // and only the middle one is "off".
+    //
+    // "active", "inactive", "absent", "unknown".
+    in property <string> firewall-state: "unknown";
     in property <string> firewall-backend-name: "";
-    in property <int> firewall-rule-count: 0;
+    // -1 when the count is not known, which includes an active firewall whose ruleset could not
+    // be read. Zero is a count that was taken.
+    in property <int> firewall-rule-count: -1;
     in property <[FirewallRule]> firewall-rules: [];
-    in property <string> firewall-profile: "Custom";
+    in property <string> firewall-reason: "";
 
     // WiFi connection details (expandable section)
     in property <string> wifi-gateway: "";
@@ -260,59 +259,23 @@ export component NetworkManager inherits Rectangle {
     in property <string> wifi-subnet: "";
     in-out property <bool> wifi-details-expanded: false;
 
-    // Diagnostics state
-    in property <[DiagTestResult]> diag-tests: [];
-    in property <[ConnectionEvent]> diag-connection-history: [];
-
-    // AI Provider Connectivity
-    in property <[NetAIProviderStatus]> ai-provider-connectivity: [];
-    in property <bool> ai-connectivity-testing: false;
-
     // Status bar (shown on all tabs)
     in property <string> status-connection-type: "";   // "WiFi", "Ethernet", ""
     in property <string> status-ip-address: "";
     in property <int> status-signal-strength: 0;        // 0-100, for WiFi
     in property <string> status-state: "disconnected";  // "connected", "disconnected", "connecting"
 
-    // Callbacks
-    callback toggle-wifi();
+    // ── Callbacks ──
+    //
+    // Five, and each has one path behind it in apps/network-manager/src/main.rs that the control
+    // surface action of the same name also takes. `toggle-wifi` became `wifi-radio-set(bool)`:
+    // the toggle computed `!wifi-enabled` from a property nothing wrote, so it asked to turn on
+    // a radio that was already on as often as not.
+    callback wifi-radio-set(bool);
     callback wifi-scan();
     callback wifi-connect(string, string);  // ssid, password
     callback wifi-disconnect();
     callback wifi-forget(string);           // ssid
-
-    callback toggle-bluetooth();
-    callback bt-scan();
-    callback bt-pair(string);               // address
-    callback bt-connect(string);            // address
-    callback bt-disconnect(string);         // address
-
-    callback vpn-connect(string);           // name
-    callback vpn-disconnect(string);        // name
-
-    callback toggle-firewall();
-    callback firewall-allow-port(string);   // port string
-    callback firewall-block-port(string);
-    callback firewall-apply-profile(string);
-
-    // Diagnostics callbacks
-    callback diag-run-test(string);    // "gateway", "dns", "internet"
-    callback diag-run-all-tests();
-    callback test-ai-connectivity();   // test all AI providers
-
-    // Diagnostics — Ping / Traceroute
-    in-out property <string> net-diag-ping-target: "8.8.8.8";
-    in property <string> net-diag-ping-result: "";
-    in property <bool> net-diag-ping-running: false;
-    in property <string> net-diag-traceroute-result: "";
-    in property <bool> net-diag-traceroute-running: false;
-    callback net-diag-run-ping();
-    callback net-diag-run-traceroute();
-
-    // VPN config import
-    in-out property <string> net-vpn-import-path: "";
-    in property <string> net-vpn-import-status: "";
-    callback net-vpn-import-config();
 
     // AI Assist
     in property <bool> ai-is-working: false;
@@ -355,6 +318,41 @@ export component NetworkManager inherits Rectangle {
                 if (id == "ai") {
                     if (root.ai-panel-open) { root.ai-dismiss(); root.ai-panel-open = false; }
                     else { root.ai-explain-pressed(); root.ai-panel-open = true; }
+                }
+            }
+        }
+
+        // ── What went wrong, said where the person is looking ──
+        //
+        // Contract point 4: a failure is said twice, here for the person and in `describe.notice`
+        // for the mind. Nothing on this screen had anywhere to report a failure before — the
+        // radio toggle logged that it had toggled and returned, whatever the service said.
+        if root.notice != "" : Rectangle {
+            height: net-notice-text.preferred-height + 16px;
+            background: Theme.color-danger-dim;
+            border-width: 1px;
+            border-color: Theme.color-danger.transparentize(60%);
+
+            HorizontalLayout {
+                padding-left: Theme.sp-4;
+                padding-right: Theme.sp-4;
+                padding-top: Theme.sp-2;
+                padding-bottom: Theme.sp-2;
+                spacing: Theme.sp-2;
+
+                Icon {
+                    commands: Icons.close;
+                    size: 12px;
+                    tint: Theme.color-danger;
+                    y: (parent.height - self.height) / 2;
+                }
+                net-notice-text := Text {
+                    text: root.notice;
+                    color: Theme.color-danger;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
                 }
             }
         }
@@ -493,8 +491,16 @@ export component NetworkManager inherits Rectangle {
                                 }
                                 Text {
                                     // The rail carries live state: the point of the app is to see
-                                    // all six at once, not one per tab.
-                                    text: !root.wifi-enabled ? "Off" : root.wifi-current-ssid != "" ? root.wifi-current-ssid : root.wifi-scanning ? "Scanning\{"\u{2026}"}" : "Not connected";
+                                    // all three at once, not one per tab.
+                                    //
+                                    // "No adapter" leads, because it is the answer that stops
+                                    // every other line here from meaning anything — and it is the
+                                    // one this rail used to render as "Off".
+                                    text: !root.wifi-adapter-present ? "No adapter"
+                                        : root.wifi-radio == "unknown" ? "Unknown"
+                                        : root.wifi-radio == "off" ? "Radio off"
+                                        : root.wifi-current-ssid != "" ? root.wifi-current-ssid
+                                        : root.wifi-scanning ? "Scanning\{"\u{2026}"}" : "Not connected";
                                     color: root.wifi-current-ssid != "" ? Theme.color-success : Theme.text-dim;
                                     font-size: Theme.fs-micro;
                                     overflow: elide;
@@ -556,7 +562,7 @@ export component NetworkManager inherits Rectangle {
                             }
                         }
                     }
-                    // Bluetooth — how many devices are actually connected
+                    // Firewall — a security fact, so say what was actually read
                     Rectangle {
                         property <bool> active: root.active-tab == 2;
                         height: 46px;
@@ -573,114 +579,6 @@ export component NetworkManager inherits Rectangle {
                         ta2 := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.active-tab = 2; }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: Theme.sp-3;
-                            padding-right: Theme.sp-3;
-                            spacing: 10px;
-
-                            Icon {
-                                commands: Icons.keyboard;
-                                size: 16px;
-                                tint: active ? AppIdentity.accent : Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 1px;
-                                horizontal-stretch: 1;
-
-                                Text {
-                                    text: "Bluetooth";
-                                    color: active ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: Theme.font-label;
-                                    font-weight: active ? 500 : Theme.fw-body;
-                                    overflow: elide;
-                                }
-                                Text {
-                                    // The rail carries live state: the point of the app is to see
-                                    // all six at once, not one per tab.
-                                    text: !root.bt-enabled ? "Off" : root.bt-paired-devices.length == 0 ? "No devices" : "\{root.bt-paired-devices.length} paired";
-                                    color: root.bt-enabled && root.bt-paired-devices.length > 0 ? Theme.color-success : Theme.text-dim;
-                                    font-size: Theme.fs-micro;
-                                    overflow: elide;
-                                }
-                            }
-                        }
-                    }
-                    // VPN — a tunnel is either up or it is not
-                    Rectangle {
-                        property <bool> active: root.active-tab == 3;
-                        height: 46px;
-                        border-radius: Theme.r-sm;
-                        background: active ? AppIdentity.tint : ta3.has-hover ? Theme.hover-fill : transparent;
-
-                        if active : Rectangle {
-                            x: 0; width: 3px; height: 22px;
-                            y: (parent.height - 22px) / 2;
-                            border-radius: 1.5px;
-                            background: Theme.accent;
-                        }
-
-                        ta3 := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.active-tab = 3; }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: Theme.sp-3;
-                            padding-right: Theme.sp-3;
-                            spacing: 10px;
-
-                            Icon {
-                                commands: Icons.lock;
-                                size: 16px;
-                                tint: active ? AppIdentity.accent : Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 1px;
-                                horizontal-stretch: 1;
-
-                                Text {
-                                    text: "VPN";
-                                    color: active ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: Theme.font-label;
-                                    font-weight: active ? 500 : Theme.fw-body;
-                                    overflow: elide;
-                                }
-                                Text {
-                                    // The rail carries live state: the point of the app is to see
-                                    // all six at once, not one per tab.
-                                    text: root.vpn-connections.length == 0 ? "None configured" : "\{root.vpn-connections.length} configured";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-micro;
-                                    overflow: elide;
-                                }
-                            }
-                        }
-                    }
-                    // Firewall — on/off is a security fact, keep it visible
-                    Rectangle {
-                        property <bool> active: root.active-tab == 4;
-                        height: 46px;
-                        border-radius: Theme.r-sm;
-                        background: active ? AppIdentity.tint : ta4.has-hover ? Theme.hover-fill : transparent;
-
-                        if active : Rectangle {
-                            x: 0; width: 3px; height: 22px;
-                            y: (parent.height - 22px) / 2;
-                            border-radius: 1.5px;
-                            background: Theme.accent;
-                        }
-
-                        ta4 := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.active-tab = 4; }
                         }
 
                         HorizontalLayout {
@@ -710,62 +608,17 @@ export component NetworkManager inherits Rectangle {
                                 Text {
                                     // The rail carries live state: the point of the app is to see
                                     // all six at once, not one per tab.
-                                    text: root.firewall-enabled ? "\{root.firewall-rule-count} rules" : "Off";
-                                    color: root.firewall-enabled ? Theme.color-success : Theme.color-warning;
-                                    font-size: Theme.fs-micro;
-                                    overflow: elide;
-                                }
-                            }
-                        }
-                    }
-                    // Diagnostics — the last run, at a glance
-                    Rectangle {
-                        property <bool> active: root.active-tab == 5;
-                        height: 46px;
-                        border-radius: Theme.r-sm;
-                        background: active ? AppIdentity.tint : ta5.has-hover ? Theme.hover-fill : transparent;
-
-                        if active : Rectangle {
-                            x: 0; width: 3px; height: 22px;
-                            y: (parent.height - 22px) / 2;
-                            border-radius: 1.5px;
-                            background: Theme.accent;
-                        }
-
-                        ta5 := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.active-tab = 5; }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: Theme.sp-3;
-                            padding-right: Theme.sp-3;
-                            spacing: 10px;
-
-                            Icon {
-                                commands: Icons.settings;
-                                size: 16px;
-                                tint: active ? AppIdentity.accent : Theme.text-secondary;
-                                y: (parent.height - self.height) / 2;
-                            }
-
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 1px;
-                                horizontal-stretch: 1;
-
-                                Text {
-                                    text: "Diagnostics";
-                                    color: active ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: Theme.font-label;
-                                    font-weight: active ? 500 : Theme.fw-body;
-                                    overflow: elide;
-                                }
-                                Text {
-                                    // The rail carries live state: the point of the app is to see
-                                    // all six at once, not one per tab.
-                                    text: root.diag-tests.length == 0 ? "Not run" : "\{root.diag-tests.length} checks";
-                                    color: Theme.text-dim;
+                                    // This one line is the whole bug in miniature. It used to read
+                                    // `firewall-enabled ? "{rule-count} rules" : "Off"` in warning
+                                    // colour, from a default nothing had written, and an audit
+                                    // copied "Firewall: Off" out of it as a security finding.
+                                    text: root.firewall-state == "absent" ? "Not installed"
+                                        : root.firewall-state == "unknown" ? "Unknown"
+                                        : root.firewall-rule-count < 0 ? root.firewall-state
+                                        : "\{root.firewall-rule-count} rules";
+                                    color: root.firewall-state == "active" ? Theme.color-success
+                                         : root.firewall-state == "inactive" ? Theme.color-warning
+                                         : Theme.text-dim;
                                     font-size: Theme.fs-micro;
                                     overflow: elide;
                                 }
@@ -794,8 +647,13 @@ export component NetworkManager inherits Rectangle {
                     padding: Theme.sp-5;
                     spacing: Theme.sp-4;
 
-                    // WiFi toggle
-                    Rectangle {
+                    // The radio switch, and only when there is a radio.
+                    //
+                    // The switch used to be drawn unconditionally, bound to a property Rust never
+                    // wrote, and pressing it called `toggle-wifi` which sent `!wifi-enabled` — the
+                    // negation of a default. On a machine with no Wi-Fi adapter it offered to
+                    // turn on hardware that is not in the machine.
+                    if root.wifi-adapter-present : Rectangle {
                         height: 56px;
                         background: Theme.bg-card;
                         border-radius: Theme.r-lg;
@@ -803,14 +661,17 @@ export component NetworkManager inherits Rectangle {
                         border-color: Theme.border-subtle;
 
                         ToggleSwitch {
-                            checked: root.wifi-enabled;
-                            label: "WiFi";
-                            toggled => { root.toggle-wifi(); }
+                            checked: root.wifi-radio == "on";
+                            label: "Wi-Fi";
+                            // `checked` has already flipped by the time this runs, so it holds
+                            // the state being asked for. The app sends that state, not a flip:
+                            // the callback is `wifi-radio-set(bool)` for exactly this reason.
+                            toggled => { root.wifi-radio-set(self.checked); }
                         }
                     }
 
-                    // Wi-Fi switched off — the pane says so rather than going blank.
-                    if !root.wifi-enabled : Rectangle {
+                    // No adapter. The one statement this screen most needed and never made.
+                    if !root.wifi-adapter-present : Rectangle {
                         height: 150px;
                         background: Theme.bg-card;
                         border-radius: Theme.r-lg;
@@ -830,7 +691,70 @@ export component NetworkManager inherits Rectangle {
                                 }
                             }
                             Text {
-                                text: "Wi-Fi is off";
+                                text: "This machine has no Wi-Fi adapter";
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-body;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Nothing here is switched off — there is no radio to switch. The Ethernet section has what this machine is using.";
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-caption;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // The adapter is there and its state could not be read. Said, rather than
+                    // drawn as "off": those are different things and the second invites a press.
+                    if root.wifi-adapter-present && root.wifi-radio == "unknown" : Rectangle {
+                        height: wifi-unknown-layout.preferred-height + 24px;
+                        background: Theme.bg-card;
+                        border-radius: Theme.r-lg;
+                        border-width: 1px;
+                        border-color: Theme.color-warning.transparentize(60%);
+
+                        wifi-unknown-layout := VerticalLayout {
+                            padding: Theme.sp-4;
+                            spacing: Theme.sp-1;
+                            Text {
+                                text: "Wi-Fi state unknown";
+                                color: Theme.color-warning;
+                                font-size: Theme.fs-body;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: root.wifi-state-reason != "" ? root.wifi-state-reason : "the network service gave no reason";
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-caption;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // The radio is off, and that was read rather than assumed.
+                    if root.wifi-adapter-present && root.wifi-radio == "off" : Rectangle {
+                        height: 130px;
+                        background: Theme.bg-card;
+                        border-radius: Theme.r-lg;
+                        border-width: 1px;
+                        border-color: Theme.border-subtle;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: Theme.sp-2;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                Icon {
+                                    commands: Icons.wifi;
+                                    size: 26px;
+                                    tint: Theme.text-dim.transparentize(30%);
+                                }
+                            }
+                            Text {
+                                text: "The Wi-Fi radio is off";
                                 color: Theme.text-secondary;
                                 font-size: Theme.fs-body;
                                 horizontal-alignment: center;
@@ -989,7 +913,9 @@ export component NetworkManager inherits Rectangle {
                     }
 
                     // Available networks section
-                    if root.wifi-enabled : VerticalLayout {
+                    // Available networks — only when there is a radio and it is on. A Scan
+                    // button on a machine with no adapter is a control that cannot work.
+                    if root.wifi-adapter-present && root.wifi-radio == "on" : VerticalLayout {
                         spacing: Theme.sp-2;
 
                         HorizontalLayout {
@@ -1120,7 +1046,10 @@ export component NetworkManager inherits Rectangle {
                     }
 
                     // Saved networks section
-                    if root.wifi-enabled && root.wifi-saved-networks.length > 0 : VerticalLayout {
+                    // Known networks — the saved list, which this machine has whether or not
+                    // the radio is on. Only the Forget button needs the radio, and the service
+                    // refuses the one network that is in use rather than cutting the link.
+                    if root.wifi-adapter-present && root.wifi-saved-networks.length > 0 : VerticalLayout {
                         spacing: Theme.sp-2;
 
                         Text {
@@ -1303,381 +1232,9 @@ export component NetworkManager inherits Rectangle {
             }
 
             // ═════════════════════════════════════
-            // TAB 2: Bluetooth
+            // TAB 2: Firewall
             // ═════════════════════════════════════
             if root.active-tab == 2 : Flickable {
-                width: 100%;
-                height: 100%;
-                viewport-height: bt-content.preferred-height + 40px;
-
-                bt-content := VerticalLayout {
-                    alignment: start;
-                    padding: Theme.sp-5;
-                    spacing: Theme.sp-4;
-
-                    // Bluetooth toggle
-                    Rectangle {
-                        height: 56px;
-                        background: Theme.bg-card;
-                        border-radius: Theme.r-lg;
-                        border-width: 1px;
-                        border-color: Theme.border-subtle;
-
-                        ToggleSwitch {
-                            checked: root.bt-enabled;
-                            label: "Bluetooth";
-                            toggled => { root.toggle-bluetooth(); }
-                        }
-                    }
-
-                    // Paired devices
-                    if root.bt-enabled : VerticalLayout {
-                        spacing: Theme.sp-2;
-
-                        Text {
-                            text: "Paired Devices";
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-headline;
-                            font-weight: 600;
-                        }
-
-                        if root.bt-paired-devices.length == 0 : Rectangle {
-                            height: 52px;
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            Text {
-                                text: "No paired devices";
-                                color: Theme.text-dim;
-                                font-size: Theme.fs-body;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        for device[idx] in root.bt-paired-devices : Rectangle {
-                            height: 56px;
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: device.is-connected ? Theme.accent-dim : Theme.border-subtle;
-
-                            HorizontalLayout {
-                                padding-left: Theme.sp-4;
-                                padding-right: Theme.sp-3;
-                                spacing: Theme.sp-3;
-                                alignment: space-between;
-
-                                HorizontalLayout {
-                                    spacing: 10px;
-
-                                    // Device type icon
-                                    Icon {
-                                        commands: device.device-type == "headphones" ? Icons.music
-                                            : device.device-type == "keyboard" ? Icons.keyboard
-                                            : device.device-type == "mouse" ? Icons.mouse
-                                            : device.device-type == "phone" ? Icons.phone
-                                            : device.device-type == "speaker" ? Icons.volume
-                                            : Icons.chip;
-                                        size: 18px;
-                                        tint: device.is-connected ? AppIdentity.accent : Theme.text-secondary;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        alignment: center;
-                                        Text {
-                                            text: device.name;
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                        }
-                                        Text {
-                                            text: device.is-connected ? "Connected" : "Not connected";
-                                            color: device.is-connected ? AppIdentity.accent : Theme.text-dim;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-                                }
-
-                                if device.is-connected : ActionButton {
-                                    label: "Disconnect";
-                                    width: 100px;
-                                    clicked => { root.bt-disconnect(device.address); }
-                                }
-                                if !device.is-connected : ActionButton {
-                                    label: "Connect";
-                                    width: 90px;
-                                    primary: true;
-                                    clicked => { root.bt-connect(device.address); }
-                                }
-                            }
-                        }
-                    }
-
-                    // Available devices
-                    if root.bt-enabled : VerticalLayout {
-                        spacing: Theme.sp-2;
-
-                        HorizontalLayout {
-                            spacing: Theme.sp-3;
-                            alignment: space-between;
-
-                            Text {
-                                text: "Available Devices";
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-headline;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-
-                            HorizontalLayout {
-                                spacing: Theme.sp-2;
-
-                                if root.bt-scanning : Text {
-                                    text: "Scanning...";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                    vertical-alignment: center;
-                                }
-
-                                ActionButton {
-                                    label: "Scan";
-                                    width: 80px;
-                                    primary: true;
-                                    clicked => { root.bt-scan(); }
-                                }
-                            }
-                        }
-
-                        for device[idx] in root.bt-available-devices : bt-avail-ta := TouchArea {
-                            height: 52px;
-
-                            Rectangle {
-                                background: bt-avail-ta.has-hover ? Theme.hover-fill : Theme.bg-card;
-                                border-radius: Theme.r-lg;
-                                border-width: 1px;
-                                border-color: Theme.border-subtle;
-
-                                HorizontalLayout {
-                                    padding-left: Theme.sp-4;
-                                    padding-right: Theme.sp-3;
-                                    spacing: Theme.sp-3;
-                                    alignment: space-between;
-
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        alignment: center;
-                                        Text {
-                                            text: device.name;
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                        }
-                                        Text {
-                                            text: device.address;
-                                            color: Theme.text-dim;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-
-                                    ActionButton {
-                                        label: "Pair";
-                                        width: 70px;
-                                        primary: true;
-                                        clicked => { root.bt-pair(device.address); }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ═════════════════════════════════════
-            // TAB 3: VPN
-            // ═════════════════════════════════════
-            if root.active-tab == 3 : Flickable {
-                width: 100%;
-                height: 100%;
-                viewport-height: vpn-content.preferred-height + 40px;
-
-                vpn-content := VerticalLayout {
-                    alignment: start;
-                    padding: Theme.sp-5;
-                    spacing: Theme.sp-4;
-
-                    Text {
-                        text: "VPN Connections";
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-headline;
-                        font-weight: 600;
-                    }
-
-                    if root.vpn-connections.length == 0 : Rectangle {
-                        height: 100px;
-                        background: Theme.bg-card;
-                        border-radius: Theme.r-lg;
-                        border-width: 1px;
-                        border-color: Theme.border-subtle;
-
-                        VerticalLayout {
-                            spacing: Theme.sp-2;
-                            alignment: center;
-                            Text {
-                                text: "No VPN connections detected";
-                                color: Theme.text-dim;
-                                font-size: Theme.fs-body;
-                                horizontal-alignment: center;
-                            }
-                            Text {
-                                text: "Configure WireGuard or OpenVPN on the system";
-                                color: Theme.text-dim;
-                                font-size: Theme.fs-caption;
-                                horizontal-alignment: center;
-                            }
-                        }
-                    }
-
-                    for vpn[idx] in root.vpn-connections : Rectangle {
-                        background: Theme.bg-card;
-                        border-radius: Theme.r-lg;
-                        border-width: 1px;
-                        border-color: vpn.status == "connected" ? Theme.accent-dim : Theme.border-subtle;
-                        height: vpn-layout.preferred-height + 24px;
-
-                        vpn-layout := VerticalLayout {
-                            padding: Theme.sp-4;
-                            spacing: Theme.sp-2;
-
-                            HorizontalLayout {
-                                spacing: Theme.sp-3;
-                                alignment: space-between;
-
-                                HorizontalLayout {
-                                    spacing: 10px;
-                                    // Type badge
-                                    Rectangle {
-                                        width: vpn-type-text.preferred-width + 14px;
-                                        height: 22px;
-                                        border-radius: 11px;
-                                        background: Theme.tint-accent;
-                                        vpn-type-text := Text {
-                                            text: vpn.vpn-type;
-                                            color: Theme.accent;
-                                            font-size: Theme.fs-caption;
-                                            font-weight: 600;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                    Text {
-                                        text: vpn.name;
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-body;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                if vpn.status == "connected" : ActionButton {
-                                    label: "Disconnect";
-                                    width: 110px;
-                                    danger: true;
-                                    clicked => { root.vpn-disconnect(vpn.name); }
-                                }
-                                if vpn.status != "connected" : ActionButton {
-                                    label: "Connect";
-                                    width: 100px;
-                                    primary: true;
-                                    clicked => { root.vpn-connect(vpn.name); }
-                                }
-                            }
-
-                            if vpn.status == "connected" : HorizontalLayout {
-                                spacing: Theme.sp-6;
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "Status"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: "Connected"; color: Theme.accent; font-size: Theme.fs-body; }
-                                }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "Tunnel IP"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: vpn.ip-address != "" ? vpn.ip-address : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "Traffic"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text { text: vpn.traffic != "" ? vpn.traffic : "—"; color: Theme.text-secondary; font-size: Theme.fs-body; }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Import VPN Config ──
-                    Rectangle {
-                        background: Theme.bg-card;
-                        border-radius: Theme.r-lg;
-                        border-width: 1px;
-                        border-color: Theme.border-subtle;
-                        height: vpn-import-layout.preferred-height + 24px;
-
-                        vpn-import-layout := VerticalLayout {
-                            padding: Theme.sp-4;
-                            spacing: 10px;
-
-                            Text {
-                                text: "Import VPN Config";
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-body;
-                                font-weight: 600;
-                            }
-
-                            HorizontalLayout {
-                                spacing: Theme.sp-2;
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: 36px;
-                                    background: Theme.bg-input; clip: true;
-                                    border-radius: Theme.r-lg;
-                                    border-width: 1px;
-                                    border-color: Theme.border-subtle;
-
-                                    vpn-import-input := TextInput {
-                                        x: 10px;
-                                        width: parent.width - 20px;
-                                        height: 100%;
-                                        text <=> root.net-vpn-import-path;
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-body;
-                                        accepted => { root.net-vpn-import-config(); }
-                                    }
-                                }
-
-                                ActionButton {
-                                    label: "Import";
-                                    width: 80px;
-                                    primary: true;
-                                    clicked => { root.net-vpn-import-config(); }
-                                }
-                            }
-
-                            if root.net-vpn-import-status != "" : Text {
-                                text: root.net-vpn-import-status;
-                                color: Theme.text-secondary;
-                                font-size: Theme.fs-caption;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ═════════════════════════════════════
-            // TAB 4: Firewall
-            // ═════════════════════════════════════
-            if root.active-tab == 4 : Flickable {
                 width: 100%;
                 height: 100%;
                 viewport-height: fw-content.preferred-height + 40px;
@@ -1687,33 +1244,80 @@ export component NetworkManager inherits Rectangle {
                     padding: Theme.sp-5;
                     spacing: Theme.sp-4;
 
-                    // Firewall toggle + status
+                    // ── What firewall this machine has, and what it is doing ──
+                    //
+                    // A toggle switch stood here, bound to `firewall-enabled` — an `in property
+                    // <bool>` defaulting to false that Rust never wrote — and beside it Quick
+                    // Profiles (Home / Public / Restrictive) and Allow / Block port. All four
+                    // callbacks were `tracing::info!` and nothing else. So the pane offered to
+                    // change the firewall of a machine it had never read the firewall of.
+                    //
+                    // The controls are gone and the reading is real. Changing a firewall from a
+                    // desktop session needs root, and this OS has no scoped privileged path for
+                    // it — no polkit rule, no helper — only a blanket NOPASSWD sudoers line that
+                    // the images written by deploy/ install. Using that to let a button press
+                    // rewrite the packet filter is not a thing this app should do quietly. See
+                    // design/network-2026-09-20.md.
                     Rectangle {
                         background: Theme.bg-card;
                         border-radius: Theme.r-lg;
                         border-width: 1px;
-                        border-color: root.firewall-enabled ? Theme.accent-dim : Theme.border-subtle;
+                        border-color: root.firewall-state == "active" ? Theme.accent-dim
+                                    : root.firewall-state == "unknown" ? Theme.color-warning.transparentize(60%)
+                                    : Theme.border-subtle;
                         height: fw-header.preferred-height + 24px;
 
                         fw-header := VerticalLayout {
                             padding: Theme.sp-4;
-                            spacing: Theme.sp-2;
+                            spacing: Theme.sp-3;
 
-                            ToggleSwitch {
-                                checked: root.firewall-enabled;
-                                label: "Firewall";
-                                toggled => { root.toggle-firewall(); }
+                            HorizontalLayout {
+                                spacing: Theme.sp-3;
+
+                                Icon {
+                                    commands: Icons.shield;
+                                    size: 18px;
+                                    tint: root.firewall-state == "active" ? Theme.color-success
+                                        : root.firewall-state == "inactive" ? Theme.color-warning
+                                        : Theme.text-dim;
+                                    y: (parent.height - self.height) / 2;
+                                }
+
+                                Text {
+                                    // Four words, four different statements. "Unknown" is not
+                                    // "Off", and "not installed" is neither.
+                                    text: root.firewall-state == "active" ? "Filtering"
+                                        : root.firewall-state == "inactive" ? "Installed, not filtering"
+                                        : root.firewall-state == "absent" ? "No firewall installed"
+                                        : "Could not be determined";
+                                    color: root.firewall-state == "active" ? Theme.color-success
+                                         : root.firewall-state == "inactive" ? Theme.color-warning
+                                         : Theme.text-secondary;
+                                    font-size: Theme.fs-headline;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+
+                            // Why the line above says what it says. Always drawn when there is a
+                            // reason, because a security display whose "unknown" carries no
+                            // reason is the confident "Off" this replaces wearing another word.
+                            if root.firewall-reason != "" : Text {
+                                text: root.firewall-reason;
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-caption;
+                                wrap: word-wrap;
                             }
 
                             HorizontalLayout {
-                                padding-left: Theme.sp-4;
                                 spacing: Theme.sp-6;
 
                                 VerticalLayout {
                                     spacing: 2px;
-                                    Text { text: "Backend"; color: Theme.text-dim; font-size: Theme.fs-caption; }
+                                    Text { text: "Tool"; color: Theme.text-dim; font-size: Theme.fs-caption; }
                                     Text {
-                                        text: root.firewall-backend-name != "" ? root.firewall-backend-name : "—";
+                                        text: root.firewall-backend-name != "" ? root.firewall-backend-name : "none found";
                                         color: Theme.text-secondary;
                                         font-size: Theme.fs-body;
                                     }
@@ -1722,117 +1326,12 @@ export component NetworkManager inherits Rectangle {
                                     spacing: 2px;
                                     Text { text: "Rules"; color: Theme.text-dim; font-size: Theme.fs-caption; }
                                     Text {
-                                        text: root.firewall-rule-count;
+                                        // -1 is "not counted". Drawing that as 0 would be a
+                                        // number nobody measured, which is how this pane got
+                                        // into an audit in the first place.
+                                        text: root.firewall-rule-count < 0 ? "unknown" : root.firewall-rule-count;
                                         color: Theme.text-secondary;
                                         font-size: Theme.fs-body;
-                                    }
-                                }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { text: "Profile"; color: Theme.text-dim; font-size: Theme.fs-caption; }
-                                    Text {
-                                        text: root.firewall-profile;
-                                        color: Theme.text-secondary;
-                                        font-size: Theme.fs-body;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Quick profiles
-                    if root.firewall-enabled : VerticalLayout {
-                        spacing: Theme.sp-2;
-
-                        Text {
-                            text: "Quick Profiles";
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-headline;
-                            font-weight: 600;
-                        }
-
-                        HorizontalLayout {
-                            spacing: 10px;
-
-                            ActionButton {
-                                label: "Home";
-                                width: 100px;
-                                primary: root.firewall-profile == "Home";
-                                clicked => { root.firewall-apply-profile("home"); }
-                            }
-                            ActionButton {
-                                label: "Public";
-                                width: 100px;
-                                primary: root.firewall-profile == "Public";
-                                clicked => { root.firewall-apply-profile("public"); }
-                            }
-                            ActionButton {
-                                label: "Restrictive";
-                                width: 110px;
-                                primary: root.firewall-profile == "Restrictive";
-                                clicked => { root.firewall-apply-profile("restrictive"); }
-                            }
-                        }
-                    }
-
-                    // Quick actions — Allow/Block port
-                    if root.firewall-enabled : VerticalLayout {
-                        spacing: Theme.sp-2;
-
-                        Text {
-                            text: "Quick Actions";
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-headline;
-                            font-weight: 600;
-                        }
-
-                        HorizontalLayout {
-                            spacing: 10px;
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                height: 36px;
-                                background: Theme.bg-input; clip: true;
-                                border-radius: Theme.r-lg;
-                                border-width: 1px;
-                                border-color: Theme.border-subtle;
-
-                                fw-port-input := TextInput {
-                                    x: 12px;
-                                    width: parent.width - 24px;
-                                    height: 100%;
-                                    text: "";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-body;
-                                }
-                                if fw-port-input.text == "" : Text {
-                                    x: 12px;
-                                    text: "Port number...";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-body;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            ActionButton {
-                                label: "Allow";
-                                width: 80px;
-                                primary: true;
-                                clicked => {
-                                    if fw-port-input.text != "" {
-                                        root.firewall-allow-port(fw-port-input.text);
-                                        fw-port-input.text = "";
-                                    }
-                                }
-                            }
-                            ActionButton {
-                                label: "Block";
-                                width: 80px;
-                                danger: true;
-                                clicked => {
-                                    if fw-port-input.text != "" {
-                                        root.firewall-block-port(fw-port-input.text);
-                                        fw-port-input.text = "";
                                     }
                                 }
                             }
@@ -1840,7 +1339,10 @@ export component NetworkManager inherits Rectangle {
                     }
 
                     // Active rules
-                    if root.firewall-enabled && root.firewall-rules.length > 0 : VerticalLayout {
+                    // Only drawn when rules were actually read. An empty list here
+                    // means the ruleset could not be read, not that it is empty;
+                    // the card above says which.
+                    if root.firewall-rules.length > 0 : VerticalLayout {
                         spacing: Theme.sp-2;
 
                         Text {
@@ -1903,496 +1405,6 @@ export component NetworkManager inherits Rectangle {
                 }
             }
 
-            // ═════════════════════════════════════
-            // TAB 5: Diagnostics
-            // ═════════════════════════════════════
-            if root.active-tab == 5 : Flickable {
-                width: 100%;
-                height: 100%;
-                viewport-height: diag-content.preferred-height + 40px;
-
-                diag-content := VerticalLayout {
-                    alignment: start;
-                    padding: Theme.sp-5;
-                    spacing: Theme.sp-4;
-
-                    // Connection Tests section
-                    VerticalLayout {
-                        spacing: Theme.sp-2;
-
-                        HorizontalLayout {
-                            spacing: Theme.sp-3;
-                            alignment: space-between;
-
-                            Text {
-                                text: "Connection Tests";
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-headline;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-
-                            ActionButton {
-                                label: "Run All Tests";
-                                width: 130px;
-                                primary: true;
-                                clicked => { root.diag-run-all-tests(); }
-                            }
-                        }
-
-                        // Test rows
-                        for test[idx] in root.diag-tests : Rectangle {
-                            height: 56px;
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: test.status == "ok" ? Theme.color-success-dim
-                                        : test.status == "fail" ? Theme.color-danger-dim
-                                        : Theme.border-subtle;
-
-                            HorizontalLayout {
-                                padding-left: Theme.sp-4;
-                                padding-right: Theme.sp-3;
-                                spacing: Theme.sp-3;
-                                alignment: space-between;
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-3;
-
-                                    // Status icon
-                                    Rectangle {
-                                        width: 28px;
-                                        height: 28px;
-                                        border-radius: 14px;
-                                        background: test.status == "ok" ? Theme.color-success-dim
-                                                  : test.status == "fail" ? Theme.color-danger-dim
-                                                  : test.status == "running" ? Theme.color-warning-dim
-                                                  : Theme.bg-elevated;
-
-                                        Icon {
-                                            commands: test.status == "ok" ? Icons.check
-                                                : test.status == "fail" ? Icons.close
-                                                : test.status == "running" ? Icons.clock
-                                                : Icons.minus;
-                                            size: 13px;
-                                            tint: test.status == "ok" ? Theme.color-success
-                                                : test.status == "fail" ? Theme.color-danger
-                                                : Theme.text-dim;
-                                            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        alignment: center;
-
-                                        Text {
-                                            text: test.name;
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                            font-weight: 500;
-                                        }
-                                        Text {
-                                            text: test.status == "running" ? "Testing..."
-                                                : test.status == "ok" ? test.latency
-                                                : test.status == "fail" ? "unreachable"
-                                                : "Not tested";
-                                            color: test.status == "ok" ? AppIdentity.accent
-                                                 : test.status == "fail" ? Theme.color-danger
-                                                 : test.status == "running" ? Theme.color-warning
-                                                 : Theme.text-dim;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-                                }
-
-                                ActionButton {
-                                    label: test.status == "running" ? "..." : "Test";
-                                    width: 70px;
-                                    clicked => { root.diag-run-test(test.name); }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── AI Provider Connectivity ──
-                    VerticalLayout {
-                        spacing: Theme.sp-2;
-
-                        HorizontalLayout {
-                            spacing: Theme.sp-3;
-                            alignment: space-between;
-
-                            HorizontalLayout {
-                                spacing: Theme.sp-2;
-
-                                Icon {
-                                    commands: Icons.companion;
-                                    size: 16px;
-                                    tint: Theme.text-secondary;
-                                    y: (parent.height - self.height) / 2;
-                                }
-
-                                Text {
-                                    text: "AI Provider Connectivity";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-headline;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            ActionButton {
-                                label: root.ai-connectivity-testing ? "Testing..." : "Test All";
-                                width: 110px;
-                                primary: true;
-                                clicked => { root.test-ai-connectivity(); }
-                            }
-                        }
-
-                        if root.ai-provider-connectivity.length == 0 : Rectangle {
-                            height: 64px;
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-
-                            Text {
-                                text: "No AI providers configured. Add providers in Settings → AI & Intelligence.";
-                                color: Theme.text-dim;
-                                font-size: Theme.fs-body;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                wrap: word-wrap;
-                            }
-                        }
-
-                        for provider[idx] in root.ai-provider-connectivity : Rectangle {
-                            height: 72px;
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: provider.status == "reachable" ? Theme.color-success-dim
-                                        : provider.status == "unreachable" ? Theme.color-danger-dim
-                                        : Theme.border-subtle;
-
-                            HorizontalLayout {
-                                padding-left: Theme.sp-4;
-                                padding-right: Theme.sp-4;
-                                spacing: Theme.sp-3;
-                                alignment: space-between;
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-3;
-
-                                    // Status dot
-                                    Rectangle {
-                                        width: 10px;
-                                        height: 10px;
-                                        border-radius: 5px;
-                                        y: (parent.height - self.height) / 2;
-                                        background: provider.status == "reachable" ? Theme.color-reminder
-                                                  : provider.status == "unreachable" ? Theme.color-danger
-                                                  : provider.status == "testing" ? Theme.amber
-                                                  : Theme.text-dim;
-
-                                        // Glow
-                                        Rectangle {
-                                            width: parent.width + 6px;
-                                            height: parent.height + 6px;
-                                            x: -3px;
-                                            y: -3px;
-                                            border-radius: Theme.r-md;
-                                            background: provider.status == "reachable" ? Theme.accent-glow
-                                                      : provider.status == "unreachable" ? Theme.color-danger.transparentize(60%)
-                                                      : transparent;
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        alignment: center;
-
-                                        HorizontalLayout {
-                                            spacing: Theme.sp-2;
-
-                                            Text {
-                                                text: provider.name;
-                                                color: Theme.text-primary;
-                                                font-size: Theme.fs-body;
-                                                font-weight: 500;
-                                            }
-
-                                            // Primary/Fallback badge
-                                            if provider.is-primary : Rectangle {
-                                                width: 58px;
-                                                height: 18px;
-                                                border-radius: 9px;
-                                                background: Theme.accent-glow;
-                                                Text {
-                                                    text: "Primary";
-                                                    color: Theme.accent;
-                                                    font-size: Theme.fs-caption;
-                                                    font-weight: 600;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                            if provider.is-fallback : Rectangle {
-                                                width: 62px;
-                                                height: 18px;
-                                                border-radius: 9px;
-                                                background: Theme.amber-glow;
-                                                Text {
-                                                    text: "Fallback";
-                                                    color: Theme.amber;
-                                                    font-size: Theme.fs-caption;
-                                                    font-weight: 600;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                        }
-
-                                        Text {
-                                            text: provider.base-url;
-                                            color: Theme.text-dim;
-                                            font-size: Theme.fs-caption;
-                                            overflow: elide;
-                                        }
-                                    }
-                                }
-
-                                // Latency display
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 2px;
-
-                                    Text {
-                                        text: provider.status == "testing" ? "..."
-                                            : provider.status == "reachable" ? (provider.latency-ms + "ms")
-                                            : provider.status == "unreachable" ? "down"
-                                            : "\u{2014}";
-                                        color: provider.status == "reachable" ?
-                                                (provider.latency-ms < 100 ? Theme.color-reminder
-                                               : provider.latency-ms < 500 ? Theme.amber
-                                               : Theme.color-danger)
-                                             : provider.status == "unreachable" ? Theme.color-danger
-                                             : Theme.text-dim;
-                                        font-size: Theme.fs-body;
-                                        font-weight: 600;
-                                        horizontal-alignment: right;
-                                    }
-
-                                    Text {
-                                        text: provider.provider-type;
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-caption;
-                                        horizontal-alignment: right;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Ping Tool ──
-                    VerticalLayout {
-                        spacing: Theme.sp-2;
-
-                        Text {
-                            text: "Ping / Traceroute";
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-headline;
-                            font-weight: 600;
-                        }
-
-                        Rectangle {
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            height: ping-tool-layout.preferred-height + 24px;
-
-                            ping-tool-layout := VerticalLayout {
-                                padding: Theme.sp-4;
-                                spacing: 10px;
-
-                                HorizontalLayout {
-                                    spacing: Theme.sp-2;
-
-                                    // Target input
-                                    Rectangle {
-                                        horizontal-stretch: 1;
-                                        height: 36px;
-                                        background: Theme.bg-input; clip: true;
-                                        border-radius: Theme.r-lg;
-                                        border-width: 1px;
-                                        border-color: Theme.border-subtle;
-
-                                        ping-target-input := TextInput {
-                                            x: 10px;
-                                            width: parent.width - 20px;
-                                            height: 100%;
-                                            text <=> root.net-diag-ping-target;
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                            accepted => { root.net-diag-run-ping(); }
-                                        }
-                                    }
-
-                                    ActionButton {
-                                        label: root.net-diag-ping-running ? "..." : "Ping";
-                                        width: 80px;
-                                        primary: true;
-                                        clicked => { root.net-diag-run-ping(); }
-                                    }
-
-                                    ActionButton {
-                                        label: root.net-diag-traceroute-running ? "..." : "Traceroute";
-                                        width: 110px;
-                                        clicked => { root.net-diag-run-traceroute(); }
-                                    }
-                                }
-
-                                // Ping spinner
-                                if root.net-diag-ping-running || root.net-diag-traceroute-running : HorizontalLayout {
-                                    spacing: Theme.sp-2;
-                                    Rectangle {
-                                        width: 14px;
-                                        height: 14px;
-                                        border-radius: 7px;
-                                        border-width: 2px;
-                                        border-color: Theme.accent;
-                                        background: transparent;
-                                    }
-                                    Text {
-                                        text: root.net-diag-ping-running ? "Pinging..." : "Running traceroute...";
-                                        color: Theme.accent;
-                                        font-size: Theme.fs-caption;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                // Ping result
-                                if root.net-diag-ping-result != "" : Rectangle {
-                                    background: Theme.bg-elevated;
-                                    border-radius: Theme.r-sm;
-                                    height: Math.min(ping-result-text.preferred-height + 16px, 160px);
-
-                                    Flickable {
-                                        width: parent.width;
-                                        height: parent.height;
-                                        viewport-height: ping-result-text.preferred-height + 16px;
-
-                                        ping-result-text := Text {
-                                            x: 10px;
-                                            y: Theme.sp-2;
-                                            width: parent.width - 20px;
-                                            text: root.net-diag-ping-result;
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-micro;
-                                            wrap: word-wrap;
-                                        }
-                                    }
-                                }
-
-                                // Traceroute result
-                                if root.net-diag-traceroute-result != "" : Rectangle {
-                                    background: Theme.bg-elevated;
-                                    border-radius: Theme.r-sm;
-                                    height: Math.min(traceroute-result-text.preferred-height + 16px, 200px);
-
-                                    HorizontalLayout {
-                                        padding-left: Theme.sp-3;
-                                        padding-top: Theme.sp-1;
-                                        Text {
-                                            text: "Traceroute:";
-                                            color: Theme.text-dim;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 600;
-                                        }
-                                    }
-
-                                    Flickable {
-                                        y: 18px;
-                                        width: parent.width;
-                                        height: parent.height - 18px;
-                                        viewport-height: traceroute-result-text.preferred-height + 16px;
-
-                                        traceroute-result-text := Text {
-                                            x: 10px;
-                                            y: Theme.sp-1;
-                                            width: parent.width - 20px;
-                                            text: root.net-diag-traceroute-result;
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-micro;
-                                            wrap: word-wrap;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Connection History section
-                    VerticalLayout {
-                        spacing: Theme.sp-2;
-
-                        Text {
-                            text: "Connection History";
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-headline;
-                            font-weight: 600;
-                        }
-
-                        if root.diag-connection-history.length == 0 : Rectangle {
-                            height: 60px;
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-                            Text {
-                                text: "No recent connection events";
-                                color: Theme.text-dim;
-                                font-size: Theme.fs-body;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        for event[idx] in root.diag-connection-history : Rectangle {
-                            height: 44px;
-                            background: Theme.bg-card;
-                            border-radius: Theme.r-lg;
-                            border-width: 1px;
-                            border-color: Theme.border-subtle;
-
-                            HorizontalLayout {
-                                padding-left: Theme.sp-4;
-                                padding-right: Theme.sp-4;
-                                spacing: Theme.sp-3;
-                                alignment: space-between;
-
-                                Text {
-                                    text: event.description;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-body;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                    horizontal-stretch: 1;
-                                }
-
-                                Text {
-                                    text: event.timestamp;
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
 
             // ── What Yantrik knows about this ──

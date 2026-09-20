@@ -2,20 +2,34 @@
 id = "com.yantrikos.network"
 name = "Network Service"
 version = "0.1.0"
-description = "Network interfaces, connectivity status, and DNS configuration via /proc"
+description = "Network interfaces, connectivity, DNS, Wi-Fi and firewall state"
 publisher = "Yantrik OS"
 roles = ["service"]
 icon = "network"
 
 [[permissions]]
 capability = "system.proc"
-reason = "Reads /proc/net/dev and /etc/resolv.conf for network information"
+reason = "Reads /proc/net/dev, /sys/class/net and /etc/resolv.conf for network information"
+
+[[permissions]]
+capability = "system.exec"
+reason = "Runs nmcli to read and change Wi-Fi, and nft/ufw/firewall-cmd read-only to report the firewall"
 
 [service]
 binary = "network-service"
+# The five write methods were called by the Network Manager app long before any of them existed
+# here; the list below is the one the app's contract constants name, so the two cannot drift again.
 methods = [
     "network.interfaces",
     "network.status",
     "network.dns",
+    "network.wifi_state",
+    "network.wifi_known",
+    "network.firewall",
+    "network.wifi_radio",
+    "network.wifi_scan",
+    "network.wifi_connect",
+    "network.wifi_disconnect",
+    "network.wifi_forget",
 ]
 autostart = true
