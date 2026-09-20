@@ -1,31 +1,37 @@
 id: firewall
 name: Firewall
-description: Manage firewall rules, ports, and IP blocking
+description: Report which firewall this machine has and what it is doing
+# The five write tools this skill used to list — firewall_allow_port, firewall_block_port,
+# firewall_block_ip, firewall_enable, firewall_disable — are gone from the registry and so from
+# here. There is no scoped privileged path for changing a packet filter in this OS: no polkit
+# action, no setuid helper, no scoped sudoers entry, only a blanket `NOPASSWD: ALL`. The Network
+# Manager app removed the same four controls for the same reason (design/network-2026-09-20.md),
+# and a card that offers a tool the registry does not hold is a promise nothing keeps.
 long_description: >
-  View firewall status, list rules, allow/block ports and IPs. Uses iptables/nftables
-  under the hood. Helps secure your system with natural language commands.
-version: "1.0.0"
+  Reports the firewall on this machine: which tool it is (nftables, ufw, firewalld), whether it
+  is filtering, and the rules it has loaded, in the firewall's own words. Reading only, and
+  unprivileged — a ruleset this session may not read comes back as "unknown with a reason"
+  rather than as a rule count nobody counted. Changing the firewall needs a privileged path this
+  OS does not have yet.
+version: "1.1.0"
 author: Yantrik
 icon: shield
 category: system
-tags: [security, iptables, nftables, ports, network, block]
+tags: [security, nftables, iptables, ufw, firewalld, status, read-only]
 
 tools:
   - firewall_status
   - firewall_list_rules
-  - firewall_allow_port
-  - firewall_block_port
-  - firewall_block_ip
-  - firewall_enable
-  - firewall_disable
 
 core_tools: []
 instincts: []
 cortex_rules: []
+# Both tools are callers of network-service, which owns the firewall reading. Not listed under
+# `services:` — that field turns on cortex rules gated on a service id, and this skill registers
+# no service of its own.
 services: []
 requires: []
 requires_config: []
 
 permissions:
-  - shell
   - network

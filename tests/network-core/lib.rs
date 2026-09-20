@@ -673,3 +673,161 @@ mod firewalls {
         assert!(parse_nft_ruleset(text).is_empty());
     }
 }
+
+#[cfg(test)]
+mod resolvers {
+    //! `network.dns_set`, and the choosing that decides which profile it lands on.
+    //!
+    //! The tool this replaces — the companion's `network_dns_set` — did
+    //! `std::fs::write("/etc/resolv.conf", …)` and answered "DNS set to 1.1.1.1". That file is
+    //! NetworkManager's: a desktop session cannot write it, and a session that can (the blanket
+    //! `NOPASSWD: ALL` both build recipes install) writes something NetworkManager rewrites on
+    //! the next carrier change. So the setting either failed or had a half-life, and the sentence
+    //! was the same either way.
+    //!
+    //! Resolvers live on a connection profile. Everything below is about picking the right
+    //! profile and reading back what actually happened, on a machine with no NetworkManager on
+    //! it.
+
+    use super::nmcli::*;
+    use yantrik_ipc_contracts::network::*;
+
+    fn active(rows: &[(&str, &str, &str, &str)]) -> Vec<ActiveConnection> {
+        rows.iter()
+            .map(|(name, uuid, kind, device)| ActiveConnection {
+                name: (*name).to_string(),
+                uuid: (*uuid).to_string(),
+                kind: (*kind).to_string(),
+                device: (*device).to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_method_is_a_constant_both_ends_read() {
+        assert_eq!(method::DNS_SET, "network.dns_set");
+    }
+
+    #[test]
+    fn the_request_is_a_list_and_not_a_primary_and_a_secondary() {
+        // `{primary, secondary}` could not say "three resolvers", and an empty `secondary` meant
+        // both "only one" and "leave the second alone".
+        let sent = serde_json::to_value(DnsSetParams {
+            servers: vec!["1.1.1.1".into(), "1.0.0.1".into()],
+        })
+        .unwrap();
+        assert_eq!(sent, serde_json::json!({ "servers": ["1.1.1.1", "1.0.0.1"] }));
+        let read: DnsSetParams = serde_json::from_value(sent).unwrap();
+        assert_eq!(read.servers.len(), 2);
+    }
+
+    #[test]
+    fn the_result_carries_both_readings_because_they_can_disagree() {
+        // On a machine with a stub resolver in front, `/etc/resolv.conf` says 127.0.0.53 and the
+        // real servers are only in NetworkManager's view of the device. A check written against
+        // resolv.conf alone would call a change that worked a failure.
+        let wire = serde_json::json!({
+            "connection": "Wired connection 1",
+            "device": "enp0s3",
+            "resolv_conf": { "nameservers": ["127.0.0.53"], "search_domains": [] },
+            "device_dns": ["1.1.1.1", "1.0.0.1"],
+        });
+        let read: DnsSetResult = serde_json::from_value(wire).unwrap();
+        assert_eq!(read.resolv_conf.nameservers, vec!["127.0.0.53"]);
+        assert_eq!(read.device_dns, vec!["1.1.1.1", "1.0.0.1"]);
+    }
+
+    #[test]
+    fn the_profile_carrying_the_default_route_is_the_one_chosen() {
+        // A laptop docked: wired and wireless both up, the route on the wire. Setting resolvers
+        // on the other one is a change that reports success and resolves nothing.
+        let rows = active(&[
+            ("lo", "uuid-lo", "loopback", "lo"),
+            ("Cafe: Free", "uuid-wifi", "802-11-wireless", "wlp3s0"),
+            ("Wired connection 1", "uuid-eth", "802-3-ethernet", "enp0s3"),
+        ]);
+        let chosen = resolver_connection(&rows, &["enp0s3".to_string()]).unwrap();
+        assert_eq!(chosen.uuid, "uuid-eth");
+    }
+
+    #[test]
+    fn loopback_is_never_chosen_even_when_it_sorts_first() {
+        // NetworkManager manages `lo` as a profile of its own on 1.42 and later and nmcli lists
+        // it first. Setting resolvers on it changes nothing and looks exactly like success.
+        let rows = active(&[
+            ("lo", "uuid-lo", "loopback", "lo"),
+            ("Wired connection 1", "uuid-eth", "802-3-ethernet", "enp0s3"),
+        ]);
+        let chosen = resolver_connection(&rows, &[]).unwrap();
+        assert_eq!(chosen.uuid, "uuid-eth");
+    }
+
+    #[test]
+    fn a_profile_with_no_device_is_not_chosen() {
+        let rows = active(&[("Stale", "uuid-stale", "802-3-ethernet", "")]);
+        assert!(resolver_connection(&rows, &[]).is_none());
+    }
+
+    #[test]
+    fn a_machine_with_nothing_up_has_no_profile_to_change() {
+        assert!(resolver_connection(&[], &[]).is_none());
+        assert!(resolver_connection(&active(&[("lo", "u", "loopback", "lo")]), &[]).is_none());
+    }
+
+    #[test]
+    fn the_active_list_survives_a_connection_named_after_an_ssid_with_a_colon_in_it() {
+        // A Wi-Fi profile is named after its SSID, and `Cafe: Free` is an ordinary network name.
+        // nmcli escapes the colon; splitting on a bare one truncates the name, and a truncated
+        // name is one `nmcli connection modify` cannot find.
+        let rows = parse_active("Cafe\\: Free:5f2c-uuid:802-11-wireless:wlp3s0\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Cafe: Free");
+        assert_eq!(rows[0].uuid, "5f2c-uuid");
+        assert_eq!(rows[0].device, "wlp3s0");
+    }
+
+    #[test]
+    fn the_uuid_is_what_the_change_is_addressed_to() {
+        // Which is why it is parsed at all. `nmcli connection modify "-h"` argues with nmcli's
+        // own argument parsing, and an SSID may begin with a dash.
+        let rows = parse_active("-h:abc-uuid:802-11-wireless:wlp3s0\n");
+        assert_eq!(rows[0].name, "-h");
+        assert_eq!(rows[0].uuid, "abc-uuid");
+    }
+
+    #[test]
+    fn networkmanagers_own_view_of_a_devices_resolvers_is_read_in_its_order() {
+        // `nmcli -t -f IP4.DNS,IP6.DNS device show enp0s3`. The keys are indexed, and the order
+        // is which resolver is asked first — sorting it would misreport which server answers.
+        let text = "IP4.DNS[1]:1.1.1.1\nIP4.DNS[2]:1.0.0.1\n";
+        assert_eq!(parse_device_dns(text), vec!["1.1.1.1", "1.0.0.1"]);
+    }
+
+    #[test]
+    fn an_ipv6_resolver_survives_whether_or_not_nmcli_escaped_its_colons() {
+        // `2606:4700:4700::1111` is colons all the way down. nmcli's terse mode escapes them, and
+        // this is the escaped form:
+        let escaped = parse_device_dns("IP6.DNS[1]:2606\\:4700\\:4700\\:\\:1111\n");
+        assert_eq!(escaped, vec!["2606:4700:4700::1111"]);
+        // And this is the same line with nothing escaped, which is what a truncating parser turns
+        // into `2606` — a resolver this machine cannot ask, reported as the one it was told to
+        // use.
+        let bare = parse_device_dns("IP6.DNS[1]:2606:4700:4700::1111\n");
+        assert_eq!(bare, vec!["2606:4700:4700::1111"]);
+    }
+
+    #[test]
+    fn a_device_with_no_resolvers_reads_as_none_rather_than_as_a_parse_failure() {
+        // nmcli prints the key with nothing after it when there are none.
+        assert!(parse_device_dns("IP4.DNS:\nIP6.DNS:\n").is_empty());
+        assert!(parse_device_dns("").is_empty());
+        // And `--`, which is nmcli's other way of writing "nothing here".
+        assert!(parse_device_dns("IP4.DNS[1]:--\n").is_empty());
+    }
+
+    #[test]
+    fn an_unrelated_field_in_the_same_output_is_not_taken_for_a_resolver() {
+        let text = "IP4.ADDRESS[1]:192.168.1.24/24\nIP4.DNS[1]:1.1.1.1\nIP4.GATEWAY:192.168.1.1\n";
+        assert_eq!(parse_device_dns(text), vec!["1.1.1.1"]);
+    }
+}

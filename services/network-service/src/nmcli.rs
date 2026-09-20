@@ -65,6 +65,13 @@ pub const SCAN_WAIT_SECS: u32 = 10;
 /// The bound on an association: DHCP and a WPA handshake on a slow AP.
 pub const CONNECT_WAIT_SECS: u32 = 25;
 
+/// The bound on re-activating a connection to apply changed resolvers.
+///
+/// `nmcli connection up` on a profile that is already up takes the link down and brings it back,
+/// which means the address is leased again. Shorter than a Wi-Fi association because there is no
+/// handshake in it, longer than [`QUICK_WAIT_SECS`] because there is a DHCP round trip.
+pub const APPLY_WAIT_SECS: u32 = 20;
+
 /// Run nmcli once and keep everything it said.
 ///
 /// `wait_secs` becomes nmcli's own `-w`, so a command that hangs is ended by nmcli with a message
@@ -433,6 +440,106 @@ pub fn parse_known(text: &str) -> Vec<KnownNetwork> {
             })
         })
         .collect()
+}
+
+pub const ACTIVE_FIELDS: &str = "NAME,UUID,TYPE,DEVICE";
+
+/// One row of `nmcli -t -f NAME,UUID,TYPE,DEVICE connection show --active`.
+///
+/// The UUID is carried because it is the only stable handle on a profile. A connection's *name*
+/// is free-form — NetworkManager names a Wi-Fi profile after the SSID, and an SSID may contain a
+/// space, a colon or a leading dash — so `nmcli connection modify <name>` on a profile called
+/// `-h` or `Cafe: Free` argues with nmcli's own argument parsing. `modify uuid <uuid>` cannot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActiveConnection {
+    pub name: String,
+    pub uuid: String,
+    /// `802-3-ethernet`, `802-11-wireless`, `loopback`, `wireguard`…
+    pub kind: String,
+    /// The interface it is up on. Empty for a profile with no device, which nmcli does list.
+    pub device: String,
+}
+
+pub fn parse_active(text: &str) -> Vec<ActiveConnection> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|line| {
+            let parts = split_terse(line);
+            ActiveConnection {
+                name: field(&parts, 0),
+                uuid: field(&parts, 1),
+                kind: field(&parts, 2),
+                device: field(&parts, 3),
+            }
+        })
+        .collect()
+}
+
+/// Which connection profile "set the DNS on this machine" means.
+///
+/// Resolvers live on a connection profile, and a machine may have several up at once — a wired
+/// link, a Wi-Fi link, a VPN, and always loopback. Writing to the wrong one is a change that
+/// reports success and resolves nothing, which is the failure mode of the tool this replaces one
+/// layer down.
+///
+/// `with_gateway` is the devices NetworkManager gives an IPv4 gateway, read by the caller with
+/// `device show`. That is the default route in NetworkManager's own words, and the profile
+/// carrying it is the one whose resolvers the machine is actually using. When nothing has a
+/// gateway — a machine with an address and no route — the first non-loopback active profile is
+/// taken, because changing the resolvers of the only link there is is still the right guess, and
+/// the caller is told which profile it was either way.
+///
+/// Loopback is never chosen. NetworkManager manages `lo` as a profile of its own on 1.42 and
+/// later, it sorts first in nmcli's output, and setting resolvers on it changes nothing while
+/// looking exactly like success.
+pub fn resolver_connection<'a>(
+    active: &'a [ActiveConnection],
+    with_gateway: &[String],
+) -> Option<&'a ActiveConnection> {
+    let usable = || {
+        active.iter().filter(|c| {
+            !c.device.is_empty()
+                && c.device != "lo"
+                && !c.kind.eq_ignore_ascii_case("loopback")
+                && !c.uuid.is_empty()
+        })
+    };
+    usable()
+        .find(|c| with_gateway.iter().any(|d| d == &c.device))
+        .or_else(|| usable().next())
+}
+
+pub const DEVICE_DNS_FIELDS: &str = "IP4.DNS,IP6.DNS";
+
+/// The resolvers NetworkManager says it applied to a device, from
+/// `nmcli -t -f IP4.DNS,IP6.DNS device show <dev>`.
+///
+/// The keys are indexed — `IP4.DNS[1]`, `IP4.DNS[2]` — and nmcli prints the key with no value at
+/// all when there are none, so an empty result is "NetworkManager applied no resolvers here" and
+/// not a parse that went wrong. Read in nmcli's order and not sorted: the order is which resolver
+/// is asked first, and re-ordering it would misreport which server answers.
+///
+/// Everything after the first field is joined back with `:` rather than taken as one field. An
+/// IPv6 resolver is `2606:4700:4700::1111`, which is colons all the way down: nmcli's terse mode
+/// escapes them as `\:` and [`split_terse`] puts the address back together, but a version that
+/// does not escape them — or a value read from anywhere else — would otherwise be truncated to
+/// `2606`. A truncated resolver is one this machine cannot ask, reported as the one it was told
+/// to use. The key itself never contains a colon, so the first split is always the right one.
+pub fn parse_device_dns(text: &str) -> Vec<String> {
+    let mut servers = Vec::new();
+    for line in text.lines() {
+        let parts = split_terse(line);
+        let Some(key) = parts.first() else { continue };
+        if !key.starts_with("IP4.DNS") && !key.starts_with("IP6.DNS") {
+            continue;
+        }
+        let value = parts[1..].join(":").trim().to_string();
+        if value.is_empty() || value == "--" {
+            continue;
+        }
+        servers.push(value);
+    }
+    servers
 }
 
 pub const DEVICE_SHOW_FIELDS: &str =

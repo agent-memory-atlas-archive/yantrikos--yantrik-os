@@ -1,11 +1,12 @@
 id: networking
 name: Network Tools
-description: Network diagnostics — ping, traceroute, DNS, ports, VPN status
+description: Network state and diagnostics — interfaces, DNS, ping, ports, VPN
 long_description: >
-  Comprehensive network diagnostic tools. Check interfaces, ping hosts, run
-  traceroutes, scan open ports, manage DNS settings, and check VPN status.
-  Essential for troubleshooting connectivity issues.
-version: "1.0.0"
+  Interfaces and resolvers read from network-service, which owns them; reachability checks,
+  listening ports and VPN status read locally. Setting DNS goes through the connection profile
+  NetworkManager keeps, not through a write to /etc/resolv.conf, and re-activates the connection
+  to apply — which briefly interrupts it.
+version: "1.1.0"
 author: Yantrik
 icon: globe
 category: system
@@ -19,10 +20,17 @@ tools:
   - network_dns
   - network_dns_set
   - network_vpn_status
+  # Registered by crates/yantrik-companion-tools/src/networking.rs all along and missing from this
+  # list, so the Skill Store card described six tools where the registry held seven.
+  - network_diagnose
 
 core_tools: []
 instincts: []
 cortex_rules: []
+# network_interfaces, network_dns, network_dns_set and network_diagnose are callers of
+# network-service. The rest read this machine directly and have no counterpart there by design —
+# see design/network-2026-09-20.md. Not listed under `services:`: that field turns on cortex
+# rules gated on a service id, and this skill registers no service of its own.
 services: []
 requires: []
 requires_config: []

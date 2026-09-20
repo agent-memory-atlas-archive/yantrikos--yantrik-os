@@ -37,6 +37,15 @@ pub mod method {
     pub const FIREWALL: &str = "network.firewall";
 
     // ── Changing ──
+    /// Point this machine's resolvers somewhere else.
+    ///
+    /// Here rather than in the companion because the companion's `network_dns_set` wrote
+    /// `/etc/resolv.conf` with `std::fs::write` and reported success. On a machine running
+    /// NetworkManager — which is every machine this OS builds — that file is NetworkManager's,
+    /// rewritten on the next carrier change or DHCP renew, so the change was either refused for
+    /// want of privilege or undone without anybody being told. Resolvers belong to the connection
+    /// profile, and the connection profile belongs to this service.
+    pub const DNS_SET: &str = "network.dns_set";
     /// Turn the Wi-Fi radio on or off.
     pub const WIFI_RADIO: &str = "network.wifi_radio";
     /// Ask the adapter to look for access points, then read the list back.
@@ -108,6 +117,23 @@ pub struct WifiForgetParams {
     pub ssid: String,
 }
 
+/// Parameters for [`method::DNS_SET`].
+///
+/// One list rather than `primary` and `secondary`. The tool this replaces took those two names
+/// and wrote two `nameserver` lines, which meant a machine that wanted three resolvers could not
+/// say so and a machine that wanted one had to leave a field blank that also meant "unchanged".
+/// A list of one is one resolver; an empty list is a request with nothing in it and is refused
+/// rather than read as "clear them", because clearing the resolvers of the connection carrying
+/// the default route is not something to do by omission.
+///
+/// Addresses are validated as addresses by the service before nmcli sees them. IPv4 and IPv6 are
+/// both accepted and are applied to `ipv4.dns` and `ipv6.dns` respectively — a family with no
+/// server in this list is left exactly as it was.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DnsSetParams {
+    pub servers: Vec<String>,
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Responses
 // ══════════════════════════════════════════════════════════════════════
@@ -140,6 +166,27 @@ pub struct NetworkStatus {
 pub struct DnsConfig {
     pub nameservers: Vec<String>,
     pub search_domains: Vec<String>,
+}
+
+/// What [`method::DNS_SET`] observed after it changed the resolvers.
+///
+/// Two readings and not one. `/etc/resolv.conf` is what the C library resolves through and is the
+/// thing a person means by "my DNS"; NetworkManager's own `IP4.DNS` for the device is what it
+/// believes it applied. They agree on a plain NetworkManager machine, which is what this OS
+/// builds. They do not agree on a machine running a stub resolver — `resolv.conf` there says
+/// `127.0.0.53` and the real servers are only in the second reading — and a check written against
+/// the first alone would call a change that worked a failure. Both are reported, and the service
+/// accepts the change only if the servers asked for turn up in one of them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DnsSetResult {
+    /// The connection profile whose resolvers were changed, by the name nmcli lists it under.
+    pub connection: String,
+    /// The interface that profile is up on.
+    pub device: String,
+    /// `/etc/resolv.conf`, re-read afterwards.
+    pub resolv_conf: DnsConfig,
+    /// `IP4.DNS` and `IP6.DNS` for the device, re-read afterwards, in NetworkManager's order.
+    pub device_dns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +399,7 @@ pub trait NetworkService: Send + Sync {
     fn interfaces(&self) -> Result<Vec<NetworkInterfaceInfo>, ServiceError>;
     fn status(&self) -> Result<NetworkStatus, ServiceError>;
     fn dns(&self) -> Result<DnsConfig, ServiceError>;
+    fn dns_set(&self, params: &DnsSetParams) -> Result<DnsSetResult, ServiceError>;
     fn wifi_state(&self) -> Result<WifiState, ServiceError>;
     fn wifi_known(&self) -> Result<Vec<KnownNetwork>, ServiceError>;
     fn wifi_scan(&self, params: &WifiScanParams) -> Result<Vec<ScannedNetwork>, ServiceError>;

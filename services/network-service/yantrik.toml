@@ -23,6 +23,10 @@ methods = [
     "network.interfaces",
     "network.status",
     "network.dns",
+    # Added when the companion's own `network_dns_set` was taken off `/etc/resolv.conf`: that file
+    # is NetworkManager's, so a write to it is either refused or undone. Resolvers live on the
+    # connection profile, which is this service's to change.
+    "network.dns_set",
     "network.wifi_state",
     "network.wifi_known",
     "network.firewall",

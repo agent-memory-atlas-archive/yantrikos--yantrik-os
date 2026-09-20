@@ -11,6 +11,7 @@
 //!   network.wifi_state     {}                        -> WifiState
 //!   network.wifi_known     {}                        -> Vec<KnownNetwork>
 //!   network.firewall       {}                        -> FirewallState
+//!   network.dns_set        { servers }               -> DnsSetResult   (re-read)
 //!   network.wifi_radio     { enabled }               -> WifiState      (re-read)
 //!   network.wifi_scan      { rescan }                -> Vec<ScannedNetwork>
 //!   network.wifi_connect   { ssid, password? }       -> WifiState      (re-read)
@@ -43,9 +44,9 @@ mod nmcli;
 
 use yantrik_ipc_contracts::control_surface::{describe_json, Action, View};
 use yantrik_ipc_contracts::network::{
-    method, ConnectionType, DnsConfig, FirewallState, KnownNetwork, NetworkInterfaceInfo,
-    NetworkStatus, RadioState, ScannedNetwork, WifiConnectParams, WifiForgetParams,
-    WifiForgetResult, WifiRadioParams, WifiScanParams, WifiState,
+    method, ConnectionType, DnsConfig, DnsSetParams, DnsSetResult, FirewallState, KnownNetwork,
+    NetworkInterfaceInfo, NetworkStatus, RadioState, ScannedNetwork, WifiConnectParams,
+    WifiForgetParams, WifiForgetResult, WifiRadioParams, WifiScanParams, WifiState,
 };
 use yantrik_service_sdk::prelude::*;
 
@@ -102,6 +103,10 @@ impl ServiceHandler for NetworkHandler {
             method::WIFI_CONNECT => {
                 let p: WifiConnectParams = params_for(method_name, params)?;
                 Ok(serde_json::to_value(wifi_connect(&p)?).unwrap())
+            }
+            method::DNS_SET => {
+                let p: DnsSetParams = params_for(method_name, params)?;
+                Ok(serde_json::to_value(dns_set(&p)?).unwrap())
             }
             method::WIFI_DISCONNECT => Ok(serde_json::to_value(wifi_disconnect()?).unwrap()),
             method::WIFI_FORGET => {
@@ -468,6 +473,217 @@ fn wifi_forget(ssid: &str) -> Result<WifiForgetResult, ServiceError> {
     Ok(WifiForgetResult {
         forgotten: ssid.to_string(),
         known: after,
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Resolvers
+// ══════════════════════════════════════════════════════════════════════
+
+/// glibc's resolver reads at most three `nameserver` lines out of `/etc/resolv.conf` — `MAXNS`
+/// in `<resolv.h>`, and it has been 3 for as long as there has been a resolv.conf. A fourth
+/// server accepted here would be written into the profile, appear in the readings, and never be
+/// asked a question, which is a setting that looks applied and is not.
+const MAX_RESOLVERS: usize = 3;
+
+/// The profiles this machine currently has up.
+fn active_connections() -> Result<Vec<nmcli::ActiveConnection>, Trouble> {
+    let exit = nmcli::run(
+        nmcli::QUICK_WAIT_SECS,
+        &[
+            "-t",
+            "-f",
+            nmcli::ACTIVE_FIELDS,
+            "connection",
+            "show",
+            "--active",
+        ],
+    );
+    nmcli::outcome(&exit).map(|text| nmcli::parse_active(&text))
+}
+
+/// The resolvers NetworkManager says it applied to one device.
+fn device_dns(device: &str) -> Vec<String> {
+    let exit = nmcli::run(
+        nmcli::QUICK_WAIT_SECS,
+        &[
+            "-t",
+            "-f",
+            nmcli::DEVICE_DNS_FIELDS,
+            "device",
+            "show",
+            device,
+        ],
+    );
+    nmcli::outcome(&exit)
+        .map(|text| nmcli::parse_device_dns(&text))
+        .unwrap_or_default()
+}
+
+/// Which devices hold an IPv4 gateway. Asked of NetworkManager rather than of `/proc/net/route`
+/// so that the answer and the profile it picks out come from the same place.
+fn devices_with_gateway(active: &[nmcli::ActiveConnection]) -> Vec<String> {
+    active
+        .iter()
+        .filter(|c| !c.device.is_empty())
+        .filter(|c| {
+            let exit = nmcli::run(
+                nmcli::QUICK_WAIT_SECS,
+                &[
+                    "-t",
+                    "-f",
+                    nmcli::DEVICE_SHOW_FIELDS,
+                    "device",
+                    "show",
+                    c.device.as_str(),
+                ],
+            );
+            nmcli::outcome(&exit)
+                .map(|text| nmcli::parse_device_show(&text).gateway.is_some())
+                .unwrap_or(false)
+        })
+        .map(|c| c.device.clone())
+        .collect()
+}
+
+/// Point this machine's resolvers somewhere else, through the profile that owns them.
+///
+/// # Why this is not a write to `/etc/resolv.conf`
+///
+/// The companion's `network_dns_set` did `std::fs::write("/etc/resolv.conf", …)` with a `.bak`
+/// beside it and answered "DNS set to 1.1.1.1". Two things were wrong with that and both are
+/// silent. The first is privilege: a desktop session cannot write that file, so the tool returned
+/// its own `Try running as root` and the resolvers were unchanged — or, on the images `deploy/`
+/// builds, where the session can become root for anything, it *did* write it, unscoped. The
+/// second is ownership, and it survives being root: NetworkManager writes `/etc/resolv.conf`
+/// itself from the active profile and rewrites it on the next carrier change, DHCP renew or
+/// re-activation. So the good case was a setting with a half-life, and nothing said so.
+///
+/// Resolvers are a property of the connection profile. `ipv4.dns` on the profile plus
+/// `ipv4.ignore-auto-dns yes` is what "use these servers, not the ones the router handed us"
+/// means — without the second, NetworkManager keeps the DHCP servers in the list and the caller's
+/// choice is merely first, so a resolver the caller thought it had removed still answers.
+///
+/// # What this costs
+///
+/// `nmcli connection up` re-activates the profile to apply the change. On the connection carrying
+/// the default route that is a brief interruption: the link goes down and comes back with a new
+/// lease. That is why the tool in front of this is graded `sensitive` rather than `standard`, and
+/// why this is a bad thing to call down the connection you are calling over. `nmcli device
+/// reapply` would apply the change in place and is the gentler instrument, but which properties
+/// it picks up varies by NetworkManager version and nothing here has run against a live one; `up`
+/// is the unambiguous one and the verification below is written against it.
+fn dns_set(params: &DnsSetParams) -> Result<DnsSetResult, ServiceError> {
+    use std::net::IpAddr;
+
+    let bad = |message: String| ServiceError {
+        code: -32602,
+        message,
+    };
+
+    if params.servers.is_empty() {
+        return Err(bad(
+            "no DNS servers were given. An empty list is not read as \"clear the resolvers\": \
+             leaving the connection carrying the default route with no resolver at all is not \
+             something to ask for by omission"
+                .to_string(),
+        ));
+    }
+    if params.servers.len() > MAX_RESOLVERS {
+        return Err(bad(format!(
+            "{} DNS servers were given and glibc's resolver reads at most {MAX_RESOLVERS}; the \
+             rest would be stored and never asked",
+            params.servers.len()
+        )));
+    }
+
+    // Parsed as addresses, not pattern-matched. The tool this replaces checked that every
+    // character was a digit, a dot or a colon, which accepts `...`, `999.999.999.999` and `:`.
+    let mut v4: Vec<String> = Vec::new();
+    let mut v6: Vec<String> = Vec::new();
+    for server in &params.servers {
+        let server = server.trim();
+        match server.parse::<IpAddr>() {
+            Ok(IpAddr::V4(a)) => v4.push(a.to_string()),
+            Ok(IpAddr::V6(a)) => v6.push(a.to_string()),
+            Err(_) => {
+                return Err(bad(format!(
+                    "\"{server}\" is not an IP address. A DNS server is named by address here, \
+                     not by hostname — a hostname would have to be resolved by the resolver this \
+                     call is about to change"
+                )))
+            }
+        }
+    }
+
+    let active = active_connections().map_err(|t| service_error(&t))?;
+    let gateways = devices_with_gateway(&active);
+    let Some(target) = nmcli::resolver_connection(&active, &gateways) else {
+        return Err(ServiceError {
+            code: -32033,
+            message: "this machine has no active network connection to set resolvers on"
+                .to_string(),
+        });
+    };
+
+    // `modify uuid <uuid>`, never `modify <name>`: a Wi-Fi profile is named after its SSID and an
+    // SSID may begin with a dash or contain a space.
+    let joined_v4 = v4.join(" ");
+    let joined_v6 = v6.join(" ");
+    let mut argv: Vec<&str> = vec!["connection", "modify", "uuid", target.uuid.as_str()];
+    if !v4.is_empty() {
+        argv.extend_from_slice(&["ipv4.dns", joined_v4.as_str(), "ipv4.ignore-auto-dns", "yes"]);
+    }
+    if !v6.is_empty() {
+        argv.extend_from_slice(&["ipv6.dns", joined_v6.as_str(), "ipv6.ignore-auto-dns", "yes"]);
+    }
+    let exit = nmcli::run(nmcli::QUICK_WAIT_SECS, &argv);
+    nmcli::outcome(&exit).map_err(|t| service_error(&t))?;
+
+    // Stored is not applied. The profile now says so on disk and the running link does not.
+    let exit = nmcli::run(
+        nmcli::APPLY_WAIT_SECS,
+        &["connection", "up", "uuid", target.uuid.as_str()],
+    );
+    nmcli::outcome(&exit).map_err(|t| service_error(&t))?;
+
+    let resolv_conf = read_dns()?;
+    let applied = device_dns(&target.device);
+
+    // Every server asked for has to turn up in one of the two readings, or this failed. A
+    // `connection up` that exits zero having re-activated the profile without the new resolvers —
+    // because the connection is shared with another setting, because a stub resolver sits in
+    // front, because NetworkManager kept an old applied connection — is a success message over an
+    // unchanged machine, which is the shape of bug this whole pass exists to remove.
+    let missing: Vec<&String> = params
+        .servers
+        .iter()
+        .filter(|wanted| {
+            let wanted = wanted.trim();
+            !applied.iter().any(|s| s == wanted)
+                && !resolv_conf.nameservers.iter().any(|s| s == wanted)
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Err(disagreed(&format!(
+            "nmcli accepted the change and {} is not among this machine's resolvers afterwards. \
+             /etc/resolv.conf says [{}]; NetworkManager says the {} device has [{}]",
+            missing
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+            resolv_conf.nameservers.join(", "),
+            target.device,
+            applied.join(", ")
+        )));
+    }
+
+    Ok(DnsSetResult {
+        connection: target.name.clone(),
+        device: target.device.clone(),
+        resolv_conf,
+        device_dns: applied,
     })
 }
 
