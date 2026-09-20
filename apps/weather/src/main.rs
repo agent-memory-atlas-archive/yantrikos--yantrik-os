@@ -4,11 +4,14 @@
 //! Falls back to direct Open-Meteo API calls when service is unavailable.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use yantrik_app_runtime::prelude::*;
 use yantrik_ipc_transport::SyncRpcClient;
+
+mod state;
+use state::{SavedLocation, WeatherState, FROM_DIRECT, FROM_SERVICE};
 
 slint::include_modules!();
 
@@ -58,6 +61,18 @@ fn refresh_agent_rail(ui: &WeatherApp) {
     });
 }
 
+/// The one question worth asking about a forecast, built from the reading on screen.
+///
+/// Shared by the rail's suggestion and the header's AI Insights button so the two cannot come
+/// to differ; the button used to log a line and do nothing at all.
+fn conditions_prompt(c: &WeatherCurrent) -> String {
+    format!(
+        "It is {} at {}, feels like {}. In at most three short lines say what to plan for \
+         today. Use only these conditions.",
+        c.condition, c.temperature, c.feels_like
+    )
+}
+
 fn main() {
     init_tracing("yantrik-weather");
 
@@ -80,22 +95,13 @@ fn main() {
             if id != "advise" {
                 return;
             }
-            let c = ui.get_current();
-            let (temp, cond, feels) = (
-                c.temperature.to_string(),
-                c.condition.to_string(),
-                c.feels_like.to_string(),
-            );
+            let prompt = conditions_prompt(&ui.get_current());
             ui.set_proposal_working(true);
             ui.set_proposal(AgentProposal {
                 title: "Today outside".into(),
                 source: "from today's conditions".into(),
                 ..Default::default()
             });
-            let prompt = format!(
-                "It is {cond} at {temp}, feels like {feels}. In at most three short lines say \
-                 what to plan for today. Use only these conditions."
-            );
             let back = ui.as_weak();
             std::thread::spawn(move || {
                 let outcome = companion::ask(&prompt);
@@ -167,141 +173,35 @@ struct WeatherData {
     aqi_label: Option<String>,
     aqi_level: Option<i32>,
     error: Option<String>,
+    /// [`FROM_SERVICE`] or [`FROM_DIRECT`], and empty on a reading that never arrived.
+    source: &'static str,
+    /// Why the service was not used, when it was not. The fallback itself is fine — it reads
+    /// the same Open-Meteo the service reads — but `Err(_) => fetch_weather_direct(…)` threw
+    /// the reason away, so a person watching a service go down in the machine rail saw
+    /// temperatures appear as usual and had no way to connect the two.
+    degraded: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct SavedLocation {
-    name: String,
-    lat: f64,
-    lon: f64,
-}
+/// The first words of the strip the fetch path writes, so that a later good reading can clear
+/// its own message without wiping one that is still true. A location that could not be added
+/// is not news the next half-hourly refresh gets to throw away.
+const DEGRADED_NOTICE: &str = "Readings came straight from Open-Meteo";
 
-#[derive(Clone)]
-struct WeatherState {
-    locations: Arc<Mutex<Vec<SavedLocation>>>,
-    active_index: Arc<Mutex<usize>>,
-    use_fahrenheit: Arc<Mutex<bool>>,
-    last_fetch_time: Arc<Mutex<Option<Instant>>>,
-}
-
-/// Prefs live next to the shell's settings (`~/.config/yantrik/weather.json`) — the
-/// user's locations and unit choice should survive a restart, not a process.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Prefs {
-    #[serde(default)]
-    fahrenheit: bool,
-    #[serde(default)]
-    active: usize,
-    #[serde(default)]
-    locations: Vec<SavedLocation>,
-}
-
-fn prefs_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".into());
-    home.into()
-}
-
-impl WeatherState {
-    /// Build from persisted prefs when present; otherwise the default single location.
-    fn new() -> Self {
-        let prefs: Option<Prefs> = std::fs::read_to_string(prefs_path().join(".config/yantrik/weather.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok());
-        let (locations, active, fahrenheit) = match prefs {
-            Some(p) if !p.locations.is_empty() => {
-                let active = (p.active).min(p.locations.len() - 1);
-                (p.locations, active, p.fahrenheit)
-            }
-            _ => (
-                vec![SavedLocation {
-                    name: DEFAULT_LOCATION_NAME.to_string(),
-                    lat: DEFAULT_LAT,
-                    lon: DEFAULT_LON,
-                }],
-                0,
-                false,
-            ),
-        };
-        Self {
-            locations: Arc::new(Mutex::new(locations)),
-            active_index: Arc::new(Mutex::new(active)),
-            use_fahrenheit: Arc::new(Mutex::new(fahrenheit)),
-            last_fetch_time: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    fn save(&self) {
-        let locs = self.locations.lock().unwrap();
-        let active = *self.active_index.lock().unwrap();
-        let prefs = Prefs {
-            fahrenheit: *self.use_fahrenheit.lock().unwrap(),
-            active,
-            locations: locs.clone(),
-        };
-        let path = prefs_path().join(".config/yantrik/weather.json");
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, serde_json::to_string_pretty(&prefs).unwrap());
-    }
-
-    fn active_location(&self) -> SavedLocation {
-        let locs = self.locations.lock().unwrap();
-        let idx = *self.active_index.lock().unwrap();
-        locs.get(idx).cloned().unwrap_or(SavedLocation {
-            name: DEFAULT_LOCATION_NAME.to_string(), lat: DEFAULT_LAT, lon: DEFAULT_LON,
-        })
-    }
-
-    fn is_fahrenheit(&self) -> bool {
-        *self.use_fahrenheit.lock().unwrap()
-    }
-
-    fn set_fahrenheit(&self, v: bool) {
-        *self.use_fahrenheit.lock().unwrap() = v;
-    }
-
-    fn record_fetch_time(&self) {
-        *self.last_fetch_time.lock().unwrap() = Some(Instant::now());
-    }
-
-    fn last_updated_text(&self) -> String {
-        let guard = self.last_fetch_time.lock().unwrap();
-        match *guard {
-            None => String::new(),
-            Some(t) => {
-                let elapsed = t.elapsed().as_secs();
-                if elapsed < 60 { "Updated just now".to_string() }
-                else if elapsed < 3600 {
-                    let mins = elapsed / 60;
-                    if mins == 1 { "Updated 1 min ago".to_string() }
-                    else { format!("Updated {} min ago", mins) }
-                } else {
-                    let hours = elapsed / 3600;
-                    if hours == 1 { "Updated 1 hr ago".to_string() }
-                    else { format!("Updated {} hr ago", hours) }
-                }
-            }
-        }
-    }
-
-    fn to_slint_locations(&self) -> Vec<WeatherSavedLocation> {
-        let locs = self.locations.lock().unwrap();
-        let active = *self.active_index.lock().unwrap();
-        locs.iter().enumerate().map(|(i, loc)| WeatherSavedLocation {
+/// The saved places, in the shape the panel draws them.
+fn to_slint_locations(state: &WeatherState) -> Vec<WeatherSavedLocation> {
+    let active = state.active_index();
+    state
+        .locations()
+        .iter()
+        .enumerate()
+        .map(|(i, loc)| WeatherSavedLocation {
             name: SharedString::from(&loc.name),
             lat: loc.lat as f32,
             lon: loc.lon as f32,
             is_active: i == active,
-        }).collect()
-    }
+        })
+        .collect()
 }
-
-const DEFAULT_LAT: f64 = 51.5074;
-const DEFAULT_LON: f64 = -0.1278;
-const DEFAULT_LOCATION_NAME: &str = "London";
 
 // ── Service wrappers ─────────────────────────────────────────────────
 
@@ -419,6 +319,8 @@ fn fetch_via_service(lat: f64, lon: f64, location_name: &str, use_fahrenheit: bo
         aqi_label: Some(svc_aqi.label),
         aqi_level: Some(svc_aqi.level),
         error: None,
+        source: FROM_SERVICE,
+        degraded: None,
     })
 }
 
@@ -443,6 +345,7 @@ fn fetch_weather_direct(lat: f64, lon: f64, location_name: &str, use_fahrenheit:
         Err(e) => {
             return WeatherData {
                 error: Some(format!("API request failed: {e}")),
+                source: FROM_DIRECT,
                 ..Default::default()
             };
         }
@@ -453,6 +356,7 @@ fn fetch_weather_direct(lat: f64, lon: f64, location_name: &str, use_fahrenheit:
         Err(e) => {
             return WeatherData {
                 error: Some(format!("Read error: {e}")),
+                source: FROM_DIRECT,
                 ..Default::default()
             };
         }
@@ -463,6 +367,7 @@ fn fetch_weather_direct(lat: f64, lon: f64, location_name: &str, use_fahrenheit:
         Err(e) => {
             return WeatherData {
                 error: Some(format!("JSON parse error: {e}")),
+                source: FROM_DIRECT,
                 ..Default::default()
             };
         }
@@ -611,38 +516,204 @@ fn fetch_weather_direct(lat: f64, lon: f64, location_name: &str, use_fahrenheit:
         aqi_label: Some("N/A".to_string()),
         aqi_level: Some(0),
         error: None,
+        source: FROM_DIRECT,
+        degraded: None,
     }
 }
 
-fn geocode_location(query: &str) -> Option<(f64, f64, String)> {
-    // Try service first
-    if let Ok(loc) = geocode_via_service(query) {
-        return Some((loc.lat, loc.lon, loc.name));
+// ── Geocoding ────────────────────────────────────────────────────────
+
+/// How long a single geocoding attempt may take.
+///
+/// This is not a guess about a good network. An `app.act` handler runs on the UI thread and the
+/// RPC side stops waiting after three seconds, so a lookup that outlasts that budget is reported
+/// to the caller as "the app did not answer" — while the location goes on being added a moment
+/// later. That is the same fabricated outcome in reverse, and the fix is for the lookup to fit
+/// inside the budget or say it could not. Two attempts at 1.2s leaves room for the rest.
+/// The direct call previously had no timeout at all and could hang the window indefinitely.
+const GEOCODE_TIMEOUT: Duration = Duration::from_millis(1200);
+
+/// Why a place name could not be turned into coordinates.
+///
+/// The distinction is the point. "There is no such place" is the person's typo and they can fix
+/// it; "the geocoder could not be reached" is the machine's problem and the same spelling will
+/// work later. Collapsing both into `None` — which is what `.ok()?` did — meant the app could
+/// not tell them apart, so it told the caller neither.
+enum GeocodeFailure {
+    NotFound(String),
+    Unreachable(String),
+}
+
+impl std::fmt::Display for GeocodeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(q) => write!(f, "no place called \"{q}\" was found"),
+            Self::Unreachable(why) => write!(f, "the geocoder could not be reached: {why}"),
+        }
     }
-    // Fallback: direct API
+}
+
+fn geocode_location(query: &str) -> Result<SavedLocation, GeocodeFailure> {
+    // The service first, because it is the one owner of this domain when it is up. Its "not
+    // found" is an answer and is taken as one; anything else means it did not answer at all,
+    // and Open-Meteo is asked directly rather than reporting a missing service as a missing city.
+    match geocode_via_service(query) {
+        Ok(loc) => {
+            return Ok(SavedLocation {
+                name: loc.name,
+                lat: loc.lat,
+                lon: loc.lon,
+            })
+        }
+        Err(e) if e.contains("not found") => {
+            return Err(GeocodeFailure::NotFound(query.to_string()))
+        }
+        Err(e) => tracing::debug!(error = %e, "weather service did not geocode; asking Open-Meteo"),
+    }
+
     let encoded = query.replace(' ', "+");
     let url = format!(
         "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=en&format=json",
         encoded
     );
-    let resp = ureq::get(&url).call().ok()?;
-    let body: String = resp.into_string().ok()?;
-    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let results = json["results"].as_array()?;
-    let first = results.first()?;
-    let lat = first["latitude"].as_f64()?;
-    let lon = first["longitude"].as_f64()?;
+    let resp = ureq::get(&url)
+        .timeout(GEOCODE_TIMEOUT)
+        .call()
+        .map_err(|e| GeocodeFailure::Unreachable(e.to_string()))?;
+    let body: String = resp
+        .into_string()
+        .map_err(|e| GeocodeFailure::Unreachable(e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| GeocodeFailure::Unreachable(format!("its answer did not parse: {e}")))?;
+
+    // An empty `results` is how Open-Meteo says it knows of no such place, and a name with no
+    // coordinates is not a location whatever else it is. Both are the person's answer, not the
+    // network's.
+    let first = json["results"]
+        .as_array()
+        .and_then(|r| r.first().cloned())
+        .ok_or_else(|| GeocodeFailure::NotFound(query.to_string()))?;
+    let (lat, lon) = match (first["latitude"].as_f64(), first["longitude"].as_f64()) {
+        (Some(lat), Some(lon)) => (lat, lon),
+        _ => return Err(GeocodeFailure::NotFound(query.to_string())),
+    };
     let name = first["name"].as_str().unwrap_or(query).to_string();
     let country = first["country"].as_str().unwrap_or("");
     let resolved = if country.is_empty() { name } else { format!("{}, {}", name, country) };
-    Some((lat, lon, resolved))
+    Ok(SavedLocation { name: resolved, lat, lon })
 }
 
 fn geocode_via_service(query: &str) -> Result<yantrik_ipc_contracts::weather::Location, String> {
-    let client = SyncRpcClient::for_service("weather");
+    let client = SyncRpcClient::for_service("weather").with_timeout(GEOCODE_TIMEOUT);
     let result = client.call("weather.geocode", serde_json::json!({ "query": query }))
         .map_err(|e| e.message)?;
     serde_json::from_value(result).map_err(|e| e.to_string())
+}
+
+// ── The one path for each change worth keeping ───────────────────────
+
+/// What actually happened when a place was added, rather than what was asked for.
+///
+/// The name and the coordinates are the geocoder's: "paris" comes back as "Paris, France" at
+/// 48.85/2.35, and a caller told only what it typed has learned nothing about what was stored.
+struct Added {
+    name: String,
+    lat: f64,
+    lon: f64,
+}
+
+/// Look a place up, keep it, and show it — or say which of those did not happen.
+///
+/// The single path behind the panel's Add button and the `add_location` action, so neither can
+/// report an outcome it did not get. The action used to answer `{"added": name}` in the
+/// statement after `invoke_weather_add_location`, and the callback under it was
+/// `if let Some(…) = geocode_location(…)` with no else: a misspelt city added nothing at all,
+/// silently, and the caller was told it had worked.
+///
+/// Free of Slint so that both callers can use it from the thread they are already on — the
+/// button from a worker, the action inline.
+fn add_location(state: &WeatherState, query: &str) -> Result<Added, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("a location needs a name".into());
+    }
+    let found = geocode_location(query).map_err(|e| e.to_string())?;
+    let name = found.name.clone();
+    let (lat, lon) = (found.lat, found.lon);
+    state.add_location(found)?;
+    Ok(Added { name, lat, lon })
+}
+
+/// Show temperatures in the other scale, and remember that.
+///
+/// Both halves in the order the switch does them, and the store written before anyone is told.
+/// The Slint toggle flips `weather-use-fahrenheit` itself and then calls the callback, so the
+/// property is set here as well: setting it only when it differs keeps the action idempotent —
+/// asking twice for fahrenheit must not land back on celsius.
+fn apply_units(
+    ui: &WeatherApp,
+    state: &WeatherState,
+    slot: &Arc<Mutex<Option<WeatherData>>>,
+    fahrenheit: bool,
+) -> Result<bool, String> {
+    state.set_fahrenheit(fahrenheit)?;
+    if ui.get_weather_use_fahrenheit() != fahrenheit {
+        ui.set_weather_use_fahrenheit(fahrenheit);
+    }
+    let loc = state.active_location();
+    fetch_weather_async(slot.clone(), loc.lat, loc.lon, &loc.name, fahrenheit);
+    let mut c = ui.get_current();
+    c.is_loading = true;
+    ui.set_current(c);
+    Ok(fahrenheit)
+}
+
+/// Redraw the saved-locations panel from the store, which is the only thing that knows.
+fn show_saved_locations(ui: &WeatherApp, state: &WeatherState) {
+    ui.set_weather_saved_locations(ModelRc::new(VecModel::from(to_slint_locations(state))));
+}
+
+/// Show one of the saved places, behind both the list row and the `show_location` action.
+///
+/// Which place is being shown is in the prefs file and is restored on start, so it has to be
+/// written when it changes; it never was, and every restart came back to whichever location the
+/// file had recorded last — which, before this change, was none of them.
+fn select_location(
+    ui: &WeatherApp,
+    state: &WeatherState,
+    slot: &Arc<Mutex<Option<WeatherData>>>,
+    idx: usize,
+) -> Result<SavedLocation, String> {
+    let loc = state.select_location(idx)?;
+    show_saved_locations(ui, state);
+    let mut c = ui.get_current();
+    c.is_loading = true;
+    ui.set_current(c);
+    fetch_weather_async(slot.clone(), loc.lat, loc.lon, &loc.name, state.is_fahrenheit());
+    Ok(loc)
+}
+
+/// Forget a saved place, behind the list row's delete button.
+///
+/// Returns which one went, so the notice on a failure can name it. The old handler returned
+/// early on a bad index and on the last remaining location without a word either way.
+fn remove_location(
+    ui: &WeatherApp,
+    state: &WeatherState,
+    slot: &Arc<Mutex<Option<WeatherData>>>,
+    idx: usize,
+) -> Result<SavedLocation, String> {
+    let was_active = state.active_index() == idx;
+    let removed = state.remove_location(idx)?;
+    show_saved_locations(ui, state);
+    if was_active {
+        let loc = state.active_location();
+        let mut c = ui.get_current();
+        c.is_loading = true;
+        ui.set_current(c);
+        fetch_weather_async(slot.clone(), loc.lat, loc.lon, &loc.name, state.is_fahrenheit());
+    }
+    Ok(removed)
 }
 
 // ── Async fetch ──────────────────────────────────────────────────────
@@ -655,7 +726,16 @@ fn fetch_weather_async(
     std::thread::spawn(move || {
         let data = match fetch_via_service(lat, lon, &name, use_fahrenheit) {
             Ok(d) => d,
-            Err(_) => fetch_weather_direct(lat, lon, &name, use_fahrenheit),
+            Err(e) => {
+                // Falling back is right: Open-Meteo is the same source the service reads, and a
+                // stopped service is no reason to show nothing. Keeping the reason is the part
+                // that was missing — it is what turns a silent degrade into something the
+                // person and `describe` can both see.
+                tracing::warn!(error = %e, "weather service did not answer; reading Open-Meteo directly");
+                let mut d = fetch_weather_direct(lat, lon, &name, use_fahrenheit);
+                d.degraded = Some(e);
+                d
+            }
         };
         *slot.lock().unwrap() = Some(data);
     });
@@ -664,6 +744,16 @@ fn fetch_weather_async(
 // ── Apply data to UI ─────────────────────────────────────────────────
 
 fn apply_weather_data(ui: &WeatherApp, data: WeatherData) {
+    // Where these numbers came from, said once on screen. Cleared again only when this same
+    // message is what is showing: a notice about a location that could not be saved outlives a
+    // refresh, and a good reading has no business wiping it.
+    match data.degraded {
+        Some(ref why) => ui.set_notice(
+            format!("{DEGRADED_NOTICE} — the weather service did not answer ({why}).").into(),
+        ),
+        None if ui.get_notice().starts_with(DEGRADED_NOTICE) => ui.set_notice(SharedString::new()),
+        None => {}
+    }
     if let Some(current) = data.current { ui.set_current(current); }
     if let Some(hourly) = data.hourly { ui.set_hourly(ModelRc::new(VecModel::from(hourly))); }
     if let Some(daily) = data.daily { ui.set_daily(ModelRc::new(VecModel::from(daily))); }
@@ -704,11 +794,16 @@ fn apply_weather_data(ui: &WeatherApp, data: WeatherData) {
 // it reports what the person is actually looking at — their location, their units, the alert on
 // their screen — rather than what a fresh query would return.
 
-fn publish_control(app: &WeatherApp) {
+fn publish_control(
+    app: &WeatherApp,
+    state: WeatherState,
+    slot: Arc<Mutex<Option<WeatherData>>>,
+) {
     use yantrik_app_runtime::control::{Action, App, Param, View};
 
     let describe = {
         let weak = app.as_weak();
+        let st = state.clone();
         move || {
             let Some(ui) = weak.upgrade() else {
                 return View::new("Weather — closing");
@@ -717,7 +812,9 @@ fn publish_control(app: &WeatherApp) {
 
             if !now.error_text.is_empty() {
                 return View::new(format!("Weather — {}", now.error_text))
-                    .with("error", now.error_text.to_string());
+                    .with("error", now.error_text.to_string())
+                    .with("notice", ui.get_notice().to_string())
+                    .with("reading_from", reading_from(&st));
             }
 
             let alert_model = ui.get_weather_alerts();
@@ -788,6 +885,13 @@ fn publish_control(app: &WeatherApp) {
                 .with("alerts", serde_json::Value::Array(alerts))
                 .with("forecast", serde_json::Value::Array(forecast))
                 .with("saved_locations", serde_json::Value::Array(saved))
+                // Which of the two paths produced what is on screen. A caller reading these
+                // temperatures is entitled to know the weather service did not produce them.
+                .with("reading_from", reading_from(&st))
+                .with("config_file", st.path().display().to_string())
+                // What the person is being told went wrong, if anything. A caller that just
+                // failed to add a location should read the reason rather than infer it.
+                .with("notice", ui.get_notice().to_string())
         }
     };
 
@@ -799,6 +903,13 @@ fn publish_control(app: &WeatherApp) {
     let add_ui = ui_for.clone();
     let units_ui = ui_for;
 
+    let select_state = state.clone();
+    let add_state = state.clone();
+    let units_state = state;
+    let select_slot = slot.clone();
+    let add_slot = slot.clone();
+    let units_slot = slot;
+
     App::new("weather")
         .describe(describe)
         .action(Action::new("refresh", "Fetch the current conditions again"), move |_| {
@@ -807,48 +918,88 @@ fn publish_control(app: &WeatherApp) {
             Ok(serde_json::json!({ "refreshing": ui.get_current().location.to_string() }))
         })
         .action(
+            // Grade: standard. It moves which saved place is on screen and writes that choice
+            // to this app's own prefs file. Nothing outside Weather changes and the previous
+            // place is one call away, which is what keeps it below `sensitive`.
             Action::new("show_location", "Switch to one of the saved locations")
+                .risk("standard")
                 .arg(Param::text("name")),
             move |args| {
                 let ui = select_ui()?;
                 let want = args["name"].as_str().unwrap_or_default().trim().to_lowercase();
-                let saved = ui.get_weather_saved_locations();
-                let row = (0..saved.row_count())
-                    .find(|i| {
-                        saved.row_data(*i).map(|l| l.name.to_lowercase().contains(&want)).unwrap_or(false)
-                    })
+                let saved = select_state.locations();
+                let row = saved
+                    .iter()
+                    .position(|l| l.name.to_lowercase().contains(&want))
                     .ok_or_else(|| {
-                        let names: Vec<String> = (0..saved.row_count())
-                            .filter_map(|i| saved.row_data(i))
-                            .map(|l| l.name.to_string())
-                            .collect();
+                        let names: Vec<String> = saved.iter().map(|l| l.name.clone()).collect();
                         if names.is_empty() {
                             "no locations are saved yet; add one first".to_string()
                         } else {
                             format!("no saved location matches \"{want}\"; there is: {}", names.join(", "))
                         }
                     })?;
-                ui.invoke_weather_select_location(row as i32);
-                Ok(serde_json::json!({ "showing": ui.get_current().location.to_string() }))
+                let loc = match select_location(&ui, &select_state, &select_slot, row) {
+                    Ok(loc) => loc,
+                    Err(e) => {
+                        ui.set_notice(format!("Could not switch location: {e}").into());
+                        return Err(e);
+                    }
+                };
+                ui.set_notice(SharedString::new());
+                Ok(serde_json::json!({ "showing": loc.name, "lat": loc.lat, "lon": loc.lon }))
             },
         )
         .action(
-            Action::new("add_location", "Look a place up and save it").arg(Param::text("name")),
+            // Grade: standard. It reaches outward — a public geocoding lookup — and writes one
+            // line of this app's own prefs file. That is the whole of its effect: nothing on
+            // the machine changes, nobody else feels it, and a place added in error is one
+            // removal away. `sensitive` is for what interrupts something (stopping a container,
+            // a network change); a saved city is not that. Declared rather than left to the
+            // default, so the judgement is on the page — and it is only worth declaring now
+            // that the action stores something, which until this change it did not.
+            Action::new("add_location", "Look a place up and save it")
+                .risk("standard")
+                .arg(Param::text("name")),
             move |args| {
                 let ui = add_ui()?;
                 let name = args["name"].as_str().unwrap_or_default().trim().to_string();
                 if name.is_empty() {
                     return Err("`name` is empty".into());
                 }
-                ui.invoke_weather_add_location(name.clone().into());
+                // The same path the panel's Add button takes, run to completion before this
+                // answers. It used to hand the name to the window and report success in the
+                // next statement, while the lookup was still in flight on another thread.
+                let added = match add_location(&add_state, &name) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        ui.set_notice(format!("Could not add \u{201C}{name}\u{201D}: {e}").into());
+                        return Err(e);
+                    }
+                };
+                ui.set_notice(SharedString::new());
+                show_saved_locations(&ui, &add_state);
+                let loc = add_state.active_location();
+                fetch_weather_async(add_slot.clone(), loc.lat, loc.lon, &loc.name, add_state.is_fahrenheit());
+                let mut c = ui.get_current();
+                c.is_loading = true;
+                ui.set_current(c);
+                // What the geocoder resolved, not what was asked for, and the file it is now in.
                 Ok(serde_json::json!({
-                    "added": name,
-                    "saved": ui.get_weather_saved_locations().row_count(),
+                    "added": added.name,
+                    "lat": added.lat,
+                    "lon": added.lon,
+                    "saved_to": add_state.path().display().to_string(),
+                    "saved_locations": add_state.locations().len(),
                 }))
             },
         )
         .action(
+            // Grade: standard. It changes what the person is reading and writes the choice to
+            // this app's prefs; it is display-only and instantly reversible, but it is still a
+            // change made on someone's screen, and `safe` in this vocabulary is for reads.
             Action::new("set_units", "Show temperatures in Celsius or Fahrenheit")
+                .risk("standard")
                 .arg(Param::text("units").describe("celsius | fahrenheit")),
             move |args| {
                 let ui = units_ui()?;
@@ -857,30 +1008,37 @@ fn publish_control(app: &WeatherApp) {
                     "celsius" | "c" | "metric" => false,
                     other => return Err(format!("units are celsius or fahrenheit, not `{other}`")),
                 };
-                // Both halves, in the order the switch does them. The callback only *reads*
-                // `weather-use-fahrenheit` — the Slint toggle flips the property itself and then
-                // calls it — so invoking the callback alone would refetch in the units already
-                // showing. Setting it only when it differs keeps this idempotent: asking twice
-                // for fahrenheit must not land back on celsius.
-                if ui.get_weather_use_fahrenheit() != want_f {
-                    ui.set_weather_use_fahrenheit(want_f);
-                    ui.invoke_weather_toggle_units();
+                if let Err(e) = apply_units(&ui, &units_state, &units_slot, want_f) {
+                    ui.set_notice(format!("Could not keep the unit choice: {e}").into());
+                    return Err(e);
                 }
+                ui.set_notice(SharedString::new());
                 Ok(serde_json::json!({
-                    "units": if ui.get_weather_use_fahrenheit() { "fahrenheit" } else { "celsius" },
+                    "units": if want_f { "fahrenheit" } else { "celsius" },
+                    "saved_to": units_state.path().display().to_string(),
                 }))
             },
         )
         .serve();
 }
 
+/// Where the readings on screen came from, in words a caller can read.
+fn reading_from(state: &WeatherState) -> String {
+    match state.reading_source() {
+        FROM_SERVICE => "weather-service".to_string(),
+        FROM_DIRECT => "open-meteo (direct; the weather service did not answer)".to_string(),
+        _ => "nothing has been fetched yet".to_string(),
+    }
+}
+
 fn wire(app: &WeatherApp) {
     let data_slot: Arc<Mutex<Option<WeatherData>>> = Arc::new(Mutex::new(None));
-    let state = WeatherState::new();
+    let state = WeatherState::load(WeatherState::default_path());
 
-    app.set_weather_saved_locations(ModelRc::new(VecModel::from(state.to_slint_locations())));
+    show_saved_locations(app, &state);
+    app.set_weather_use_fahrenheit(state.is_fahrenheit());
 
-    publish_control(app);
+    publish_control(app, state.clone(), data_slot.clone());
 
     // ── Refresh ──
     {
@@ -905,15 +1063,11 @@ fn wire(app: &WeatherApp) {
         let st = state.clone();
         let weak = app.as_weak();
         app.on_weather_select_location(move |idx| {
-            let idx = idx as usize;
-            { let locs = st.locations.lock().unwrap(); if idx >= locs.len() { return; } }
-            *st.active_index.lock().unwrap() = idx;
-            if let Some(ui) = weak.upgrade() {
-                ui.set_weather_saved_locations(ModelRc::new(VecModel::from(st.to_slint_locations())));
-                let mut c = ui.get_current(); c.is_loading = true; ui.set_current(c);
+            let Some(ui) = weak.upgrade() else { return };
+            match select_location(&ui, &st, &slot, idx.max(0) as usize) {
+                Ok(_) => ui.set_notice(SharedString::new()),
+                Err(e) => ui.set_notice(format!("Could not switch location: {e}").into()),
             }
-            let loc = st.active_location();
-            fetch_weather_async(slot.clone(), loc.lat, loc.lon, &loc.name, st.is_fahrenheit());
         });
     }
 
@@ -923,30 +1077,34 @@ fn wire(app: &WeatherApp) {
         let slot = data_slot.clone();
         let weak = app.as_weak();
         app.on_weather_add_location(move |name| {
-            let name_str = name.to_string().trim().to_string();
-            if name_str.is_empty() { return; }
+            let query = name.to_string().trim().to_string();
+            if query.is_empty() { return; }
             let st_c = st.clone();
             let slot_c = slot.clone();
             let ui_w = weak.clone();
+            // On a worker, because the lookup is a network call and this is the UI thread.
+            // The same `add_location` the action calls, so the button and the mind cannot
+            // drift apart about what "added" means.
             std::thread::spawn(move || {
-                if let Some((lat, lon, resolved)) = geocode_location(&name_str) {
-                    {
-                        let mut locs = st_c.locations.lock().unwrap();
-                        if locs.iter().any(|l| (l.lat - lat).abs() < 0.01 && (l.lon - lon).abs() < 0.01) {
-                            return;
-                        }
-                        locs.push(SavedLocation { name: resolved, lat, lon });
-                        let new_idx = locs.len() - 1;
-                        *st_c.active_index.lock().unwrap() = new_idx;
-                    }
-                    let loc = st_c.active_location();
+                let outcome = add_location(&st_c, &query);
+                let rows = to_slint_locations(&st_c);
+                let fetch = outcome.is_ok().then(|| st_c.active_location());
+                if let Some(loc) = &fetch {
                     fetch_weather_async(slot_c, loc.lat, loc.lon, &loc.name, st_c.is_fahrenheit());
-                    let locs_slint = st_c.to_slint_locations();
-                    let _ = ui_w.upgrade_in_event_loop(move |ui| {
-                        ui.set_weather_saved_locations(ModelRc::new(VecModel::from(locs_slint)));
-                        let mut c = ui.get_current(); c.is_loading = true; ui.set_current(c);
-                    });
                 }
+                let _ = ui_w.upgrade_in_event_loop(move |ui| match outcome {
+                    Ok(_) => {
+                        ui.set_notice(SharedString::new());
+                        ui.set_weather_saved_locations(ModelRc::new(VecModel::from(rows)));
+                        let mut c = ui.get_current(); c.is_loading = true; ui.set_current(c);
+                    }
+                    // Said on screen, because the panel's input has already cleared itself and
+                    // the person would otherwise be looking at a list their city is not in
+                    // with nothing to explain why.
+                    Err(e) => ui.set_notice(
+                        format!("Could not add \u{201C}{query}\u{201D}: {e}").into(),
+                    ),
+                });
             });
         });
     }
@@ -957,22 +1115,10 @@ fn wire(app: &WeatherApp) {
         let slot = data_slot.clone();
         let weak = app.as_weak();
         app.on_weather_remove_location(move |idx| {
-            let idx = idx as usize;
-            let need_refetch;
-            {
-                let mut locs = st.locations.lock().unwrap();
-                if idx >= locs.len() || locs.len() <= 1 { return; }
-                locs.remove(idx);
-                let mut active = st.active_index.lock().unwrap();
-                if *active >= locs.len() { *active = locs.len() - 1; }
-                need_refetch = idx == *active || *active >= locs.len();
-            }
-            if let Some(ui) = weak.upgrade() {
-                ui.set_weather_saved_locations(ModelRc::new(VecModel::from(st.to_slint_locations())));
-            }
-            if need_refetch {
-                let loc = st.active_location();
-                fetch_weather_async(slot.clone(), loc.lat, loc.lon, &loc.name, st.is_fahrenheit());
+            let Some(ui) = weak.upgrade() else { return };
+            match remove_location(&ui, &st, &slot, idx.max(0) as usize) {
+                Ok(_) => ui.set_notice(SharedString::new()),
+                Err(e) => ui.set_notice(format!("Could not remove that location: {e}").into()),
             }
         });
     }
@@ -983,20 +1129,66 @@ fn wire(app: &WeatherApp) {
         let slot = data_slot.clone();
         let weak = app.as_weak();
         app.on_weather_toggle_units(move || {
-            let new_val = if let Some(ui) = weak.upgrade() {
-                ui.get_weather_use_fahrenheit()
-            } else { return; };
-            st.set_fahrenheit(new_val);
-            let loc = st.active_location();
-            fetch_weather_async(slot.clone(), loc.lat, loc.lon, &loc.name, new_val);
+            let Some(ui) = weak.upgrade() else { return };
+            // The toggle has already flipped the property; `apply_units` is given what it now
+            // says and is the same path `set_units` takes.
+            let want = ui.get_weather_use_fahrenheit();
+            match apply_units(&ui, &st, &slot, want) {
+                Ok(_) => ui.set_notice(SharedString::new()),
+                Err(e) => {
+                    // The choice did not stick, so the switch must not look as though it did.
+                    ui.set_weather_use_fahrenheit(st.is_fahrenheit());
+                    ui.set_notice(format!("Could not keep the unit choice: {e}").into());
+                }
+            }
         });
     }
 
     // ── Back pressed ──
+    //
+    // There is nowhere to go back to from a window of its own, which is why this wrapper sets
+    // `show-back: false` and the arrow is not drawn. The handler stays as the explicit no-op
+    // for a control this window does not have; the shell's embedding of the same screen, where
+    // back does mean something, wires its own.
     app.on_back_pressed(|| {});
 
-    // ── AI stubs ──
-    app.on_ai_explain_pressed(|| { tracing::info!("AI explain (standalone mode)"); });
+    // ── AI Insights ──
+    {
+        let weak = app.as_weak();
+        app.on_ai_explain_pressed(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let c = ui.get_current();
+            // Nothing to be insightful about yet. Saying so beats asking a model to comment on
+            // three empty strings and presenting whatever it invents as a reading of the sky.
+            if c.temperature.is_empty() || c.is_loading {
+                ui.set_ai_response("There is no reading yet — refresh first.".into());
+                return;
+            }
+            if !companion::is_online() {
+                ui.set_ai_response(companion::OFFLINE_HINT.into());
+                return;
+            }
+            ui.set_ai_is_working(true);
+            ui.set_ai_response(SharedString::new());
+            let prompt = conditions_prompt(&c);
+            let back = ui.as_weak();
+            std::thread::spawn(move || {
+                let outcome = companion::ask(&prompt);
+                let _ = back.upgrade_in_event_loop(move |ui| {
+                    ui.set_ai_is_working(false);
+                    match outcome {
+                        Ok(text) => ui.set_ai_response(text.into()),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "companion call failed");
+                            ui.set_ai_response(
+                                format!("The companion did not answer: {e}").into(),
+                            );
+                        }
+                    }
+                });
+            });
+        });
+    }
     {
         let weak = app.as_weak();
         app.on_ai_dismiss(move || {
@@ -1025,6 +1217,9 @@ fn wire(app: &WeatherApp) {
             let mut slot = slot_poll.lock().unwrap();
             if let Some(data) = slot.take() {
                 state_poll.record_fetch_time();
+                // Remembered here rather than inferred later: by the time `describe` is asked,
+                // the reading is just numbers and nothing else says which path produced them.
+                state_poll.set_reading_source(data.source);
                 if let Some(ui) = ui_weak_poll.upgrade() {
                     apply_weather_data(&ui, data);
                     ui.set_weather_last_updated(SharedString::from(state_poll.last_updated_text()));

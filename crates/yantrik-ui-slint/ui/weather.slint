@@ -226,6 +226,16 @@ export component WeatherDashboard inherits Rectangle {
     // Last updated
     in property <string> weather-last-updated: "";
 
+    /// What went wrong with the last thing the person asked for, in their words.
+    ///
+    /// Empty when nothing has, which is also the default -- the shell embeds this same screen
+    /// and sets nothing here. A city that could not be looked up used to add nothing and say
+    /// nothing, and a unit choice that could not be written to disk looked exactly like one
+    /// that had been. It also carries the case where the readings came straight from
+    /// Open-Meteo because the weather service did not answer: the numbers are still good, but
+    /// where they came from is not what the person would assume.
+    in property <string> notice: "";
+
     // AQI (Air Quality Index)
     in property <string> weather-aqi-value: "--";
     in property <string> weather-aqi-label: "N/A";
@@ -553,6 +563,38 @@ export component WeatherDashboard inherits Rectangle {
                     alignment: start;
                     padding: Theme.sp-5;
                     spacing: Theme.sp-4;
+
+                    // ══════ NOTICE ══════
+                    //
+                    // Above the readings, because it is usually about why they are not what was
+                    // asked for. Separate from the error banner below: that one is a fetch that
+                    // produced nothing, this one is a change that did not take -- a location
+                    // that could not be looked up or saved -- while the numbers on screen are
+                    // still fine.
+                    if root.notice != "" : Rectangle {
+                        background: Theme.color-danger-dim;
+                        border-radius: Theme.r-lg;
+                        border-width: 1px;
+                        border-color: Theme.color-danger.with-alpha(0.25);
+                        height: notice-text.preferred-height + Theme.sp-4;
+
+                        Rectangle {
+                            x: 0;
+                            width: 2px;
+                            height: 100%;
+                            background: Theme.color-danger;
+                        }
+
+                        notice-text := Text {
+                            x: Theme.sp-4;
+                            width: parent.width - Theme.sp-4 * 2;
+                            y: Theme.sp-2;
+                            text: root.notice;
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-caption;
+                            wrap: word-wrap;
+                        }
+                    }
 
                     // ══════ ERROR BANNER ══════
                     if root.current.error-text != "" : Rectangle {
