@@ -137,6 +137,43 @@ def act(app, action, _timeout=40, **args):
             "state": reply.get("state") or {}}
 
 
+# The marker the control surface puts on a refusal that never reached the app.
+# `Registry::act` in `crates/yantrik-app-runtime/src/control.rs` formats every ceiling
+# refusal as `CEILING: <app>.<action> is graded ...`, and that file's own tests assert
+# `err.starts_with("CEILING:")` for precisely this reason — so a caller can branch on it
+# rather than on the sentence, which is written for a person and will be reworded.
+CEILING_MARKER = "CEILING:"
+
+
+def refusal_kind(answer):
+    """Who turned an action away: the machine, the app, or nobody.
+
+        "policy"  the control surface refused on the action's grade, before dispatch. The
+                  app never ran. Nothing in this answer is the app's account of anything,
+                  and no assertion about what the app does has been exercised.
+        "app"     the app itself declined, in its own words.
+        None      it was not refused.
+
+    In one place, because from the outside the first two are identical — both arrive as
+    `accepted: false` with a sentence in `refused` — and reading a policy refusal as the
+    app's is how a probe comes to assert that the machine's ceiling should have mentioned
+    a missing process. It is the app's answer that the check is about; when the app was
+    never asked, the honest record is that the check was not exercised.
+
+    The text arrives with `yos`'s own prefix in front of the runtime's —
+    `system-monitor.app.act refused: CEILING: ...` — so the marker is looked for anywhere
+    in the sentence rather than at its start.
+    """
+    if not isinstance(answer, dict):
+        return None
+    if answer.get("accepted") is True:
+        return None
+    text = answer.get("refused") or answer.get("error")
+    if not text:
+        return None
+    return "policy" if CEILING_MARKER in str(text) else "app"
+
+
 def describe(app):
     """The whole view an app publishes, or `{"unreachable": "..."}`."""
     before = len(_refusals)
@@ -243,6 +280,91 @@ def wait_for(predicate, timeout=30.0, interval=0.4):
             return value
         if time.time() >= deadline:
             return None
+        time.sleep(interval)
+
+
+class Waited:
+    """What one bounded wait saw: whether it settled, what to, and how long it took.
+
+    `wait_for` returns the value or `None`, which throws the waiting itself away. A probe
+    that polls a deferred outcome — an action that `defers`, a thread the app started after
+    it answered — has to be able to *say* that it polled, for how long, and what it was
+    still seeing when it gave up. Otherwise a timeout disappears into whatever assertion
+    comes next and is reported as the app being wrong about something else entirely.
+    """
+
+    __slots__ = ("what", "timeout", "value", "last", "seconds", "polls", "error")
+
+    def __init__(self, what, timeout):
+        self.what = what
+        self.timeout = float(timeout)
+        self.value = None   # the truthy thing the predicate finally returned
+        self.last = None    # the last thing it returned, truthy or not
+        self.seconds = 0.0
+        self.polls = 0
+        self.error = None   # the last exception a poll raised, if any
+
+    @property
+    def settled(self):
+        return self.value is not None
+
+    def __bool__(self):
+        return self.settled
+
+    def evidence(self, **extra):
+        """This wait as a check's evidence. Extra keys are merged in beside it."""
+        out = {
+            "waited_for": self.what,
+            "settled": self.settled,
+            "waited_s": round(self.seconds, 1),
+            "deadline_s": self.timeout,
+            "polls": self.polls,
+        }
+        if self.settled:
+            out["settled_as"] = self.value
+        else:
+            out["timed_out"] = True
+            out["still_seeing"] = self.last
+        if self.error is not None:
+            out["last_poll_error"] = self.error
+        out.update(extra)
+        return out
+
+
+def wait_until(predicate, timeout=30.0, what=None, interval=0.4):
+    """Poll until `predicate()` is truthy, keeping a record of the waiting.
+
+    The same loop as `wait_for`, returning a `Waited` rather than a bare value, so a probe
+    can report the timeout as its own failure with the wait as its evidence instead of
+    letting it fall through into the next assertion:
+
+        settled = wait_until(lambda: checksum() in ("pass", "fail"), timeout=60,
+                             what="the checksum to settle out of `verifying`")
+        probe.check("the checksum settles inside the deadline", bool(settled),
+                    evidence=settled.evidence(row=row(id)))
+
+    `what` finishes the sentence "waited for ...". It is written into the evidence, so the
+    report says what was being waited on and not merely that something was.
+    """
+    record = Waited(what or "a condition the probe did not name", timeout)
+    started = time.time()
+    deadline = started + float(timeout)
+    while True:
+        record.polls += 1
+        try:
+            value = predicate()
+            record.error = None
+        except Exception as exc:  # noqa: BLE001 - a poll that throws is a poll that is not ready
+            value = None
+            record.error = "%s: %s" % (type(exc).__name__, exc)
+        record.last = value
+        if value:
+            record.value = value
+            record.seconds = time.time() - started
+            return record
+        if time.time() >= deadline:
+            record.seconds = time.time() - started
+            return record
         time.sleep(interval)
 
 
@@ -612,6 +734,10 @@ class Probe:
 
 def _jsonable(value):
     """Anything a check wants to record, made safe for `json.dumps`."""
+    if isinstance(value, Waited):
+        # A wait handed straight to `check(evidence=...)` records as its own account of
+        # itself rather than as `<lib.Waited object at 0x...>`.
+        return _jsonable(value.evidence())
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple, set)):

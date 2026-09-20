@@ -15,6 +15,14 @@ No internet. The probe serves the file itself from a throttled loopback HTTP ser
 `Range` the way a mirror does, so `resume` is tested as a resume and not as a silent restart:
 against a server that answered 200 the engine truncates and starts over, and the file would
 shrink. The low-water check below is what tells the two apart.
+
+Every action this app publishes that changes anything — `add`, `pause`, `resume`, `verify` —
+declares `defers`: the reply is the app accepting the work, not the app having finished it, and
+the same is true of the hashing thread that runs after the last byte lands. So nothing here reads
+an outcome the moment it asks for one. Each deferred outcome is waited for with `lib.wait_until`
+against a bounded deadline, and a deadline that expires is a failed check of its own carrying the
+wait as its evidence — because a probe that reads `checksum: verifying` and asserts on it is
+testing its own timing, not the app.
 """
 
 import hashlib
@@ -47,6 +55,17 @@ STATE = STORE / "state.json"
 SIZE = 6 * 1024 * 1024
 CHUNK = 64 * 1024
 CHUNK_DELAY = 0.04
+
+# How long a deferred outcome is given before the wait is called a failure.
+#
+# `completed` and `checksum: pass` are two different moments: the engine flips the status and
+# then hands the file to a hashing thread, so there is a window in which the row says the
+# transfer is done and the checksum says `verifying`. Hashing 6 MiB is milliseconds of work on
+# an idle machine — these deadlines are generous because this one renders in software and can be
+# busy, and a deadline that is merely typical turns a wait into a coin toss.
+CHECKSUM_DEADLINE = 60
+PAUSE_DEADLINE = 30
+TRANSFER_DEADLINE = 150
 
 
 def read_state():
@@ -206,16 +225,24 @@ with lib.Probe(APP, ONE_JOB) as probe:
                 "the transfer reports partial progress while it is running",
                 caught is not None,
                 contract=2, evidence={"row": caught, "summary": lib.state(APP).get("summary")})
+            # `pause` defers: it sets a flag the worker reads at its next chunk boundary, and the
+            # row it answers with can still say `downloading`. The worker flushes the file before
+            # it flips the status, so `paused` is also the point at which the byte count stops
+            # moving — which is why the size below is read after the wait and not after the call.
             paused_action = lib.act(APP, "pause", id=download_id)
-            lib.wait_for(lambda: (row(download_id) or {}).get("status") == "paused", timeout=25)
+            came_to_rest = lib.wait_until(
+                lambda: (row(download_id) or {}).get("status") == "paused",
+                timeout=PAUSE_DEADLINE,
+                what="the running transfer to come to rest at `paused`")
             partial_bytes = saved_path.stat().st_size if saved_path.exists() else 0
             probe.check(
-                "pause keeps the bytes that arrived",
-                0 < partial_bytes < len(body),
-                contract=2, evidence={"path": str(saved_path), "bytes_on_disk": partial_bytes,
-                                      "of_total": len(body),
-                                      "status": (row(download_id) or {}).get("status"),
-                                      "pause_answer": paused_action.get("result")})
+                "pause stops the transfer, and keeps the bytes that arrived",
+                bool(came_to_rest) and 0 < partial_bytes < len(body),
+                contract=2, evidence=came_to_rest.evidence(
+                    path=str(saved_path), bytes_on_disk=partial_bytes, of_total=len(body),
+                    status=(row(download_id) or {}).get("status"),
+                    pause_answer=paused_action.get("result"),
+                    pause_refused=paused_action.get("refused")))
 
             # ── 6. It survives a restart ─────────────────────────────────────
             killed = lib.kill_app(APP_BIN)
@@ -256,38 +283,91 @@ with lib.Probe(APP, ONE_JOB) as probe:
                                       "recorded_bytes": (stored_row(download_id) or {}).get("downloaded")})
 
             # ── Finish it from where it stopped ──────────────────────────────
-            lib.act(APP, "resume", id=download_id)
-            lowest = len(body)
-            deadline = time.time() + 150
-            while time.time() < deadline:
-                current = row(download_id) or {}
+            resumed = lib.act(APP, "resume", id=download_id)
+            probe.note("resume_answer", {"accepted": resumed.get("accepted"),
+                                         "settled": resumed.get("settled"),
+                                         "refused": resumed.get("refused")})
+
+            low_water = [len(body)]
+
+            def transfer_over():
+                """The row once the transfer has stopped moving, sampling the file on the way.
+
+                The low-water mark can only be read while the transfer is running — a resume
+                that truncated and started over shows up as the file shrinking and nowhere
+                else — so the sampling lives inside the poll rather than in a loop of its own.
+                """
                 if saved_path.exists():
-                    lowest = min(lowest, saved_path.stat().st_size)
-                if current.get("status") in ("completed", "failed", "missing"):
-                    break
-                time.sleep(0.4)
+                    low_water[0] = min(low_water[0], saved_path.stat().st_size)
+                current = row(download_id) or {}
+                return current if current.get("status") in ("completed", "failed", "missing") \
+                    else None
+
+            transfer = lib.wait_until(
+                transfer_over, timeout=TRANSFER_DEADLINE, interval=0.4,
+                what="the resumed download to reach a final status")
+            lowest = low_water[0]
             finished = row(download_id) or {}
             final_bytes = saved_path.stat().st_size if saved_path.exists() else 0
             on_disk_sha = lib.sha256(saved_path)
             probe.check(
                 "the restored download finishes, and the file on disk is the file that was served",
-                final_bytes == len(body) and on_disk_sha == expected_sha,
-                contract=2, evidence={"status": finished.get("status"), "bytes": final_bytes,
-                                      "expected_bytes": len(body), "sha256_on_disk": on_disk_sha,
-                                      "sha256_served": expected_sha, "error": finished.get("error")})
+                bool(transfer) and final_bytes == len(body) and on_disk_sha == expected_sha,
+                contract=2, evidence=transfer.evidence(
+                    status=finished.get("status"), bytes=final_bytes,
+                    expected_bytes=len(body), sha256_on_disk=on_disk_sha,
+                    sha256_served=expected_sha, error=finished.get("error")))
             probe.check(
                 "resume continues the partial file instead of starting it over",
                 lowest >= after_death,
                 contract=2, evidence={"low_water_bytes": lowest, "bytes_at_resume": after_death,
                                       "note": "a file that shrinks was restarted, not resumed"})
+
+            # ── The checksum, once the hashing thread has finished ───────────
+            #
+            # `completed` is set in one edit with `checksum: verifying`, and the verdict lands a
+            # thread later. Reading the field the instant the status turns is reading the hashing
+            # and not its result — which is exactly what this check used to do, and it saw
+            # `verifying` with no `sha256` beside it on a loaded VM.
+            #
+            # Both the surface and the state file have to settle. `describe` is what a caller
+            # reads; the state file is what survives the kill on the next line but one, and the
+            # digest gets there one `save()` after the field that reports it.
+            def checksum_verdict():
+                shown = (row(download_id) or {}).get("checksum")
+                stored = (stored_row(download_id) or {}).get("checksum_status")
+                if "verifying" in (shown, stored):
+                    return None
+                return {"describe": shown, "state_file": stored}
+
+            verdict = lib.wait_until(
+                checksum_verdict, timeout=CHECKSUM_DEADLINE, interval=0.3,
+                what="the checksum to settle out of `verifying`, in describe and in the state file")
+            finished = row(download_id) or {}
+            probe.check(
+                "the checksum settles inside the deadline instead of being read mid-hash",
+                bool(verdict), contract=3,
+                evidence=verdict.evidence(
+                    row=finished,
+                    stored=(stored_row(download_id) or {}).get("checksum_status"),
+                    note="a timeout here is this app hashing forever, or this probe reading a "
+                         "deferred outcome too early; either way it is not a pass"))
             probe.check(
                 "the app confirms the checksum it was given, against the file it wrote",
                 finished.get("checksum") == "pass" and finished.get("sha256") == expected_sha,
                 contract=3, evidence={"checksum": finished.get("checksum"),
                                       "sha256_reported": finished.get("sha256"),
-                                      "sha256_on_disk": on_disk_sha})
+                                      "sha256_on_disk": on_disk_sha,
+                                      "sha256_served": expected_sha,
+                                      "waited_s": round(verdict.seconds, 1),
+                                      "checksum_settled": verdict.settled})
 
             # ── 6 again: and still there the next time ───────────────────────
+            #
+            # The digest is read back off disk first: the wait above is what makes this check a
+            # statement about persistence rather than about whether the hashing thread happened
+            # to have saved before the kill landed on it.
+            digest_before_kill = (stored_row(download_id) or {}).get("file_hash")
             lib.kill_app(APP_BIN)
             second = open_downloads()
             kept = row(download_id) or {}
@@ -295,7 +375,9 @@ with lib.Probe(APP, ONE_JOB) as probe:
                 "a finished download and its digest survive a second restart",
                 bool(second["processes"]) and kept.get("status") == "completed"
                 and kept.get("sha256") == expected_sha,
-                contract=6, evidence={"row": kept, "summary": lib.state(APP).get("summary")})
+                contract=6, evidence={"row": kept, "summary": lib.state(APP).get("summary"),
+                                      "digest_in_the_state_file_before_the_kill":
+                                          digest_before_kill})
 
             # ── A completed file that is gone is said to be gone ─────────────
             # Point 2 read the other way: the value of a completed row is the path it points at,

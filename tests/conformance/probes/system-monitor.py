@@ -11,16 +11,28 @@ measurements — which is where an earlier audit's `cpu_model: ""` came from.
 So nothing here is believed on the action's word. The probe starts a child of its own, asks the
 app to end it, and reads `/proc` to find out whether it is gone.
 
-Two outcomes are acceptable for a `dangerous` action and they are not the same thing:
+Three outcomes are possible for a `dangerous` action and they are not the same thing:
 
   * the app ran it, and the process table agrees with what it said;
+  * the app itself declined, in its own words;
   * the machine's ceiling refused it before the app ever saw it.
 
-The VM's configured ceiling is `sensitive`, which is below `dangerous`, so a policy refusal is
-the expected outcome there. It is recorded as its own outcome, and the assertion flips: a kill
-that was refused must have killed nothing. What it cannot do is prove the kill path itself, and
-the report says so rather than passing quietly — a point a probe does not check is unmeasured,
-not met.
+The third is not a variety of the second, and telling them apart is `lib.refusal_kind`'s one
+job — every `kill_process` answer below goes through it, and nothing here matches on refusal
+text of its own. They look identical from the outside (`accepted: false` and a sentence), and
+reading a ceiling refusal as the app's answer is how this probe came to assert that the ceiling
+should have mentioned a missing process.
+
+The machine's ceiling is `sensitive` as this is written, which is below `dangerous`, so a policy
+refusal is what happens here — but nothing below assumes that; it is read off each answer. Where
+it does happen the assertion flips — a kill that was refused must have killed nothing — and
+every check that was about *the app's* behaviour is recorded as NOT EXERCISED with the reason,
+rather than passed on the ceiling's sentence. The report says so in
+`notes.kill_path_not_exercised`, plainly, with the refusal quoted in full, so a green run cannot
+be mistaken for coverage of the kill path: a point a probe does not check is unmeasured, not met.
+
+The ceiling is the user's setting. This probe does not raise it, and a green run bought by
+raising it would be worth less than an honest NOT EXERCISED.
 """
 
 import os
@@ -77,14 +89,28 @@ def reap(child):
         pass
 
 
-def by_policy(answer):
-    """A `dangerous` action turned away by the machine's ceiling rather than by the app.
+# How each of `lib.refusal_kind`'s three answers reads in the report. The classifying is done
+# once, in lib; this is only the wording, and the names it produces are the ones a person
+# reading the JSON has to be able to tell apart at a glance.
+OUTCOME = {
+    "policy": "refused by policy — the machine's ceiling turned it away before the app saw it",
+    "app": "refused by the app",
+    None: "answered by the app",
+}
 
-    The gate's wording is fixed — "Permission denied: 'system-monitor.kill_process' is declared
-    dangerous but max is sensitive" — and it is a different fact from the app refusing a pid.
-    """
-    text = (answer.get("refused") or "").lower()
-    return "permission denied" in text or "declared dangerous" in text
+WHY_NOT_EXERCISED = (
+    "`system-monitor.kill_process` is graded `dangerous`, above this machine's ceiling, so the "
+    "control surface refused on the grade alone, before dispatch. The app's kill code did not "
+    "run and was not measured. The ceiling is the user's setting, in `tool_permission` in "
+    "~/.config/yantrik/settings.yaml; raising it is their decision, not this probe's."
+)
+
+# Check names this machine's ceiling stood in front of. They are not failures and they are not
+# passes: they were not exercised, and the report names each one.
+not_exercised = []
+# The refusal that did it, kept verbatim so the note above is checkable against the machine
+# rather than being this probe's account of what it thinks the ceiling is.
+ceiling_refusal = None
 
 
 with lib.Probe(APP, ONE_JOB) as probe:
@@ -150,17 +176,20 @@ with lib.Probe(APP, ONE_JOB) as probe:
         alive(pid), contract=2, evidence={"pid": pid})
 
     killed = lib.act(APP, "kill_process", pid=pid)
-    if killed.get("accepted"):
+    kind = lib.refusal_kind(killed)
+    if kind is None:
         # The app confirms against the table before it answers, so this is a second opinion
         # rather than a wait. On a refusal there is nothing to wait for; a refusal that killed
         # something anyway would have done it by the time the call returned.
         lib.wait_for(lambda: not alive(pid), timeout=5.0)
     survived = alive(pid)
     evidence = {"pid": pid, "accepted": killed.get("accepted"), "result": killed.get("result"),
-                "refused": killed.get("refused"), "alive_afterwards": survived}
+                "refused": killed.get("refused"), "alive_afterwards": survived,
+                "refusal_kind": kind, "outcome": OUTCOME[kind]}
 
-    if by_policy(killed):
-        evidence["outcome"] = "refused by the machine's ceiling"
+    if kind == "policy":
+        evidence["kill_path_exercised"] = False
+        ceiling_refusal = killed.get("refused")
         probe.note("kill_path_exercised", False)
         probe.check(
             "a dangerous action refused by the ceiling ends nothing",
@@ -169,8 +198,22 @@ with lib.Probe(APP, ONE_JOB) as probe:
             "the refusal is in words the caller can read, not \"1\"",
             bool(killed.get("refused")) and killed.get("refused") not in ("1", "0"),
             contract=4, evidence=evidence)
-    elif killed.get("accepted"):
-        evidence["outcome"] = "the app ran it"
+        not_exercised += [
+            "the process the app said it ended is gone from /proc",
+            "the answer reports what was observed: the signal, the path, and that it exited",
+        ]
+    elif kind == "app":
+        # The app itself would not do it. Allowed — a process may decline SIGTERM — but then the
+        # table has to agree, and the reason has to be readable.
+        probe.note("kill_path_exercised", True)
+        probe.check(
+            "an app that says it did not end the process has not ended it",
+            survived, contract=3, evidence=evidence)
+        probe.check(
+            "the refusal is in words the caller can read, not \"1\"",
+            bool(killed.get("refused")) and killed.get("refused") not in ("1", "0"),
+            contract=4, evidence=evidence)
+    else:
         probe.note("kill_path_exercised", True)
         answer = killed.get("result") or {}
         probe.check(
@@ -181,18 +224,6 @@ with lib.Probe(APP, ONE_JOB) as probe:
             answer.get("exited") is True and answer.get("via") in ("service", "local")
             and answer.get("signal") == "SIGTERM",
             contract=3, evidence=answer)
-    else:
-        # The app itself would not do it. Allowed — a process may decline SIGTERM — but then the
-        # table has to agree, and the reason has to be readable.
-        evidence["outcome"] = "the app refused it"
-        probe.note("kill_path_exercised", True)
-        probe.check(
-            "an app that says it did not end the process has not ended it",
-            survived, contract=3, evidence=evidence)
-        probe.check(
-            "the refusal is in words the caller can read, not \"1\"",
-            bool(killed.get("refused")) and killed.get("refused") not in ("1", "0"),
-            contract=4, evidence=evidence)
     probe.note("kill_own_child", evidence)
     reap(child)
 
@@ -209,15 +240,27 @@ with lib.Probe(APP, ONE_JOB) as probe:
         not alive(spent_pid), contract=2, evidence={"pid": spent_pid})
 
     missing = lib.act(APP, "kill_process", pid=spent_pid)
+    missing_kind = lib.refusal_kind(missing)
     missing_evidence = {"pid": spent_pid, "accepted": missing.get("accepted"),
                         "result": missing.get("result"), "refused": missing.get("refused"),
-                        "outcome": "refused by the machine's ceiling" if by_policy(missing)
-                        else "answered by the app"}
+                        "refusal_kind": missing_kind, "outcome": OUTCOME[missing_kind]}
     probe.note("kill_missing_pid", missing_evidence)
+    # True either way: the ceiling refusing is also "not reported as a kill".
     probe.check(
         "ending a pid that does not exist is refused, never reported as a kill",
         missing.get("accepted") is not True, contract=9, evidence=missing_evidence)
-    if not by_policy(missing):
+    if missing_kind == "policy":
+        # The ceiling answered, so the app was never asked whether this pid exists. The two
+        # checks below are about the app's words; recording the ceiling's sentence as the app's
+        # answer is the fault this branch exists to prevent — it failed the run by demanding that
+        # a refusal about a grade mention a missing process.
+        missing_evidence["kill_path_exercised"] = False
+        ceiling_refusal = ceiling_refusal or missing.get("refused")
+        not_exercised += [
+            "the refusal names the reason: there is no such process",
+            "the same failure is on screen, not only in the caller's error",
+        ]
+    else:
         probe.check(
             "the refusal names the reason: there is no such process",
             "no process" in (missing.get("refused") or "").lower(),
@@ -230,14 +273,47 @@ with lib.Probe(APP, ONE_JOB) as probe:
 
     # ── 5. The pids it will not touch ────────────────────────────────────────
     init = lib.act(APP, "kill_process", pid=1)
-    probe.note("kill_init", {"accepted": init.get("accepted"), "refused": init.get("refused")})
+    init_kind = lib.refusal_kind(init)
+    probe.note("kill_init", {"accepted": init.get("accepted"), "refused": init.get("refused"),
+                             "refusal_kind": init_kind, "outcome": OUTCOME[init_kind]})
+    # Both checks hold whichever way it was refused, so both are asserted either way. What the
+    # ceiling does take away is the evidence that the app has a guard of its own for pid 1.
     probe.check(
         "pid 1 is refused",
         init.get("accepted") is not True, contract=9,
-        evidence={"refused": init.get("refused"), "result": init.get("result")})
+        evidence={"refused": init.get("refused"), "result": init.get("result"),
+                  "refusal_kind": init_kind, "outcome": OUTCOME[init_kind]})
     probe.check(
         "pid 1 is still running, which is the only answer that matters here",
         alive(1), contract=9, evidence={"init_alive": alive(1)})
+    if init_kind == "policy":
+        ceiling_refusal = ceiling_refusal or init.get("refused")
+        not_exercised.append(
+            "the app's own guard on pid 1 — the ceiling refused before the app was asked")
+
+    # ── What this run did not measure ────────────────────────────────────────
+    #
+    # Said in the report rather than left to be inferred from a green table. Everything the
+    # ceiling stood in front of is named, because a check that was not exercised and a check
+    # that passed are the same colour from outside and must not be the same word.
+    if not_exercised:
+        probe.note("kill_path_not_exercised", {
+            "kill_path_exercised": False,
+            "statement": "The kill path was NOT EXERCISED on this machine. A green result for "
+                         "system-monitor is not coverage of it.",
+            "why": WHY_NOT_EXERCISED,
+            "action_grade": "dangerous",
+            "the_refusal_in_full": ceiling_refusal,
+            "checks_not_exercised": not_exercised,
+            "what_was_still_measured": "that a refused kill ends nothing, that the refusal "
+                                       "arrives in readable words, and that pid 1 is untouched",
+        })
+    else:
+        probe.note("kill_path_not_exercised", {
+            "kill_path_exercised": True,
+            "statement": "The ceiling allowed `dangerous` on this machine, so the app's own "
+                         "kill path ran and was measured against /proc.",
+        })
 
     # ── Put the machine back ─────────────────────────────────────────────────
     if not was_running:
