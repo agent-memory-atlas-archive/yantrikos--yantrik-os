@@ -1,11 +1,21 @@
 // Document Editor (yDoc) — screen 30
-// Full-featured document editor with comments, track changes, version history,
-// tables, templates, advanced formatting, outline sidebar, find/replace.
-// Wrapped in WindowFrame by app.slint.
+//
+// A Markdown editor. The document's native format is Markdown, which is what the empty-document
+// hint on the page has always said and what the formatting buttons and the `#`-derived outline
+// have always assumed; it is now also what is on disk.
+//
+// This screen used to carry comments, track changes, version history, tables, templates, page
+// layout, print preview and a second AI panel. None of it was backed: 53 of the 60 callbacks
+// this app registered wrote a log line and returned, and sixteen `in` properties — including the
+// `doc-file-path` that Save read — were never written by Rust at all. What was removed is
+// recorded at the site it was removed from, with what it would take to bring it back. What is
+// left does something.
+//
+// Wrapped in a Window by apps/document-editor/ui/app.slint.
 
 import { Theme } from "theme.slint";
 import { ListView, LineEdit, ScrollView } from "std-widgets.slint";
-import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButton, RibbonQuickAction, RibbonGroupLabel } from "components/app_ribbon.slint";
+import { RibbonToolButton, RibbonToolButtonWide, RibbonSeparator, RibbonTabButton, RibbonGroupLabel } from "components/app_ribbon.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
 import { AgentRail, AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
@@ -15,31 +25,18 @@ import { AppColor, AppIdentity } from "components/app_color.slint";
 export struct DocHeadingEntry {
     title: string,
     level: int,
+    // Byte offset of the heading in the document, so clicking it can move the real caret.
     block-index: int,
 }
 
-export struct DocCommentEntry {
-    id: int,
-    text: string,
-    line-hint: int,
-    resolved: bool,
-    timestamp: string,
-}
-
-export struct DocChangeEntry {
-    id: int,
-    change-type: string,   // "insert", "delete", "modify"
-    old-text: string,
-    new-text: string,
-    line-hint: int,
-    timestamp: string,
-}
-
-export struct DocVersionEntry {
-    label: string,
-    timestamp: string,
-    index: int,
-}
+// DocCommentEntry, DocChangeEntry and DocVersionEntry were here, behind three sidebar panels
+// with eleven callbacks between them. Nothing stored a comment, recorded a change or kept a
+// version: every one of those handlers was a `tracing::info!` and the three list properties were
+// never set, so the panels drew their own empty states for ever. Comments and track changes need
+// a per-document store that can survive the text being rewritten under them — anchors, not line
+// numbers, because the AI rewrite path replaces the whole document. Version history needs
+// somewhere to put the versions. Until one of those exists, a person leaving a note here was
+// typing into nothing.
 
 export component DocumentEditorScreen inherits Rectangle {
     // ── The agent layer ──
@@ -58,131 +55,118 @@ export component DocumentEditorScreen inherits Rectangle {
 
     background: transparent;
 
-    // Document state
-    in-out property <string> doc-title: "Untitled";
+    // ── The document ──
+    //
+    // `doc-title` is derived from the document, not typed beside it: the first `# ` heading, or
+    // the file name. There used to be a title field on the page that could be typed into and was
+    // saved nowhere, so a title survived until the next reload and no further.
+    in property <string> doc-title: "Untitled";
     in-out property <string> doc-content: "";
     in property <string> doc-file-path: "";
     in property <int> doc-word-count: 0;
     in property <int> doc-char-count: 0;
-    in property <int> doc-page-estimate: 0;
-    in property <int> doc-reading-time: 0;
-    in property <int> doc-sentence-count: 0;
-    in property <int> doc-paragraph-count: 0;
     in property <[DocHeadingEntry]> doc-headings: [];
     in property <bool> doc-is-modified: false;
     in property <string> doc-save-status: "";
+
+    // What went wrong, for the person. The same sentence goes to `describe.notice` for a mind:
+    // contract point 4 is that a failure is said twice, and this is the half a person reads.
+    in property <string> notice: "";
+
+    // Find and replace
     in-out property <bool> doc-show-find: false;
     in-out property <string> doc-find-query: "";
     in property <int> doc-find-count: 0;
     in-out property <string> doc-replace-text: "";
 
-    // Comments
-    in property <[DocCommentEntry]> doc-comments: [];
-    in-out property <bool> doc-show-comments: false;
-    in-out property <string> doc-comment-input: "";
+    // The outline sidebar. One panel now, so this is a flag rather than the four-way mode it was.
+    in-out property <bool> doc-show-outline: true;
 
-    // Track changes
-    in property <[DocChangeEntry]> doc-changes: [];
-    in property <bool> doc-track-changes-on: false;
-    in-out property <bool> doc-show-changes: false;
+    // ── The file prompt ──
+    //
+    // 0 none, 1 open, 2 save as, 3 export Markdown, 4 export HTML, 5 unsaved changes.
+    //
+    // This is what makes Save reachable. A new document has no path; Save with no path used to
+    // log "No file path set" and return, for ever, because nothing in the app could ever give it
+    // one. Now it opens this, the same way the text editor does.
+    in-out property <int> doc-dialog: 0;
+    in-out property <string> doc-dialog-path: "";
+    in property <string> doc-dialog-error: "";
+    callback doc-dialog-confirm();
+    callback doc-dialog-cancel();
+    callback doc-dialog-discard();
 
-    // Version history
-    in property <[DocVersionEntry]> doc-versions: [];
-    in-out property <bool> doc-show-versions: false;
-
-    // Active sidebar: 0=outline, 1=comments, 2=changes, 3=versions
-    in-out property <int> doc-sidebar-mode: 0;
-
-    // Callbacks — existing
-    callback doc-save();
-    callback doc-open();
+    // ── What the buttons do ──
     callback doc-new();
-    callback doc-export-pdf();
+    callback doc-open();
+    callback doc-save();
+    callback doc-save-as();
+    callback doc-export-md();
+    callback doc-export-html();
+    callback doc-content-changed(string);
+    callback doc-undo();
+    callback doc-redo();
+
+    // Formatting: each of these inserts Markdown around the selection or at the start of the
+    // lines it touches. Underline and highlight used to sit beside them and are gone — Markdown
+    // has neither, and a button that writes a syntax no reader renders is a button that lies.
+    callback doc-format-heading(int);
     callback doc-format-bold();
     callback doc-format-italic();
-    callback doc-format-underline();
-    callback doc-format-heading(int);
+    callback doc-format-strikethrough();
     callback doc-format-bullet();
     callback doc-format-checklist();
     callback doc-format-quote();
     callback doc-format-code();
+    callback doc-format-inline-code();
     callback doc-format-divider();
-    callback doc-undo();
-    callback doc-redo();
+    callback doc-format-link(string);
+
+    callback doc-find-changed(string);
     callback doc-find-next();
     callback doc-find-prev();
     callback doc-replace-one();
     callback doc-replace-all();
     callback doc-heading-clicked(int);
-    callback doc-import-md();
-    callback doc-export-md();
-    callback doc-content-changed(string);
 
-    // Callbacks — new: Comments
-    callback doc-add-comment(string);
-    callback doc-delete-comment(int);
-    callback doc-resolve-comment(int);
-
-    // Callbacks — new: Track changes
-    callback doc-toggle-track-changes();
-    callback doc-accept-change(int);
-    callback doc-reject-change(int);
-    callback doc-accept-all-changes();
-    callback doc-reject-all-changes();
-
-    // Callbacks — new: Versions
-    callback doc-save-version(string);
-    callback doc-list-versions();
-    callback doc-restore-version(int);
-
-    // Callbacks — new: Tables
-    callback doc-insert-table(int, int);
-    callback doc-add-table-row();
-    callback doc-add-table-col();
-
-    // Callbacks — new: Formatting
-    callback doc-format-strikethrough();
-    callback doc-format-highlight();
-    callback doc-format-link(string);
-    callback doc-format-inline-code();
-    callback doc-insert-toc();
-    callback doc-insert-footnote();
-
-    // Callbacks — new: Export
-    callback doc-export-html();
-
-    // Callbacks — new: Templates
-    callback doc-use-template(int);
-
-    // Callbacks — new: Image
-    callback doc-insert-image(string);
-
-    // Page layout
-    in-out property <bool> doc-page-layout-visible: false;
-    in-out property <string> doc-page-size: "A4";
-    in property <int> doc-margin-top: 25;
-    in property <int> doc-margin-bottom: 25;
-    in property <string> doc-export-status: "";
-
-    callback doc-set-page-layout(string);
-    callback doc-print-preview();
-
-    // AI Assist
+    // The one AI path, and it is real: it asks the companion and comes back as a proposal card
+    // that says what applying it would do. `doc-ai-summarize` and `doc-ai-improve` are the two
+    // canned prompts, and they go through the same call.
+    //
+    // doc-ai-apply, doc-ai-dismiss, doc-ai-draft, doc-ai-translate and doc-ai-insights were here
+    // with a response pane and an Apply/Dismiss row beneath them. The pane's `doc-ai-response`
+    // was never set, so the row it gated never drew at all, and the five callbacks logged their
+    // arguments. Apply and Dismiss already exist for real as the proposal card's own buttons.
+    // Translate hardcoded Spanish with nowhere to choose a language; Draft and Insights had no
+    // prompt behind them.
     in-out property <bool> show-ai-panel: false;
-    in property <bool> doc-ai-working: false;
-    in property <string> doc-ai-response: "";
     in-out property <string> doc-ai-prompt: "";
     callback doc-ai-submit(string);
-    callback doc-ai-apply();
-    callback doc-ai-dismiss();
-    callback doc-ai-draft(string);
     callback doc-ai-summarize();
     callback doc-ai-improve();
-    callback doc-ai-translate(string);
-    callback doc-ai-insights();
 
-    // Ribbon tab state: 0=Home, 1=Insert, 2=Review, 3=Export
+    // ── What the editing surface can be asked ──
+    //
+    // The body is a plain TextInput, which means the caret and the selection are real and
+    // reachable. That is what lets the formatting buttons be more than decoration: Rust reads
+    // these two offsets, computes the new text and the new selection as pure string work, and
+    // puts the selection back with select-range.
+    out property <int> doc-cursor: content-edit.cursor-position-byte-offset;
+    out property <int> doc-anchor: content-edit.anchor-position-byte-offset;
+    public function select-range(start: int, end: int) { content-edit.set-selection-offsets(start, end); }
+    public function focus-body() { content-edit.focus(); }
+    // Undo and redo are the TextInput's own. Slint's TextInput carries an edit history and
+    // exposes undo()/redo(); writing a second stack beside it would have fought with the one
+    // already running under the caret.
+    public function undo-body() { content-edit.undo(); }
+    public function redo-body() { content-edit.redo(); }
+
+    // Ribbon tab state: 0=Home, 1=Insert, 2=File
     property <int> ribbon-tab: 0;
+
+    changed doc-dialog => {
+        if (root.doc-dialog != 0 && root.doc-dialog != 5) { dialog-path-input.focus(); }
+    }
 
     VerticalLayout {
         // -- Header --
@@ -190,6 +174,7 @@ export component DocumentEditorScreen inherits Rectangle {
             app-id: "documents";
             icon: Icons.doc;
             title: root.doc-title != "" ? root.doc-title : "yDoc";
+            subtitle: root.doc-file-path != "" ? root.doc-file-path : "Not saved yet — Save gives it a home";
             modified: root.doc-is-modified;
             leading-actions: [
                 { id: "save", icon: Icons.save, label: "Save", emphasis: 2, active: root.doc-is-modified },
@@ -208,7 +193,7 @@ export component DocumentEditorScreen inherits Rectangle {
                 else if (id == "ai") { root.show-ai-panel = !root.show-ai-panel; }
             }
         }
-        // ═══ Row 1: Tab strip + Quick Actions (36px) ═══
+        // ═══ Row 1: Tab strip (36px) ═══
         Rectangle {
             height: 36px;
             background: Theme.bg-elevated;
@@ -226,10 +211,11 @@ export component DocumentEditorScreen inherits Rectangle {
                 // so the window opened with two command bars stacked, the top one and the bottom one
                 // offering the same five buttons eighteen pixels apart. The tabs are the part that was
                 // never anywhere else.
+                //
+                // Review was a tab of its own for track changes; it is gone with them.
                 RibbonTabButton { label: "Home"; is-active: root.ribbon-tab == 0; clicked => { root.ribbon-tab = 0; } }
                 RibbonTabButton { label: "Insert"; is-active: root.ribbon-tab == 1; clicked => { root.ribbon-tab = 1; } }
-                RibbonTabButton { label: "Review"; is-active: root.ribbon-tab == 2; clicked => { root.ribbon-tab = 2; } }
-                RibbonTabButton { label: "Export"; is-active: root.ribbon-tab == 3; clicked => { root.ribbon-tab = 3; } }
+                RibbonTabButton { label: "File"; is-active: root.ribbon-tab == 2; clicked => { root.ribbon-tab = 2; } }
 
                 Rectangle {}
             }
@@ -254,7 +240,6 @@ export component DocumentEditorScreen inherits Rectangle {
                 spacing: 3px;
                 alignment: start;
 
-                // Style group
                 RibbonGroupLabel { label: "STYLE"; }
                 RibbonToolButton { label: "H1"; tooltip-text: "Heading 1"; clicked => { root.doc-format-heading(1); } }
                 RibbonToolButton { label: "H2"; tooltip-text: "Heading 2"; clicked => { root.doc-format-heading(2); } }
@@ -262,17 +247,13 @@ export component DocumentEditorScreen inherits Rectangle {
 
                 RibbonSeparator {}
 
-                // Font group
                 RibbonGroupLabel { label: "FONT"; }
-                RibbonToolButton { icon-path: Icons.bold; tooltip-text: "Bold"; clicked => { root.doc-format-bold(); } }
-                RibbonToolButton { icon-path: Icons.italic; tooltip-text: "Italic"; clicked => { root.doc-format-italic(); } }
-                RibbonToolButton { icon-path: Icons.underline; tooltip-text: "Underline"; clicked => { root.doc-format-underline(); } }
-                RibbonToolButton { icon-path: Icons.strikethrough; tooltip-text: "Strikethrough"; clicked => { root.doc-format-strikethrough(); } }
-                RibbonToolButton { icon-path: Icons.highlight; tooltip-text: "Highlight"; clicked => { root.doc-format-highlight(); } }
+                RibbonToolButton { icon-path: Icons.bold; tooltip-text: "Bold  **text**"; clicked => { root.doc-format-bold(); } }
+                RibbonToolButton { icon-path: Icons.italic; tooltip-text: "Italic  *text*"; clicked => { root.doc-format-italic(); } }
+                RibbonToolButton { icon-path: Icons.strikethrough; tooltip-text: "Strikethrough  ~~text~~"; clicked => { root.doc-format-strikethrough(); } }
 
                 RibbonSeparator {}
 
-                // Paragraph group
                 RibbonGroupLabel { label: "PARAGRAPH"; }
                 RibbonToolButton { icon-path: Icons.list; tooltip-text: "Bullet list"; clicked => { root.doc-format-bullet(); } }
                 RibbonToolButton { icon-path: Icons.checkbox; tooltip-text: "Checklist"; clicked => { root.doc-format-checklist(); } }
@@ -280,84 +261,58 @@ export component DocumentEditorScreen inherits Rectangle {
                 RibbonToolButton { icon-path: Icons.link; tooltip-text: "Link"; clicked => { root.doc-format-link(""); } }
             }
 
-            // ── INSERT tab: Objects + Code ──
+            // ── INSERT tab: Code + Views ──
+            //
+            // Table, Image and Contents were here. A Markdown table needs a grid to edit once it
+            // is inserted, an image needs a file to point at and there is no picker, and a table
+            // of contents is the outline on the left — inserting a stale copy of it into the text
+            // is a second source of the same truth. All three logged a line and returned.
             if root.ribbon-tab == 1 : HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 10px;
                 spacing: 3px;
                 alignment: start;
 
-                RibbonGroupLabel { label: "OBJECTS"; }
-                RibbonToolButtonWide { label: "Table"; icon-path: Icons.table; tooltip-text: "Insert table"; clicked => { root.doc-insert-table(3, 3); } }
-                RibbonToolButtonWide { label: "Image"; icon-path: Icons.image; tooltip-text: "Insert image"; clicked => { root.doc-insert-image(""); } }
-                RibbonToolButtonWide { label: "Contents"; icon-path: Icons.list; tooltip-text: "Table of contents"; clicked => { root.doc-insert-toc(); } }
+                RibbonGroupLabel { label: "CODE"; }
+                RibbonToolButtonWide { label: "Block"; icon-path: Icons.code; tooltip-text: "Code block"; clicked => { root.doc-format-code(); } }
+                RibbonToolButtonWide { label: "Inline"; icon-path: Icons.code; tooltip-text: "Inline code"; clicked => { root.doc-format-inline-code(); } }
                 RibbonToolButton { icon-path: Icons.divider; tooltip-text: "Divider"; clicked => { root.doc-format-divider(); } }
 
                 RibbonSeparator {}
 
-                RibbonGroupLabel { label: "CODE"; }
-                RibbonToolButtonWide { label: "Block"; icon-path: Icons.code; tooltip-text: "Code block"; clicked => { root.doc-format-code(); } }
-                RibbonToolButtonWide { label: "Inline"; icon-path: Icons.code; tooltip-text: "Inline code"; clicked => { root.doc-format-inline-code(); } }
+                RibbonGroupLabel { label: "VIEW"; }
+                RibbonToolButtonWide {
+                    label: "Outline";
+                    is-active: root.doc-show-outline;
+                    tooltip-text: "Show the outline";
+                    clicked => { root.doc-show-outline = !root.doc-show-outline; }
+                }
             }
 
-            // ── REVIEW tab: Track changes + Comments ──
+            // ── FILE tab: the document, and copies of it ──
+            //
+            // Import Markdown is gone: the native format IS Markdown, so importing one is just
+            // opening it, and two buttons doing the identical thing is how a person learns not
+            // to trust either. Export PDF is gone too — there is no PDF writer on this machine
+            // and nothing behind that button ever made one. Export Markdown stays because it is
+            // not Save As: it writes a copy and leaves the document where it lives.
             if root.ribbon-tab == 2 : HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 10px;
                 spacing: 3px;
                 alignment: start;
 
-                RibbonGroupLabel { label: "TRACKING"; }
-                RibbonToolButtonWide {
-                    label: "Track";
-                    is-active: root.doc-track-changes-on;
-                    tooltip-text: "Toggle track changes";
-                    clicked => { root.doc-toggle-track-changes(); }
-                }
-
-                RibbonSeparator {}
-
-                RibbonGroupLabel { label: "NAVIGATE"; }
-                RibbonToolButtonWide {
-                    label: "Outline";
-                    is-active: root.doc-sidebar-mode == 0;
-                    tooltip-text: "Toggle outline";
-                    clicked => { root.doc-sidebar-mode = root.doc-sidebar-mode == 0 ? -1 : 0; }
-                }
-            }
-
-            // ── EXPORT tab: Import/Export + Page layout ──
-            if root.ribbon-tab == 3 : HorizontalLayout {
-                padding-left: 10px;
-                padding-right: 10px;
-                spacing: 3px;
-                alignment: start;
-
-                RibbonGroupLabel { label: "FILE"; }
+                RibbonGroupLabel { label: "DOCUMENT"; }
                 RibbonToolButtonWide { label: "New"; icon-path: Icons.plus; clicked => { root.doc-new(); } }
                 RibbonToolButtonWide { label: "Open"; icon-path: Icons.folder; clicked => { root.doc-open(); } }
+                RibbonToolButtonWide { label: "Save"; icon-path: Icons.save; clicked => { root.doc-save(); } }
+                RibbonToolButtonWide { label: "Save As"; icon-path: Icons.save; clicked => { root.doc-save-as(); } }
 
                 RibbonSeparator {}
 
-                RibbonGroupLabel { label: "IMPORT"; }
-                RibbonToolButtonWide { label: "Markdown"; icon-path: Icons.import; tooltip-text: "Import Markdown"; clicked => { root.doc-import-md(); } }
-
-                RibbonSeparator {}
-
-                RibbonGroupLabel { label: "EXPORT"; }
-                RibbonToolButtonWide { label: "Markdown"; icon-path: Icons.export; tooltip-text: "Export Markdown"; clicked => { root.doc-export-md(); } }
-                RibbonToolButtonWide { label: "HTML"; icon-path: Icons.globe; tooltip-text: "Export HTML"; clicked => { root.doc-export-html(); } }
-                RibbonToolButtonWide { label: "PDF"; icon-path: Icons.doc; tooltip-text: "Export PDF"; clicked => { root.doc-export-pdf(); } }
-
-                RibbonSeparator {}
-
-                RibbonGroupLabel { label: "LAYOUT"; }
-                RibbonToolButtonWide {
-                    label: "Page";
-                    is-active: root.doc-page-layout-visible;
-                    tooltip-text: "Page layout settings";
-                    clicked => { root.doc-page-layout-visible = !root.doc-page-layout-visible; }
-                }
+                RibbonGroupLabel { label: "COPY TO"; }
+                RibbonToolButtonWide { label: "Markdown"; icon-path: Icons.export; tooltip-text: "Write a copy as Markdown"; clicked => { root.doc-export-md(); } }
+                RibbonToolButtonWide { label: "HTML"; icon-path: Icons.globe; tooltip-text: "Write a copy as HTML"; clicked => { root.doc-export-html(); } }
             }
 
             // Bottom border
@@ -368,89 +323,23 @@ export component DocumentEditorScreen inherits Rectangle {
             }
         }
 
-        // ── Export status ──
-        Rectangle {
-            height: root.doc-export-status != "" ? 28px : 0px;
-            visible: root.doc-export-status != "";
-            background: Theme.color-success-dim;
+        // ── What went wrong ──
+        //
+        // Every refusal this app makes lands here and in `describe.notice`, because a save that
+        // did not happen has to be visible to the person in front of it and to the mind driving
+        // it, and neither should have to ask the other.
+        if root.notice != "" : Rectangle {
+            background: Theme.bg-elevated;
+            height: notice-text.preferred-height + 18px;
 
-            HorizontalLayout {
-                padding-left: 12px;
-                spacing: 6px;
-                alignment: start;
-
-                Text {
-                    text: root.doc-export-status;
-                    color: Theme.color-success;
-                    font-size: Theme.fs-micro;
-                    font-weight: 500;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
-        // ── Page layout panel ──
-        Rectangle {
-            height: root.doc-page-layout-visible ? 64px : 0px;
-            visible: root.doc-page-layout-visible;
-            background: Theme.border-subtle;
-            border-width: 1px;
-            border-color: Theme.hover-fill-strong;
-
-            HorizontalLayout {
-                padding-left: 16px;
-                padding-right: 16px;
-                spacing: 16px;
-                alignment: start;
-
-                // Page size selector
-                VerticalLayout {
-                    spacing: 2px;
-                    alignment: center;
-
-                    Text { text: "Page Size"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 600; }
-                    HorizontalLayout {
-                        spacing: 4px;
-
-                        Rectangle {
-                            width: 44px; height: 26px; border-radius: 4px;
-                            background: root.doc-page-size == "A4" ? AppIdentity.accent.transparentize(0.7) : Theme.bg-card;
-                            border-width: root.doc-page-size == "A4" ? 1px : 0px;
-                            border-color: Theme.accent.transparentize(0.5);
-                            TouchArea { clicked => { root.doc-set-page-layout("A4"); } }
-                            Text { text: "A4"; color: root.doc-page-size == "A4" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                        Rectangle {
-                            width: 54px; height: 26px; border-radius: 4px;
-                            background: root.doc-page-size == "Letter" ? AppIdentity.accent.transparentize(0.7) : Theme.bg-card;
-                            border-width: root.doc-page-size == "Letter" ? 1px : 0px;
-                            border-color: Theme.accent.transparentize(0.5);
-                            TouchArea { clicked => { root.doc-set-page-layout("Letter"); } }
-                            Text { text: "Letter"; color: root.doc-page-size == "Letter" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                        Rectangle {
-                            width: 50px; height: 26px; border-radius: 4px;
-                            background: root.doc-page-size == "Legal" ? AppIdentity.accent.transparentize(0.7) : Theme.bg-card;
-                            border-width: root.doc-page-size == "Legal" ? 1px : 0px;
-                            border-color: Theme.accent.transparentize(0.5);
-                            TouchArea { clicked => { root.doc-set-page-layout("Legal"); } }
-                            Text { text: "Legal"; color: root.doc-page-size == "Legal" ? AppIdentity.accent : Theme.text-secondary; font-size: Theme.fs-micro; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                    }
-                }
-
-                // Margins display
-                VerticalLayout {
-                    spacing: 2px;
-                    alignment: center;
-
-                    Text { text: "Margins"; color: Theme.text-dim; font-size: Theme.fs-micro; font-weight: 600; }
-                    Text {
-                        text: "Top: \{root.doc-margin-top}mm  Bottom: \{root.doc-margin-bottom}mm";
-                        color: Theme.text-secondary;
-                        font-size: Theme.fs-micro;
-                    }
-                }
+            notice-text := Text {
+                x: 16px;
+                y: 9px;
+                width: parent.width - 32px;
+                text: root.notice;
+                color: Theme.amber;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
             }
 
             Rectangle { y: parent.height - 1px; height: 1px; background: Theme.separator; }
@@ -480,11 +369,12 @@ export component DocumentEditorScreen inherits Rectangle {
                     width: 180px;
                     text <=> root.doc-find-query;
                     placeholder-text: "Search...";
+                    edited => { root.doc-find-changed(self.text); }
                     accepted => { root.doc-find-next(); }
                 }
 
                 Text {
-                    text: root.doc-find-count >= 0 ? root.doc-find-count + " matches" : "";
+                    text: root.doc-find-query == "" ? "" : root.doc-find-count + " matches";
                     color: Theme.text-secondary;
                     font-size: Theme.fs-caption;
                     vertical-alignment: center;
@@ -521,7 +411,6 @@ export component DocumentEditorScreen inherits Rectangle {
             }
         }
 
-        // ── Main content area (sidebar + page + right panel) ──
         // ── What the companion is proposing ──
         if root.proposal.title != "" : AgentProposalCard {
             data: root.proposal;
@@ -530,211 +419,53 @@ export component DocumentEditorScreen inherits Rectangle {
             dismiss => { root.proposal-dismissed(); }
         }
 
+        // ── Main content area (outline + page + agent rail) ──
         HorizontalLayout {
-            // ── Left sidebar: Outline / Comments / Changes / Versions ──
-            Rectangle {
+            // ── Left sidebar: the outline ──
+            //
+            // There were four tabs across the top of this panel — Outline, Notes, Changes,
+            // History — and three of them opened a panel over an empty list property nothing
+            // ever filled. One panel needs no tab strip.
+            if root.doc-show-outline : Rectangle {
                 width: 220px;
                 background: Theme.bg-surface;
 
                 VerticalLayout {
-                    // Sidebar tab selector — improved visibility
                     Rectangle {
                         height: 38px;
                         background: Theme.bg-elevated;
 
-                        HorizontalLayout {
-                            spacing: 2px;
-                            padding-left: 4px;
-                            padding-right: 4px;
-                            padding-top: 4px;
-                            padding-bottom: 4px;
-
-                            // Outline tab
-                            Rectangle {
-                                height: 30px;
-                                border-radius: 5px;
-                                background: root.doc-sidebar-mode == 0
-                                    ? AppIdentity.accent.transparentize(0.82) : transparent;
-                                border-width: root.doc-sidebar-mode == 0 ? 1px : 0px;
-                                border-color: root.doc-sidebar-mode == 0
-                                    ? AppIdentity.accent.transparentize(0.6) : transparent;
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.doc-sidebar-mode = 0; }
-                                }
-
-                                Text {
-                                    text: "Outline";
-                                    color: root.doc-sidebar-mode == 0
-                                        ? AppIdentity.accent : Theme.text-secondary;
-                                    font-size: Theme.fs-micro;
-                                    font-weight: root.doc-sidebar-mode == 0 ? 700 : 500;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            // Comments tab — with count badge
-                            Rectangle {
-                                height: 30px;
-                                border-radius: 5px;
-                                background: root.doc-sidebar-mode == 1
-                                    ? AppIdentity.accent.transparentize(0.82) : transparent;
-                                border-width: root.doc-sidebar-mode == 1 ? 1px : 0px;
-                                border-color: root.doc-sidebar-mode == 1
-                                    ? AppIdentity.accent.transparentize(0.6) : transparent;
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.doc-sidebar-mode = 1; }
-                                }
-
-                                HorizontalLayout {
-                                    spacing: 3px;
-                                    alignment: center;
-
-                                    Text {
-                                        text: "Notes";
-                                        color: root.doc-sidebar-mode == 1
-                                            ? AppIdentity.accent : Theme.text-secondary;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: root.doc-sidebar-mode == 1 ? 700 : 500;
-                                        vertical-alignment: center;
-                                    }
-
-                                    // Count badge
-                                    Rectangle {
-                                        visible: root.doc-comments.length > 0;
-                                        width: 18px;
-                                        height: 16px;
-                                        border-radius: 8px;
-                                        background: root.doc-sidebar-mode == 1
-                                            ? AppIdentity.accent : Theme.text-dim;
-
-                                        Text {
-                                            text: root.doc-comments.length;
-                                            color: Theme.text-on-accent;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Changes tab — with count badge
-                            Rectangle {
-                                height: 30px;
-                                border-radius: 5px;
-                                background: root.doc-sidebar-mode == 2
-                                    ? AppIdentity.accent.transparentize(0.82) : transparent;
-                                border-width: root.doc-sidebar-mode == 2 ? 1px : 0px;
-                                border-color: root.doc-sidebar-mode == 2
-                                    ? AppIdentity.accent.transparentize(0.6) : transparent;
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.doc-sidebar-mode = 2; }
-                                }
-
-                                HorizontalLayout {
-                                    spacing: 3px;
-                                    alignment: center;
-
-                                    Text {
-                                        text: "Changes";
-                                        color: root.doc-sidebar-mode == 2
-                                            ? AppIdentity.accent : Theme.text-secondary;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: root.doc-sidebar-mode == 2 ? 700 : 500;
-                                        vertical-alignment: center;
-                                    }
-
-                                    // Count badge
-                                    Rectangle {
-                                        visible: root.doc-changes.length > 0;
-                                        width: 18px;
-                                        height: 16px;
-                                        border-radius: 8px;
-                                        background: root.doc-sidebar-mode == 2
-                                            ? AppIdentity.accent : Theme.text-dim;
-
-                                        Text {
-                                            text: root.doc-changes.length;
-                                            color: Theme.text-on-accent;
-                                            font-size: Theme.fs-micro;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Versions tab
-                            Rectangle {
-                                height: 30px;
-                                border-radius: 5px;
-                                background: root.doc-sidebar-mode == 3
-                                    ? AppIdentity.accent.transparentize(0.82) : transparent;
-                                border-width: root.doc-sidebar-mode == 3 ? 1px : 0px;
-                                border-color: root.doc-sidebar-mode == 3
-                                    ? AppIdentity.accent.transparentize(0.6) : transparent;
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.doc-sidebar-mode = 3; root.doc-list-versions(); }
-                                }
-
-                                Text {
-                                    text: "History";
-                                    color: root.doc-sidebar-mode == 3
-                                        ? AppIdentity.accent : Theme.text-secondary;
-                                    font-size: Theme.fs-micro;
-                                    font-weight: root.doc-sidebar-mode == 3 ? 700 : 500;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
+                        Text {
+                            x: 12px;
+                            text: "OUTLINE";
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-micro;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            height: parent.height;
                         }
                     }
 
                     Rectangle { height: 1px; background: Theme.separator; }
 
-                    // ── Outline panel ──
                     Rectangle {
-                        visible: root.doc-sidebar-mode == 0;
-
                         VerticalLayout {
                             padding: 8px;
                             spacing: 4px;
 
                             if root.doc-headings.length == 0 : VerticalLayout {
-
                                 vertical-stretch: 1;
-
                                 alignment: center;
-
                                 spacing: 6px;
-
                                 padding: 16px;
 
                                 HorizontalLayout {
-
                                     alignment: center;
-
                                     Icon {
-
                                         commands: Icons.heading;
-
                                         size: 22px;
-
                                         tint: Theme.text-dim.transparentize(35%);
-
                                     }
-
                                 }
                                 Text {
                                     text: "No headings yet";
@@ -758,6 +489,8 @@ export component DocumentEditorScreen inherits Rectangle {
 
                                     heading-ta := TouchArea {
                                         mouse-cursor: pointer;
+                                        // block-index is the heading's byte offset; the handler
+                                        // moves the caret there and focuses the page.
                                         clicked => { root.doc-heading-clicked(heading.block-index); }
                                     }
 
@@ -781,411 +514,6 @@ export component DocumentEditorScreen inherits Rectangle {
                                             font-weight: heading.level == 1 ? 600 : 400;
                                             vertical-alignment: center;
                                             overflow: elide;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Comments panel ──
-                    Rectangle {
-                        visible: root.doc-sidebar-mode == 1;
-
-                        VerticalLayout {
-                            padding: 8px;
-                            spacing: 6px;
-
-                            // Add comment input
-                            Rectangle {
-                                height: 60px;
-                                background: Theme.bg-input; clip: true;
-                                border-radius: 6px;
-                                border-width: 1px;
-                                border-color: Theme.border-subtle;
-
-                                comment-ti := TextInput {
-                                    x: 8px;
-                                    y: 4px;
-                                    width: parent.width - 16px;
-                                    height: parent.height - 8px;
-                                    text <=> root.doc-comment-input;
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-caption;
-                                    wrap: word-wrap;
-                                    vertical-alignment: top;
-                                }
-                            }
-
-                            Rectangle {
-                                height: 28px;
-                                border-radius: 4px;
-                                background: add-cmt.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2);
-
-                                add-cmt := TouchArea {
-                                    clicked => {
-                                        root.doc-add-comment(root.doc-comment-input);
-                                        root.doc-comment-input = "";
-                                    }
-                                }
-
-                                Text {
-                                    text: "Add Comment";
-                                    color: white;
-                                    font-size: Theme.fs-caption;
-                                    font-weight: 600;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            Rectangle { height: 1px; background: Theme.separator; }
-
-                            // Comments list
-                            if root.doc-comments.length == 0 : VerticalLayout {
-                                vertical-stretch: 1;
-                                alignment: center;
-                                spacing: 6px;
-                                padding: 16px;
-                                HorizontalLayout {
-                                    alignment: center;
-                                    Icon {
-                                        commands: Icons.chat;
-                                        size: 22px;
-                                        tint: Theme.text-dim.transparentize(35%);
-                                    }
-                                }
-                                Text {
-                                    text: "No notes";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                    horizontal-alignment: center;
-                                }
-                                Text {
-                                    text: "Select some text and leave a note.";
-                                    color: Theme.text-dim.transparentize(35%);
-                                    font-size: Theme.fs-micro;
-                                    horizontal-alignment: center;
-                                    wrap: word-wrap;
-                                }
-                            }
-                            if root.doc-comments.length > 0 : ListView {
-                                for comment[idx] in root.doc-comments : Rectangle {
-                                    height: 72px;
-                                    background: Theme.bg-card;
-                                    border-radius: 6px;
-                                    border-width: 1px;
-                                    border-color: comment.resolved ? Theme.color-success-dim : Theme.border-subtle;
-
-                                    VerticalLayout {
-                                        padding: 8px;
-                                        spacing: 4px;
-
-                                        HorizontalLayout {
-                                            spacing: 4px;
-
-                                            Text {
-                                                text: "L" + comment.line-hint;
-                                                color: Theme.accent;
-                                                font-size: Theme.fs-micro;
-                                                font-weight: 600;
-                                                vertical-alignment: center;
-                                            }
-
-                                            Text {
-                                                text: comment.timestamp;
-                                                color: Theme.text-secondary;
-                                                font-size: Theme.fs-micro;
-                                                vertical-alignment: center;
-                                            }
-
-                                            Rectangle {}
-
-                                            // Resolve button
-                                            Rectangle {
-                                                visible: !comment.resolved;
-                                                width: 16px;
-                                                height: 16px;
-                                                border-radius: 3px;
-                                                background: resolve-ta.has-hover ? Theme.color-success : transparent;
-                                                border-width: 1px;
-                                                border-color: Theme.color-success;
-
-                                                resolve-ta := TouchArea { clicked => { root.doc-resolve-comment(comment.id); } }
-                                                Icon { commands: Icons.check; size: 12px; tint: Theme.color-success; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
-                                            }
-
-                                            // Delete button
-                                            Rectangle {
-                                                width: 16px;
-                                                height: 16px;
-                                                border-radius: 3px;
-                                                background: del-c-ta.has-hover ? Theme.color-danger : transparent;
-                                                border-width: 1px;
-                                                border-color: Theme.color-danger;
-
-                                                del-c-ta := TouchArea { clicked => { root.doc-delete-comment(comment.id); } }
-                                                Icon { commands: Icons.close; size: 11px; tint: Theme.color-danger; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
-                                            }
-                                        }
-
-                                        Text {
-                                            text: comment.text;
-                                            color: comment.resolved ? Theme.text-secondary : Theme.text-primary;
-                                            font-size: Theme.fs-caption;
-                                            wrap: word-wrap;
-                                            overflow: elide;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Changes panel ──
-                    Rectangle {
-                        visible: root.doc-sidebar-mode == 2;
-
-                        VerticalLayout {
-                            padding: 8px;
-                            spacing: 6px;
-
-                            // Track changes toggle + bulk actions
-                            HorizontalLayout {
-                                spacing: 4px;
-
-                                Rectangle {
-                                    height: 24px;
-                                    border-radius: 4px;
-                                    background: root.doc-track-changes-on ? Theme.color-success : Theme.bg-card;
-
-                                    TouchArea { clicked => { root.doc-toggle-track-changes(); } }
-
-                                    Text {
-                                        text: root.doc-track-changes-on ? "Tracking ON" : "Tracking OFF";
-                                        color: root.doc-track-changes-on ? white : Theme.text-secondary;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: 600;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                Rectangle {
-                                    height: 24px;
-                                    width: 40px;
-                                    border-radius: 4px;
-                                    background: accept-all-ta.has-hover ? Theme.color-success : transparent;
-                                    border-width: 1px;
-                                    border-color: Theme.color-success;
-
-                                    accept-all-ta := TouchArea { clicked => { root.doc-accept-all-changes(); } }
-                                    HorizontalLayout {
-                                spacing: 3px;
-                                alignment: center;
-                                Icon { commands: Icons.check; size: 11px; tint: Theme.color-success; y: (parent.height - self.height) / 2; }
-                                Text { text: "All"; font-size: Theme.fs-micro; color: Theme.color-success; vertical-alignment: center; }
-                            }
-                                }
-
-                                Rectangle {
-                                    height: 24px;
-                                    width: 40px;
-                                    border-radius: 4px;
-                                    background: reject-all-ta.has-hover ? Theme.color-danger : transparent;
-                                    border-width: 1px;
-                                    border-color: Theme.color-danger;
-
-                                    reject-all-ta := TouchArea { clicked => { root.doc-reject-all-changes(); } }
-                                    HorizontalLayout {
-                                spacing: 3px;
-                                alignment: center;
-                                Icon { commands: Icons.close; size: 10px; tint: Theme.color-danger; y: (parent.height - self.height) / 2; }
-                                Text { text: "All"; font-size: Theme.fs-micro; color: Theme.color-danger; vertical-alignment: center; }
-                            }
-                                }
-                            }
-
-                            Rectangle { height: 1px; background: Theme.separator; }
-
-                            // Changes list
-                            if root.doc-changes.length == 0 : VerticalLayout {
-                                vertical-stretch: 1;
-                                alignment: center;
-                                spacing: 6px;
-                                padding: 16px;
-                                HorizontalLayout {
-                                    alignment: center;
-                                    Icon {
-                                        commands: Icons.history;
-                                        size: 22px;
-                                        tint: Theme.text-dim.transparentize(35%);
-                                    }
-                                }
-                                Text {
-                                    text: "No tracked changes";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                    horizontal-alignment: center;
-                                }
-                                Text {
-                                    text: "Turn on tracking to record edits.";
-                                    color: Theme.text-dim.transparentize(35%);
-                                    font-size: Theme.fs-micro;
-                                    horizontal-alignment: center;
-                                    wrap: word-wrap;
-                                }
-                            }
-                            if root.doc-changes.length > 0 : ListView {
-                                for change[idx] in root.doc-changes : Rectangle {
-                                    height: 64px;
-                                    background: Theme.bg-card;
-                                    border-radius: 6px;
-                                    border-width: 1px;
-                                    border-color: change.change-type == "insert" ? Theme.color-success-dim
-                                        : change.change-type == "delete" ? Theme.color-danger-dim
-                                        : Theme.color-warning-dim;
-
-                                    VerticalLayout {
-                                        padding: 6px;
-                                        spacing: 2px;
-
-                                        HorizontalLayout {
-                                            spacing: 4px;
-
-                                            Text {
-                                                text: change.change-type == "insert" ? "+" : change.change-type == "delete" ? "-" : "~";
-                                                color: change.change-type == "insert" ? Theme.color-success
-                                                    : change.change-type == "delete" ? Theme.color-danger : Theme.color-warning;
-                                                font-size: Theme.fs-caption;
-                                                font-weight: 700;
-                                                vertical-alignment: center;
-                                            }
-
-                                            Text {
-                                                text: "L" + change.line-hint + " " + change.timestamp;
-                                                color: Theme.text-secondary;
-                                                font-size: Theme.fs-micro;
-                                                vertical-alignment: center;
-                                            }
-
-                                            Rectangle {}
-
-                                            Rectangle {
-                                                width: 20px; height: 20px; border-radius: 3px;
-                                                background: acc-ta.has-hover ? Theme.color-success : transparent;
-                                                acc-ta := TouchArea { clicked => { root.doc-accept-change(change.id); } }
-                                                Icon { commands: Icons.check; size: 13px; tint: Theme.color-success; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
-                                            }
-
-                                            Rectangle {
-                                                width: 20px; height: 20px; border-radius: 3px;
-                                                background: rej-ta.has-hover ? Theme.color-danger : transparent;
-                                                rej-ta := TouchArea { clicked => { root.doc-reject-change(change.id); } }
-                                                Icon { commands: Icons.close; size: 12px; tint: Theme.color-danger; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
-                                            }
-                                        }
-
-                                        Text {
-                                            text: change.new-text != "" ? change.new-text : change.old-text;
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-micro;
-                                            overflow: elide;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Versions panel ──
-                    Rectangle {
-                        visible: root.doc-sidebar-mode == 3;
-
-                        VerticalLayout {
-                            padding: 8px;
-                            spacing: 6px;
-
-                            // Save version button
-                            Rectangle {
-                                height: 28px;
-                                border-radius: 4px;
-                                background: save-ver-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2);
-
-                                save-ver-ta := TouchArea {
-                                    clicked => {
-                                        root.doc-save-version("Manual snapshot");
-                                    }
-                                }
-
-                                Text {
-                                    text: "Save Version";
-                                    color: white;
-                                    font-size: Theme.fs-caption;
-                                    font-weight: 600;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            Rectangle { height: 1px; background: Theme.separator; }
-
-                            // Versions list
-                            if root.doc-versions.length == 0 : VerticalLayout {
-                                vertical-stretch: 1;
-                                alignment: center;
-                                spacing: 6px;
-                                padding: 16px;
-                                HorizontalLayout {
-                                    alignment: center;
-                                    Icon {
-                                        commands: Icons.archive;
-                                        size: 22px;
-                                        tint: Theme.text-dim.transparentize(35%);
-                                    }
-                                }
-                                Text {
-                                    text: "No saved versions";
-                                    color: Theme.text-dim;
-                                    font-size: Theme.fs-caption;
-                                    horizontal-alignment: center;
-                                }
-                                Text {
-                                    text: "Save a version to snapshot this draft.";
-                                    color: Theme.text-dim.transparentize(35%);
-                                    font-size: Theme.fs-micro;
-                                    horizontal-alignment: center;
-                                    wrap: word-wrap;
-                                }
-                            }
-                            if root.doc-versions.length > 0 : ListView {
-                                for ver[idx] in root.doc-versions : Rectangle {
-                                    height: 44px;
-                                    background: ver-item-ta.has-hover ? Theme.hover-fill : Theme.bg-card;
-                                    border-radius: 6px;
-                                    border-width: 1px;
-                                    border-color: Theme.border-subtle;
-
-                                    ver-item-ta := TouchArea {
-                                        clicked => { root.doc-restore-version(ver.index); }
-                                    }
-
-                                    VerticalLayout {
-                                        padding: 8px;
-                                        spacing: 2px;
-
-                                        Text {
-                                            text: ver.label;
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-caption;
-                                            font-weight: 500;
-                                            overflow: elide;
-                                        }
-
-                                        Text {
-                                            text: ver.timestamp;
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-micro;
                                         }
                                     }
                                 }
@@ -1239,33 +567,28 @@ export component DocumentEditorScreen inherits Rectangle {
                                     spacing: 0px;
 
                                     // Title
+                                    //
+                                    // Read out of the document, not typed into. This was a
+                                    // TextInput bound to `doc-title`, and what was typed into it
+                                    // went nowhere: the title was not part of the file and not
+                                    // part of anything else either, so it survived until the next
+                                    // load. The title of a Markdown document is its first `# `
+                                    // heading, and that is what this shows — press H1 on the
+                                    // first line to write one.
                                     Rectangle {
                                         height: 48px;
                                         clip: true;
 
-                                        if root.doc-title == "" : Text {
+                                        Text {
                                             x: 0;
                                             width: 100%;
                                             height: 100%;
-                                            text: "Untitled document";
-                                            color: Theme.text-dim.transparentize(30%);
+                                            text: root.doc-title != "" ? root.doc-title : "Untitled document";
+                                            color: root.doc-title != "" ? Theme.text-primary : Theme.text-dim.transparentize(30%);
                                             font-size: 30px;
                                             font-weight: 700;
                                             vertical-alignment: bottom;
-                                        }
-
-                                        title-input := TextInput {
-                                            x: 0;
-                                            y: 0;
-                                            width: parent.width;
-                                            height: parent.height;
-                                            text <=> root.doc-title;
-                                            color: Theme.text-primary;
-                                            font-size: 30px;
-                                            font-weight: 700;
-                                            single-line: true;
-                                            vertical-alignment: bottom;
-                                            accepted => { root.doc-content-changed(root.doc-content); }
+                                            overflow: elide;
                                         }
                                     }
 
@@ -1307,6 +630,8 @@ export component DocumentEditorScreen inherits Rectangle {
                                             font-size: Theme.fs-headline;
                                             single-line: false;
                                             wrap: word-wrap;
+                                            read-only: root.doc-dialog != 0;
+                                            selection-background-color: Theme.accent;
                                             edited => { root.doc-content-changed(self.text); }
                                         }
                                     }
@@ -1328,6 +653,11 @@ export component DocumentEditorScreen inherits Rectangle {
         }
 
         // ── Bottom status bar ──
+        //
+        // Words and characters are measurements of the text. "Sentences", "~N pages" and
+        // "N min read" were here beside them and were never set by anything, so they read 0, 0
+        // and 0 on every document: a page is not a thing a Markdown file has, and a reading time
+        // is a guess about a reader. The tracking badge went with track changes.
         Rectangle {
             height: 28px;
             background: Theme.bg-surface;
@@ -1359,42 +689,10 @@ export component DocumentEditorScreen inherits Rectangle {
                 }
 
                 Text {
-                    text: root.doc-sentence-count + " sentences";
-                    color: Theme.text-secondary;
+                    text: "Markdown";
+                    color: Theme.text-dim;
                     font-size: Theme.fs-caption;
                     vertical-alignment: center;
-                }
-
-                Text {
-                    text: "~" + root.doc-page-estimate + " pages";
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-caption;
-                    vertical-alignment: center;
-                }
-
-                Text {
-                    text: root.doc-reading-time + " min read";
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-caption;
-                    vertical-alignment: center;
-                }
-
-                // Track changes indicator
-                Rectangle {
-                    visible: root.doc-track-changes-on;
-                    width: 80px;
-                    height: 18px;
-                    border-radius: 3px;
-                    background: Theme.color-success-dim;
-
-                    Text {
-                        text: "Tracking";
-                        font-size: Theme.fs-micro;
-                        color: Theme.color-success;
-                        font-weight: 600;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
                 }
 
                 Rectangle {}
@@ -1407,7 +705,7 @@ export component DocumentEditorScreen inherits Rectangle {
                 }
 
                 Text {
-                    text: root.doc-file-path != "" ? root.doc-file-path : "No file";
+                    text: root.doc-file-path != "" ? root.doc-file-path : "No file yet";
                     color: Theme.text-secondary;
                     font-size: Theme.fs-caption;
                     vertical-alignment: center;
@@ -1418,7 +716,11 @@ export component DocumentEditorScreen inherits Rectangle {
         }
     }
 
-    // AI Assist Panel (right sidebar)
+    // ── AI Assist Panel (right sidebar) ──
+    //
+    // One box that asks the companion, and two canned prompts that ask it the same way. The
+    // answer comes back as the proposal card above the page — the card that says what applying
+    // it would do before the button is pressed — and not as a pane in here with its own Apply.
     Rectangle {
         visible: root.show-ai-panel;
         x: parent.width - 280px;
@@ -1455,20 +757,10 @@ export component DocumentEditorScreen inherits Rectangle {
 
             Rectangle { height: 1px; background: Theme.separator; }
 
-            Text { text: "Quick Actions"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
+            Text { text: "From this document"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
             HorizontalLayout {
                 spacing: 4px;
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: draft-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    draft-ta := TouchArea { clicked => { root.doc-ai-draft(root.doc-ai-prompt); } }
-                    Text { text: "Draft"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
 
                 Rectangle {
                     height: 28px;
@@ -1477,12 +769,8 @@ export component DocumentEditorScreen inherits Rectangle {
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     summarize-ta := TouchArea { clicked => { root.doc-ai-summarize(); } }
-                    Text { text: "Summarize"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Summarise"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
-            }
-
-            HorizontalLayout {
-                spacing: 4px;
 
                 Rectangle {
                     height: 28px;
@@ -1491,34 +779,13 @@ export component DocumentEditorScreen inherits Rectangle {
                     border-width: 1px;
                     border-color: Theme.accent.transparentize(0.6);
                     improve-ta := TouchArea { clicked => { root.doc-ai-improve(); } }
-                    Text { text: "Improve"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Shorten"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
                 }
-
-                Rectangle {
-                    height: 28px;
-                    border-radius: 4px;
-                    background: translate-ta.has-hover ? AppIdentity.accent.transparentize(0.8) : Theme.bg-elevated;
-                    border-width: 1px;
-                    border-color: Theme.accent.transparentize(0.6);
-                    translate-ta := TouchArea { clicked => { root.doc-ai-translate("Spanish"); } }
-                    Text { text: "Translate"; color: Theme.accent; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
-                }
-            }
-
-            Rectangle {
-                height: 28px;
-                border-radius: 4px;
-                background: doc-insights-ta.has-hover ? Theme.color-purple : Theme.color-purple-dim;
-                border-width: 1px;
-                border-color: Theme.color-purple;
-
-                doc-insights-ta := TouchArea { clicked => { root.doc-ai-insights(); } }
-                Text { text: "Contextual Insights"; color: Theme.color-purple; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
             }
 
             Rectangle { height: 1px; background: Theme.separator; }
 
-            Text { text: "Ask AI"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
+            Text { text: "Ask about this document"; color: Theme.text-secondary; font-size: Theme.fs-micro; }
 
             Rectangle {
                 height: 60px;
@@ -1543,13 +810,13 @@ export component DocumentEditorScreen inherits Rectangle {
             Rectangle {
                 height: 28px;
                 border-radius: 4px;
-                background: root.doc-ai-working ? Theme.text-dim : (submit-doc-ai-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2));
+                background: root.proposal-working ? Theme.text-dim : (submit-doc-ai-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2));
                 submit-doc-ai-ta := TouchArea {
-                    enabled: !root.doc-ai-working;
+                    enabled: !root.proposal-working;
                     clicked => { root.doc-ai-submit(root.doc-ai-prompt); }
                 }
                 Text {
-                    text: root.doc-ai-working ? "Thinking..." : "Ask";
+                    text: root.proposal-working ? "Thinking..." : "Ask";
                     color: white;
                     font-size: Theme.fs-micro;
                     font-weight: 600;
@@ -1558,42 +825,121 @@ export component DocumentEditorScreen inherits Rectangle {
                 }
             }
 
-            Rectangle { height: 1px; background: Theme.separator; }
-
-            ScrollView {
-                Rectangle {
-                    background: transparent;
-                    Text {
-                        text: root.doc-ai-response;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-micro;
-                        wrap: word-wrap;
-                        width: parent.width;
-                    }
-                }
+            Text {
+                text: "The answer arrives as a proposal above the page, with what it would replace.";
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                wrap: word-wrap;
             }
 
-            HorizontalLayout {
-                visible: root.doc-ai-response != "";
-                spacing: 6px;
-                height: 28px;
+            Rectangle { vertical-stretch: 1; }
+        }
+    }
+
+    // ── The file prompt ──
+    //
+    // Open, Save As and the two exports all need a path, and a document with no file needs one
+    // before Save can mean anything. There is no file picker on this machine, so this is a path
+    // field — the same prompt the text editor uses, and the same rules: absolute or ~/.
+    // Shown with `visible`, not with `if`: the path field has to exist for the focus handler
+    // above to be able to put the caret in it when the prompt opens.
+    Rectangle {
+        visible: root.doc-dialog != 0;
+        background: #00000066;
+        TouchArea {}
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(520px, root.width - 48px);
+            height: dialog-body.preferred-height;
+            border-radius: 14px;
+            background: Theme.bg-elevated;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+
+            dialog-body := VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+
+                Text {
+                    text: root.doc-dialog == 1 ? "Open a document"
+                        : root.doc-dialog == 2 ? "Save this document"
+                        : root.doc-dialog == 3 ? "Write a Markdown copy"
+                        : root.doc-dialog == 4 ? "Write an HTML copy"
+                        : "Keep your changes?";
+                    color: Theme.text-primary;
+                    font-size: 22px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: root.doc-dialog == 5
+                        ? "This document has changes that are not on disk."
+                        : "Absolute path or ~/ — UTF-8 Markdown, up to 1 MiB.";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
 
                 Rectangle {
-                    border-radius: 4px;
-                    background: doc-apply-ta.has-hover ? Theme.color-success : Theme.color-success;
-                    doc-apply-ta := TouchArea { clicked => { root.doc-ai-apply(); } }
-                    Text { text: "Apply"; color: white; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
+                    visible: root.doc-dialog != 5;
+                    height: root.doc-dialog != 5 ? 34px : 0px;
+                    dialog-path-input := LineEdit {
+                        width: 100%;
+                        height: 34px;
+                        text <=> root.doc-dialog-path;
+                        placeholder-text: "~/Documents/notes.md";
+                        accepted => { root.doc-dialog-confirm(); }
+                    }
                 }
-                Rectangle {
-                    border-radius: 4px;
-                    background: doc-dismiss-ta.has-hover ? Theme.color-danger : Theme.color-danger;
-                    doc-dismiss-ta := TouchArea { clicked => { root.doc-ai-dismiss(); } }
-                    Text { text: "Dismiss"; color: white; font-size: Theme.fs-micro; horizontal-alignment: center; vertical-alignment: center; }
+
+                if root.doc-dialog-error != "" : Text {
+                    text: root.doc-dialog-error;
+                    color: Theme.amber;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    height: 32px;
+
+                    Rectangle {
+                        width: 92px;
+                        border-radius: 5px;
+                        background: cancel-ta.has-hover ? Theme.hover-fill : Theme.bg-card;
+                        cancel-ta := TouchArea { clicked => { root.doc-dialog-cancel(); } }
+                        Text { text: "Cancel"; color: Theme.text-secondary; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+
+                    if root.doc-dialog == 5 : Rectangle {
+                        width: 92px;
+                        border-radius: 5px;
+                        background: discard-ta.has-hover ? Theme.color-danger : transparent;
+                        border-width: 1px;
+                        border-color: Theme.color-danger;
+                        discard-ta := TouchArea { clicked => { root.doc-dialog-discard(); } }
+                        Text { text: "Discard"; color: discard-ta.has-hover ? white : Theme.color-danger; font-size: Theme.fs-caption; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+
+                    Rectangle {
+                        width: 92px;
+                        border-radius: 5px;
+                        background: confirm-ta.has-hover ? AppIdentity.accent : Theme.accent.transparentize(0.2);
+                        confirm-ta := TouchArea { clicked => { root.doc-dialog-confirm(); } }
+                        Text {
+                            text: root.doc-dialog == 1 ? "Open" : "Save";
+                            color: white;
+                            font-size: Theme.fs-caption;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
         }
     }
-
-    // ── Template picker overlay ──
-    // (could be triggered by a menu, but for now we add templates to toolbar)
 }

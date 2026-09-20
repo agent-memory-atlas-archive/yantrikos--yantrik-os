@@ -2,7 +2,7 @@
 name = "yantrik-document-editor"
 version = "0.1.0"
 edition = "2021"
-description = "Yantrik Document Editor — rich document editing with comments, track changes, AI assist"
+description = "Yantrik Document Editor — a Markdown document editor a person and a mind can both write in"
 
 [[bin]]
 name = "yantrik-document-editor"
@@ -18,6 +18,14 @@ slint = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# O_NOFOLLOW on the read side and 0600 on the temporary file; the same guards the text editor uses.
+libc = { workspace = true }
+# Case-insensitive find over real UTF-8 offsets. Lowercasing a copy and indexing into the original
+# is how a replace cuts a document in the wrong place.
+regex = { workspace = true }
+# Markdown -> HTML for the export, reusing the renderer Notes already depends on rather than
+# writing a second Markdown implementation to keep in step with the first.
+pulldown-cmark = { version = "0.13.1", default-features = false, features = ["html"] }
 
 [build-dependencies]
 slint-build = "1.17"

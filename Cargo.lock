@@ -10341,6 +10341,8 @@ dependencies = [
  "yantrik-companion-cortex",
  "yantrik-companion-instincts",
  "yantrik-companion-tools",
+ "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
  "yantrik-ml",
  "yantrik-os",
  "yantrikdb",
@@ -10363,11 +10365,14 @@ dependencies = [
 name = "yantrik-companion-cortex"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "rusqlite",
  "serde",
  "serde_json",
  "tracing",
  "yantrik-companion-core",
+ "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
 ]
 
 [[package]]
@@ -10424,6 +10429,9 @@ version = "0.1.0"
 name = "yantrik-document-editor"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "pulldown-cmark",
+ "regex",
  "serde",
  "serde_json",
  "slint",
