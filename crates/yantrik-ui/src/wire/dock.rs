@@ -41,9 +41,11 @@ pub enum Launch {
 ///
 /// - `text_editor` is the name the binary carries and the name a person would try; `editor` is
 ///   what the arm was always called. Both open the native Text Editor, which forwards repeated file opens to its existing window.
-/// - The image viewer had no arm, so yantrik-image-viewer sat in /opt/yantrik/bin unreachable.
-///   Screen 11 is the viewer the file browser's "open" is wired to, so it is the one that
-///   actually receives a picture.
+/// - The image viewer was routed to screen 11 because the standalone binary, although shipped,
+///   could not open a picture: no argument handling, no control surface, and navigation
+///   callbacks that only logged. Routing around it kept the shell screen working and left
+///   24 MB in /opt/yantrik/bin that nothing could reach. The app opens files now, so the route
+///   is the app, and the file browser hands it the path.
 /// - `network_manager` was accepted by the guard — a .desktop entry matched — and then reached
 ///   no arm, so open_app answered "launching" and nothing happened.
 const ROUTES: &[(&[&str], Launch)] = &[
@@ -53,7 +55,7 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["settings"], Launch::Screen(7)),
     (&["notes"], Launch::Program { id: "notes", bin: "yantrik-notes" }),
     (&["editor", "text_editor"], Launch::Program { id: "editor", bin: "yantrik-text-editor" }),
-    (&["image_viewer", "images"], Launch::Screen(11)),
+    (&["image_viewer", "images"], Launch::Program { id: "images", bin: "yantrik-image-viewer" }),
     (&["bond"], Launch::Screen(4)),
     (&["personality"], Launch::Screen(5)),
     (&["memory"], Launch::Screen(6)),

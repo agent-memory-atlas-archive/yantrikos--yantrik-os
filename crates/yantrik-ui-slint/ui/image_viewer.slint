@@ -76,6 +76,13 @@ export component ImageViewer inherits Rectangle {
     in property <image> current-image;
     in property <string> file-name: "";
     in property <string> counter-text: "";   // e.g. "3 / 12"
+
+    /// Why there is no picture, when there is no picture.
+    ///
+    /// An empty window used to be the answer to every case: no file given, a file that is not
+    /// an image, a file that has gone. They are different problems and only one of them is the
+    /// person's to fix.
+    in property <string> notice: "";
     in-out property <bool> fit-contain: true; // true=contain, false=cover
 
     callback nav-prev();
@@ -118,23 +125,11 @@ export component ImageViewer inherits Rectangle {
     callback viewer-slideshow-toggle();
     callback viewer-slideshow-stop();
 
-    // ── Crop mode ──
-    in-out property <bool> viewer-crop-mode: false;
-    callback viewer-start-crop();
-    callback viewer-apply-crop();
-    callback viewer-cancel-crop();
-
-    // ── Batch operations ──
-    in property <string> viewer-batch-status: "";
-    in property <int> viewer-batch-total: 0;
-    in property <int> viewer-batch-done: 0;
-    in-out property <bool> viewer-batch-panel-open: false;
-    callback viewer-batch-rotate-all(int);   // degrees
-    callback viewer-batch-resize(int, int);  // width, height
-
-    // Batch resize inputs (internal)
-    in-out property <string> batch-resize-w: "1920";
-    in-out property <string> batch-resize-h: "1080";
+    // Crop and batch operations were here: a toolbar button each, a crop overlay reading
+    // "scaffold — full crop selection coming soon", and a batch panel whose progress bar counted
+    // up while the handler behind it wrote "Batch rotate image 3/12" to the log and changed no
+    // file. Removed rather than wired, because nothing in this OS can rotate or resize a picture
+    // on disk yet; when something can, the buttons come back with it.
 
     // Zoom / pan state (pure Slint, no Rust wiring needed)
     property <float> zoom-level: 1.0;
@@ -216,8 +211,6 @@ export component ImageViewer inherits Rectangle {
                 { id: "ai",    icon: Icons.spark, label: root.ai-is-working ? "Working" : "Describe",
                   emphasis: 1, loading: root.ai-is-working, active: root.ai-panel-open },
                 { id: "info",  icon: Icons.eye,   label: "Info",  active: root.viewer-info-open },
-                { id: "crop",  icon: Icons.scissors, label: "Crop", active: root.viewer-crop-mode },
-                { id: "batch", icon: Icons.grid,  label: "Batch", active: root.viewer-batch-panel-open },
             ];
             action(id) => {
                 if (id == "slideshow") {
@@ -241,18 +234,19 @@ export component ImageViewer inherits Rectangle {
                 } else if (id == "info") {
                     root.viewer-info-open = !root.viewer-info-open;
                     root.viewer-toggle-info();
-                } else if (id == "crop") {
-                    if (!root.viewer-crop-mode) { root.viewer-start-crop(); }
-                    else { root.viewer-cancel-crop(); }
-                } else if (id == "batch") {
-                    root.viewer-batch-panel-open = !root.viewer-batch-panel-open;
                 }
             }
         }
 
-        // The content, with the agent rail beside it. The header stays full
-        // width above both.
-        HorizontalLayout {
+        // Everything below the header, stacked: the zoom and rotate toolbar, then the panels
+        // that open above the picture, then the picture itself with the rail beside it.
+        //
+        // This was a HorizontalLayout, carrying the comment that belongs to the row further
+        // down, so the toolbar, the separator, the AI panel and the picture were laid out side
+        // by side: the image ended up in a strip a couple of hundred pixels wide in the corner
+        // while most of the window stayed empty. Nothing caught it because the standalone app
+        // could not open a picture and the shell's screen was only reachable through Files.
+        VerticalLayout {
             Rectangle {
                 height: Theme.h-prominent;
                 background: Theme.bg-deep;
@@ -437,8 +431,12 @@ export component ImageViewer inherits Rectangle {
                 dismiss => { root.proposal-dismissed(); }
             }
 
+            // The picture, with the agent rail beside it. Takes the height left over from the
+            // header and toolbar: without it every child keeps its natural size and the picture
+            // draws into a small box with the window empty around it.
             HorizontalLayout {
                 spacing: 0px;
+                vertical-stretch: 1;
 
                 // Image area with zoom/pan
                 Rectangle {
@@ -453,6 +451,14 @@ export component ImageViewer inherits Rectangle {
                         icon-path: Icons.image;
                         title: "No image open";
                         description: "Open a picture from Files, or pass a path on the command line.";
+                    }
+
+                    // A file was chosen and cannot be drawn: the name is on screen, so the
+                    // reason belongs beside it rather than in a log the person will not read.
+                    if root.file-name != "" && root.notice != "" : YEmptyState {
+                        icon-path: Icons.image;
+                        title: "Cannot show this picture";
+                        description: root.notice;
                     }
 
                     if !root.is-custom-zoom : Image {
@@ -656,88 +662,6 @@ export component ImageViewer inherits Rectangle {
                         }
                     }
 
-                    // ── Crop mode overlay ──
-                    if root.viewer-crop-mode : Rectangle {
-                        x: 0;
-                        y: 0;
-                        width: parent.width;
-                        height: parent.height;
-                        background: Theme.overlay-backdrop;
-
-                        // Block interaction with image beneath
-                        TouchArea { width: 100%; height: 100%; }
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 16px;
-
-                            Text {
-                                text: "Select crop area";
-                                color: Theme.text-primary;
-                                font-size: Theme.fs-title-1;
-                                font-weight: 600;
-                                horizontal-alignment: center;
-                            }
-
-                            Text {
-                                text: "Drag to select region (scaffold — full crop selection coming soon)";
-                                color: Theme.text-secondary;
-                                font-size: Theme.fs-caption;
-                                horizontal-alignment: center;
-                            }
-
-                            HorizontalLayout {
-                                alignment: center;
-                                spacing: 12px;
-
-                                // Apply crop
-                                TouchArea {
-                                    width: crop-apply-bg.width;
-                                    height: 34px;
-                                    clicked => { root.viewer-apply-crop(); }
-
-                                    crop-apply-bg := Rectangle {
-                                        width: crop-apply-txt.preferred-width + 28px;
-                                        height: 34px;
-                                        border-radius: 8px;
-                                        background: parent.has-hover ? AppIdentity.accent : Theme.accent-dim;
-
-                                        crop-apply-txt := Text {
-                                            text: "Apply Crop";
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                            font-weight: 600;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                // Cancel crop
-                                TouchArea {
-                                    width: crop-cancel-bg.width;
-                                    height: 34px;
-                                    clicked => { root.viewer-cancel-crop(); }
-
-                                    crop-cancel-bg := Rectangle {
-                                        width: crop-cancel-txt.preferred-width + 28px;
-                                        height: 34px;
-                                        border-radius: 8px;
-                                        background: parent.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
-
-                                        crop-cancel-txt := Text {
-                                            text: "Cancel";
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-body;
-                                            font-weight: 500;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 // ── EXIF Info Panel (right side, 250px) ──
@@ -937,292 +861,18 @@ export component ImageViewer inherits Rectangle {
                     }
                 }
 
-                // ── Batch Operations Panel (right side, 260px) ──
-                if root.viewer-batch-panel-open : Rectangle {
-                    width: 260px;
-                    background: Theme.bg-surface;
-
-                    // Left border separator
-                    Rectangle {
-                        x: 0;
-                        y: 0;
-                        width: 1px;
-                        height: 100%;
-                        background: Theme.separator;
+                    // ── What Yantrik knows about this ──
+                    //
+                    // Full height beside the content. Collapses to nothing when there is nothing true to say.
+                    AgentRail {
+                        context-items: root.agent-context;
+                        suggestions: root.agent-suggestions;
+                        unavailable: root.agent-unavailable;
+                        context-activated(id) => { root.agent-context-activated(id); }
+                        suggestion-activated(id) => { root.agent-suggestion-activated(id); }
                     }
 
-                    Flickable {
-                        x: 1px;
-                        width: parent.width - 1px;
-                        viewport-height: batch-content.preferred-height + 24px;
-
-                        batch-content := VerticalLayout {
-                            alignment: start;
-                            padding: 16px;
-                            spacing: 12px;
-
-                            // Panel title
-                            HorizontalLayout {
-                                spacing: 6px;
-                                Text {
-                                    text: "Batch Operations";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.fs-body;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                }
-                                Rectangle { horizontal-stretch: 1; }
-                                TouchArea {
-                                    width: 24px; height: 24px;
-                                    clicked => {
-                                        root.viewer-batch-panel-open = false;
-                                    }
-                                    Rectangle {
-                                        border-radius: 12px;
-                                        background: parent.has-hover ? Theme.hover-fill : transparent;
-                                        Icon {
-                                            commands: Icons.close;
-                                            size: 12px;
-                                            tint: Theme.text-dim;
-                                            x: (parent.width - self.width) / 2;
-                                            y: (parent.height - self.height) / 2;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Separator
-                            Rectangle { height: 1px; background: Theme.separator; }
-
-                            // ── Rotate All ──
-                            Text {
-                                text: "Rotate All Images";
-                                color: Theme.accent;
-                                font-size: Theme.fs-micro;
-                                font-weight: 600;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-
-                                TouchArea {
-                                    width: batch-rot-90.width;
-                                    height: 32px;
-                                    clicked => { root.viewer-batch-rotate-all(90); }
-                                    batch-rot-90 := Rectangle {
-                                        width: batch-rot-90-txt.preferred-width + 20px;
-                                        height: 32px;
-                                        border-radius: 8px;
-                                        background: parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
-                                        border-width: 1px;
-                                        border-color: Theme.border-subtle;
-                                        batch-rot-90-txt := Text {
-                                            text: "90\u{00b0} CW";
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-caption;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                TouchArea {
-                                    width: batch-rot-180.width;
-                                    height: 32px;
-                                    clicked => { root.viewer-batch-rotate-all(180); }
-                                    batch-rot-180 := Rectangle {
-                                        width: batch-rot-180-txt.preferred-width + 20px;
-                                        height: 32px;
-                                        border-radius: 8px;
-                                        background: parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
-                                        border-width: 1px;
-                                        border-color: Theme.border-subtle;
-                                        batch-rot-180-txt := Text {
-                                            text: "180\u{00b0}";
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-caption;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                TouchArea {
-                                    width: batch-rot-270.width;
-                                    height: 32px;
-                                    clicked => { root.viewer-batch-rotate-all(270); }
-                                    batch-rot-270 := Rectangle {
-                                        width: batch-rot-270-txt.preferred-width + 20px;
-                                        height: 32px;
-                                        border-radius: 8px;
-                                        background: parent.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
-                                        border-width: 1px;
-                                        border-color: Theme.border-subtle;
-                                        batch-rot-270-txt := Text {
-                                            text: "90\u{00b0} CCW";
-                                            color: Theme.text-secondary;
-                                            font-size: Theme.fs-caption;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Separator
-                            Rectangle { height: 1px; background: Theme.separator; }
-
-                            // ── Resize All ──
-                            Text {
-                                text: "Resize All Images";
-                                color: Theme.accent;
-                                font-size: Theme.fs-micro;
-                                font-weight: 600;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
-
-                                VerticalLayout {
-                                    spacing: 4px;
-                                    Text { text: "Width"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                    Rectangle {
-                                        width: 80px;
-                                        height: 30px;
-                                        background: Theme.bg-input; clip: true;
-                                        border-radius: 6px;
-                                        border-width: 1px;
-                                        border-color: Theme.border-subtle;
-                                        TextInput {
-                                            x: 6px;
-                                            width: parent.width - 12px;
-                                            height: 100%;
-                                            text <=> root.batch-resize-w;
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-                                }
-
-                                Icon {
-                                    commands: Icons.close;
-                                    size: 14px;
-                                    tint: Theme.text-dim;
-                                    y: 10px;
-                                }
-
-                                VerticalLayout {
-                                    spacing: 4px;
-                                    Text { text: "Height"; color: Theme.text-dim; font-size: Theme.fs-micro; }
-                                    Rectangle {
-                                        width: 80px;
-                                        height: 30px;
-                                        background: Theme.bg-input; clip: true;
-                                        border-radius: 6px;
-                                        border-width: 1px;
-                                        border-color: Theme.border-subtle;
-                                        TextInput {
-                                            x: 6px;
-                                            width: parent.width - 12px;
-                                            height: 100%;
-                                            text <=> root.batch-resize-h;
-                                            color: Theme.text-primary;
-                                            font-size: Theme.fs-caption;
-                                        }
-                                    }
-                                }
-                            }
-
-                            TouchArea {
-                                width: batch-resize-btn.width;
-                                height: 34px;
-                                clicked => {
-                                    // Parse width/height from text inputs
-                                    root.viewer-batch-resize(Math.round(root.batch-resize-w.to-float()), Math.round(root.batch-resize-h.to-float()));
-                                }
-                                batch-resize-btn := Rectangle {
-                                    width: batch-resize-btn-txt.preferred-width + 24px;
-                                    height: 34px;
-                                    border-radius: 8px;
-                                    background: parent.has-hover ? AppIdentity.accent : Theme.accent-dim;
-                                    batch-resize-btn-txt := Text {
-                                        text: "Resize All";
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-body;
-                                        font-weight: 600;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-
-                            // Separator
-                            Rectangle { height: 1px; background: Theme.separator; }
-
-                            // ── Progress ──
-                            if root.viewer-batch-total > 0 : VerticalLayout {
-                                spacing: 6px;
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    Text {
-                                        text: "Progress:";
-                                        color: Theme.text-dim;
-                                        font-size: Theme.fs-micro;
-                                        vertical-alignment: center;
-                                    }
-                                    Text {
-                                        text: root.viewer-batch-done + " / " + root.viewer-batch-total;
-                                        color: Theme.text-primary;
-                                        font-size: Theme.fs-micro;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                // Progress bar
-                                Rectangle {
-                                    height: 4px;
-                                    border-radius: 2px;
-                                    background: Theme.bg-elevated;
-
-                                    Rectangle {
-                                        x: 0;
-                                        y: 0;
-                                        width: root.viewer-batch-total > 0
-                                            ? parent.width * (root.viewer-batch-done / root.viewer-batch-total)
-                                            : 0px;
-                                        height: 4px;
-                                        border-radius: 2px;
-                                        background: Theme.accent;
-
-                                        animate width { duration: 200ms; }
-                                    }
-                                }
-
-                                if root.viewer-batch-status != "" : Text {
-                                    text: root.viewer-batch-status;
-                                    color: Theme.text-secondary;
-                                    font-size: Theme.fs-micro;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-                    }
-                }
             }
-
-                // ── What Yantrik knows about this ──
-                //
-                // Full height beside the content. Collapses to nothing when there is nothing true to say.
-                AgentRail {
-                    context-items: root.agent-context;
-                    suggestions: root.agent-suggestions;
-                    unavailable: root.agent-unavailable;
-                    context-activated(id) => { root.agent-context-activated(id); }
-                    suggestion-activated(id) => { root.agent-suggestion-activated(id); }
-                }
         }
     }
 }

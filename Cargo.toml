@@ -9,6 +9,7 @@ members = [
     "crates/yantrik-companion",
     "crates/yantrik-design-tokens",
     "crates/yantrik-ipc-contracts",
+    "crates/yantrik-image-core",
     "crates/yantrik-manifest",
     "crates/yantrik-shell-core",
     "crates/yantrik-ui-kit",
@@ -119,6 +120,7 @@ yantrik-companion-cortex = { path = "crates/yantrik-companion-cortex" }
 yantrik-companion-tools = { path = "crates/yantrik-companion-tools" }
 yantrik-design-tokens = { path = "crates/yantrik-design-tokens" }
 yantrik-ipc-contracts = { path = "crates/yantrik-ipc-contracts" }
+yantrik-image-core = { path = "crates/yantrik-image-core" }
 yantrik-shell-core = { path = "crates/yantrik-shell-core" }
 yantrik-ui-kit = { path = "crates/yantrik-ui-kit" }
 yantrik-ipc-transport = { path = "crates/yantrik-ipc-transport" }

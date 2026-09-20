@@ -1,0 +1,9 @@
+[package]
+name = "yantrik-image-core"
+version = "0.1.0"
+edition = "2021"
+description = "What a picture is, which pictures sit beside it, and what its file says about it"
+
+[dependencies]
+kamadak-exif = "0.5"
+tracing = { workspace = true }

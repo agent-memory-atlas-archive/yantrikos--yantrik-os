@@ -573,20 +573,9 @@ export component App inherits Window {
     in-out property <bool> viewer-slideshow-active: false;
     in-out property <bool> viewer-slideshow-paused: false;
     in-out property <float> viewer-slideshow-progress: 0.0;
+    in property <string> viewer-notice: "";
     callback viewer-slideshow-toggle();
     callback viewer-slideshow-stop();
-    // Image Viewer — Crop
-    in-out property <bool> viewer-crop-mode: false;
-    callback viewer-start-crop();
-    callback viewer-apply-crop();
-    callback viewer-cancel-crop();
-    // Image Viewer — Batch operations
-    in property <string> viewer-batch-status: "";
-    in property <int> viewer-batch-total: 0;
-    in property <int> viewer-batch-done: 0;
-    in-out property <bool> viewer-batch-panel-open: false;
-    callback viewer-batch-rotate-all(int);
-    callback viewer-batch-resize(int, int);
 
     // Text Editor state (screen 12)
     in property <string> editor-file-name: "untitled";
@@ -1921,16 +1910,7 @@ export component App inherits Window {
                 viewer-slideshow-progress <=> root.viewer-slideshow-progress;
                 viewer-slideshow-toggle => { root.viewer-slideshow-toggle(); }
                 viewer-slideshow-stop => { root.viewer-slideshow-stop(); }
-                viewer-crop-mode <=> root.viewer-crop-mode;
-                viewer-start-crop => { root.viewer-start-crop(); }
-                viewer-apply-crop => { root.viewer-apply-crop(); }
-                viewer-cancel-crop => { root.viewer-cancel-crop(); }
-                viewer-batch-status: root.viewer-batch-status;
-                viewer-batch-total: root.viewer-batch-total;
-                viewer-batch-done: root.viewer-batch-done;
-                viewer-batch-panel-open <=> root.viewer-batch-panel-open;
-                viewer-batch-rotate-all(deg) => { root.viewer-batch-rotate-all(deg); }
-                viewer-batch-resize(w, h) => { root.viewer-batch-resize(w, h); }
+                notice: root.viewer-notice;
             }
         }
 

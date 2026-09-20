@@ -163,13 +163,15 @@ fn wire_file_open(ui: &App, ctx: &AppContext) {
         tracing::info!(path = %full.display(), "Opening file");
 
         match mime_dispatch::classify(&name_str) {
+            // The same app the launcher opens, given the file that was double-clicked. It used
+            // to load the picture into the shell's own screen instead, which is why the
+            // standalone viewer could ship for months without anyone noticing it opened nothing.
             FileAction::ImageViewer => {
-                iv_state.borrow_mut().open(&full);
-                if let Some(ui) = ui_weak.upgrade() {
-                    super::image_viewer::load_current_image(&ui, &iv_state.borrow());
-                    ui.set_current_screen(11);
-                    ui.invoke_navigate(11);
-                }
+                super::dock::spawn_app_with_args(
+                    "images",
+                    "yantrik-image-viewer",
+                    &[&full.to_string_lossy()],
+                );
             }
             FileAction::TextEditor => {
                 super::dock::spawn_app_with_args("editor", "yantrik-text-editor", &[&full.to_string_lossy()]);

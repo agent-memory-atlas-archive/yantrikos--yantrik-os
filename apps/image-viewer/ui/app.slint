@@ -6,8 +6,9 @@ import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
 import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
 import { ImageViewer } from "image_viewer.slint";
+import { ThemeMode, AccentPreset } from "theme.slint";
 
-export { AgentContextItem, AgentSuggestion, AgentProposal }
+export { AgentContextItem, AgentSuggestion, AgentProposal, ThemeMode, AccentPreset }
 
 export component ImageViewerApp inherits Window {
     // ── The agent layer ──
@@ -43,6 +44,7 @@ export component ImageViewerApp inherits Window {
     in property <image> current-image <=> viewer.current-image;
     in property <string> file-name <=> viewer.file-name;
     in property <string> counter-text <=> viewer.counter-text;
+    in property <string> notice <=> viewer.notice;
     in-out property <bool> fit-contain <=> viewer.fit-contain;
 
     // ── Navigation ──
@@ -85,20 +87,6 @@ export component ImageViewerApp inherits Window {
     in-out property <float> viewer-slideshow-progress <=> viewer.viewer-slideshow-progress;
     callback viewer-slideshow-toggle <=> viewer.viewer-slideshow-toggle;
     callback viewer-slideshow-stop <=> viewer.viewer-slideshow-stop;
-
-    // ── Crop mode ──
-    in-out property <bool> viewer-crop-mode <=> viewer.viewer-crop-mode;
-    callback viewer-start-crop <=> viewer.viewer-start-crop;
-    callback viewer-apply-crop <=> viewer.viewer-apply-crop;
-    callback viewer-cancel-crop <=> viewer.viewer-cancel-crop;
-
-    // ── Batch operations ──
-    in property <string> viewer-batch-status <=> viewer.viewer-batch-status;
-    in property <int> viewer-batch-total <=> viewer.viewer-batch-total;
-    in property <int> viewer-batch-done <=> viewer.viewer-batch-done;
-    in-out property <bool> viewer-batch-panel-open <=> viewer.viewer-batch-panel-open;
-    callback viewer-batch-rotate-all <=> viewer.viewer-batch-rotate-all;
-    callback viewer-batch-resize <=> viewer.viewer-batch-resize;
 
     viewer := ImageViewer {
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).

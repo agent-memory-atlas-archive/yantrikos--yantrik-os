@@ -51,7 +51,7 @@ mailparse = { workspace = true }
 html2text = { workspace = true }
 rusqlite = { workspace = true }
 libc = { workspace = true }
-kamadak-exif = "0.5"
+yantrik-image-core = { workspace = true }
 
 [features]
 default = ["claude-cli"]

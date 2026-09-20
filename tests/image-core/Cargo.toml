@@ -1,0 +1,10 @@
+[package]
+name = "yantrik-image-core-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+yantrik-image-core = { path = "../../crates/yantrik-image-core" }
+[lib]
+path = "lib.rs"

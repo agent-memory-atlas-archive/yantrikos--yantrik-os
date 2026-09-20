@@ -10490,6 +10490,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-image-core"
+version = "0.1.0"
+dependencies = [
+ "kamadak-exif",
+ "tracing",
+]
+
+[[package]]
 name = "yantrik-image-viewer"
 version = "0.1.0"
 dependencies = [
@@ -10500,6 +10508,7 @@ dependencies = [
  "tracing",
  "yantrik-app-runtime",
  "yantrik-design-tokens",
+ "yantrik-image-core",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ui-kit",
@@ -10768,7 +10777,6 @@ dependencies = [
  "crossbeam-channel",
  "html2text",
  "imap",
- "kamadak-exif",
  "lettre",
  "libc",
  "mailparse",
@@ -10790,6 +10798,7 @@ dependencies = [
  "yantrik-chat",
  "yantrik-companion",
  "yantrik-harness",
+ "yantrik-image-core",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ml",
