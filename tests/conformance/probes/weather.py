@@ -40,6 +40,7 @@ ONE_JOB = ("Remember the places someone saved and the scale they chose, across a
 
 APP = "weather"
 APP_BIN = "/opt/yantrik/bin/yantrik-weather"
+SERVICE_BIN = "/opt/yantrik/bin/weather-service"
 CONFIG = pathlib.Path.home() / ".config/yantrik/weather.json"
 APP_SOCK = lib.SOCKET_DIR / "app-weather.sock"
 NOWHERE = "Zzxqvnowhereville"
@@ -110,6 +111,24 @@ def run():
                     "this launch added nothing to the shell's failed_launches",
                     not opened["new_failed_launches_for_this_app"],
                     contract=1, evidence={"added_by_this_launch": opened["new_failed_launches"]})
+
+                # Reading Open-Meteo directly when the service does not answer is a fallback
+                # worth having, and on a healthy machine it is a fault worth failing on. Every
+                # autostart service here was once killed 200 ms after the shell started it, and
+                # this probe stayed green for the whole day because the app fetched for itself
+                # and nothing asked where the reading had come from.
+                service_up = lib.running(SERVICE_BIN)
+                settled = lib.wait_until(
+                    lambda: (lib.state(APP).get("reading_from") or "").startswith(
+                        ("weather-service", "open-meteo")),
+                    timeout=30, what="a first reading to arrive from somewhere")
+                reading_from = lib.state(APP).get("reading_from")
+                probe.check(
+                    "the weather service the shell starts is up, and it is what the app is reading",
+                    bool(service_up) and reading_from == "weather-service",
+                    contract=8, evidence={"reading_from": reading_from,
+                                          "service_processes": service_up,
+                                          "waited": settled.evidence()})
 
                 opening = lib.state(APP)
                 probe.note("on_open", {"units": opening.get("units"),

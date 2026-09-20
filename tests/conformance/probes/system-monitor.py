@@ -153,6 +153,17 @@ with lib.Probe(APP, ONE_JOB) as probe:
         source != "service" or bool(service_up),
         contract=3, evidence={"source": source, "service_processes": service_up,
                               "socket": SERVICE_SOCK.exists()})
+    # The fallback is allowed to exist; on a healthy machine it is not allowed to be what is
+    # running. For a whole day every autostart service on this machine was being killed 200 ms
+    # after the shell started it, and this probe stayed green throughout, because "local" was an
+    # accepted answer and the app was quietly reading the machine itself. The shell starts this
+    # service at login, so a machine where it is absent is a machine with a fault, and a check
+    # that cannot tell the two apart is the reason nobody noticed.
+    probe.check(
+        "the monitor service the shell starts is up, and it is what the app is reading",
+        bool(service_up) and source == "service" and state.get("degraded") is False,
+        contract=8, evidence={"source": source, "degraded": state.get("degraded"),
+                              "service_processes": service_up})
     if state.get("degraded"):
         probe.check(
             "a degraded reading says why, and says it on screen as well",
