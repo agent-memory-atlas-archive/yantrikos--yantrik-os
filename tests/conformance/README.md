@@ -145,11 +145,13 @@ end" rather than a stack trace and a lost report.
 | --- | --- |
 | `act(app, action, **args)` | an action, always a dict: `accepted`, `settled`, `result`, `summary`, `revision`, `refused`. `refused` holds the refusal **in the words the caller was given** — the point of the wrapper. |
 | `describe(app)`, `state(app)`, `actions(app)` | the published view, its state block, its action names. Unreachable is a value, not an exception. |
+| `refusal_kind(answer)` | who turned an action away: `"policy"` — the machine's ceiling, on the action's grade, before the app was asked — or `"app"`, or `None` for one that was not refused. The first two arrive identically, as `accepted: false` and a sentence; this is what tells them apart, and it branches on the runtime's `CEILING:` marker rather than on the wording. |
 | `running(pattern)`, `pids`, `kill_app` | processes by full command line, minus this one. Give it a path, not a word: `pgrep -f calendar` also matches the probe. |
 | `toplevels()`, `has_window(*words)` | what the compositor says is mapped. |
 | `open_app(name, expect_process=, window_words=)` | asks the shell to open an app and returns the evidence — process, window, surface, and what this launch added to `failed_launches`. |
 | `spawn`, `run_and_wait` | start a binary in the session's Wayland environment; the second waits, for a handover launch. |
-| `wait_for(predicate, timeout=)` | poll until something is true. |
+| `wait_for(predicate, timeout=)` | poll until something is true. Returns the value, or `None`. |
+| `wait_until(predicate, timeout=, what=)` | the same poll, keeping a record of the waiting: whether it settled, what to, how long it took, how many polls, and what it was still seeing when it gave up. `what` finishes the sentence "waited for ...", and `.evidence(**extra)` hands the whole wait to a check — so a timeout is reported as its own failure instead of falling through into the next assertion. |
 | `sha256(path)`, `surface_up(app)` | |
 | `preserved(path)` | snapshot a file or directory, restore it on the way out, and report `differences()`. |
 | `moved_aside(path)` | rename one file away to force a failure, and put it back no matter how the probe ends. |
@@ -158,6 +160,55 @@ end" rather than a stack trace and a lost report.
 `severity=lib.ADVISORY` reports a check without failing the probe. It is for something this suite
 genuinely cannot prove on this machine — never for softening a contract point that is simply not
 met.
+
+### The third outcome: not exercised
+
+A check can pass, it can fail, and it can never have been run. The third is not a shade of the
+first. Two things on this machine produce it. The permission ceiling refuses an action on its
+grade before the app is asked, so nothing that comes back is the app's account of anything —
+`system-monitor.kill_process` and `containers.remove` are both `dangerous`, above the `sensitive`
+ceiling. And a machine may not have the thing the check is about: there is no container runtime
+here, so no container can be started, stopped or removed for real.
+
+Not exercised **never fails a probe**, and it is not a severity and has no flag, because it is not
+a verdict on the app — it is the absence of one. A probe records it by leaving the check out of
+`checks` entirely, since an unrun check has no result to report, and putting its name in a note
+that says in words what was not run and why:
+
+```python
+probe.note("kill_path_not_exercised", {
+    "kill_path_exercised": False,
+    "statement": "The kill path was NOT EXERCISED on this machine. A green result for "
+                 "system-monitor is not coverage of it.",
+    "why": "`system-monitor.kill_process` is graded `dangerous`, above this machine's ceiling, "
+           "so the control surface refused on the grade alone, before dispatch.",
+    "the_refusal_in_full": ceiling_refusal,
+    "checks_not_exercised": [...],
+    "what_was_still_measured": "that a refused kill ends nothing, and that the refusal arrives "
+                               "in readable words",
+})
+```
+
+The rules that go with it:
+
+- **The report has to say it in words.** `15/15` and `15/15, with the dangerous half never run`
+  are the same number. Without the sentence, the number is a claim nobody made.
+- **Branch on the answer, not on the sentence.** `refusal_kind` decides who refused. A probe that
+  matched on refusal text came to assert that a refusal about a grade should have named a missing
+  process.
+- **Quote the refusal in full.** Then the note is checkable against the machine, instead of being
+  the probe's account of what it thinks the ceiling is.
+- **Never raise the ceiling to turn it green.** `tool_permission` in
+  `~/.config/yantrik/settings.yaml` is the user's setting. A pass bought by changing it is worth
+  less than an honest not exercised.
+- **Check everything that can still be checked.** A refused kill must have ended nothing; a
+  refused `remove` must not answer `{"removed": ...}`; the refusal must arrive in words a caller
+  can read and not as `"1"`.
+
+`probes/system-monitor.py` is the model. `probes/container-manager.py` names both kinds at once —
+the ceiling in front of `remove`, and a machine with no runtime in front of every mutation.
+`probes/calendar.py` has the plainest: its control surface publishes `add_event` and nothing that
+removes, so the deletion bug that fix 617dac9 was about cannot be reached from here at all.
 
 ## The contract points, in checkable terms
 

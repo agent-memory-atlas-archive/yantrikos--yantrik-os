@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Weather on the live machine against the store, not against its own answers.
+"""Weather's one job: remember the places someone saved, and say when it cannot find one.
 
 Two faults are under test here.
 
@@ -9,67 +9,46 @@ launch. Nothing short of killing the app and reopening it proves that is fixed, 
 disk is checked as well as what the window says, because the window could be holding the right
 value for the wrong reason.
 
-`add_location` answered `{"added": name, "saved": N}` whether or not the geocoder found
-anything. So a name that cannot resolve must come back as a refusal. This machine may have no
-internet, which is why nothing here requires a *successful* lookup: a lookup that fails has to
-say so, and that is the assertion either way.
+`add_location` answered `{"added": name, "saved": N}` whether or not the geocoder found anything.
+So a name that cannot resolve must come back as a refusal — and as a refusal a caller can read.
+This machine may have no internet, which is why nothing here requires a *successful* lookup: a
+lookup that fails has to say so, and that is the assertion either way.
 
-Run on the VM. Exits nonzero on a failed assertion and prints its evidence as JSON.
+This probe was written before `lib.py` and carried its own `act()` with the bug `lib` exists to
+fix: `yos` reports a refusal by printing to stderr and exiting, so `str(SystemExit(1))` is the
+string "1", and every refusal in this report read "1" — including the one this file's whole third
+section is about. It is ported now, and the refusal is asserted on as text: the app's own words,
+naming the place it could not find, and told to the person in `describe.notice` as well. Whether
+the refusal came from the app or from the machine's ceiling is read off the answer with
+`lib.refusal_kind` rather than guessed at from the sentence; a ceiling refusal would satisfy "it
+did not answer success" while proving nothing about the app, so where one happens the checks about
+the app's own words are recorded as NOT EXERCISED instead of passed.
 """
+
 import json
+import os
 import pathlib
-import subprocess
 import sys
 import time
-import runpy
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import lib  # noqa: E402
+
+ONE_JOB = ("Remember the places someone saved and the scale they chose, across a restart — and "
+           "when a place cannot be looked up, say so instead of answering that it was added.")
+
+APP = "weather"
+APP_BIN = "/opt/yantrik/bin/yantrik-weather"
 CONFIG = pathlib.Path.home() / ".config/yantrik/weather.json"
-APP_SOCK = pathlib.Path("/run/user/1000/yantrik/app-weather.sock")
-BINARY = "/opt/yantrik/bin/yantrik-weather"
+APP_SOCK = lib.SOCKET_DIR / "app-weather.sock"
 NOWHERE = "Zzxqvnowhereville"
 
-yos = runpy.run_path("/opt/yantrik/bin/yos", run_name="probe")
-call = yos["call"]
-results = {"checks": []}
-failures = []
-
-
-def act(app, action, **args):
-    """Run an action, keeping a refusal as an answer rather than an exception.
-
-    A refusal is the thing under test: an app that cannot look a city up is supposed to say so,
-    and `yos` reports that by exiting."""
-    try:
-        return call(app, "app.act", {"action": action, "args": args})
-    except SystemExit as e:
-        return {"accepted": False, "refused": str(e)}
-    except Exception as e:  # noqa: BLE001 - any failure here is a result, not a crash
-        return {"accepted": False, "refused": f"{type(e).__name__}: {e}"}
-
-
-def describe(app):
-    try:
-        return call(app, "app.describe", {})
-    except SystemExit as e:
-        return {"error": str(e)}
-
-
-def state_of(app):
-    return describe(app).get("state", {})
-
-
-def refusal_text(answer):
-    return str(answer.get("refused") or answer.get("error") or "")
-
-
-class ProbeStop(Exception):
-    """Stop the run but still put the machine back and print what was found."""
-
-
-def check(name, condition, detail=None):
-    results["checks"].append({"check": name, "passed": bool(condition), "detail": detail})
-    if not condition:
-        failures.append(name)
+OUTCOME = {
+    "policy": "refused by policy — the machine's ceiling turned it away before the app saw it",
+    "app": "refused by the app",
+    None: "answered by the app",
+}
 
 
 def on_disk():
@@ -78,200 +57,263 @@ def on_disk():
         return json.loads(CONFIG.read_text())
     except FileNotFoundError:
         return {}
-    except Exception as e:  # noqa: BLE001
-        return {"unreadable": f"{type(e).__name__}: {e}"}
+    except Exception as exc:  # noqa: BLE001 - an unreadable file is a result, not a crash
+        return {"unreadable": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def saved_places(prefs=None):
+    prefs = on_disk() if prefs is None else prefs
+    places = prefs.get("locations") if isinstance(prefs, dict) else None
+    return [p for p in places or [] if isinstance(p, dict)]
 
 
 def stop_app():
-    subprocess.run(["pkill", "-f", BINARY], capture_output=True)
-    time.sleep(2)
-    # A socket file outlives the process it belonged to, so leaving it would make the wait
-    # below return at once against a window that is not there.
-    if APP_SOCK.exists():
-        APP_SOCK.unlink()
+    lib.kill_app(APP_BIN)
+    # A socket file outlives the process it belonged to, so leaving it would make the wait for
+    # the surface return at once against a window that is not there.
+    try:
+        APP_SOCK.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
-def open_app():
-    act("shell", "open_app", name="weather")
-    for _ in range(40):
-        if APP_SOCK.exists():
-            time.sleep(2)
-            return True
-        time.sleep(0.5)
-    return False
+def open_weather():
+    return lib.open_app(APP, expect_process=APP_BIN, window_words=("weather",), timeout=45)
 
 
-# ── 0. Keep the machine's own configuration to put back ──────────────
-original = CONFIG.read_bytes() if CONFIG.exists() else None
-results["before"] = {
-    "config_existed": original is not None,
-    "config": on_disk(),
-}
+def run():
+    """The probe. In a function so that importing this file does nothing — see calendar.py."""
+    not_exercised = []
 
-try:
-    stop_app()
-    if not open_app():
-        check("the app opens", False, "no app-weather.sock appeared")
-        raise ProbeStop
-    check("the app opens", True)
+    with lib.Probe(APP, ONE_JOB) as probe:
+        was_running = bool(lib.running(APP_BIN))
+        probe.note("processes_before", lib.running(APP_BIN))
 
-    opening = state_of("weather")
-    results["on_open"] = {
-        "units": opening.get("units"),
-        "reading_from": opening.get("reading_from"),
-        "notice": opening.get("notice"),
-        "saved_locations": opening.get("saved_locations"),
-    }
-    # Where the numbers came from is part of the contract now: a reading fetched directly
-    # because the service was down must not read as one the service produced.
-    check(
-        "describe says where the reading came from",
-        bool(opening.get("reading_from")),
-        opening.get("reading_from"),
-    )
-    check("describe carries a notice field", "notice" in opening, opening.get("notice"))
+        config = lib.preserved(CONFIG)
+        with config:
+            probe.note("config_before", {"existed": CONFIG.exists(), "prefs": on_disk()})
+            before_bytes = CONFIG.read_bytes() if CONFIG.exists() else None
 
-    # ── 1. A choice that has to outlive the process ──────────────────
-    was = opening.get("units")
-    want = "celsius" if was == "fahrenheit" else "fahrenheit"
-    set_units = act("weather", "set_units", units=want)
-    time.sleep(1)
-    results["set_units"] = {
-        "from": was,
-        "to": want,
-        "accepted": set_units.get("accepted"),
-        "result": set_units.get("result"),
-        "refused": refusal_text(set_units) or None,
-    }
-    check("set_units is accepted", set_units.get("accepted") is True, refusal_text(set_units))
-    check("the window shows the units asked for", state_of("weather").get("units") == want)
-    # The store, not the window. This is the assertion the old code failed: the property was
-    # set, the file was never written, and both looked the same from outside.
-    check(
-        "the units reached ~/.config/yantrik/weather.json",
-        on_disk().get("fahrenheit") == (want == "fahrenheit"),
-        on_disk(),
-    )
+            stop_app()
 
-    # ── 2. Kill it and open it again ─────────────────────────────────
-    stop_app()
-    results["after_kill"] = {"config": on_disk()}
-    check(
-        "the file still says so with nothing running",
-        on_disk().get("fahrenheit") == (want == "fahrenheit"),
-        on_disk(),
-    )
-    if not open_app():
-        check("the app reopens", False, "no app-weather.sock appeared")
-        raise ProbeStop
-    check("the app reopens", True)
+            # Everything from here is inside a try, so that the app this probe opened is
+            # closed and the prefs are put back even when an assertion above throws.
+            try:
+                # ── 1. It opens ───────────────────────────────────────────────
+                opened = open_weather()
+                probe.check(
+                    "it opens: a process exists, the compositor has its window, and the surface "
+                    "answers",
+                    bool(opened["processes"]) and bool(opened["windows"]) and opened["surface_up"],
+                    contract=1, evidence=opened)
+                probe.check(
+                    "this launch added nothing to the shell's failed_launches",
+                    not opened["new_failed_launches_for_this_app"],
+                    contract=1, evidence={"added_by_this_launch": opened["new_failed_launches"]})
 
-    reopened = state_of("weather")
-    results["after_restart"] = {
-        "units": reopened.get("units"),
-        "saved_locations": reopened.get("saved_locations"),
-        "notice": reopened.get("notice"),
-    }
-    check("the units survived the restart", reopened.get("units") == want, reopened.get("units"))
+                opening = lib.state(APP)
+                probe.note("on_open", {"units": opening.get("units"),
+                                       "reading_from": opening.get("reading_from"),
+                                       "notice": opening.get("notice"),
+                                       "saved_locations": opening.get("saved_locations")})
+                # Where the numbers came from is part of the contract: a reading fetched directly
+                # because the service was down must not read as one the service produced.
+                probe.check(
+                    "describe says where the reading came from",
+                    bool(opening.get("reading_from")),
+                    contract=3, evidence={"reading_from": opening.get("reading_from")})
+                probe.check(
+                    "describe carries a notice field, so a failure can be said to the caller too",
+                    "notice" in opening,
+                    contract=4, evidence={"notice": opening.get("notice"), "keys": sorted(opening)})
 
-    # ── 3. A place that does not exist ───────────────────────────────
-    before_add = on_disk().get("locations", [])
-    nowhere = act("weather", "add_location", name=NOWHERE)
-    time.sleep(1)
-    after_add = on_disk().get("locations", [])
-    refused = refusal_text(nowhere)
-    results["add_nowhere"] = {
-        "accepted": nowhere.get("accepted"),
-        "result": nowhere.get("result"),
-        "refused": refused or None,
-        "locations_before": len(before_add),
-        "locations_after": len(after_add),
-    }
-    check(
-        "a name that cannot be found is refused, not answered with success",
-        nowhere.get("accepted") is not True,
-        nowhere.get("result"),
-    )
-    # A refusal from the permission ceiling would satisfy the line above while proving nothing
-    # about the app, so the reason has to be about the lookup.
-    check(
-        "the refusal is about the lookup, not the ceiling",
-        "permission" not in refused.lower(),
-        refused,
-    )
-    check(
-        "nothing was stored for a place that was not found",
-        not any(NOWHERE.lower() in str(loc.get("name", "")).lower() for loc in after_add)
-        and len(after_add) == len(before_add),
-        after_add,
-    )
-    check(
-        "the person is told as well, in describe.notice",
-        NOWHERE.lower() in str(state_of("weather").get("notice", "")).lower(),
-        state_of("weather").get("notice"),
-    )
+                # ── 2. A choice that has to outlive the process ───────────────
+                was = opening.get("units")
+                want = "celsius" if was == "fahrenheit" else "fahrenheit"
+                set_units = lib.act(APP, "set_units", units=want)
+                kind = lib.refusal_kind(set_units)
+                time.sleep(1)
+                probe.note("set_units", {"from": was, "to": want,
+                                         "accepted": set_units.get("accepted"),
+                                         "result": set_units.get("result"),
+                                         "refused": set_units.get("refused"),
+                                         "outcome": OUTCOME[kind]})
+                probe.check(
+                    "set_units is carried out, not refused",
+                    set_units.get("accepted") is True,
+                    contract=3, evidence={"refused": set_units.get("refused"),
+                                          "outcome": OUTCOME[kind]})
+                probe.check(
+                    "the window shows the scale it was asked for",
+                    lib.state(APP).get("units") == want,
+                    contract=3, evidence={"asked_for": want, "shown": lib.state(APP).get("units")})
+                # The store, not the window. This is the assertion the old code failed: the property
+                # was set, the file was never written, and both looked the same from outside.
+                probe.check(
+                    "the choice reached ~/.config/yantrik/weather.json",
+                    on_disk().get("fahrenheit") == (want == "fahrenheit"),
+                    contract=2, evidence={"asked_for": want, "on_disk": on_disk()})
 
-    # ── 4. A real place, whichever way this machine's network goes ───
-    #
-    # Not an assertion that the lookup succeeds — this VM may have no internet. The assertion
-    # is that whichever happens is reported truthfully: a success is matched by a new entry in
-    # the file, a failure by a refusal and by nothing added.
-    before_real = on_disk().get("locations", [])
-    real = act("weather", "add_location", name="Reykjavik")
-    time.sleep(2)
-    after_real = on_disk().get("locations", [])
-    results["add_real"] = {
-        "accepted": real.get("accepted"),
-        "result": real.get("result"),
-        "refused": refusal_text(real) or None,
-        "locations_before": len(before_real),
-        "locations_after": len(after_real),
-        "notice": state_of("weather").get("notice"),
-    }
-    if real.get("accepted") is True:
-        answered = (real.get("result") or {})
-        check(
-            "a successful add reports what the geocoder resolved",
-            bool(answered.get("added")) and answered.get("lat") is not None
-            and answered.get("lon") is not None,
-            answered,
-        )
-        check(
-            "and the place it reported is in the file",
-            any(str(answered.get("added")) == loc.get("name") for loc in after_real),
-            after_real,
-        )
-    else:
-        check(
-            "a failed add stores nothing",
-            len(after_real) == len(before_real),
-            after_real,
-        )
-        check(
-            "and says why",
-            bool(refusal_text(real)) and bool(state_of("weather").get("notice")),
-            {"refused": refusal_text(real), "notice": state_of("weather").get("notice")},
-        )
+                # ── 3. Kill it and open it again ──────────────────────────────
+                stop_app()
+                probe.check(
+                    "the file still says so with nothing running",
+                    on_disk().get("fahrenheit") == (want == "fahrenheit"),
+                    contract=6, evidence={"on_disk": on_disk(),
+                                          "processes": lib.running(APP_BIN)})
+                reopened = open_weather()
+                probe.check(
+                    "it opens again after being killed",
+                    bool(reopened["processes"]) and reopened["surface_up"],
+                    contract=6, evidence=reopened)
+                after_restart = lib.state(APP)
+                probe.check(
+                    "the scale chosen before the restart is the scale shown after it",
+                    after_restart.get("units") == want,
+                    contract=6, evidence={"asked_for": want, "shown": after_restart.get("units"),
+                                          "on_disk": on_disk()})
 
-except ProbeStop:
-    pass
+                # ── 4. A place that does not exist ────────────────────────────
+                # A reading is fetched on a thread at every launch, and when it has to go straight to
+                # Open-Meteo because the service is down it says so in the notice when it lands. That
+                # is true and it is not what the check below is about: a reading arriving a moment
+                # after the refusal would write over the refusal's line, and the check would fail for
+                # a reason that has nothing to do with the lookup. So the in-flight one is waited for
+                # first, and the notice is read the instant the refusal comes back.
+                in_flight = lib.wait_until(
+                    lambda: str(lib.state(APP).get("notice") or "").strip(),
+                    timeout=10,
+                    what="the reading that was in flight at launch to land and write its own line")
+                probe.note("the_notice_before_the_lookup", in_flight.evidence())
 
-finally:
-    # ── 5. Put the machine back, byte for byte ───────────────────────
-    stop_app()
-    if original is None:
-        if CONFIG.exists():
-            CONFIG.unlink()
-    else:
-        CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG.write_bytes(original)
-    restored = CONFIG.read_bytes() if CONFIG.exists() else None
-    results["restored"] = {
-        "config_identical": restored == original,
-        "config": on_disk(),
-    }
+                before_add = saved_places()
+                nowhere = lib.act(APP, "add_location", name=NOWHERE)
+                notice = str(lib.state(APP).get("notice") or "")
+                nowhere_kind = lib.refusal_kind(nowhere)
+                time.sleep(1)
+                after_add = saved_places()
+                refusal = str(nowhere.get("refused") or "")
+                evidence = {"accepted": nowhere.get("accepted"), "result": nowhere.get("result"),
+                            "refused": refusal, "refusal_kind": nowhere_kind,
+                            "outcome": OUTCOME[nowhere_kind], "notice": notice,
+                            "places_before": len(before_add), "places_after": len(after_add)}
+                probe.note("add_a_place_that_is_not_one", evidence)
 
-results["failed"] = failures
-print(json.dumps(results, indent=2, default=str))
-if failures or results["restored"]["config_identical"] is not True:
-    sys.exit(1)
+                probe.check(
+                    "a name that cannot be found is refused, never answered with success",
+                    nowhere.get("accepted") is not True,
+                    contract=3, evidence=evidence)
+                probe.check(
+                    "the refusal arrives in words the caller can read, not \"1\"",
+                    bool(refusal) and refusal not in ("1", "0"),
+                    contract=4, evidence=evidence)
+                probe.check(
+                    "nothing was stored for a place that was not found",
+                    len(after_add) == len(before_add)
+                    and not any(NOWHERE.lower() in str(p.get("name", "")).lower()
+                                for p in after_add),
+                    contract=2, evidence={"places": after_add})
+
+                if nowhere_kind == "policy":
+                    # The ceiling answered, so the app was never asked to look anything up. The two
+                    # checks below are about the app's own words; recording the ceiling's sentence as
+                    # the app's answer is the fault this branch exists to prevent.
+                    not_exercised += [
+                        "the refusal is the app's own and says what went wrong with the lookup",
+                        "the person at the window is told as well, in describe.notice",
+                    ]
+                    probe.note("lookup_not_exercised", {
+                        "statement": "The lookup was NOT EXERCISED: the machine's ceiling refused "
+                                     "`add_location` before the app saw it. A green result here is "
+                                     "not coverage of what the app says when a place is not found.",
+                        "the_refusal_in_full": refusal,
+                        "checks_not_exercised": not_exercised,
+                    })
+                else:
+                    # Two sentences are possible and both are the app's: the geocoder answered and
+                    # knows of no such place, or it could not be reached at all. They are not the
+                    # same thing and the app is required to say which.
+                    names_it = NOWHERE.lower() in refusal.lower()
+                    unreachable = "could not be reached" in refusal.lower()
+                    probe.check(
+                        "the refusal is the app's own and says what went wrong with the lookup: the "
+                        "place was not found, or the geocoder could not be reached",
+                        nowhere_kind == "app" and (names_it or unreachable),
+                        contract=4, evidence={"refused": refusal, "names_the_place": names_it,
+                                              "says_the_geocoder_was_unreachable": unreachable,
+                                              "outcome": OUTCOME[nowhere_kind]})
+                    probe.check(
+                        "the person at the window is told as well, in describe.notice",
+                        NOWHERE.lower() in notice.lower(),
+                        contract=4, evidence={"notice": notice, "refused": refusal})
+
+                # ── 5. A real place, whichever way this machine's network goes ──
+                #
+                # Not an assertion that the lookup succeeds — this VM may have no internet. The
+                # assertion is that whichever happens is reported truthfully: a success matched by a
+                # new entry in the file, a failure by a refusal and by nothing added.
+                before_real = saved_places()
+                real = lib.act(APP, "add_location", name="Reykjavik")
+                real_kind = lib.refusal_kind(real)
+                time.sleep(2)
+                after_real = saved_places()
+                answered = real.get("result") or {}
+                probe.note("add_a_real_place", {"accepted": real.get("accepted"),
+                                                "result": answered,
+                                                "refused": real.get("refused"),
+                                                "outcome": OUTCOME[real_kind],
+                                                "places_before": len(before_real),
+                                                "places_after": len(after_real),
+                                                "notice": lib.state(APP).get("notice")})
+                if real.get("accepted") is True:
+                    probe.check(
+                        "a successful add reports what the geocoder resolved, not what it was asked",
+                        bool(answered.get("added")) and answered.get("lat") is not None
+                        and answered.get("lon") is not None,
+                        contract=3, evidence=answered)
+                    probe.check(
+                        "and the place it reported is in the file",
+                        any(str(answered.get("added")) == p.get("name") for p in after_real),
+                        contract=2, evidence={"places": after_real})
+                else:
+                    probe.check(
+                        "an add that did not happen stored nothing",
+                        len(after_real) == len(before_real),
+                        contract=2, evidence={"places": after_real})
+                    probe.check(
+                        "and says why, to the caller and on screen",
+                        bool(real.get("refused"))
+                        and bool(str(lib.state(APP).get("notice") or "").strip()),
+                        contract=4, evidence={"refused": real.get("refused"),
+                                              "notice": lib.state(APP).get("notice"),
+                                              "outcome": OUTCOME[real_kind]})
+
+
+            finally:
+                # Nothing may be writing to the file while it is being put back.
+                stop_app()
+
+        # ── Put the machine back ──────────────────────────────────────────
+        after_bytes = CONFIG.read_bytes() if CONFIG.exists() else None
+        probe.note("config_after", {"existed": CONFIG.exists(), "prefs": on_disk()})
+        probe.check(
+            "the weather prefs are left exactly as they were found, byte for byte",
+            not config.differences() and after_bytes == before_bytes,
+            contract="leave-as-found",
+            evidence={"before": config.listing(), "after": config.listing(config.after),
+                      "differences": config.differences() or "none",
+                      "identical_bytes": after_bytes == before_bytes})
+
+        if was_running:
+            open_weather()
+        leftover = lib.running(APP_BIN)
+        probe.note("processes_after", leftover)
+        probe.check(
+            "a weather app is running afterwards exactly if one was running before",
+            bool(leftover) == was_running,
+            contract="leave-as-found",
+            evidence={"before": probe.notes["processes_before"], "after": leftover})
+
+
+if __name__ == "__main__":
+    run()
