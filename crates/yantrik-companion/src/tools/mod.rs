@@ -133,11 +133,30 @@ pub fn build_registry(config: &CompanionConfig) -> ToolRegistry {
         tracing::info!("Email tools registered ({} accounts)", config.email.accounts.len());
     }
 
-    // Conditionally register calendar tools (reuses email OAuth2)
-    if config.calendar.enabled && !config.email.accounts.is_empty() {
-        calendar::register(&mut reg, config.email.accounts.clone(), config.calendar.account.clone());
-        tracing::info!("Calendar tools registered");
-    }
+    // The calendar tools, always.
+    //
+    // They were registered only when `calendar.enabled` was set AND an email account existed,
+    // because they were written around Google Calendar and borrow that account's OAuth2 tokens —
+    // and `enabled` defaults to false. So on a machine as it ships the mind had no calendar tools
+    // at all, while their own header called them local-first and the Skill Store went on offering
+    // their names to the model, which then got "Unknown tool" back. The first run of the
+    // one-calendar probe on a real machine is what found it.
+    //
+    // The calendar is this machine's own now: calendar-service ships with the OS and owns the
+    // events, so the tools that reach it have no reason to wait on anybody's mail account. What
+    // the switch and the account still decide is whether anything is pulled from Google, so with
+    // the switch off the tools are handed no accounts and sync stays the quiet no-op it is when
+    // there is nobody to sign in as.
+    let sync_accounts = if config.calendar.enabled {
+        config.email.accounts.clone()
+    } else {
+        Vec::new()
+    };
+    calendar::register(&mut reg, sync_accounts, config.calendar.account.clone());
+    tracing::info!(
+        google_sync = config.calendar.enabled && !config.email.accounts.is_empty(),
+        "Calendar tools registered"
+    );
 
     // Register vision tools (if using API backend like Ollama with vision support)
     if config.llm.is_api_backend() {
