@@ -343,9 +343,16 @@ def run():
 
         leftover = lib.running(APP_BIN) + lib.running(SERVICE_BIN)
         probe.note("processes_after", leftover)
+        # Which programs, not which pids. The service is on demand: this probe stops it to prove
+        # a tool can start it, and something starts it again afterwards, so a service that was
+        # running before and is running after is the machine as it was found — under a new pid.
+        # Comparing the listings whole failed this check on a machine that was exactly as found.
+        def programs(listing):
+            return sorted({line.split(None, 1)[1] if " " in line else line for line in listing})
+
         probe.check(
             "no calendar process is left running that was not running before",
-            leftover == probe.notes["processes_before"],
+            set(programs(leftover)) <= set(programs(probe.notes["processes_before"])),
             contract="leave-as-found",
             evidence={"before": probe.notes["processes_before"], "after": leftover})
 

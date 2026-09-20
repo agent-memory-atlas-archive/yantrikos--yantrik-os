@@ -242,9 +242,27 @@ fn extract_toml_value(content: &str, key: &str) -> Option<String> {
     None
 }
 
-impl Drop for ServiceManager {
+/// Stop what is still running when the LAST handle goes, not when any of them does.
+///
+/// This was `impl Drop for ServiceManager`, and ServiceManager is `Clone`: every clone shares one
+/// `Inner`, so dropping any handle stopped every service for all of them. It went unnoticed while
+/// each clone happened to be moved into something that lives as long as the shell — a timer
+/// closure, the boot wiring. Then `control::publish` was given a handle for `start_service`,
+/// cloned it into the action and let its own copy go when the function returned, and every
+/// autostart service on the machine was killed two hundred milliseconds after it started, on
+/// every shell start. Nothing reported it: Weather fell back to fetching directly, System Monitor
+/// fell back to reading the machine itself, and both went on passing their checks. The one app
+/// with no fallback, Network Manager, is how it was found — by a probe, on a real machine.
+///
+/// On `Inner` the rule is the one that was always meant: the services stop when nothing can reach
+/// the manager any more, which is when the shell is going away.
+impl Drop for Inner {
     fn drop(&mut self) {
-        self.stop_all();
+        for (id, mut child) in self.processes.drain() {
+            tracing::info!(service = %id, "Stopping service");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -289,3 +307,89 @@ fn tie_lifetime_to_ours(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn tie_lifetime_to_ours(_command: &mut Command) {}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    /// A directory holding one "service": a script that records its pid and then waits.
+    fn fixture(name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("svcmgr-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("pid");
+        let script = dir.join("svc");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho $$ > {}\nexec sleep 30\n", pidfile.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, pidfile)
+    }
+
+    fn pid_from(pidfile: &Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(s) = std::fs::read_to_string(pidfile) {
+                if let Ok(pid) = s.trim().parse() {
+                    return pid;
+                }
+            }
+            assert!(Instant::now() < deadline, "the service never wrote its pid");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn alive(pid: u32) -> bool {
+        // A zombie still has a /proc entry; a reaped process does not.
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|s| !s.contains(") Z "))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn dropping_one_handle_does_not_stop_the_services_the_others_still_hold() {
+        // The bug: ServiceManager is Clone, Drop was on the handle, and a function that was
+        // handed a clone and returned took every autostart service on the machine down with it.
+        let (dir, pidfile) = fixture("clone-drop");
+        let mgr = ServiceManager::new(dir.clone());
+        mgr.register("svc", "svc", true);
+        mgr.start("svc").unwrap();
+        let pid = pid_from(&pidfile);
+
+        {
+            let handed_to_a_function = mgr.clone();
+            drop(handed_to_a_function);
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(alive(pid), "a dropped clone stopped a service the manager still owns");
+        assert_eq!(mgr.status("svc"), Some(ServiceStatus::Running));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        drop(mgr);
+    }
+
+    #[test]
+    fn the_last_handle_going_away_stops_what_is_running() {
+        let (dir, pidfile) = fixture("last-drop");
+        let mgr = ServiceManager::new(dir.clone());
+        mgr.register("svc", "svc", true);
+        mgr.start("svc").unwrap();
+        let pid = pid_from(&pidfile);
+        let other = mgr.clone();
+
+        drop(mgr);
+        assert!(alive(pid), "one handle is still held");
+        drop(other);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(pid), "the service outlived every handle to its manager");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
