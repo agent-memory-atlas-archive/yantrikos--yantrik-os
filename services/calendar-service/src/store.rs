@@ -1,0 +1,195 @@
+//! The event store: one JSON file per event, under `~/.local/share/yantrik/calendar/`.
+//!
+//! Separate from the RPC wiring in `main.rs` so the rules that decide whether a day has
+//! anything on it can be tested without a socket, a service manager, or a desktop. The
+//! calendar's whole job lives here.
+
+use std::path::{Path, PathBuf};
+
+use chrono::NaiveDateTime;
+use yantrik_ipc_contracts::calendar::{
+    CalendarEvent, CreateEventParams, EventsParams, UpdateEventParams,
+};
+use yantrik_ipc_contracts::email::ServiceError;
+
+fn failed(message: impl Into<String>) -> ServiceError {
+    ServiceError { code: -32000, message: message.into() }
+}
+
+fn bad_request(message: impl Into<String>) -> ServiceError {
+    ServiceError { code: -32602, message: message.into() }
+}
+
+/// Parse an ISO 8601 datetime. Accepts `2026-03-18T10:00:00` and bare `2026-03-18`,
+/// the latter as the start of that day.
+pub fn parse_iso_datetime(s: &str) -> Option<NaiveDateTime> {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return Some(dt);
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return d.and_hms_opt(0, 0, 0);
+    }
+    None
+}
+
+/// The events on disk.
+pub struct EventStore {
+    dir: PathBuf,
+}
+
+impl EventStore {
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn event_path(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.json"))
+    }
+
+    fn read_event(&self, path: &Path) -> Option<CalendarEvent> {
+        let data = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&data).ok()
+    }
+
+    fn write_event(&self, event: &CalendarEvent) -> Result<(), ServiceError> {
+        // The directory can be missing on a machine where nothing has been saved yet, and a
+        // calendar that refuses the first event anyone gives it is not a calendar.
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| failed(format!("Cannot create {}: {e}", self.dir.display())))?;
+        let data = serde_json::to_string_pretty(event)
+            .map_err(|e| failed(format!("Failed to serialize event: {e}")))?;
+        std::fs::write(self.event_path(&event.id), data)
+            .map_err(|e| failed(format!("Failed to write event: {e}")))
+    }
+
+    /// One event by id, or `None` if nothing is stored under it.
+    pub fn get(&self, id: &str) -> Option<CalendarEvent> {
+        self.read_event(&self.event_path(id))
+    }
+
+    /// Every event overlapping the requested range, oldest first.
+    ///
+    /// Overlap, not containment: an event that starts before the range and ends inside it is on
+    /// those days and has to be listed, or a month view loses anything spanning its first day.
+    pub fn list(&self, params: &EventsParams) -> Result<Vec<CalendarEvent>, ServiceError> {
+        let range_start = parse_iso_datetime(&params.start_date)
+            .ok_or_else(|| bad_request(format!("`start_date` is not a date: {}", params.start_date)))?;
+        let range_end = parse_iso_datetime(&params.end_date)
+            .ok_or_else(|| bad_request(format!("`end_date` is not a date: {}", params.end_date)))?;
+
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            // Nothing saved yet is an empty calendar, not a broken one.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(failed(format!("Cannot read calendar dir: {e}"))),
+        };
+
+        let mut events = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(event) = self.read_event(&path) else { continue };
+            let ev_start = parse_iso_datetime(&event.start);
+            let ev_end = parse_iso_datetime(&event.end);
+            let starts_before_range_ends = ev_start.map(|s| s <= range_end).unwrap_or(true);
+            let ends_after_range_starts = ev_end.or(ev_start).map(|e| e >= range_start).unwrap_or(true);
+            if starts_before_range_ends && ends_after_range_starts {
+                events.push(event);
+            }
+        }
+        events.sort_by(|a, b| a.start.cmp(&b.start));
+        Ok(events)
+    }
+
+    /// Store a new event and return it as stored, with the id it was given.
+    pub fn create(&self, params: &CreateEventParams) -> Result<CalendarEvent, ServiceError> {
+        let title = params.title.trim();
+        if title.is_empty() {
+            return Err(bad_request("`title` is empty"));
+        }
+        let start = parse_iso_datetime(&params.start)
+            .ok_or_else(|| bad_request(format!("`start` is not a date and time: {}", params.start)))?;
+        let end = parse_iso_datetime(&params.end)
+            .ok_or_else(|| bad_request(format!("`end` is not a date and time: {}", params.end)))?;
+        if end < start {
+            return Err(bad_request(format!(
+                "`end` ({}) is before `start` ({})",
+                params.end, params.start
+            )));
+        }
+
+        let event = CalendarEvent {
+            id: uuid7::uuid7().to_string(),
+            title: title.to_string(),
+            description: params.description.clone(),
+            start: params.start.clone(),
+            end: params.end.clone(),
+            is_all_day: false,
+            location: params.location.clone(),
+            attendees: Vec::new(),
+            recurrence: None,
+            calendar_id: "default".to_string(),
+            remote_id: None,
+        };
+        self.write_event(&event)?;
+        Ok(event)
+    }
+
+    /// Change a stored event. Fields left out keep what they had.
+    pub fn update(&self, params: &UpdateEventParams) -> Result<CalendarEvent, ServiceError> {
+        let mut event = self
+            .get(&params.id)
+            .ok_or_else(|| bad_request(format!("No event here with id {}", params.id)))?;
+
+        if let Some(v) = &params.title {
+            if v.trim().is_empty() {
+                return Err(bad_request("`title` is empty"));
+            }
+            event.title = v.trim().to_string();
+        }
+        if let Some(v) = &params.start {
+            parse_iso_datetime(v).ok_or_else(|| bad_request(format!("`start` is not a date and time: {v}")))?;
+            event.start = v.clone();
+        }
+        if let Some(v) = &params.end {
+            parse_iso_datetime(v).ok_or_else(|| bad_request(format!("`end` is not a date and time: {v}")))?;
+            event.end = v.clone();
+        }
+        if let (Some(s), Some(e)) = (parse_iso_datetime(&event.start), parse_iso_datetime(&event.end)) {
+            if e < s {
+                return Err(bad_request(format!(
+                    "`end` ({}) is before `start` ({})",
+                    event.end, event.start
+                )));
+            }
+        }
+        if let Some(v) = &params.description {
+            event.description = v.clone();
+        }
+        if let Some(v) = &params.location {
+            event.location = Some(v.clone());
+        }
+
+        self.write_event(&event)?;
+        Ok(event)
+    }
+
+    /// Remove an event. Removing something that was never here is an error, not a success:
+    /// the caller asked for a state change that did not happen.
+    pub fn delete(&self, id: &str) -> Result<(), ServiceError> {
+        let path = self.event_path(id);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(bad_request(format!("No event here with id {id}")))
+            }
+            Err(e) => Err(failed(format!("Failed to delete event: {e}"))),
+        }
+    }
+}

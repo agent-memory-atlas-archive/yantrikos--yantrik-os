@@ -8,7 +8,9 @@ use std::rc::Rc;
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
-use yantrik_ipc_transport::SyncRpcClient;
+use yantrik_ipc_contracts::calendar::{
+    method, CreateEventParams, DeleteEventParams, EventsParams,
+};
 
 slint::include_modules!();
 
@@ -102,12 +104,14 @@ struct CalEvent {
 // ── Service wrappers ─────────────────────────────────────────────────
 
 fn fetch_events_via_service(year: i32, month: u32) -> Result<Vec<CalEvent>, String> {
-    let client = SyncRpcClient::for_service("calendar");
-    let start = format!("{:04}-{:02}-01T00:00:00", year, month);
+    let client = service::client("calendar")?;
     let last_day = last_day_of_month(year, month);
-    let end = format!("{:04}-{:02}-{:02}T23:59:59", year, month, last_day);
+    let params = EventsParams {
+        start_date: format!("{:04}-{:02}-01T00:00:00", year, month),
+        end_date: format!("{:04}-{:02}-{:02}T23:59:59", year, month, last_day),
+    };
     let result = client
-        .call("calendar.events", serde_json::json!({ "start": start, "end": end }))
+        .call(method::EVENTS, serde_json::to_value(params).map_err(|e| e.to_string())?)
         .map_err(|e| e.message)?;
     let svc_events: Vec<yantrik_ipc_contracts::calendar::CalendarEvent> =
         serde_json::from_value(result).map_err(|e| e.to_string())?;
@@ -132,22 +136,29 @@ fn fetch_events_via_service(year: i32, month: u32) -> Result<Vec<CalEvent>, Stri
 }
 
 fn create_event_via_service(title: &str, start: &str, end: &str, notes: &str) -> Result<String, String> {
-    let client = SyncRpcClient::for_service("calendar");
+    let client = service::client("calendar")?;
+    let params = CreateEventParams {
+        title: title.to_string(),
+        start: start.to_string(),
+        end: end.to_string(),
+        description: notes.to_string(),
+        location: None,
+        color: String::new(),
+    };
     let result = client
-        .call("calendar.create_event", serde_json::json!({
-            "title": title, "start": start, "end": end, "description": notes,
-        }))
+        .call(method::CREATE_EVENT, serde_json::to_value(params).map_err(|e| e.to_string())?)
         .map_err(|e| e.message)?;
-    // Return the event ID
+    // The stored event, with the id the store gave it — the proof it landed, not a hope.
     let event: yantrik_ipc_contracts::calendar::CalendarEvent =
         serde_json::from_value(result).map_err(|e| e.to_string())?;
     Ok(event.id)
 }
 
 fn delete_event_via_service(event_id: &str) -> Result<(), String> {
-    let client = SyncRpcClient::for_service("calendar");
+    let client = service::client("calendar")?;
+    let params = DeleteEventParams { id: event_id.to_string() };
     client
-        .call("calendar.delete_event", serde_json::json!({ "event_id": event_id }))
+        .call(method::DELETE_EVENT, serde_json::to_value(params).map_err(|e| e.to_string())?)
         .map_err(|e| e.message)?;
     Ok(())
 }
@@ -242,9 +253,12 @@ fn events_for_day(events: &[CalEvent], year: i32, month: u32, day: i32) -> Vec<C
         let time_text = if e.is_all_day {
             "All day".to_string()
         } else {
-            let start_time = e.start.split('T').nth(1).unwrap_or("").to_string();
-            let end_time = e.end.split('T').nth(1).unwrap_or("").to_string();
-            format!("{} - {}", start_time, end_time)
+            // Hours and minutes. The seconds are in the store because the store keeps ISO
+            // timestamps, and nobody reading their own day needs "14:00:00 - 15:00:00".
+            let clock = |iso: &str| {
+                iso.split('T').nth(1).unwrap_or("").split(':').take(2).collect::<Vec<_>>().join(":")
+            };
+            format!("{} – {}", clock(&e.start), clock(&e.end))
         };
         CalendarEvent {
             id: 0,
@@ -263,6 +277,59 @@ fn events_for_day(events: &[CalEvent], year: i32, month: u32, day: i32) -> Vec<C
 //
 // "What is on my calendar today" should never be answered by photographing a month grid and
 // asking a vision model to read the numbers. See `yantrik_app_runtime::control`.
+
+/// Re-read the month on screen from the store and redraw it.
+fn refresh_month(ui: &CalendarApp, state: &Rc<RefCell<CalState>>) {
+    let (year, month) = {
+        let s = state.borrow();
+        (s.year, s.month)
+    };
+    let events = fetch_events_via_service(year, month).unwrap_or_default();
+    let (ty, tm, td) = today();
+    let td_opt = if year == ty && month == tm { Some(td) } else { None };
+    let grid = build_month_grid(year, month, &events, td_opt);
+    let day = ui.get_selected_day();
+    let day_events = events_for_day(&events, year, month, day);
+    state.borrow_mut().events = events;
+    ui.set_days(ModelRc::new(VecModel::from(grid)));
+    ui.set_events_today(ModelRc::new(VecModel::from(day_events)));
+    refresh_agent_rail(ui);
+}
+
+/// Put an event on the calendar and show it, or say why not.
+///
+/// The single path behind the form's Save button and the `add_event` action, so neither can
+/// report an outcome it did not get. The action used to answer `{"added": ...}` the moment it
+/// had handed the title to the window, and the window's own save dropped the service's error on
+/// the floor — which is how a calendar that was storing nothing told every caller it had.
+fn store_event(
+    ui: &CalendarApp,
+    state: &Rc<RefCell<CalState>>,
+    title: &str,
+    date: &str,
+    time: &str,
+    notes: &str,
+) -> Result<String, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("an event needs a title".into());
+    }
+    let start = format!("{date}T{time}:00");
+    let hour: i32 = time.split(':').next().unwrap_or("9").parse().unwrap_or(9);
+    let minute = time.split(':').nth(1).unwrap_or("00");
+    // The default hour-long event used to run off the end of the day: 23:30 became "24:30",
+    // which is not a time. The service now refuses to store what it cannot parse, so an
+    // evening appointment would have been refused rather than silently kept.
+    let end = if hour >= 23 {
+        format!("{date}T23:59:00")
+    } else {
+        format!("{date}T{:02}:{}:00", hour + 1, minute)
+    };
+
+    let id = create_event_via_service(title, &start, &end, notes)?;
+    refresh_month(ui, state);
+    Ok(id)
+}
 
 fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
     use yantrik_app_runtime::control::{Action, App, Param, View};
@@ -324,12 +391,16 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 .with("events_on_selected_day", serde_json::Value::Array(today))
                 .with("days_with_events", serde_json::Value::Array(busy))
                 .with("events_this_month", s.events.len() as i64)
+                // What the person is being told went wrong, if anything. A caller that just
+                // failed to save should be able to read the reason rather than infer it.
+                .with("notice", ui.get_notice().to_string())
         }
     };
 
     let weak = app.as_weak();
     let ui_for = move || weak.upgrade().ok_or_else(|| "Calendar window is gone".to_string());
 
+    let add_state = state.clone();
     let day_ui = ui_for.clone();
     let move_ui = ui_for.clone();
     let today_ui = ui_for.clone();
@@ -400,8 +471,19 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                     return Err(format!("`time` should look like 14:30, not `{time}`"));
                 }
                 let notes = args["notes"].as_str().unwrap_or_default().to_string();
-                ui.invoke_save_event(title.clone().into(), date.clone().into(), time.clone().into(), notes.into());
-                Ok(serde_json::json!({ "added": title, "on": format!("{date} {time}") }))
+                // Stored before answering, and the answer carries the id it was stored under,
+                // so "added" cannot be a guess about what the window did next. A failure is put
+                // on screen as well as returned: when a mind tries to put something on the
+                // calendar and cannot, the person watching the window is owed the reason too.
+                let id = match store_event(&ui, &add_state, &title, &date, &time, &notes) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        ui.set_notice(format!("Could not save “{title}”: {e}").into());
+                        return Err(e);
+                    }
+                };
+                ui.set_notice(SharedString::new());
+                Ok(serde_json::json!({ "added": title, "on": format!("{date} {time}"), "id": id }))
             },
         )
         .action(
@@ -533,26 +615,15 @@ fn wire(app: &CalendarApp) {
         let st = state.clone();
         app.on_save_event(move |title, date, time, notes| {
             let Some(ui) = weak.upgrade() else { return };
-            let start = format!("{}T{}:00", date, time);
-            // Default 1 hour duration
-            let hour: i32 = time.split(':').next().unwrap_or("9").parse().unwrap_or(9);
-            let end = format!("{}T{:02}:{}:00", date, hour + 1,
-                time.split(':').nth(1).unwrap_or("00"));
-
-            if create_event_via_service(&title, &start, &end, &notes).is_ok() {
-                // Refresh
-                let mut s = st.borrow_mut();
-                s.events = fetch_events_via_service(s.year, s.month).unwrap_or_default();
-                let (_, _, td_now) = today();
-                let td_opt = if s.year == ty && s.month == tm { Some(td_now) } else { None };
-                let grid = build_month_grid(s.year, s.month, &s.events, td_opt);
-                let day = ui.get_selected_day();
-                let day_events = events_for_day(&s.events, s.year, s.month, day);
-                ui.set_days(ModelRc::new(VecModel::from(grid)));
-                ui.set_events_today(ModelRc::new(VecModel::from(day_events)));
-                refresh_agent_rail(&ui);
+            match store_event(&ui, &st, &title, &date, &time, &notes) {
+                Ok(_) => {
+                    ui.set_notice(SharedString::new());
+                    ui.set_show_event_form(false);
+                }
+                // The form stays open holding what was typed. Closing it on a failed save threw
+                // the event away twice: once from the store, once from the screen.
+                Err(e) => ui.set_notice(format!("Could not save “{}”: {e}", title.trim()).into()),
             }
-            ui.set_show_event_form(false);
         });
     }
 
@@ -570,18 +641,17 @@ fn wire(app: &CalendarApp) {
             let idx = idx as usize;
             if idx >= day_events.len() { return; }
             let event_id = day_events[idx].id.clone();
+            let event_title = day_events[idx].title.clone();
             drop(s);
 
-            if delete_event_via_service(&event_id).is_ok() {
-                let mut s = st.borrow_mut();
-                s.events = fetch_events_via_service(s.year, s.month).unwrap_or_default();
-                let (_, _, td_now) = today();
-                let td_opt = if s.year == ty && s.month == tm { Some(td_now) } else { None };
-                let grid = build_month_grid(s.year, s.month, &s.events, td_opt);
-                let day_events = events_for_day(&s.events, s.year, s.month, day);
-                ui.set_days(ModelRc::new(VecModel::from(grid)));
-                ui.set_events_today(ModelRc::new(VecModel::from(day_events)));
-                refresh_agent_rail(&ui);
+            match delete_event_via_service(&event_id) {
+                Ok(()) => {
+                    ui.set_notice(SharedString::new());
+                    refresh_month(&ui, &st);
+                }
+                // A row that stayed on screen after a delete used to mean either "it is still
+                // there" or "the store never heard"; now it means the first, and says the second.
+                Err(e) => ui.set_notice(format!("Could not delete “{event_title}”: {e}").into()),
             }
         });
     }

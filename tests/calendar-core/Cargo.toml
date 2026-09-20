@@ -1,0 +1,14 @@
+[package]
+name = "yantrik-calendar-core-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[workspace]
+[dependencies]
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid7 = "1"
+yantrik-ipc-contracts = { path = "../../crates/yantrik-ipc-contracts" }
+[lib]
+path = "lib.rs"

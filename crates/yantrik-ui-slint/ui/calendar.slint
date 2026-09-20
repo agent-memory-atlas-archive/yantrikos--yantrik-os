@@ -77,6 +77,13 @@ export component CalendarScreen inherits Rectangle {
     in property <int> selected-day: 0;
     in property <bool> is-loading: false;
 
+    /// What went wrong with the last thing the person asked for, in their words.
+    ///
+    /// Empty when nothing has. Saving used to fail in silence -- the form closed, the day stayed
+    /// empty, and the only way to find out the event had not been stored was to look for it
+    /// later. A calendar that cannot save has to say so at the moment it cannot.
+    in property <string> notice: "";
+
     // View mode: 0=month, 1=week, 2=day
     in-out property <int> view-mode: 0;
     callback switch-view(int);
@@ -713,9 +720,36 @@ export component CalendarScreen inherits Rectangle {
                 background: Theme.separator;
             }
 
+            // What could not be done, above whatever the sidebar is showing. Outside the form
+            // because the failure outlives it: a delete that could not reach the store has no
+            // form to report into.
+            if root.notice != "" : Rectangle {
+                y: 0;
+                height: notice-text.preferred-height + Theme.sp-4;
+                background: Theme.color-danger-dim;
+
+                Rectangle {
+                    x: 0;
+                    width: 2px;
+                    height: 100%;
+                    background: Theme.color-danger;
+                }
+
+                notice-text := Text {
+                    x: Theme.sp-4;
+                    width: parent.width - Theme.sp-4 * 2;
+                    y: Theme.sp-2;
+                    text: root.notice;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+            }
+
             // Event form overlay
             if root.show-event-form : VerticalLayout {
                 padding: Theme.sp-5;
+                padding-top: root.notice != "" ? Theme.sp-5 * 2 : Theme.sp-5;
                 spacing: Theme.sp-3;
 
                 HorizontalLayout {

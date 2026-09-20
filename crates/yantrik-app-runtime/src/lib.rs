@@ -32,11 +32,12 @@ pub use yantrik_ipc_transport::SyncRpcClient;
 pub mod companion;
 pub mod control;
 pub mod instance;
+pub mod service;
 pub mod theme;
 
 /// Commonly-needed imports for app authors.
 pub mod prelude {
-    pub use crate::{companion, control, init_tracing, instance, theme, SyncRpcClient};
+    pub use crate::{companion, control, init_tracing, instance, service, theme, SyncRpcClient};
     pub use serde_json;
     pub use slint;
     pub use tracing;

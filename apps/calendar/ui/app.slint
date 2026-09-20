@@ -46,6 +46,7 @@ export component CalendarApp inherits Window {
     in property <[CalendarEvent]> events-today <=> cal.events-today;
     in property <int> selected-day <=> cal.selected-day;
     in property <bool> is-loading <=> cal.is-loading;
+    in property <string> notice <=> cal.notice;
 
     // ── View mode ──
     in-out property <int> view-mode <=> cal.view-mode;

@@ -3,6 +3,72 @@
 use serde::{Deserialize, Serialize};
 use crate::email::ServiceError;
 
+/// The names of the calendar service's JSON-RPC methods.
+///
+/// Here rather than spelled out at each call site, because the two ends of this wire drifted
+/// apart while both looked correct on their own page.
+pub mod method {
+    pub const EVENTS: &str = "calendar.events";
+    pub const CREATE_EVENT: &str = "calendar.create_event";
+    pub const UPDATE_EVENT: &str = "calendar.update_event";
+    pub const DELETE_EVENT: &str = "calendar.delete_event";
+}
+
+/// Parameters for [`method::EVENTS`].
+///
+/// The request types below exist because this contract used to carry only the data types, and
+/// each end wrote its own parameter names by hand. They disagreed: the app asked for `start` and
+/// `end` where the service required `start_date` and `end_date`, so every listing failed and the
+/// calendar could not show an event it had just stored; delete sent `event_id` where the service
+/// read `id`. Both sides now build and parse the same struct, so a rename cannot land on one end
+/// alone — it stops compiling on the other.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventsParams {
+    /// Inclusive lower bound, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`.
+    pub start_date: String,
+    /// Inclusive upper bound, same formats. An event overlapping the range is included.
+    pub end_date: String,
+}
+
+/// Parameters for [`method::CREATE_EVENT`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateEventParams {
+    pub title: String,
+    /// ISO 8601, `YYYY-MM-DDTHH:MM:SS`.
+    pub start: String,
+    /// ISO 8601. An event that ends before it starts is refused.
+    pub end: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub color: String,
+}
+
+/// Parameters for [`method::UPDATE_EVENT`]. Every field but `id` is optional; those left out
+/// keep the value the stored event already has.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateEventParams {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+}
+
+/// Parameters for [`method::DELETE_EVENT`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteEventParams {
+    pub id: String,
+}
+
 /// A calendar event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarEvent {

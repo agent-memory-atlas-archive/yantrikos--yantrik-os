@@ -102,6 +102,17 @@ pub struct SyncRpcClient {
 }
 
 impl SyncRpcClient {
+    /// Forget that an address was failing, because the caller just proved that it is not.
+    ///
+    /// The breaker is keyed by address and shared process-wide, which is what makes a down
+    /// service cheap to call. It is wrong in exactly one case: when the caller is the thing
+    /// that started the service. Without this, the first call after an on-demand start fails
+    /// instantly against a socket that is already listening, and the caller concludes the
+    /// service it just started is not there.
+    pub fn clear_breaker(address: &str) {
+        breaker_reset(address);
+    }
+
     /// Create a client targeting the given address, with the default UI-safe timeout.
     pub fn new(address: &str) -> Self {
         Self {

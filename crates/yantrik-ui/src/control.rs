@@ -144,7 +144,15 @@ fn clip(text: &str, max: usize) -> String {
 const FILE_LISTING_CAP: usize = 40;
 
 /// Publish the desktop on the service bus. Call from the UI thread before `run()`.
-pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
+///
+/// Takes the service manager because the shell is the only process that owns service lifetimes:
+/// `start_service` below is what makes the rail's "on demand" a mechanism rather than a caption
+/// on a service nothing ever starts.
+pub fn publish(
+    ui: &App,
+    ctx: &crate::app_context::AppContext,
+    services: yantrik_shell_core::service_manager::ServiceManager,
+) {
     // The catalogue, not a copy of it. The control surface answers from the same live list
     // the launcher shows, so an app installed a moment ago is launchable by name without
     // restarting the shell — which is what `accepted: true` ought to mean.
@@ -450,6 +458,37 @@ pub fn publish(ui: &App, ctx: &crate::app_context::AppContext) {
                 // and focuses the running one instead of starting a second.
                 ui.invoke_launch_app(name.clone().into());
                 Ok(serde_json::json!({ "launching": name }))
+            },
+        )
+        .action(
+            // What "on demand" in the machine rail is supposed to mean. calendar, email and
+            // notes are registered without autostart, so on a fresh session their sockets do
+            // not exist; an app calling one got a connect failure and, in the calendar's case,
+            // reported the appointment as saved anyway. Apps now ask for the service first,
+            // and the manager that starts it is the same one the rail reads, so a running
+            // service is never described as stopped.
+            //
+            // Standard, not sensitive: this starts one of the machine's own registered
+            // services, which is what opening the app that needs it would have done.
+            Action::new("start_service", "Start one of the machine's services if it is not running")
+                .arg(Param::text("name").describe("Service id, as the machine rail lists it")),
+            {
+                let services = services.clone();
+                move |args: &serde_json::Value| {
+                    let name = args["name"].as_str().unwrap_or_default().trim().to_string();
+                    if name.is_empty() {
+                        return Err("`name` is empty".into());
+                    }
+                    // Already up is the outcome the caller wanted, not an error to handle.
+                    if matches!(
+                        services.status(&name),
+                        Some(yantrik_shell_core::service_manager::ServiceStatus::Running)
+                    ) {
+                        return Ok(serde_json::json!({ "service": name, "state": "already running" }));
+                    }
+                    services.start(&name)?;
+                    Ok(serde_json::json!({ "service": name, "state": "started" }))
+                }
             },
         )
         .action(

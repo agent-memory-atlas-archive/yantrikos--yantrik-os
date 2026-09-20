@@ -146,7 +146,7 @@ fn main() {
 
     // And publish the desktop itself, the same way every app does. Without it, "what is on my
     // desktop right now" was answerable only by photographing a status bar we wrote ourselves.
-    control::publish(&ui, &ctx);
+    control::publish(&ui, &ctx, service_manager.clone());
 
     // Debug: navigate to specific screen on startup via env var
     if let Ok(screen_str) = std::env::var("YANTRIK_START_SCREEN") {
