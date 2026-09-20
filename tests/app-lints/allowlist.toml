@@ -1,0 +1,29 @@
+# Deliberate exemptions from the two app lints.
+#
+# This is not the place to put debt. Debt goes in baseline.json, where it is
+# counted on every run and can only shrink. An entry here says the item is
+# correct as it stands and should never be reported again, and it must say why
+# in prose. An entry without a reason is an error and fails the run: a dead
+# control has to be argued for in writing or it is not allowed.
+#
+# Shape:
+#
+#   [<lint>]
+#   <app> = [
+#     { name = "<slint property or callback name>", reason = "<why>" },
+#   ]
+#
+# Names are as the lint prints them: Slint spelling for properties
+# (`doc-file-path`), the generated Rust spelling without the `on_` for
+# callbacks (`snip_save`).
+
+[unset-property]
+
+[dead-handler]
+image-viewer = [
+  { name = "toggle_fit", reason = "The shared viewer component applies fit to its own property when the button is pressed; the callback is only the notification that it did. Handling it again here is the bug that made the fit button do nothing at all -- see design/images-2026-09-20.md, 'Rotation is applied once'. The control-surface actions set the property directly, because no button was pressed in that case." },
+  { name = "viewer_rotate_left", reason = "As toggle_fit: the component has already rotated its own property. The app's handler applied it a second time, which turned a 90 degree press into 180. The handler is now a notification and must stay empty." },
+  { name = "viewer_rotate_right", reason = "As viewer_rotate_left -- the component rotates itself and this is the notification. Doing the work twice was the double-rotation bug." },
+  { name = "viewer_flip_horizontal", reason = "As viewer_rotate_left: the component flips its own property and the callback only reports it." },
+  { name = "viewer_flip_vertical", reason = "As viewer_rotate_left: the component flips its own property and the callback only reports it." },
+]
