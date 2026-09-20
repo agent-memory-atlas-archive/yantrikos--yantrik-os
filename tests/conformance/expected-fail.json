@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "Apps whose probes are expected to fail today. An entry needs an app and a reason, and",
+    "the reason is read by a person, not by the runner. An app listed here is reported as",
+    "'expected fail (reason)' and does not break the exit code.",
+    "",
+    "The list cannot go stale in either direction: an app listed here that starts PASSING",
+    "fails the run until it is taken off, and an entry naming an app with no probe is",
+    "reported as a note. Nothing else in this suite can turn a failing check green.",
+    "",
+    "This is not a place to park a known bug. It is for a probe that cannot run yet."
+  ],
+  "expected_fail": [
+    {
+      "app": "container-manager",
+      "reason": "fixed in source, not yet deployed to the VM"
+    },
+    {
+      "app": "system-monitor",
+      "reason": "fixed in source, not yet deployed to the VM"
+    },
+    {
+      "app": "weather",
+      "reason": "fixed in source, not yet deployed to the VM"
+    },
+    {
+      "app": "download-manager",
+      "reason": "fixed in source, not yet deployed to the VM"
+    }
+  ]
+}
