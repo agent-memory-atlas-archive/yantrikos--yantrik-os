@@ -180,8 +180,15 @@ def run_probe(app, path, timeout, verbose=False):
     env["PATH"] = "/opt/yantrik/bin" + os.pathsep + env.get("PATH", "")
     env["PYTHONUNBUFFERED"] = "1"
 
+    # -P keeps the script's own directory off sys.path. A probe is named after its app, and two
+    # apps are named after standard library modules: probes/calendar.py made `datetime.strptime`
+    # import the probe instead of the library, and probes/email.py broke `import http.server` in
+    # a DIFFERENT probe the day it was added, because every probe in this directory has the
+    # directory first on its path. The next app called `queue` or `json` would have done it again.
+    # lib.py is reached through PYTHONPATH above, so nothing needs the directory there.
+    env["PYTHONSAFEPATH"] = "1"
     started = time.time()
-    proc = subprocess.Popen([sys.executable, str(path)], cwd=str(HERE), env=env,
+    proc = subprocess.Popen([sys.executable, "-P", str(path)], cwd=str(HERE), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             start_new_session=True)
     timed_out = False

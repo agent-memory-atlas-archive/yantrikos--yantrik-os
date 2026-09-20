@@ -668,7 +668,6 @@ class RealRepo(unittest.TestCase):
 
     MUST_FLAG_PROPERTIES = {
         "spreadsheet": ["cell-grid", "row-count", "col-count"],
-        "network-manager": ["firewall-enabled", "wifi-enabled"],
     }
     MUST_FLAG_HANDLERS = {
         "spreadsheet": ["save_sheet", "load_sheet"],
@@ -718,11 +717,11 @@ class RealRepo(unittest.TestCase):
                 self.assertIn(name, flagged, "%s %s" % (app_name, name))
 
     def test_the_apps_that_were_fixed_have_no_dead_handlers(self):
-        for app_name in ("notes", "terminal", "text-editor", "snippet-manager", "document-editor", "presentation"):
+        for app_name in ("notes", "terminal", "text-editor", "snippet-manager", "document-editor", "presentation", "network-manager", "email"):
             self.assertEqual([], dead.check_app(self.apps[app_name]), app_name)
 
     def test_the_apps_that_were_fixed_have_no_unset_in_properties(self):
-        for app_name in ("notes", "terminal", "text-editor", "snippet-manager", "document-editor", "presentation"):
+        for app_name in ("notes", "terminal", "text-editor", "snippet-manager", "document-editor", "presentation", "network-manager", "email"):
             errors = [
                 f for f in unset.check_app(self.apps[app_name]) if f["severity"] == "error"
             ]
