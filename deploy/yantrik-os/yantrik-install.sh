@@ -165,21 +165,28 @@ chmod 440 "$M/etc/sudoers.d/$USERNAME"
 ok "User $USERNAME created"
 
 # ── 11. Desktop config for new user ──
+#
+# The session is `yantrik-session`, the same program the live image and every cloud-init
+# machine start. This used to hand-write an autostart and then run bare `labwc`, which meant
+# an installed machine was the ONE kind of Yantrik machine that did not run the shipped
+# session: no XDG_DATA_DIRS entry for /opt/yantrik/share, so the launcher's "all applications"
+# listed Chromium and Vim and none of this OS's own fourteen apps; no shipped rc.xml, so the
+# shell drew inside a titlebar; no fonts installed for fontconfig, so the compositor drew its
+# chrome in a typeface this OS does not use. Every one of those was fixed in yantrik-session
+# and the fix reached everything except the machines people actually install.
 UHOME="$M/home/$USERNAME"
 mkdir -p "$UHOME/.config/labwc" "$UHOME/.yantrik"
 
-# labwc environment — use printf to avoid heredoc issues
+# The environment file stays: yantrik-session does not set the renderer, and this is where a
+# machine with no GPU is told to fall back to software rendering.
 printf "WLR_RENDERER_ALLOW_SOFTWARE=1\nWLR_NO_HARDWARE_CURSORS=1\nWLR_RENDERER=pixman\nXDG_SESSION_TYPE=wayland\nQT_QPA_PLATFORM=wayland\nMOZ_ENABLE_WAYLAND=1\nSLINT_BACKEND=winit\nLIBGL_ALWAYS_SOFTWARE=1\n" > "$UHOME/.config/labwc/environment"
 
-# labwc autostart
-printf '#!/bin/sh\nmako &\n/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml >> /opt/yantrik/logs/yantrik-os.log 2>&1 &\n' > "$UHOME/.config/labwc/autostart"
-chmod +x "$UHOME/.config/labwc/autostart"
+# No autostart and no rc.xml written here. yantrik-session copies the shipped ones out of
+# /opt/yantrik/share at every login, so a machine installed today picks up a theme fix
+# published tomorrow by rebooting. Writing them here would shadow that permanently.
 
-# labwc rc.xml (fullscreen, no decorations)
-cp /home/yantrik/.config/labwc/rc.xml "$UHOME/.config/labwc/rc.xml" 2>/dev/null || true
-
-# .bash_profile (auto-start labwc on tty1)
-printf 'if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then\n    export XDG_RUNTIME_DIR="/run/user/$(id -u)"\n    mkdir -p "$XDG_RUNTIME_DIR"\n    if [ -f "$HOME/.config/labwc/environment" ]; then\n        set -a; . "$HOME/.config/labwc/environment"; set +a\n    fi\n    labwc 2>/opt/yantrik/logs/labwc.log\nfi\n' > "$UHOME/.bash_profile"
+# .bash_profile — the same one the live image uses, minus the installer-mode branch.
+printf 'if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then\n    export XDG_RUNTIME_DIR="/run/user/$(id -u)"\n    mkdir -p "$XDG_RUNTIME_DIR"\n    if [ -f "$HOME/.config/labwc/environment" ]; then\n        set -a; . "$HOME/.config/labwc/environment"; set +a\n    fi\n    /opt/yantrik/bin/yantrik-session 2>>/opt/yantrik/logs/labwc.log\nfi\n' > "$UHOME/.bash_profile"
 
 # Mark onboarding complete (boot to desktop, not wizard)
 touch "$UHOME/.yantrik/.onboarding_complete"
@@ -201,7 +208,13 @@ printf 'd /run/user/%s 0700 %s %s -\n' "$UID_NUM" "$USERNAME" "$USERNAME" \
 sed -i "s/^user_name:.*/user_name: \"$USERNAME\"/" "$M/opt/yantrik/config.yaml"
 
 # ── 14. OS branding ──
-printf 'PRETTY_NAME="Yantrik OS"\nNAME="Yantrik OS"\nID=yantrik\nID_LIKE=debian\nVERSION_ID="0.3.0"\nHOME_URL="https://yantrikos.com"\n' > "$M/etc/os-release"
+# The version comes from the build that is being installed, not from a literal written here.
+# "0.3.0" was hardcoded for five months, so `cat /etc/os-release` on any installed machine
+# named a version that had not been true since spring — and that file is the first thing
+# anyone reads off a machine they are asked to debug.
+VERSION_ID=$(sed -n 's/^version=//p' "$M/opt/yantrik/BUILD" 2>/dev/null | head -1)
+[ -n "$VERSION_ID" ] || VERSION_ID="unknown"
+printf 'PRETTY_NAME="Yantrik OS"\nNAME="Yantrik OS"\nID=yantrik\nID_LIKE=debian\nVERSION_ID="%s"\nHOME_URL="https://yantrikos.com"\n' "$VERSION_ID" > "$M/etc/os-release"
 
 # ── 15. GRUB ──
 step "Installing bootloader..."
@@ -221,7 +234,11 @@ chroot "$M" update-initramfs -u 2>/dev/null || true
 
 # ── 17. Cleanup ──
 rm -f "$M/opt/yantrik/.installer-mode"
-mkdir -p "$M/opt/yantrik/logs"; chmod 777 "$M/opt/yantrik/logs"
+# The desktop user owns its own logs. `chmod 777` made this world-writable on every installed
+# machine: any process any user runs could rewrite the log that says what the OS did.
+mkdir -p "$M/opt/yantrik/logs"
+chmod 755 "$M/opt/yantrik/logs"
+chown "$UID_NUM:$GID_NUM" "$M/opt/yantrik/logs"
 chown -R "$UID_NUM:$GID_NUM" "$M/opt/yantrik/data" 2>/dev/null || true
 
 umount "$M/sys" "$M/proc" "$M/dev" 2>/dev/null || true

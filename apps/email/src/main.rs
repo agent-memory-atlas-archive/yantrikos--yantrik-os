@@ -1560,7 +1560,7 @@ fn wire(app: &EmailApp) {
         *mail.state.borrow_mut() = MailState::Ready {
             account: EmailAccountSummary {
                 id: "demo".into(),
-                email: "pranab@yantrik.dev".into(),
+                email: "you@example.com".into(),
                 display_name: "Demo".into(),
                 provider: "demo".into(),
                 imap_server: "localhost".into(),
@@ -2303,13 +2303,13 @@ mod demo {
         app.set_folders(ModelRc::new(VecModel::from(folders)));
 
         let rows = [
-            ("Priya Raman", "priya@lumen.dev", "Kernel perception API — review notes", "Left comments on the observation tiers doc. The event-driven path looks right; two questions on the commit gate…", "09:42", false, true, true, 4, "P", (0x4E, 0x79, 0xA7)),
+            ("Priya R.", "priya@example.com", "Kernel perception API — review notes", "Left comments on the observation tiers doc. The event-driven path looks right; two questions on the commit gate…", "09:42", false, true, true, 4, "P", (0x4E, 0x79, 0xA7)),
             ("GitHub", "noreply@github.com", "[yantrik-os] CI passed on rebase/yantrikdb-0.10", "All 212 checks passed. Build time 6m 12s (fast profile).", "09:10", false, false, false, 1, "G", (0x59, 0xA1, 0x4F)),
-            ("Ananya Sen", "ananya@lumen.dev", "Re: Launcher grid — category rail", "Agree on 5 columns. Can we keep the search box pinned when the grid scrolls?", "Yesterday", false, false, false, 3, "A", (0xE1, 0x57, 0x59)),
-            ("Hetzner", "billing@hetzner.com", "Invoice R0093-2211 for September", "Your invoice for the CX32 VPS is attached. Amount due: €14.28.", "Yesterday", true, false, true, 1, "H", (0xF2, 0x8E, 0x2B)),
-            ("Marcus Webb", "marcus@webb.io", "Talk proposal: AI-native desktops", "Would you be up for a 25-minute slot in the systems track? Abstract deadline is the 19th.", "Tue", true, true, false, 2, "M", (0x76, 0xB7, 0xB2)),
-            ("Slint Weekly", "hello@slint.dev", "1.17: software renderer partial repaints", "This release brings dirty-region repaints to the software renderer and a new Path API…", "Mon", true, false, false, 1, "S", (0xB0, 0x7A, 0xA1)),
-            ("Ravi Kulkarni", "ravi@lumen.dev", "Fonts landed on the design tokens crate", "Barlow at 400/500/600 and JetBrains Mono 400/500 are embedded now; no more DejaVu fallback.", "Mon", true, false, false, 1, "R", (0x9C, 0x75, 0x5F)),
+            ("Ananya S.", "ananya@example.com", "Re: Launcher grid — category rail", "Agree on 5 columns. Can we keep the search box pinned when the grid scrolls?", "Yesterday", false, false, false, 3, "A", (0xE1, 0x57, 0x59)),
+            ("Example Hosting", "billing@example.net", "Invoice 0000-0001 for September", "Your invoice for your server is attached. Amount due: €10.00.", "Yesterday", true, false, true, 1, "H", (0xF2, 0x8E, 0x2B)),
+            ("Marcus W.", "marcus@example.org", "Talk proposal: AI-native desktops", "Would you be up for a 25-minute slot in the systems track? Abstract deadline is the 19th.", "Tue", true, true, false, 2, "M", (0x76, 0xB7, 0xB2)),
+            ("Slint Weekly", "weekly@example.org", "1.17: software renderer partial repaints", "This release brings dirty-region repaints to the software renderer and a new Path API…", "Mon", true, false, false, 1, "S", (0xB0, 0x7A, 0xA1)),
+            ("Ravi K.", "ravi@example.com", "Fonts landed on the design tokens crate", "Barlow at 400/500/600 and JetBrains Mono 400/500 are embedded now; no more DejaVu fallback.", "Mon", true, false, false, 1, "R", (0x9C, 0x75, 0x5F)),
         ];
         let list: Vec<EmailListItem> = rows.iter().enumerate().map(|(i, r)| EmailListItem {
             id: i as i32 + 1, from_name: r.0.into(), from_addr: r.1.into(), subject: r.2.into(),
@@ -2321,15 +2321,15 @@ mod demo {
 
         app.set_email_detail(EmailDetailData {
             id: 1,
-            from_name: "Priya Raman".into(),
-            from_addr: "priya@lumen.dev".into(),
+            from_name: "Priya R.".into(),
+            from_addr: "priya@example.com".into(),
             from_initial: "P".into(),
             from_avatar_color: color(0x4E, 0x79, 0xA7),
-            to_addr: "pranab@yantrik.dev".into(),
-            cc_addr: "ananya@lumen.dev".into(),
+            to_addr: "you@example.com".into(),
+            cc_addr: "ananya@example.com".into(),
             subject: "Kernel perception API — review notes".into(),
             date_text: "Today, 09:42".into(),
-            body: "Hi Pranab,
+            body: "Hi Alex,
 
 Went through the observation-tier design end to end. The split between the AT-SPI event stream, the compositor damage hints and the on-demand vision tier is the right shape — most of what an agent needs is in tier one, and the model only pays for pixels when something is opaque.
 
@@ -2354,13 +2354,13 @@ Small thing: the world model's epistemic states read well. \"Believed\" vs \"obs
             EmailAttachmentData { name: "commit-gate.png".into(), size_text: "88 KB".into(), mime_type: "image/png".into(), is_downloaded: false },
         ])));
         app.set_email_thread_messages(ModelRc::new(VecModel::from(vec![
-            EmailThreadMessage { id: 11, from_name: "Pranab".into(), from_addr: "pranab@yantrik.dev".into(), date_text: "Mon, 14:05".into(), body: "Sharing v3 of the perception tiers doc. Main change: tier two is event-driven now.".into(), is_collapsed: true },
-            EmailThreadMessage { id: 12, from_name: "Ananya Sen".into(), from_addr: "ananya@lumen.dev".into(), date_text: "Mon, 16:40".into(), body: "The damage-hint idea is neat. Does labwc expose that today or do we need a protocol extension?".into(), is_collapsed: true },
-            EmailThreadMessage { id: 13, from_name: "Pranab".into(), from_addr: "pranab@yantrik.dev".into(), date_text: "Tue, 08:12".into(), body: "wlr-screencopy gives us damage regions per frame; no extension needed.".into(), is_collapsed: true },
-            EmailThreadMessage { id: 14, from_name: "Priya Raman".into(), from_addr: "priya@lumen.dev".into(), date_text: "Today, 09:42".into(), body: app.get_email_detail().body, is_collapsed: false },
+            EmailThreadMessage { id: 11, from_name: "Alex".into(), from_addr: "you@example.com".into(), date_text: "Mon, 14:05".into(), body: "Sharing v3 of the perception tiers doc. Main change: tier two is event-driven now.".into(), is_collapsed: true },
+            EmailThreadMessage { id: 12, from_name: "Ananya S.".into(), from_addr: "ananya@example.com".into(), date_text: "Mon, 16:40".into(), body: "The damage-hint idea is neat. Does labwc expose that today or do we need a protocol extension?".into(), is_collapsed: true },
+            EmailThreadMessage { id: 13, from_name: "Alex".into(), from_addr: "you@example.com".into(), date_text: "Tue, 08:12".into(), body: "wlr-screencopy gives us damage regions per frame; no extension needed.".into(), is_collapsed: true },
+            EmailThreadMessage { id: 14, from_name: "Priya R.".into(), from_addr: "priya@example.com".into(), date_text: "Today, 09:42".into(), body: app.get_email_detail().body, is_collapsed: false },
         ])));
 
-        app.set_account_name("pranab@yantrik.dev".into());
+        app.set_account_name("you@example.com".into());
         app.set_email_folder_total(128);
         app.set_email_folder_unread(3);
         app.set_email_sync_status("Synced 2 min ago".into());

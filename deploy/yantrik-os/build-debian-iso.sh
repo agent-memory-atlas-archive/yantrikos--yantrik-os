@@ -38,10 +38,25 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TARGET_DIR="${CARGO_TARGET_DIR:-/home/yantrik/target-yantrik}"
+
+# Where cargo ACTUALLY puts things, asked of cargo rather than assumed — the same question
+# build-release.sh asks, for the same reason.
+#
+# This used to read "${CARGO_TARGET_DIR:-/home/yantrik/target-yantrik}": one developer's home
+# directory, hardcoded. On every machine but that one the prerequisite check below looked for
+# yantrik-ui in a directory that does not exist and the build refused to start, with a message
+# telling you to run a build you had already run.
+TARGET_DIR="${TARGET_DIR:-$( \
+  cd "$PROJECT_ROOT" && cargo metadata --format-version 1 --no-deps --offline 2>/dev/null \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')}"
+[ -n "$TARGET_DIR" ] || TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
 
 # ── Configuration ──
-YANTRIK_VERSION="0.3.0"
+# From git, like the tarball's. A version hardcoded in a build script names whatever it named
+# the day it was written: this said 0.3.0 for five months, across every commit, so two ISOs
+# built a season apart had the same filename and nothing on either could tell them apart.
+YANTRIK_VERSION="${YANTRIK_VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null)}"
+[ -n "$YANTRIK_VERSION" ] || YANTRIK_VERSION="0.0.0-unknown"
 DEBIAN_SUITE="trixie"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
 ARCH="amd64"
@@ -105,7 +120,9 @@ fail()  { echo -e "   ${RED}✗${NC} $1"; exit 1; }
 
 echo
 echo -e "${CYAN}╔═══════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║${NC}  ${BOLD}Yantrik OS${NC} — Debian ISO Builder v${YANTRIK_VERSION}         ${CYAN}║${NC}"
+# No "v" prefix here: git describe already returns one (v0.1.0-217-g48ac75c), and the banner
+# printed "vv0.1.0-217-g48ac75c".
+echo -e "${CYAN}║${NC}  ${BOLD}Yantrik OS${NC} — Debian ISO Builder ${YANTRIK_VERSION}         ${CYAN}║${NC}"
 echo -e "${CYAN}║${NC}  ${DIM}Fully offline-capable installation ISO${NC}           ${CYAN}║${NC}"
 echo -e "${CYAN}╚═══════════════════════════════════════════════════╝${NC}"
 echo
@@ -224,6 +241,13 @@ apt-get install -y -qq \
 # build, and the parity check after this step names anything user-data.yaml gains later.
 apt-get install -y -qq     seatd     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp     qemu-guest-agent     mako-notifier libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr     lxpolkit     udisks2     brightnessctl     bluez alsa-utils
 
+# Three programs the shell shells out to by name, and did not have.
+#   swaybg     — yantrik-companion-tools/src/wallpaper.rs: setting a wallpaper did nothing
+#   xdg-utils  — mime_dispatch.rs and lens.rs call xdg-open to hand a file to its app
+#   espeak-ng  — the voice fallback when Piper is not the chosen engine
+# Each failed silently, which is why none of them was noticed from inside the desktop.
+apt-get install -y -qq     swaybg     xdg-utils     espeak-ng
+
 # ── Utilities (installer essentials) ──
 apt-get install -y -qq \
     jq parted rsync openssh-server openssl \
@@ -316,7 +340,11 @@ step "[4/10] Installing Yantrik OS (every binary, discovered)..."
 # because this script is not the thing that decides when to compile; it installs
 # what has already been built.
 if [ -z "$RELEASE_TARBALL" ]; then
-    "$SCRIPT_DIR/build-release.sh" --no-build --out "$WORK_DIR/dist" \
+    # Handed the SAME directory this script checked for yantrik-ui, spelled the way
+    # build-release.sh spells it (it takes the release dir itself, not its parent). Without
+    # this the two scripts resolve the target directory independently and the check above can
+    # pass against one build while the tarball is packed from another.
+    TARGET_DIR="$TARGET_DIR/release" "$SCRIPT_DIR/build-release.sh" --no-build --out "$WORK_DIR/dist" \
         || fail "build-release.sh failed — cannot determine what the OS contains"
     RELEASE_TARBALL="$(ls -t "$WORK_DIR/dist"/yantrik-os-*.tar.zst 2>/dev/null | head -1)"
     [ -n "$RELEASE_TARBALL" ] || fail "build-release.sh produced no tarball"
@@ -381,6 +409,36 @@ if [ -d "$PROJECT_ROOT/skills" ]; then
 fi
 
 ok "Installed $INSTALLED binaries ($(sudo du -sh "$ROOTFS/opt/yantrik/bin" | cut -f1))"
+
+# ── What this image redistributes that we did not write ──
+#
+# The embedder, Whisper, Piper and its voice, the fonts, and a whole Debian system. Several of
+# those licences require their terms to travel with the copy, and publishing an ISO is making
+# copies. Required, not best-effort: an image with no attribution file is an image that cannot
+# be published, and discovering that at upload time is discovering it too late.
+[ -f "$SCRIPT_DIR/THIRD-PARTY-NOTICES.md" ] \
+    || fail "no THIRD-PARTY-NOTICES.md beside this script — this image redistributes other people's software and must say so"
+sudo cp "$SCRIPT_DIR/THIRD-PARTY-NOTICES.md" "$ROOTFS/opt/yantrik/THIRD-PARTY-NOTICES.md"
+if [ -f "$PROJECT_ROOT/LICENSE" ]; then
+    sudo cp "$PROJECT_ROOT/LICENSE" "$ROOTFS/opt/yantrik/LICENSE"
+    ok "Licence and third-party notices installed"
+else
+    warn "the repository has no LICENSE file, so the image ships none — by default that is"
+    warn "all rights reserved, and nobody who downloads the ISO may redistribute it"
+fi
+
+# ── The Hermes plugin ──
+#
+# Not a Yantrik binary and not started by anything here: it is the adapter that lets an
+# existing Hermes install attach to this desktop's harness socket, so it ships as source
+# beside the OS rather than being installed into a Python environment the image does not have.
+# Hermes keeps its own model, keys and memory; nothing about them is in this image.
+if [ -d "$PROJECT_ROOT/harnesses/hermes" ]; then
+    sudo mkdir -p "$ROOTFS/opt/yantrik/share/harnesses/hermes"
+    sudo cp "$PROJECT_ROOT/harnesses/hermes/"*.py "$PROJECT_ROOT/harnesses/hermes/plugin.yaml" \
+        "$ROOTFS/opt/yantrik/share/harnesses/hermes/" 2>/dev/null || true
+    ok "Hermes desktop plugin staged at /opt/yantrik/share/harnesses/hermes"
+fi
 
 # ── The mind, beside the OS ──
 #
@@ -499,12 +557,16 @@ ok "Whisper STT model"
 if $INCLUDE_LLM; then
     LLM_DIR="$ROOTFS/opt/yantrik/models/llm"
     LLM_GGUF="yantrik-4b.gguf"
-    # Use our fine-tuned model from Ollama if available on the host
-    OLLAMA_BLOB="/mnt/c/Users/sync/.ollama/models/blobs/sha256-485cf5f063803ddb1c8b3f6e48186e2908840855e914952ea242fbe18ac56bb4"
-    if [ -f "$OLLAMA_BLOB" ]; then
-        info "Copying fine-tuned Yantrik-4B model (~2.6GB)..."
+    # A local GGUF, if the builder points at one. LOCAL_GGUF=/path/to/model.gguf.
+    #
+    # This used to be one developer's Windows home directory and one Ollama blob hash, written
+    # into the script: on their machine the ISO silently shipped a fine-tuned model, on every
+    # other machine it silently shipped a different one, and the image could not say which.
+    OLLAMA_BLOB="${LOCAL_GGUF:-}"
+    if [ -n "$OLLAMA_BLOB" ] && [ -f "$OLLAMA_BLOB" ]; then
+        info "Copying local GGUF from $OLLAMA_BLOB ..."
         sudo cp "$OLLAMA_BLOB" "$LLM_DIR/$LLM_GGUF"
-        ok "Yantrik-4B fine-tuned model (Enhanced Mode)"
+        ok "Local GGUF installed (Enhanced Mode) — sha256 $(sha256sum "$OLLAMA_BLOB" | cut -c1-16)…"
     elif [ ! -f "$LLM_DIR/$LLM_GGUF" ]; then
         info "Fine-tuned model not found, downloading base Qwen3.5-4B (~2.5GB)..."
         sudo wget -q --show-progress -O "$LLM_DIR/$LLM_GGUF" \
@@ -520,92 +582,46 @@ fi
 # ═══════════════════════════════════════════════════════════════
 step "[6/10] Generating default configuration..."
 
-sudo tee "$ROOTFS/opt/yantrik/config.yaml" > /dev/null <<'CONFIG'
-# Yantrik OS — Default Configuration
-# This will be customized during first-boot onboarding
+# The config a published image ships used to be a 130-line heredoc right here, which meant it
+# could only be audited by reading a shell script — and that it silently overwrote the config
+# the release tarball had just installed two steps ago, so the image ran on a config no other
+# install path had. It is a file now: deploy/yantrik-os/config-default.yaml, greppable for the
+# addresses, names and keys a public image must not carry.
+#
+# It still overwrites what the tarball brought, and that is deliberate: the tarball carries
+# config/yantrik-ollama.yaml, the author's dev config, which names a private LAN address as the
+# model endpoint and the author by name. Correct for the machine it was written for; wrong for
+# every machine that boots this ISO.
+[ -f "$SCRIPT_DIR/config-default.yaml" ]     || fail "no config-default.yaml beside this script — the image would ship the dev config"
 
-user_name: "User"
+# Refuse to publish somebody's private network. Cheap, and it is the check that was missing
+# when the dev config was the one being shipped.
+CONFIG_LEAKS=$(grep -nE '192\.168\.|10\.[0-9]+\.[0-9]+\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01])\.|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'     "$SCRIPT_DIR/config-default.yaml" || true)
+[ -z "$CONFIG_LEAKS" ]     || fail "config-default.yaml carries a private address or an e-mail address:
+$CONFIG_LEAKS"
 
-personality:
-  name: "Yantrik"
-  system_prompt: >
-    You are Yantrik, a personal AI companion running as the desktop shell.
-    You remember everything the user tells you. You are warm, thoughtful,
-    and occasionally curious. You are aware of the system state — battery,
-    network, running apps, files. When you notice patterns or have concerns,
-    you bring them up naturally. You never fabricate memories —
-    if you don't know, say so.
+sudo cp "$SCRIPT_DIR/config-default.yaml" "$ROOTFS/opt/yantrik/config.yaml"
+sudo chmod 644 "$ROOTFS/opt/yantrik/config.yaml"
 
-llm:
-  backend: "api"
-  api_base_url: "http://localhost:8341/v1"
-  api_model: "qwen3.5-4b"
-  max_tokens: 1024
-  temperature: 0.6
-  max_context_tokens: 16384
-  fallback:
-    backend: "api"
-    api_base_url: "http://localhost:8341/v1"
-    api_model: "qwen3.5-4b"
+# One answer to "which channel is this machine on".
+#
+# Two programs ask that question and they were reading different files: yantrik-ui reads
+# `updates.channel` out of config.yaml (which says beta) and `yantrik-update` reads CHANNEL out
+# of /opt/yantrik/update.conf, which did not exist — so it fell back to its own default,
+# `stable`. The desktop would report one channel while the updater pulled from another.
+UPDATE_CHANNEL=$(sed -n 's/^[[:space:]]*channel:[[:space:]]*"\{0,1\}\([a-z]*\)"\{0,1\}.*/\1/p' \
+    "$SCRIPT_DIR/config-default.yaml" | head -1)
+[ -n "$UPDATE_CHANNEL" ] || fail "config-default.yaml names no update channel"
+sudo tee "$ROOTFS/opt/yantrik/update.conf" > /dev/null <<UPDATECONF
+# Read by yantrik-update. Generated from config-default.yaml at image build time so the
+# desktop and the updater cannot name different channels.
+CHANNEL=$UPDATE_CHANNEL
+HOST=releases.yantrikos.com
+SCHEME=https
+UPDATECONF
 
-server:
-  host: "0.0.0.0"
-  port: 8340
-
-yantrikdb:
-  db_path: "/opt/yantrik/data/memory.db"
-  embedding_dim: 384
-  embedder_model_dir: "/opt/yantrik/models/embedder"
-
-conversation:
-  max_history_turns: 10
-  session_timeout_minutes: 30
-
-tools:
-  enabled: true
-  max_tool_rounds: 3
-  max_permission: "sensitive"
-
-cognition:
-  think_interval_minutes: 15
-  think_interval_active_minutes: 5
-  idle_think_interval_minutes: 30
-  proactive_urgency_threshold: 0.7
-
-instincts:
-  check_in_enabled: true
-  check_in_hours: 8.0
-  emotional_awareness_enabled: true
-  follow_up_enabled: true
-  follow_up_min_hours: 4.0
-  reminder_enabled: true
-  pattern_surfacing_enabled: true
-  conflict_alerting_enabled: true
-  conflict_alert_threshold: 5
-
-urges:
-  expiry_hours: 48.0
-  max_pending: 20
-  boost_increment: 0.1
-  cooldown_seconds: 3600.0
-
-bond:
-  enabled: true
-
-voice:
-  enabled: true
-  whisper_model: "openai/whisper-tiny"
-  piper_voice: "en_US-lessac-medium"
-  silence_threshold: 0.01
-  silence_duration_ms: 800
-
-updates:
-  channel: "beta"
-  server: "http://releases.yantrikos.com"
-  check_on_boot: true
-CONFIG
-
-ok "Default config generated"
+ok "Default config installed from config-default.yaml (loopback model endpoint, no name, no key)"
+ok "Update channel: $UPDATE_CHANNEL via https://releases.yantrikos.com"
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 7: Configure desktop session (labwc + auto-login)
@@ -958,8 +974,14 @@ info "Installer: Slint onboarding (GRUB default) with yantrik-install as the tex
 
 # Always install the text-based installer (used by GRUB "Install" option)
 sudo cp "$SCRIPT_DIR/yantrik-install.sh" "$ROOTFS/opt/yantrik/bin/yantrik-install"
+# LF, for the same reason build-release.sh normalises the bundle: copied out of a working
+# tree edited on Windows, a CRLF shebang makes this installer unrunnable on the machine it
+# is meant to install.
+sudo sed -i 's/\r$//' "$ROOTFS/opt/yantrik/bin/yantrik-install"
 sudo chmod +x "$ROOTFS/opt/yantrik/bin/yantrik-install"
-ok "Text installer ready"
+sudo chroot "$ROOTFS" bash -n /opt/yantrik/bin/yantrik-install \
+    || fail "yantrik-install does not parse — the ISO's only text installer would not run"
+ok "Text installer ready (parses)"
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 10: Build ISO image
@@ -968,11 +990,28 @@ step "[10/10] Building ISO image..."
 
 # Enable NetworkManager
 sudo chroot "$ROOTFS" systemctl enable NetworkManager 2>/dev/null || true
-# Enable SSH with password auth for debugging
-sudo chroot "$ROOTFS" systemctl enable ssh 2>/dev/null || true
-sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "$ROOTFS/etc/ssh/sshd_config"
-sudo mkdir -p "$ROOTFS/etc/ssh/sshd_config.d"
-echo -e "PasswordAuthentication yes" | sudo tee "$ROOTFS/etc/ssh/sshd_config.d/yantrik.conf" > /dev/null
+# ── SSH: installed, not enabled ──
+#
+# This used to enable sshd and force `PasswordAuthentication yes` on every image. Read it
+# together with the user created in step 3 — `yantrik`, password `yantrik`, passwordless sudo —
+# and what shipped was root on any machine that booted this ISO, to anyone on its network who
+# could guess a password printed in the build script. The installer copies this filesystem, so
+# every installed machine kept it.
+#
+# "For debugging" is a real need and it belongs to the person who is debugging, not to every
+# stranger who downloads the image. YANTRIK_ISO_SSH=1 puts it back for a build you make for
+# yourself; the default build has sshd on disk, off at boot, and no config override.
+if [ "${YANTRIK_ISO_SSH:-0}" = "1" ]; then
+    sudo chroot "$ROOTFS" systemctl enable ssh 2>/dev/null || true
+    sudo mkdir -p "$ROOTFS/etc/ssh/sshd_config.d"
+    echo "PasswordAuthentication yes" | sudo tee "$ROOTFS/etc/ssh/sshd_config.d/yantrik.conf" > /dev/null
+    warn "SSH ENABLED with password auth (YANTRIK_ISO_SSH=1) — user yantrik / password yantrik."
+    warn "Do not publish this image. Anyone who can reach it on a network owns it."
+else
+    sudo chroot "$ROOTFS" systemctl disable ssh 2>/dev/null || true
+    sudo rm -f "$ROOTFS/etc/ssh/sshd_config.d/yantrik.conf"
+    ok "SSH installed but not enabled (YANTRIK_ISO_SSH=1 to enable for a private build)"
+fi
 
 # Load VM display drivers at boot (VBox vmwgfx, virtio-gpu, etc.)
 echo -e "vmwgfx\nvirtio-gpu\ndrm" | sudo tee "$ROOTFS/etc/modules-load.d/yantrik-display.conf" > /dev/null
@@ -989,11 +1028,32 @@ LIVECONF
 # Clean up chroot
 sudo chroot "$ROOTFS" apt-get clean
 sudo rm -rf "$ROOTFS/tmp/"*
+# The build host's resolv.conf was copied in for the chroot's apt; it must not ship.
+#
+# It used to be replaced with "nameserver 8.8.8.8" — every machine built from this image
+# resolving every name it ever looks up through Google, chosen by a build script rather than
+# by the person using the machine or by the network they joined. NetworkManager is installed
+# and enabled and writes this file from DHCP; leaving it as NM's symlink is both the correct
+# behaviour and the one that keeps nobody's DNS queries.
 sudo rm -f "$ROOTFS/etc/resolv.conf"
-echo "nameserver 8.8.8.8" | sudo tee "$ROOTFS/etc/resolv.conf" > /dev/null
+sudo ln -sf /run/NetworkManager/resolv.conf "$ROOTFS/etc/resolv.conf"
 
 # Store version
 echo "$YANTRIK_VERSION" | sudo tee "$ROOTFS/opt/yantrik/.version" > /dev/null
+
+# The live image says what it is. Only yantrik-install wrote /etc/os-release, so the image
+# people actually download called itself "Debian GNU/Linux 13" — on the getty banner, to every
+# tool that asks, and in the first line of any bug report. Same fields the installer writes,
+# same source for the version. /etc/os-release is a symlink into /usr/lib on Debian; it is
+# replaced, not written through, so base-files' own copy stays what the package shipped.
+sudo rm -f "$ROOTFS/etc/os-release"
+printf 'PRETTY_NAME="Yantrik OS"
+NAME="Yantrik OS"
+ID=yantrik
+ID_LIKE=debian
+VERSION_ID="%s"
+HOME_URL="https://yantrikos.com"
+'     "$YANTRIK_VERSION" | sudo tee "$ROOTFS/etc/os-release" > /dev/null
 
 # Unmount chroot filesystems
 sudo umount "$ROOTFS/dev/pts" 2>/dev/null || true
@@ -1032,26 +1092,78 @@ insmod gfxterm
 set gfxmode=auto
 terminal_output gfxterm
 
+# Speak on the serial line AS WELL AS the screen, and accept input from both.
+# `--append`, so this adds the serial line to the screen rather than replacing it.
+#
+# Without this the menu exists only on a display. Every automated boot test — qemu -nographic,
+# a headless VM, a server with a BMC — sees a blank serial port and cannot tell "the ISO hangs
+# in GRUB" from "the ISO has no bootloader", which is the difference the test is being run to
+# establish. The kernel lines already said console=ttyS0; the bootloader did not.
+insmod serial
+serial --unit=0 --speed=115200
+terminal_output --append serial
+terminal_input --append serial
+
 set menu_color_normal=cyan/black
 set menu_color_highlight=white/blue
 
+# `yantrik.install=true` is what .bash_profile reads to put the Slint onboarding into
+# installer mode. Both entries used to pass it, so there was no way to boot this image and
+# simply try the desktop — an ISO that can only be installed is one nobody evaluates first.
 menuentry "Install Yantrik OS" {
     linux /live/vmlinuz boot=live yantrik.install=true live-config.username=yantrik live-config.user-fullname=yantrik console=tty1 console=ttyS0,115200 quiet
     initrd /live/initrd
 }
 
-menuentry "Install Yantrik OS (Safe Mode)" {
+menuentry "Try Yantrik OS (live, no install)" {
+    linux /live/vmlinuz boot=live live-config.username=yantrik live-config.user-fullname=yantrik console=tty1 console=ttyS0,115200 quiet
+    initrd /live/initrd
+}
+
+menuentry "Install Yantrik OS (Safe Mode — software rendering)" {
     linux /live/vmlinuz boot=live yantrik.install=true live-config.username=yantrik live-config.user-fullname=yantrik console=tty1 console=ttyS0,115200 nomodeset quiet
+    initrd /live/initrd
+}
+
+# No `quiet`, so the kernel and systemd say what they are doing on the serial line. This is
+# the entry a bug report is made from, and the one an automated boot check selects.
+menuentry "Try Yantrik OS (verbose, serial console)" {
+    linux /live/vmlinuz boot=live live-config.username=yantrik live-config.user-fullname=yantrik console=tty1 console=ttyS0,115200 nomodeset systemd.log_level=info
     initrd /live/initrd
 }
 GRUBCFG
 
 # ── Build ISO with grub-mkrescue (BIOS + EFI hybrid) ──
 info "Creating hybrid ISO (BIOS + EFI)..."
-grub-mkrescue -o "$OUTPUT" "$ISO_DIR" \
-    -- -volid "YANTRIK_OS" 2>/dev/null
+# stderr kept. `2>/dev/null` here meant a grub-mkrescue that failed for a missing mtools or a
+# missing EFI module said nothing, produced no file, and the next line died on `du` of a path
+# that does not exist — forty minutes of debootstrap and apt thrown away with no reason given.
+grub-mkrescue -o "$OUTPUT" "$ISO_DIR" -- -volid "YANTRIK_OS" \
+    || fail "grub-mkrescue failed — no ISO was written (missing mtools, grub-efi-amd64-bin or grub-pc-bin?)"
+[ -f "$OUTPUT" ] || fail "grub-mkrescue reported success but wrote no $OUTPUT"
 
+# What was actually produced, read back off the file rather than assumed.
 ISO_SIZE=$(du -h "$OUTPUT" | cut -f1)
+ISO_SHA=$(sha256sum "$OUTPUT" | cut -d' ' -f1)
+sha256sum "$OUTPUT" > "$OUTPUT.sha256"
+# Asked of the rootfs's own dpkg database rather than through a chroot: by this point /proc
+# and /dev have been unmounted, and this is the same answer without needing them back.
+PKG_COUNT=$(dpkg-query --admindir="$ROOTFS/var/lib/dpkg" -f '${binary:Package}\n' -W 2>/dev/null | wc -l)
+cat > "$OUTPUT.manifest" <<ISOMANIFEST
+iso=$OUTPUT
+version=$YANTRIK_VERSION
+built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+suite=$DEBIAN_SUITE
+arch=$ARCH
+sha256=$ISO_SHA
+size=$(stat -c%s "$OUTPUT")
+debian_packages=$PKG_COUNT
+yantrik_binaries=$INSTALLED
+offline_llm=$INCLUDE_LLM
+ssh_enabled=${YANTRIK_ISO_SSH:-0}
+mind=$([ "${YANTRIK_ISO_WITHOUT_MIND:-0}" = "1" ] && echo absent || echo present)
+ISOMANIFEST
+ok "$PKG_COUNT Debian packages · $INSTALLED Yantrik binaries · sha256 ${ISO_SHA:0:16}…"
 
 echo
 echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"

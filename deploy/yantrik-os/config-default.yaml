@@ -1,0 +1,107 @@
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# Yantrik OS — the configuration a machine has before anybody has told it anything
+# ═══════════════════════════════════════════════════════════════════════════════════════
+#
+# This file ships on the ISO as /opt/yantrik/config.yaml and is what first-boot onboarding
+# edits. It is the file a stranger's machine runs on, so it holds no address that is not
+# loopback, no key, no token, no e-mail address and nobody's name.
+#
+# It used to be a 130-line heredoc in the middle of build-debian-iso.sh, which meant the
+# config a published image ships could only be audited by reading a shell script — and that
+# the release tarball's config (config/yantrik-ollama.yaml, which names a private LAN address
+# and its author) and the image's config were two different files that nothing compared.
+# One file, greppable, is the point.
+#
+# The dev configs under config/ are NOT this file and must not be copied over it.
+
+user_name: "User"
+
+personality:
+  name: "Yantrik"
+  system_prompt: >
+    You are Yantrik, a personal AI companion running as the desktop shell.
+    You remember what the user tells you. You are warm, thoughtful,
+    and occasionally curious. You are aware of the system state — battery,
+    network, running apps, files. When you notice patterns or have concerns,
+    you bring them up naturally. You never fabricate memories —
+    if you don't know, say so.
+
+# ── The model ──────────────────────────────────────────────────────────────────────────
+# Loopback only. A fresh machine either runs a model on itself (llama-server on 8341, which
+# --with-llm installs and enables) or is pointed at one by the person who owns it, during
+# onboarding. It never ships pointed at somebody else's server: an endpoint baked into a
+# public image is an endpoint every copy of that image talks to.
+llm:
+  backend: "api"
+  api_base_url: "http://127.0.0.1:8341/v1"
+  api_model: "yantrik-4b"
+  max_tokens: 1024
+  temperature: 0.6
+  max_context_tokens: 16384
+  fallback:
+    backend: "api"
+    api_base_url: "http://127.0.0.1:8341/v1"
+    api_model: "yantrik-4b"
+
+# Loopback, not 0.0.0.0. The shell's own API has no authentication; bound to every interface
+# it is an unauthenticated agent surface on whatever network the machine joins, which for a
+# laptop is every café it is opened in.
+server:
+  host: "127.0.0.1"
+  port: 8340
+
+yantrikdb:
+  db_path: "/opt/yantrik/data/memory.db"
+  embedding_dim: 384
+  embedder_model_dir: "/opt/yantrik/models/embedder"
+
+conversation:
+  max_history_turns: 10
+  session_timeout_minutes: 30
+
+tools:
+  enabled: true
+  max_tool_rounds: 3
+  max_permission: "sensitive"
+
+cognition:
+  think_interval_minutes: 15
+  think_interval_active_minutes: 5
+  idle_think_interval_minutes: 30
+  proactive_urgency_threshold: 0.7
+
+instincts:
+  check_in_enabled: true
+  check_in_hours: 8.0
+  emotional_awareness_enabled: true
+  follow_up_enabled: true
+  follow_up_min_hours: 4.0
+  reminder_enabled: true
+  pattern_surfacing_enabled: true
+  conflict_alerting_enabled: true
+  conflict_alert_threshold: 5
+
+urges:
+  expiry_hours: 48.0
+  max_pending: 20
+  boost_increment: 0.1
+  cooldown_seconds: 3600.0
+
+bond:
+  enabled: true
+
+voice:
+  enabled: true
+  whisper_model: "openai/whisper-tiny"
+  piper_voice: "en_US-lessac-medium"
+  silence_threshold: 0.01
+  silence_duration_ms: 800
+
+# ── Updates ────────────────────────────────────────────────────────────────────────────
+# A public hostname, over HTTPS. An image that updates itself over plain HTTP takes its next
+# build from whoever is between it and the server; the checksum in the manifest is fetched
+# over the same channel, so it settles nothing.
+updates:
+  channel: "beta"
+  server: "https://releases.yantrikos.com"
+  check_on_boot: true

@@ -104,13 +104,22 @@ fi
 # each entry carries the reason and what would bring the app back; design/shelved-2026-09-20.md
 # is the account. These two names are the same names, and a test in dock.rs reads this file and
 # fails if the two stop agreeing. Un-shelving an app is deleting it from both.
-SHELVED_BINS="yantrik-music-player yantrik-spreadsheet"
+#
+# This used to be a literal here, copied by hand out of dock.rs. It was also copied into
+# deploy.sh, install.sh, scripts/package-all.sh and scripts/publish-components.sh, where it was
+# never updated — so the release tarball dropped the shelved apps and every other path put them
+# straight back. shelved-bins.sh reads dock.rs, so there is nothing left to copy.
+SHELVED_BINS="$("$SCRIPT_DIR/shelved-bins.sh" | paste -sd' ' -)" \
+  || fail "cannot determine which apps are shelved — refusing to ship a list nobody checked"
 
 say "Discovering what the OS is made of"
 echo "   from $TARGET_DIR"
+# `! -name ".*"`: cargo's own `.cargo-lock` sits in the release directory with mode 755, so
+# `-type f -executable` matched it and it was staged into bin/ and counted as one of the
+# binaries this OS is made of. Every tarball built so far carries it.
 mapfile -t BINS < <(
   find "$TARGET_DIR" -maxdepth 1 -type f -executable \
-    ! -name "*.so" ! -name "*.d" ! -name "*.rlib" ! -name "build-script*" ! -name "test-*" ! -name "*-test" ! -name "bench-*" \
+    ! -name ".*" ! -name "*.so" ! -name "*.d" ! -name "*.rlib" ! -name "build-script*" ! -name "test-*" ! -name "*-test" ! -name "bench-*" \
     -printf '%f\n' | sort | grep -vxF "$(printf '%s\n' $SHELVED_BINS)"
 )
 [ "${#BINS[@]}" -gt 0 ] || fail "no binaries found in $TARGET_DIR"
@@ -159,8 +168,27 @@ else
   fail "missing $SCRIPT_DIR/yantrik-session -- a release without a session does not boot"
 fi
 
-cp "$PROJECT_ROOT/config/yantrik-ollama.yaml" "$ROOT/config.yaml" 2>/dev/null \
-  || echo "   (no config shipped — the machine will need one)"
+# The config a release carries is the public default: no name, no private address, the model
+# endpoint on loopback. It used to be config/yantrik-ollama.yaml, the DEV config, which names an
+# address on the author's LAN as the model endpoint and the author in the system prompt — right
+# for the machine it was written for, and on a stranger's install a mind pointed at an address
+# it cannot reach, greeting them by someone else's name. The reason given for leaving it was
+# that the nightly channel feeds the author's own VMs; but `yantrik-update` installs bin/ and
+# share/ and never touches an installed machine's config.yaml, so nothing of theirs depended on
+# it. A first install that does want another config says so: YANTRIK_RELEASE_CONFIG=<path>.
+RELEASE_CONFIG="${YANTRIK_RELEASE_CONFIG:-$SCRIPT_DIR/config-default.yaml}"
+cp "$RELEASE_CONFIG" "$ROOT/config.yaml"   || fail "missing $RELEASE_CONFIG -- a release without a config does not start"
+echo "   + config.yaml  ($(basename "$RELEASE_CONFIG"))"
+
+# Checked all the same, because the override exists and a release is a thing that leaves.
+if [ -f "$ROOT/config.yaml" ]; then
+  LEAKS="$(grep -nE '192\.168\.|10\.[0-9]+\.[0-9]+\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01])\.|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|(api[_-]?key|token|secret)[[:space:]]*:' "$ROOT/config.yaml" || true)"
+  if [ -n "$LEAKS" ]; then
+    printf '   \033[33m!\033[0m config.yaml in this tarball is not fit to publish:\n'
+    printf '%s\n' "$LEAKS" | sed 's/^/       /'
+    printf '       (set by YANTRIK_RELEASE_CONFIG; do not publish this tarball)\n'
+  fi
+fi
 
 # The desktop's own chrome. Without these the compositor runs on stock defaults and draws a
 # light-grey title bar, in a font this OS does not use, around every one of its dark apps — the
@@ -214,6 +242,40 @@ done
 echo "   + $(ls "$ROOT/share/applications" | wc -l) application entries"
 
 echo "   + labwc theme and $(ls "$ROOT/share/fonts" | wc -l) fonts"
+
+# ── Nothing in this bundle may have CRLF line endings ──
+#
+# The scripts above — yos, yos-mcp, yantrik-update, yantrik-session, the labwc autostart — are
+# copied verbatim out of a working tree that is edited on Windows. A `#!/usr/bin/env python3`
+# line ending in CR names an interpreter called `python3\r`, which does not exist, so the file
+# is installed, is executable, and fails on its first line with "no such file or directory".
+# This has already shipped once: .gitattributes carries the account of it.
+#
+# git's eol=lf does not save us here. The blobs in this repository were committed with CRLF
+# before those attributes existed, and checkout converts LF to the platform ending — it does
+# not strip CRs that are already in the blob. So the check has to be on the bytes being packed.
+#
+# Stripped rather than failed: refusing to build would block every release made from a Windows
+# checkout, which is most of them. Named out loud, so it is a thing someone can go and fix at
+# the source rather than a silent repair that runs forever.
+say "Checking line endings"
+CRLF_FIXED=""
+for f in "$ROOT/bin/"* "$ROOT/share/labwc/autostart"; do
+  [ -f "$f" ] || continue
+  # Text only: the compiled binaries are full of 0x0d and must not be touched.
+  head -c 2 "$f" | grep -q '^#!' || continue
+  if grep -qU $'\r' "$f" 2>/dev/null; then
+    sed -i 's/\r$//' "$f"
+    CRLF_FIXED="$CRLF_FIXED $(basename "$f")"
+  fi
+done
+if [ -n "$CRLF_FIXED" ]; then
+  printf '   \033[33m!\033[0m CRLF stripped from:%s\n' "$CRLF_FIXED"
+  printf '       These would have been installed unrunnable. Fix at the source:\n'
+  printf '       git add --renormalize . && git commit\n'
+else
+  echo "   all shipped scripts are LF"
+fi
 
 if [ "$WITH_MODELS" = 1 ]; then
   say "Including models"

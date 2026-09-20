@@ -401,8 +401,17 @@ for svc in $SERVICES; do
 done
 
 # Download standalone app binaries (non-fatal if unavailable)
+#
+# The fourteen apps this OS ships. yantrik-music-player and yantrik-spreadsheet are NOT here:
+# they are shelved — the shell's launcher refuses to open either, so installing them puts two
+# tiles on the machine whose clicks do nothing. This list used to name them.
+#
+# Unlike every other packaging script in the tree, this one cannot read the shelf from
+# crates/yantrik-ui/src/wire/dock.rs via deploy/yantrik-os/shelved-bins.sh, because it is
+# fetched over curl and run on a machine that has no checkout. It is therefore a COPY, and
+# copies drift: when an app is shelved or un-shelved, this line is one of the places to change.
 step "Installing app binaries..."
-APPS="yantrik-notes yantrik-email yantrik-calendar yantrik-weather yantrik-system-monitor yantrik-terminal yantrik-music-player yantrik-text-editor yantrik-image-viewer yantrik-spreadsheet yantrik-document-editor yantrik-presentation yantrik-network-manager yantrik-container-manager yantrik-download-manager yantrik-snippet-manager"
+APPS="yantrik-notes yantrik-email yantrik-calendar yantrik-weather yantrik-system-monitor yantrik-terminal yantrik-text-editor yantrik-image-viewer yantrik-document-editor yantrik-presentation yantrik-network-manager yantrik-container-manager yantrik-download-manager yantrik-snippet-manager"
 for app in $APPS; do
     if [ -f "/tmp/$app" ]; then
         cp "/tmp/$app" "$BIN_DIR/$app"
@@ -420,8 +429,19 @@ done
 step "Installing desktop files..."
 DESKTOP_DIR="/usr/share/applications"
 mkdir -p "$DESKTOP_DIR"
-for df in /opt/yantrik/desktop-files/*.desktop 2>/dev/null; do
-    [ -f "$df" ] && cp "$df" "$DESKTOP_DIR/" && ok "$(basename $df)"
+# `for df in ... 2>/dev/null; do` is not valid shell — a redirection cannot sit in a `for`
+# list — so this was a syntax error, and `bash -n install.sh` failed on it. The whole file
+# therefore could not run at all: a `curl | sh` installer that has never parsed.
+for df in /opt/yantrik/desktop-files/*.desktop; do
+    [ -f "$df" ] || continue
+    # A shelved app's entry is all the launcher needs to list it, so installing one puts the
+    # tile back with nothing behind the click. Same two apps as the APPS list above, and the
+    # same caveat: this is a copy of a decision recorded in the repository, which this script
+    # cannot read. The shelf is SHELVED in crates/yantrik-ui/src/wire/dock.rs.
+    case "$(basename "$df")" in
+        yantrik-music-player.desktop|yantrik-spreadsheet.desktop) continue ;;
+    esac
+    cp "$df" "$DESKTOP_DIR/" && ok "$(basename "$df")"
 done
 
 echo

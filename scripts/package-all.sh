@@ -1,18 +1,43 @@
 #!/usr/bin/env bash
 # Package all built binaries as component tarballs
-# Run inside WSL: bash /home/yantrik/src/yantrik-os/scripts/package-all.sh
+# Run inside WSL: bash scripts/package-all.sh
 set -eu
 
-TARGET_DIR=/home/yantrik/target-yantrik/release
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Where cargo actually writes, asked of cargo. This used to be /home/yantrik/target-yantrik —
+# one developer's home directory — so on any other machine it packaged nothing and said "SKIP"
+# twenty-five times in a row, which reads like a result.
+TARGET_DIR="${TARGET_DIR:-$( \
+  cd "$PROJECT_ROOT" && cargo metadata --format-version 1 --no-deps --offline 2>/dev/null \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release}"
+[ -d "$TARGET_DIR" ] || { echo "no release directory at $TARGET_DIR" >&2; exit 1; }
+
 STAGING=/tmp/ypub-all
 OUTPUT_DIR=/tmp/yantrik-components
 rm -rf "$STAGING" "$OUTPUT_DIR"
 mkdir -p "$STAGING" "$OUTPUT_DIR"
 
-BINARIES="yantrik-ui yantrik weather-service system-monitor-service notes-service notifications-service calendar-service network-service email-service yantrik-notes yantrik-email yantrik-calendar yantrik-weather yantrik-system-monitor yantrik-terminal yantrik-music-player yantrik-text-editor yantrik-image-viewer yantrik-spreadsheet yantrik-document-editor yantrik-presentation yantrik-network-manager yantrik-container-manager yantrik-download-manager yantrik-snippet-manager"
-VERSION="0.3.0"
+# What the OS is made of is discovered, never listed here — the rule build-release.sh already
+# follows. The list that used to live on this line named twenty-five binaries: it had gone
+# stale in both directions at once, missing a11y-service and perception-service (so no machine
+# fed from these components had them) while still naming the two shelved apps (so every machine
+# fed from them got Music and ySheets back, which the shipped launcher refuses to open).
+SHELVED_BINS="$("$PROJECT_ROOT/deploy/yantrik-os/shelved-bins.sh" | paste -sd' ' -)"
+BINARIES="$(
+  find "$TARGET_DIR" -maxdepth 1 -type f -executable \
+    ! -name ".*" ! -name "*.so" ! -name "*.d" ! -name "*.rlib" ! -name "build-script*" \
+    ! -name "test-*" ! -name "*-test" ! -name "bench-*" \
+    -printf '%f\n' | sort | grep -vxF "$(printf '%s\n' $SHELVED_BINS)" | paste -sd' ' -
+)"
+[ -n "$BINARIES" ] || { echo "no binaries found in $TARGET_DIR" >&2; exit 1; }
+for b in $SHELVED_BINS; do
+    [ -f "$TARGET_DIR/$b" ] && echo "SHELVED (not packaged): $b"
+done
+
+VERSION="$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null || echo 0.0.0-unknown)"
 TARGET="x86_64-unknown-linux-gnu"
-GIT_SHA=$(cd /home/yantrik/src/yantrik-os && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_SHA=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
 COMPONENTS_JSON="{"
 FIRST=true

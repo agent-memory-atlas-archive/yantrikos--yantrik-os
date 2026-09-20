@@ -41,15 +41,38 @@ SESSION_UNIT="${YANTRIK_SESSION_UNIT:-yantrik-session.service}"
 LOG_DIR="$PREFIX/logs"
 LOG_FILE="$LOG_DIR/yantrik-os.log"
 
-# Config file may set CHANNEL and HOST. It is plain KEY=value, sourced only for those two.
+# Config file may set CHANNEL, HOST and SCHEME. Plain KEY=value, sourced only for those.
+#
+# ── One host, and no second address ──
+#
+# This script used to carry a hardcoded fallback to a private address on the author's home
+# network, tried for both the manifest read and the bundle download whenever HOST did not
+# answer. The sha256 check did not make that safe: the checksum comes out of the same
+# manifest, from the same host, over the same connection, so it verified nothing. The full
+# account is in design/iso-release-2026-09-20.md §3 — deliberately there and not here,
+# because this file is installed on every machine and a postmortem naming somebody's LAN is
+# not something to ship a copy of to strangers.
+#
+# A machine that wants a different server, private or otherwise, sets HOST in
+# /opt/yantrik/update.conf. That is the supported way, and it is the only way.
 CHANNEL_DEFAULT="stable"
 HOST_DEFAULT="releases.yantrikos.com"
+# https by default, because the manifest is what decides which bytes get installed and a
+# plaintext manifest is modifiable by anyone on the path. update.conf may set SCHEME=http for
+# a server that has no certificate; that is a choice someone makes about their own machine.
+SCHEME_DEFAULT="https"
 if [ -f "$CONF" ]; then
   # shellcheck disable=SC1090
   . "$CONF"
 fi
 CHANNEL="${CHANNEL:-$CHANNEL_DEFAULT}"
 HOST="${HOST:-$HOST_DEFAULT}"
+SCHEME="${SCHEME:-$SCHEME_DEFAULT}"
+# Checked here with a bare echo rather than fail(): the helpers are defined below this point.
+case "$SCHEME" in
+  http|https) ;;
+  *) echo "SCHEME in $CONF must be http or https, not '$SCHEME'" >&2; exit 2 ;;
+esac
 
 # ── Small helpers ───────────────────────────────────────────────────────────────────────
 c_bold=$'\033[1m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_dim=$'\033[2m'; c_off=$'\033[0m'
@@ -75,22 +98,24 @@ parse_channel() {
 manifest_field() {
   # $1 = channel, $2 = field. HOST comes through the environment so the quoted heredoc below
   # stays literal (expanding a shell var inside it is how you ship a malformed request).
-  YANTRIK_UPDATE_HOST="$HOST" python3 - "$1" "$2" <<'PY' 2>/dev/null
+  YANTRIK_UPDATE_HOST="$HOST" YANTRIK_UPDATE_SCHEME="$SCHEME" \
+  python3 - "$1" "$2" <<'PY' 2>/dev/null
 import sys, os, json, urllib.request
 channel, field = sys.argv[1], sys.argv[2]
 host = os.environ.get("YANTRIK_UPDATE_HOST", "releases.yantrikos.com")
-for url in (f"http://{host}/manifest.json", "http://192.168.4.28/manifest.json"):
-    try:
-        with urllib.request.urlopen(url, timeout=10) as r:
-            m = json.load(r)
-        ch = m.get("channels", {}).get(channel, {})
-        v = ch.get(field, "")
-        if v != "":
-            print(v)
-        sys.exit(0)
-    except Exception:
-        continue
-sys.exit(1)
+scheme = os.environ.get("YANTRIK_UPDATE_SCHEME", "https")
+# One URL. The second entry here used to be a literal private address on the author's LAN,
+# tried on every machine this OS was ever installed on; see the note beside HOST_DEFAULT.
+try:
+    with urllib.request.urlopen(f"{scheme}://{host}/manifest.json", timeout=10) as r:
+        m = json.load(r)
+    ch = m.get("channels", {}).get(channel, {})
+    v = ch.get(field, "")
+    if v != "":
+        print(v)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
 PY
 }
 
@@ -202,13 +227,12 @@ cmd_apply() {
   local dl="$UPDATES_DIR/$artifact"
 
   say "Downloading $artifact"
-  local url="http://$HOST/$CHANNEL/$artifact"
-  if ! curl -fL --retry 3 --connect-timeout 15 -o "$dl" "$url"; then
-    # Fall back to the release server's IP, the same way the manifest read does.
-    warn "download from $HOST failed; trying 192.168.4.28"
-    curl -fL --retry 3 --connect-timeout 15 -o "$dl" "http://192.168.4.28/$CHANNEL/$artifact" \
-      || fail "could not download the update bundle"
-  fi
+  local url="$SCHEME://$HOST/$CHANNEL/$artifact"
+  # One host, and a failure is a failure. This used to fall back to a hardcoded private
+  # address when $HOST did not answer — so the way to get this machine to install your
+  # tarball was to make its usual server unreachable and answer at that address instead.
+  curl -fL --retry 3 --connect-timeout 15 -o "$dl" "$url" \
+    || fail "could not download the update bundle from $url"
 
   say "Verifying"
   local got; got="$(sha256sum "$dl" | awk '{print $1}')"

@@ -963,12 +963,36 @@ mod tests {
         let Ok(text) = std::fs::read_to_string(&script) else {
             return; // Packaged source without the deploy tree; nothing to check against.
         };
+        // The release script used to carry its own copy of the shelf and this test read the
+        // names out of it. Five scripts carried such a copy and four were wrong, so the list
+        // is no longer written down anywhere but here: `shelved-bins.sh` reads the table above
+        // and every packaging script asks it. What can still go wrong is a script that stops
+        // asking, or a reader that stops reading this file — so that is what is checked.
+        assert!(
+            text.contains("shelved-bins.sh"),
+            "{} no longer asks shelved-bins.sh what is shelved, so a release would ship it all",
+            script.display()
+        );
+        let reader = script.with_file_name("shelved-bins.sh");
+        let reader_text = std::fs::read_to_string(&reader)
+            .unwrap_or_else(|e| panic!("{} is missing: {e}", reader.display()));
+        assert!(
+            reader_text.contains("crates/yantrik-ui/src/wire/dock.rs"),
+            "{} does not read the SHELVED table in dock.rs",
+            reader.display()
+        );
+        // Its sed pattern takes `binary: "…"` lines that start with whitespace. Hold the table
+        // to that shape, or an entry reformatted onto one line would silently leave the shelf.
+        let this_file = include_str!("dock.rs");
         for shelf in SHELVED {
+            let as_the_script_sees_it = this_file.lines().any(|line| {
+                line.starts_with(char::is_whitespace)
+                    && line.trim_start().starts_with(&format!("binary: \"{}\"", shelf.binary))
+            });
             assert!(
-                text.contains(shelf.binary),
-                "{} is shelved but {} does not exclude it, so a release would ship it",
-                shelf.binary,
-                script.display()
+                as_the_script_sees_it,
+                "{} is shelved but not written the way shelved-bins.sh reads it",
+                shelf.binary
             );
         }
     }

@@ -26,6 +26,28 @@ step() { echo -e "${GREEN}==> $1${NC}"; }
 warn() { echo -e "${YELLOW}    $1${NC}"; }
 fail() { echo -e "${RED}!!! $1${NC}"; exit 1; }
 
+# ── What this build does not ship ──
+#
+# The shelf is SHELVED in crates/yantrik-ui/src/wire/dock.rs and deploy/yantrik-os/shelved-bins.sh
+# reads it. Before that existed this script carried its own copy of the app list and nobody
+# updated it, so `./deploy.sh` compiled Music and ySheets and copied them into /opt/yantrik/bin
+# on a machine whose launcher refuses to open either — the tile reappears, the click does
+# nothing, and the release tarball and the dev machine disagree about what the OS is.
+SHELVED_BINS="$("$(cd "$(dirname "$0")" && pwd)/deploy/yantrik-os/shelved-bins.sh" | paste -sd' ' -)" \
+    || fail "cannot determine which apps are shelved"
+# Drops shelved names from a list of binaries, and `-p name` pairs from a list of cargo
+# arguments. Whitespace (including the backslash-newlines the lists below are written with)
+# is flattened to single spaces first, so one rule handles both shapes.
+drop_shelved() {
+    local s b
+    s="$(printf '%s' "$1" | tr '\n\\\t' '   ' | tr -s ' ')"
+    for b in $SHELVED_BINS; do
+        # Padded both ends so the first and last entries match the same rule as the middle.
+        s="$(printf ' %s ' "$s" | sed "s/ -p $b / /g; s/ $b / /g")"
+    done
+    printf '%s' "$s" | tr -s ' ' | sed 's/^ *//; s/ *$//'
+}
+
 # Determine build profile
 PROFILE="release"
 PROFILE_FLAG="--release"
@@ -69,9 +91,11 @@ if [ "${1:-}" != "--skip-build" ]; then
             -p yantrik-spreadsheet -p yantrik-document-editor -p yantrik-presentation \
             -p yantrik-network-manager -p yantrik-container-manager \
             -p yantrik-download-manager -p yantrik-snippet-manager"
+        PACKAGES="$(drop_shelved "$PACKAGES")"
         step "Building ALL packages ($PROFILE) via WSL2..."
     else
         PACKAGES="-p yantrik-ui -p yantrik -p weather-service -p system-monitor-service -p notes-service -p notifications-service -p calendar-service -p network-service -p email-service -p a11y-service -p perception-service -p yantrik-notes -p yantrik-email -p yantrik-calendar -p yantrik-weather -p yantrik-music-player -p yantrik-network-manager -p yantrik-system-monitor -p yantrik-download-manager -p yantrik-snippet-manager -p yantrik-container-manager -p yantrik-spreadsheet -p yantrik-document-editor -p yantrik-presentation -p yantrik-terminal"
+        PACKAGES="$(drop_shelved "$PACKAGES")"
         step "Building core packages ($PROFILE) via WSL2... (set BUILD_ALL=1 for all)"
     fi
 
@@ -116,6 +140,7 @@ wsl.exe -d Ubuntu -- bash -lc "
 # Step 2a2: Deploy app binaries
 step "Deploying apps..."
 APPS="yantrik-notes yantrik-email yantrik-calendar yantrik-weather yantrik-system-monitor yantrik-terminal yantrik-music-player yantrik-text-editor yantrik-image-viewer yantrik-spreadsheet yantrik-document-editor yantrik-presentation yantrik-network-manager yantrik-container-manager yantrik-download-manager yantrik-snippet-manager"
+APPS="$(drop_shelved "$APPS")"
 wsl.exe -d Ubuntu -- bash -lc "
     for app in $APPS; do
         if [ -f $WSL_TARGET/$PROFILE/\$app ]; then
@@ -148,7 +173,10 @@ DESKTOP_SRC="$WSL_SRC/apps/desktop-files"
 wsl.exe -d Ubuntu -- bash -lc "
     if [ -d '$DESKTOP_SRC' ]; then
         sudo mkdir -p /usr/share/applications &&
-        sudo cp $DESKTOP_SRC/*.desktop /usr/share/applications/ 2>/dev/null
+        sudo cp $DESKTOP_SRC/*.desktop /usr/share/applications/ 2>/dev/null;
+        # An installed .desktop entry is all the launcher needs to list an app, so a shelved
+        # app's entry puts the tile back with nothing behind the click.
+        for b in $SHELVED_BINS; do sudo rm -f /usr/share/applications/\$b.desktop; done
     fi
 " || warn "Failed to deploy .desktop files (non-fatal)"
 

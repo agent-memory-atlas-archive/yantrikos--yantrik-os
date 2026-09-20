@@ -34,6 +34,22 @@ step() { echo -e "${GREEN}==> $1${NC}"; }
 warn() { echo -e "${YELLOW}    $1${NC}"; }
 fail() { echo -e "${RED}!!! $1${NC}"; exit 1; }
 
+# ── What this build does not publish ──
+#
+# The shelf is SHELVED in crates/yantrik-ui/src/wire/dock.rs; deploy/yantrik-os/shelved-bins.sh
+# reads it. The component tables below used to name the shelved apps, so the component registry
+# served Music and ySheets to every machine that pulled from it while the release tarball, built
+# from the same tree on the same day by build-release.sh, deliberately left them out. Two
+# answers to "what is this OS made of", from one repository.
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SHELVED_BINS="$("$PROJECT_ROOT/deploy/yantrik-os/shelved-bins.sh" | paste -sd' ' -)" \
+    || fail "cannot determine which apps are shelved"
+is_shelved() {
+    local b
+    for b in $SHELVED_BINS; do [ "$1" = "$b" ] && return 0; done
+    return 1
+}
+
 # Component definitions: name -> binary name in target/release/
 declare -A CORE_COMPONENTS=(
     ["yantrik-ui"]="yantrik-ui"
@@ -98,8 +114,8 @@ if [ "$SKIP_BUILD" = false ]; then
             -p email-service \
             -p yantrik-notes -p yantrik-email -p yantrik-calendar \
             -p yantrik-weather -p yantrik-system-monitor -p yantrik-terminal \
-            -p yantrik-music-player -p yantrik-text-editor -p yantrik-image-viewer \
-            -p yantrik-spreadsheet -p yantrik-document-editor -p yantrik-presentation \
+            -p yantrik-text-editor -p yantrik-image-viewer \
+            -p yantrik-document-editor -p yantrik-presentation \
             -p yantrik-network-manager -p yantrik-container-manager \
             -p yantrik-download-manager -p yantrik-snippet-manager \
          2>&1" || fail "Build failed!"
@@ -172,12 +188,15 @@ METAEOF
 
 # Publish all components
 for name in "${!CORE_COMPONENTS[@]}"; do
+    if is_shelved "${CORE_COMPONENTS[$name]}"; then warn "shelved, not published: $name"; continue; fi
     publish_component "$name" "${CORE_COMPONENTS[$name]}"
 done
 for name in "${!SERVICE_COMPONENTS[@]}"; do
+    if is_shelved "${SERVICE_COMPONENTS[$name]}"; then warn "shelved, not published: $name"; continue; fi
     publish_component "$name" "${SERVICE_COMPONENTS[$name]}"
 done
 for name in "${!APP_COMPONENTS[@]}"; do
+    if is_shelved "${APP_COMPONENTS[$name]}"; then warn "shelved, not published: $name"; continue; fi
     publish_component "$name" "${APP_COMPONENTS[$name]}"
 done
 
@@ -200,9 +219,8 @@ binary_names = {
     'yantrik-notes': 'yantrik-notes', 'yantrik-email': 'yantrik-email',
     'yantrik-calendar': 'yantrik-calendar', 'yantrik-weather': 'yantrik-weather',
     'yantrik-system-monitor': 'yantrik-system-monitor', 'yantrik-terminal': 'yantrik-terminal',
-    'yantrik-music-player': 'yantrik-music-player', 'yantrik-text-editor': 'yantrik-text-editor',
-    'yantrik-image-viewer': 'yantrik-image-viewer', 'yantrik-spreadsheet': 'yantrik-spreadsheet',
-    'yantrik-document-editor': 'yantrik-document-editor', 'yantrik-presentation': 'yantrik-presentation',
+'yantrik-text-editor': 'yantrik-text-editor',
+    'yantrik-image-viewer': 'yantrik-image-viewer',     'yantrik-document-editor': 'yantrik-document-editor', 'yantrik-presentation': 'yantrik-presentation',
     'yantrik-network-manager': 'yantrik-network-manager', 'yantrik-container-manager': 'yantrik-container-manager',
     'yantrik-download-manager': 'yantrik-download-manager', 'yantrik-snippet-manager': 'yantrik-snippet-manager',
 }
