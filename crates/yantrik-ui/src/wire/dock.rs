@@ -399,11 +399,29 @@ const BROWSERS: &[(&str, &[&str])] = &[
     ("epiphany", &[]),
 ];
 
+/// How the desktop starts a Chromium-family browser.
+///
+/// The three debugging flags are what make the browser one of this desktop's apps rather than a
+/// window a mind can only look at. `yos web` — and through it a harness's `web_read`, `web_find`,
+/// `web_click` — drives the page over the DevTools protocol, and the browser this launcher
+/// started had no DevTools port: the first mind asked to research something was told "no browser
+/// with a debug port on 9222", on a desktop whose dock had a browser open. The built-in companion
+/// never hit it because it launches its own.
+///
+/// Loopback only, and only the origin `yos` itself presents: `--remote-allow-origins=*` would
+/// let any web page's script open the socket if it learned a target id. What this does grant is
+/// what it sounds like — a process running as this user can drive this browser — which such a
+/// process could already do by reading the profile on disk. The gates a MIND meets are at the
+/// bridge: plan mode, the taint rule, and the refusal to press anything that reads as a
+/// commitment.
 const CHROMIUM_FLAGS: &[&str] = &[
     "--ozone-platform=wayland",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-gpu",
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-debugging-port=9222",
+    "--remote-allow-origins=http://127.0.0.1:9222",
 ];
 
 /// The first browser from `BROWSERS` this machine has.

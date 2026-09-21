@@ -556,8 +556,12 @@ def _page():
     try:
         tabs = json.load(urllib.request.urlopen(CDP + "/json/list", timeout=5))
     except urllib.error.URLError:
-        die("no browser with a debug port on 9222 (launch chromium with "
-            "--remote-debugging-port=9222 --remote-allow-origins=*)")
+        # The way forward, not a flag recipe: the desktop's own launcher starts the browser
+        # drivable, so the answer to "no browser" is to open it. (A browser somebody started by
+        # hand, or one from before this build, has no port — closing and reopening it fixes that.)
+        die("no browser this desktop can drive is open. Open it: yos act shell open_app "
+            "name=browser — then `yos web go <url>`. If a browser window is already open, it "
+            "was not started by the desktop; close it and open it that way.")
     pages = [t for t in tabs if t.get("type") == "page"]
     if not pages:
         die("the browser is running but has no page open")
