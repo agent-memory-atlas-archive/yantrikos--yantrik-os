@@ -11,6 +11,7 @@ use std::{
     },
     time::Duration,
 };
+use yantrik_app_runtime::control::{Action, App, Param, View};
 use yantrik_app_runtime::prelude::*;
 use yantrik_terminal::Session;
 slint::include_modules!();
@@ -37,10 +38,13 @@ impl Workbench {
     fn session(&self) -> Option<&Session> {
         self.tabs.get(self.active).map(|t| &t.session)
     }
-    fn new_tab(&mut self, ui: &TerminalApp) {
-        if self.tabs.len() >= 8 {
-            return;
-        }
+    /// Open a tab beside the active one, in the same directory the active shell is sitting in.
+    ///
+    /// Returns the reason it could not, rather than only painting it: the eight-tab cap used to
+    /// `return` here in silence, so the New Tab button did nothing and said nothing — and the
+    /// control surface, which had no way to find out, answered `{"tabs": 8}` as though it had
+    /// opened one. The notice is still set here so the person at the window sees it too.
+    fn new_tab(&mut self, ui: &TerminalApp) -> Result<(), String> {
         let dir = self
             .session()
             .map(Session::cwd)
@@ -48,9 +52,11 @@ impl Workbench {
             .or_else(|| std::env::current_dir().ok())
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"));
-        if let Err(e) = self.new_tab_at(ui, &dir) {
-            ui.set_notice(e.into());
+        let result = self.new_tab_at(ui, &dir);
+        if let Err(e) = &result {
+            ui.set_notice(e.clone().into());
         }
+        result
     }
     fn new_tab_at(&mut self, ui: &TerminalApp, dir: &std::path::Path) -> Result<(), String> {
         if self.tabs.len() >= 8 {
@@ -422,7 +428,7 @@ fn wire(ui: &TerminalApp, publish: bool) -> State {
     if publish {
         publish_control(ui, state.clone());
     }
-    state.borrow_mut().new_tab(ui);
+    let _ = state.borrow_mut().new_tab(ui);
     state
 }
 
@@ -459,7 +465,7 @@ fn action(ui: &TerminalApp, state: &State, id: &str) {
     }
     let mut s = state.borrow_mut();
     match id {
-        "new" => s.new_tab(ui),
+        "new" => drop(s.new_tab(ui)),
         "close" => {
             let i = s.active;
             s.close(i, ui, false);
@@ -481,7 +487,7 @@ fn action(ui: &TerminalApp, state: &State, id: &str) {
                     s.tabs.remove(i);
                 }
                 s.active = s.active.min(s.tabs.len().saturating_sub(1));
-                s.new_tab(ui);
+                let _ = s.new_tab(ui);
             }
         }
         "live" => {
@@ -688,75 +694,386 @@ fn encode_key(
     }
     Some(result)
 }
-fn publish_control(ui: &TerminalApp, state: State) {
-    use yantrik_app_runtime::control::{Action, App, Param, View};
-    let s = state.clone();
-    let app = App::new("terminal").describe(move || {
-        let s = s.borrow();
-        let Some(session) = s.session() else {
-            return View::new("Terminal — no sessions");
-        };
-        let snap = session.snapshot();
-        View::new(format!("Terminal — {}", session.cwd().display()))
-            .with("directory", session.cwd().to_string_lossy().into_owned())
-            .with("alive", snap.alive)
-            .with("tabs", s.tabs.len())
-            .with("active_tab", s.active)
-            .with("execution", "interactive_pty")
-            .with("shell_exit_code", snap.exit)
-            .with("error", snap.error)
-            .with("recent_output", snap.text)
-    });
-    let s = state.clone();
-    let app=app.action(Action::new("run","Submit a command line to the active PTY; read describe for subsequent output. This does not wait for completion.").risk("sensitive")
-        .arg(Param::text("command").describe("Command line sent to the current interactive session")),move|args|{
-            let command=args["command"].as_str().filter(|s|!s.trim().is_empty()).ok_or("command is empty")?;
-            let s=s.borrow();let session=s.session().ok_or("No active session")?;
-            session.set_scrollback(0);session.write(format!("{command}\r").as_bytes())?;
-            Ok(serde_json::json!({"accepted":true,"completed":false,"shell_pid":session.pid()}))
+// ── What the mind is shown, and what it is told afterwards ─────────────────
+//
+// Terminal's four actions were the best-described of the three apps a mind uses most, and still
+// answered nothing that had been observed: `run` answered `{"accepted": true, "completed":
+// false, "shell_pid": …}` — while the envelope around it said `settled: true`, because the action
+// never declared that it only starts the work — `send_input` answered `{"accepted": true}`, and
+// `new_tab` answered `{"tabs": n}` whether or not a tab had opened, because the eight-tab cap
+// returned in silence. Two of the four arguments had no description at all.
+
+/// A refusal the person at the window sees too.
+///
+/// Contract point 4: failure is said twice — to the caller, and in the app's `notice`, which is
+/// `describe.notice` and the line under the terminal screen.
+fn refuse(ui: &TerminalApp, message: impl Into<String>) -> String {
+    let message = message.into();
+    ui.set_notice(message.clone().into());
+    message
+}
+
+/// One action, with the one sentence a reader who cannot see the screen needs.
+///
+/// The same guard Notes and the Editor grew when their `for name in [...]` loops were taken out:
+/// a description that is only the action's name, or too short to say what it does and to which
+/// shell, stops the app before `serve()` and inside the tests.
+fn act(name: &'static str, sentence: &'static str) -> Action {
+    assert!(
+        sentence.len() >= 20 && !sentence.starts_with("Terminal:"),
+        "terminal action `{name}` was given a placeholder description: {sentence:?}"
+    );
+    Action::new(name, sentence)
+}
+
+/// One argument, with the format it takes and what leaving it out means. Required by default.
+fn arg(name: &'static str, sentence: &'static str) -> Param {
+    assert!(
+        sentence.len() >= 15,
+        "terminal argument `{name}` was given no usable description: {sentence:?}"
+    );
+    Param::text(name).describe(sentence)
+}
+
+/// The name of the shell's foreground job, if it has one.
+///
+/// `has_children` already reads `/proc/<pid>/task/<pid>/children` to answer whether something is
+/// running; the same file names it, and "running: sleep" is the difference between a summary a
+/// mind can act on and one that only says a directory.
+fn running(pid: u32) -> Option<String> {
+    let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).ok()?;
+    let child = children.split_whitespace().next()?;
+    let name = std::fs::read_to_string(format!("/proc/{child}/comm")).ok()?;
+    let name = name.trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The last few lines the screen actually shows — what a person looking at it would read.
+fn tail(text: &str, lines: usize) -> String {
+    let kept: Vec<&str> = text.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect();
+    kept[kept.len().saturating_sub(lines)..].join("\n")
+}
+
+/// What appeared on the screen after the command was sent: the lines the old screen did not have.
+///
+/// This is the closest thing to "the command's output" that an interactive shell can honestly
+/// give in the time one call has. It is not the exit status — nothing short of waiting for the
+/// command, or echoing a sentinel into the person's own terminal, can know that — so a caller
+/// that needs one asks for it: `run command="make; echo exit=$?"`. If the screen scrolled, the
+/// lines in common are gone and this is simply what is on it now.
+fn appeared(before: &str, after: &str) -> String {
+    let was: Vec<&str> = before.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect();
+    let now: Vec<&str> = after.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect();
+    let mut same = 0;
+    while same < was.len().min(now.len()) && was[same] == now[same] {
+        same += 1;
+    }
+    now[same..].join("\n")
+}
+
+/// Wait, bounded, for the shell to begin answering, and say whether it did.
+///
+/// A PTY write returns as soon as the bytes are queued: nothing has run yet. So `run` and
+/// `send_input` declare `defers` — the envelope then says `settled: false` and the caller is told
+/// to look again rather than reporting a command as finished the moment it was typed — but
+/// "accepted" alone is still an answer that reports nothing observed. This waits for the
+/// session's revision to move, which is the shell echoing or printing, and then the answer can
+/// carry what came back. It is deliberately *not* waiting for the command to finish: `sleep 30`
+/// takes thirty seconds and the runtime gives the whole call three.
+fn responded(session: &Session, before: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_millis(900);
+    while session.revision() == before && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    session.revision() != before
+}
+
+/// What the active shell now is, read back off the PTY rather than assumed.
+fn shell_now(ui: &TerminalApp, s: &Workbench) -> serde_json::Value {
+    let Some(session) = s.session() else {
+        return serde_json::json!({
+            "tabs": 0,
+            "alive": false,
+            "notice": ui.get_notice().to_string(),
         });
-    let s = state.clone();
-    let app = app.action(
-        Action::new(
-            "send_input",
-            "Send text or control characters to the active PTY",
+    };
+    let snap = session.snapshot();
+    serde_json::json!({
+        "directory": session.cwd().display().to_string(),
+        "tab": s.active,
+        "tabs": s.tabs.len(),
+        "shell_pid": session.pid(),
+        "alive": snap.alive,
+        "running": running(session.pid()),
+        "shell_exit_code": snap.exit,
+        "screen_tail": tail(&snap.text, 12),
+        "error": snap.error,
+        "notice": ui.get_notice().to_string(),
+    })
+}
+
+/// The one line a mind reads first.
+///
+/// This used to be `Terminal — <cwd>`, which is the one thing about a terminal that a mind can
+/// already get from `cd`: it did not say whether the shell was alive, whether a command was
+/// running in it, or how many tabs there were to choose from.
+fn view(ui: &TerminalApp, s: &Workbench) -> View {
+    let notice = ui.get_notice().to_string();
+    let Some(session) = s.session() else {
+        let mut summary = "Terminal — no shell is open; `new_tab` starts one".to_string();
+        if !notice.is_empty() {
+            summary.push_str(&format!(" · {notice}"));
+        }
+        return View::new(summary)
+            .with("tabs", 0)
+            .with("alive", false)
+            .with("execution", "interactive_pty")
+            .with("notice", notice);
+    };
+    let snap = session.snapshot();
+    let busy = running(session.pid());
+    let mut summary = format!(
+        "Terminal — {}, {}",
+        session.cwd().display(),
+        if !snap.alive {
+            snap.exit
+                .map(|n| format!("shell exited (status {n}); `new_tab` starts another"))
+                .unwrap_or_else(|| "the shell has ended".to_string())
+        } else {
+            match &busy {
+                Some(job) => format!("running: {job}"),
+                None => "shell idle at a prompt".to_string(),
+            }
+        }
+    );
+    if s.tabs.len() > 1 {
+        summary.push_str(&format!(", tab {} of {}", s.active + 1, s.tabs.len()));
+    }
+    if snap.scrollback > 0 {
+        summary.push_str(&format!(", scrolled back {} lines", snap.scrollback));
+    }
+    if !notice.is_empty() {
+        summary.push_str(&format!(" · {notice}"));
+    }
+    View::new(summary)
+        .with("directory", session.cwd().to_string_lossy().into_owned())
+        .with("alive", snap.alive)
+        .with("running", busy)
+        .with("shell_pid", session.pid())
+        .with("tabs", s.tabs.len())
+        .with("active_tab", s.active)
+        .with(
+            "tab_directories",
+            s.tabs
+                .iter()
+                .map(|t| t.session.cwd().display().to_string())
+                .collect::<Vec<_>>(),
+        )
+        .with("execution", "interactive_pty")
+        .with("shell_exit_code", snap.exit)
+        .with("scrollback", snap.scrollback as i64)
+        .with("error", snap.error)
+        .with("notice", notice)
+        .with("recent_output", snap.text)
+}
+
+/// One published action: what it says it does, and the code that does it.
+type Handler = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
+
+/// Everything this window offers a mind.
+///
+/// Built as a list rather than pushed straight into `App` so the tests can read exactly what a
+/// mind is shown and run a handler without a socket.
+fn surface(ui: &TerminalApp, state: &State) -> Vec<(Action, Handler)> {
+    let window = {
+        let weak = ui.as_weak();
+        move || weak.upgrade().ok_or_else(|| "The Terminal window is gone.".to_string())
+    };
+    let mut out: Vec<(Action, Handler)> = Vec::new();
+    let mut add =
+        |spec: Action,
+         run: fn(&TerminalApp, &State, &serde_json::Value) -> Result<serde_json::Value, String>| {
+            let window = window.clone();
+            let state = state.clone();
+            out.push((
+                spec,
+                Box::new(move |args: &serde_json::Value| {
+                    let ui = window()?;
+                    run(&ui, &state, args)
+                }) as Handler,
+            ));
+        };
+
+    add(
+        // Sensitive, and deliberately not raised further: this hands a line to the interactive
+        // shell the person is looking at, which is the whole of what a terminal is for, and a
+        // `dangerous` grade would put it above the shipped `sensitive` ceiling and leave the app
+        // publishing nothing a mind could use. What the command itself may destroy is the
+        // machine's ceiling to decide — `tool_permission` in settings.yaml — not this app's, and
+        // the person can see and interrupt every line that arrives.
+        act(
+            "run",
+            "Type a command line into the active shell and press Return. It does not wait for \
+             the command to finish: the answer carries what the shell printed in the moment \
+             after, `running` names anything still going, and `describe` shows the rest as it \
+             arrives. There is no exit status — ask for one with `; echo exit=$?`.",
         )
         .risk("sensitive")
-        .arg(Param::text("text")),
-        move |args| {
-            let s = s.borrow();
-            let session = s.session().ok_or("No active session")?;
-            session.write(args["text"].as_str().ok_or("text is required")?.as_bytes())?;
-            Ok(serde_json::json!({"accepted":true}))
-        },
-    );
-    let weak = ui.as_weak();
-    let s = state.clone();
-    let app = app.action(
-        Action::new("new_tab", "Open a new interactive shell"),
-        move |_| {
-            let ui = weak.upgrade().ok_or("Terminal is closing")?;
-            s.borrow_mut().new_tab(&ui);
-            Ok(serde_json::json!({"tabs":s.borrow().tabs.len()}))
-        },
-    );
-    let weak = ui.as_weak();
-    app.action(
-        Action::new(
-            "open_directory",
-            "Open a new Terminal tab in an absolute directory",
-        )
-        .arg(Param::text("directory")),
-        move |args| {
-            let dir = PathBuf::from(args["directory"].as_str().ok_or("directory is required")?);
-            if !dir.is_absolute() {
-                return Err("directory must be absolute".into());
+        .defers()
+        .arg(arg(
+            "command",
+            "One command line, exactly as it would be typed; a newline is added. It is \
+             interpreted by the shell, so pipes, redirection and `cd` all work, and `cd` moves \
+             this tab for every command after it.",
+        )),
+        |ui, state, args| {
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| {
+                    refuse(ui, "`run` needs `command`: one command line for the active shell.")
+                })?
+                .to_string();
+            let s = state.borrow();
+            let session = s.session().ok_or_else(|| {
+                refuse(ui, "No shell is open in this Terminal; `new_tab` starts one.")
+            })?;
+            if !session.alive() {
+                return Err(refuse(
+                    ui,
+                    "The shell in this tab has exited; `new_tab` starts another.",
+                ));
             }
-            let ui = weak.upgrade().ok_or("Terminal is closing")?;
-            state.borrow_mut().new_tab_at(&ui, &dir)?;
-            let _ = ui.show();
-            Ok(serde_json::json!({"tabs":state.borrow().tabs.len(),"directory":dir}))
+            let before = session.revision();
+            let screen = session.snapshot().text;
+            session.set_scrollback(0);
+            session.write(format!("{command}\r").as_bytes()).map_err(|e| refuse(ui, e))?;
+            let answered = responded(session, before);
+            let mut out = shell_now(ui, &s);
+            out["sent"] = serde_json::json!(command);
+            out["shell_answered"] = serde_json::json!(answered);
+            // What came back in the time this call has, which is not the same as the command
+            // being over: `running` says whether something is still going, and `settled: false`
+            // on the envelope says this action never waits to find out.
+            out["output"] = serde_json::json!(appeared(&screen, &session.snapshot().text));
+            out["finished"] = serde_json::json!(false);
+            Ok(out)
         },
-    )
-    .serve();
+    );
+
+    add(
+        // Sensitive for the same reason as `run`: whatever is waiting on the other end of the
+        // PTY reads these bytes, and a program at a prompt cannot tell them from typing.
+        act(
+            "send_input",
+            "Send raw bytes to the active shell without pressing Return — for answering a \
+             prompt a running command is waiting on, or sending a control character like \
+             \\u0003 (Ctrl-C) to interrupt it.",
+        )
+        .risk("sensitive")
+        .defers()
+        .arg(arg(
+            "text",
+            "The exact characters to send, with no newline added: end it with \\n to submit a \
+             line. \\u0003 interrupts, \\u0004 is end-of-input. Up to 64 KiB.",
+        )),
+        |ui, state, args| {
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| {
+                    refuse(
+                        ui,
+                        "`send_input` needs `text`: the exact characters to send to the shell.",
+                    )
+                })?
+                .to_string();
+            let s = state.borrow();
+            let session = s.session().ok_or_else(|| {
+                refuse(ui, "No shell is open in this Terminal; `new_tab` starts one.")
+            })?;
+            let was_running = running(session.pid());
+            let before = session.revision();
+            session.write(text.as_bytes()).map_err(|e| refuse(ui, e))?;
+            let answered = responded(session, before);
+            let mut out = shell_now(ui, &s);
+            out["sent_bytes"] = serde_json::json!(text.len());
+            out["shell_answered"] = serde_json::json!(answered);
+            out["was_running"] = serde_json::json!(was_running);
+            Ok(out)
+        },
+    );
+
+    add(
+        // Sensitive: it starts a shell process on this machine. It is the door `run` needs to
+        // exist, and grading the door below the thing it opens would be the grade not meaning it.
+        act(
+            "new_tab",
+            "Start another interactive shell in a new tab, in the same directory as the tab \
+             that is active now, and make the new one active. Up to eight tabs.",
+        )
+        .risk("sensitive"),
+        |ui, state, _| {
+            state.borrow_mut().new_tab(ui)?;
+            let s = state.borrow();
+            Ok(shell_now(ui, &s))
+        },
+    );
+
+    add(
+        // Sensitive: as `new_tab`, and the directory comes from the caller.
+        act(
+            "open_directory",
+            "Start an interactive shell in a new tab whose working directory is this path, make \
+             it active, and bring the Terminal window to the front.",
+        )
+        .risk("sensitive")
+        .arg(arg(
+            "directory",
+            "An absolute path to an existing folder; symlinks are resolved. It is refused if it \
+             is relative, missing, or not a folder.",
+        )),
+        |ui, state, args| {
+            let given = args
+                .get("directory")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .ok_or_else(|| {
+                    refuse(ui, "`open_directory` needs `directory`: an absolute path to a folder.")
+                })?
+                .to_string();
+            let dir = PathBuf::from(&given);
+            if !dir.is_absolute() {
+                return Err(refuse(
+                    ui,
+                    format!("`directory` has to be an absolute path; `{given}` is not one."),
+                ));
+            }
+            state.borrow_mut().new_tab_at(ui, &dir).map_err(|e| refuse(ui, e))?;
+            let _ = ui.show();
+            let s = state.borrow();
+            let mut out = shell_now(ui, &s);
+            out["asked_for"] = serde_json::json!(given);
+            Ok(out)
+        },
+    );
+
+    out
+}
+
+fn publish_control(ui: &TerminalApp, state: State) {
+    let weak = ui.as_weak();
+    let described = state.clone();
+    let mut app = App::new("terminal").describe(move || match weak.upgrade() {
+        Some(ui) => view(&ui, &described.borrow()),
+        None => View::new("Terminal — the window is closed"),
+    });
+    for (spec, run) in surface(ui, &state) {
+        app = app.action(spec, run);
+    }
+    app.serve();
 }

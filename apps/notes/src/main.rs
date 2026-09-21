@@ -3,6 +3,7 @@ mod store;
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::mpsc, time::Duration};
 use store::Note;
+use yantrik_app_runtime::control::{Action, App, Param, View};
 use yantrik_app_runtime::prelude::*;
 slint::include_modules!();
 enum Job {
@@ -25,6 +26,13 @@ enum Event {
 struct Workbench {
     notes: Vec<Note>,
     current: Option<Note>,
+    /// Where the library lives on disk.
+    ///
+    /// The worker owns the only other copy and answers in `Note`s, which carry a filename and no
+    /// directory — so an action could say it had made "note-0199….md" and not where. A caller
+    /// told a filename it cannot find is a caller that has to guess, and `yos act notes new_note`
+    /// is meant to be checkable with `cat`.
+    dir: PathBuf,
     jobs: mpsc::Sender<Job>,
     events: mpsc::Receiver<Event>,
     timer: slint::Timer,
@@ -88,6 +96,7 @@ fn wire(ui: &NotesApp, dir: PathBuf, publish: bool) -> State {
     let (jobs, work) = mpsc::channel();
     let (results, events) = mpsc::channel();
     let weak = ui.as_weak();
+    let library = dir.clone();
     let worker = std::thread::spawn(move || {
         while let Ok(job) = work.recv() {
             let e = match job {
@@ -117,6 +126,7 @@ fn wire(ui: &NotesApp, dir: PathBuf, publish: bool) -> State {
     let s = Rc::new(RefCell::new(Workbench {
         notes: vec![],
         current: None,
+        dir: library,
         jobs,
         events,
         timer: slint::Timer::default(),
@@ -662,8 +672,10 @@ fn action(ui: &NotesApp, s: &State, id: &str) {
     }
     ui.set_notice("".into());
     match id {
-        "new" => new(ui, s, "Untitled"),
-        a if a.starts_with("new:") => new(ui, s, &a[4..]),
+        // The button path ignores the new note's filename; the control surface does not — see
+        // `new`, which now answers with it so an action can say which note it made.
+        "new" => drop(new(ui, s, "Untitled", "")),
+        a if a.starts_with("new:") => drop(new(ui, s, &a[4..], "")),
         a if a.starts_with("open:") => {
             let key = &a[5..];
             let (trash, id) = key
@@ -774,14 +786,35 @@ fn action(ui: &NotesApp, s: &State, id: &str) {
         _ => {}
     }
 }
-fn new(ui: &NotesApp, s: &State, title: &str) {
+/// Start a new note titled `title`, with `body` under the heading, and open it.
+///
+/// `body` exists because "create a note titled Groceries listing milk, eggs and bread" was three
+/// calls on this surface — `new_note`, `append`, `save` — and a 27B model measured on the desktop
+/// made the first two and produced a note with no title at all, because nothing it was shown said
+/// `new_note` takes the title or that the title is the note's `# heading` line. One call that
+/// takes both is the fix a small model can actually follow.
+///
+/// Returns the new note's filename. The window's own New button has no use for it; every caller
+/// that has to report what it did does.
+fn new(ui: &NotesApp, s: &State, title: &str, body: &str) -> Result<String, String> {
     if s.borrow().notes.len() >= 2000
-        || s.borrow().notes.iter().map(|n| n.text.len()).sum::<usize>() + 1024 > store::VAULT_LIMIT
+        || s.borrow().notes.iter().map(|n| n.text.len()).sum::<usize>() + 1024 + body.len()
+            > store::VAULT_LIMIT
     {
-        ui.set_notice("The library supports up to 2,000 notes.".into());
-        return;
+        return Err(refuse(
+            ui,
+            "The library supports up to 2,000 notes and 32 MiB of text. Nothing was created.",
+        ));
     }
-    let n = Note::blank(&title.chars().take(160).collect::<String>());
+    let mut n = Note::blank(&title.chars().take(160).collect::<String>());
+    if !body.is_empty() {
+        n.text.push_str(body);
+        if !n.text.ends_with('\n') {
+            n.text.push('\n');
+        }
+    }
+    store::validate(&n.text).map_err(|e| refuse(ui, e))?;
+    let id = n.id.clone();
     let mut b = s.borrow_mut();
     b.notes.push(n.clone());
     b.current = Some(n);
@@ -793,139 +826,969 @@ fn new(ui: &NotesApp, s: &State, title: &str) {
     show(ui, s);
     ui.invoke_caret(ui.get_content().len() as i32);
     save(ui, s);
+    Ok(id)
 }
-fn control(ui: &NotesApp, s: &State) {
-    use yantrik_app_runtime::control::{Action, App, Param, View};
-    let w = ui.as_weak();
-    let b = s.clone();
-    let mut app=App::new("notes").describe(move||{
-  let Some(u)=w.upgrade()else{return View::new("Notes closed")};let b=b.borrow();let n=b.current.as_ref();
-  View::new("Notes").with("open_note",n.map(|n|n.id.clone())).with("title",n.map(Note::title)).with("unsaved",n.is_some_and(Note::dirty)).with("content",n.map(|n|n.text.chars().take(4000).collect::<String>())).with("busy",u.get_busy()).with("notice",u.get_notice().to_string()).with("status",u.get_status().to_string()).with("folder",u.get_folder().to_string()).with("preview",u.get_preview()).with("focus",u.get_focus_mode()).with("note_count",u.get_all_count()).with("trash_count",u.get_trash_count()).with("search_query",u.get_query().to_string()).with("matches",{use slint::Model;u.get_notes().row_count()}).with("notes",b.notes.iter().take(100).map(|n|serde_json::json!({"filename":n.id,"title":n.title(),"trash":n.trash,"pinned":n.field("pinned")=="true","notebook":n.field("notebook")})).collect::<Vec<_>>())
- });
-    for name in [
-        "new_note",
-        "open_note",
-        "set_title",
-        "append",
-        "set_content",
-        "search",
-        "set_folder",
-        "notebook",
-        "tags",
-        "save",
-        "trash",
-        "restore",
-        "copy",
-        "reload",
-        "preview",
-        "focus",
-        "import",
-        "export",
-    ] {
-        let param = match name {
-            "new_note" | "open_note" | "set_title" => "title",
-            "search" => "query",
-            "set_folder" => "folder",
-            "import" | "export" => "path",
-            _ => "text",
-        };
-        let mut a = Action::new(name, &format!("Notes: {name}"));
-        if !matches!(
-            name,
-            "save" | "trash" | "restore" | "copy" | "reload" | "preview" | "focus"
-        ) {
-            a = a.arg(Param::text(param).optional());
+
+// ── What the mind is shown, and what it is told afterwards ──────────────────
+//
+// Everything below used to be a `for name in [...]` loop over eighteen action names, which built
+// `Action::new(name, &format!("Notes: {name}"))` with one `Param::text(param).optional()` and
+// answered every call with `{"accepted": true, "completed": false}`. Three separate faults came
+// out of that one loop, and all three were measured on the deployed VM:
+//
+//   * the description a mind reads was the action's own name, so nothing said that `new_note`
+//     takes a title, that the title is the first `# heading` line, or what `append` appends to;
+//   * every argument was optional, so `append` with no text was accepted and appended nothing;
+//   * the answer reported acceptance, never an observation, so a caller was told a note had been
+//     created and could not learn its filename, its title, its size, or whether it was on disk.
+//
+// A description is now written at the definition site of every action, and `act`/`arg` below
+// refuse to build one that is a placeholder.
+
+/// A refusal the person at the window sees too.
+///
+/// Contract point 4: failure is said twice — once to the caller, once in the app's `notice`,
+/// which is both `describe.notice` and the amber line on screen. A mind that cannot save a note
+/// and a person who cannot see why it did not save are the same bug counted once.
+fn refuse(ui: &NotesApp, message: impl Into<String>) -> String {
+    let message = message.into();
+    ui.set_notice(message.clone().into());
+    message
+}
+
+/// One action, with the one sentence a reader who cannot see the screen needs.
+///
+/// The guard is the point: a description that is only the action's name, or too short to say what
+/// the action does and to which note, stops the app before `serve()` — and inside the tests,
+/// which build this same list. `Action::new` takes any `&str` and cannot be made to care, and
+/// `yantrik-app-runtime` is shared by fourteen apps, so the check lives here.
+fn act(name: &'static str, sentence: &'static str) -> Action {
+    assert!(
+        sentence.len() >= 20 && !sentence.starts_with("Notes:"),
+        "notes action `{name}` was given a placeholder description: {sentence:?}"
+    );
+    Action::new(name, sentence)
+}
+
+/// One argument, with the format it takes and what leaving it out means.
+///
+/// Required unless `.optional()` is added — the opposite of what the loop did, which made every
+/// argument optional and so let a call that named nothing be accepted.
+fn arg(name: &'static str, sentence: &'static str) -> Param {
+    assert!(
+        sentence.len() >= 15,
+        "notes argument `{name}` was given no usable description: {sentence:?}"
+    );
+    Param::text(name).describe(sentence)
+}
+
+/// A required text argument that has to say something, or a refusal that names it.
+///
+/// The runtime already refuses a *missing* required argument before the handler runs. This is the
+/// other half: an argument that is present and blank. `append text=""` must not report success.
+fn needed(
+    ui: &NotesApp,
+    args: &serde_json::Value,
+    action: &str,
+    name: &str,
+    hint: &str,
+) -> Result<String, String> {
+    match args.get(name).and_then(|v| v.as_str()) {
+        Some(v) if !v.trim().is_empty() => Ok(v.to_string()),
+        Some(_) => Err(refuse(ui, format!("`{action}` was given an empty `{name}`. {hint}"))),
+        None => Err(refuse(ui, format!("`{action}` needs `{name}`. {hint}"))),
+    }
+}
+
+/// An optional text argument: absent and empty mean the same thing to every caller here.
+fn given(args: &serde_json::Value, name: &str) -> String {
+    args.get(name).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+}
+
+/// Wait, on the UI thread, for the file work this action started.
+///
+/// Notes does its IO on one worker: `send` sets `busy`, the worker answers on a channel, and
+/// `receive` — normally woken by the worker's `invoke_refresh` — applies the result. An action
+/// handler also runs on the UI thread, so a handler that returned as soon as it had sent the job
+/// could only ever answer "accepted", which is precisely the fault being fixed: the caller is
+/// told a note was created and its name, size and saved-ness are all still unknown.
+///
+/// Draining the channel here, before answering, is what lets the answer report what is on disk.
+/// If it has not settled in time the answer says `saved: false` rather than guessing, and the
+/// notice already carries the reason.
+///
+/// The budget is 800 ms because two of these can happen in one call — `flush` saves what was
+/// open before `new_note` or `open_note` navigates away from it, and then the action waits for
+/// its own write — and both have to fit inside the runtime's 3 s `UI_ROUNDTRIP`, or a caller is
+/// told the app did not answer about work that in fact happened. A save is one small file write;
+/// 800 ms is already three orders of magnitude of headroom.
+fn settle(ui: &NotesApp, s: &State) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_millis(800);
+    while ui.get_busy() && std::time::Instant::now() < deadline {
+        receive(ui, s);
+        if !ui.get_busy() {
+            break;
         }
-        let w = ui.as_weak();
-        let b = s.clone();
-        app = app.action(a, move |args| {
-            let u = w.upgrade().ok_or("Notes closed")?;
-            if u.get_busy() {
-                return Err("Notes is busy".into());
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    receive(ui, s);
+    !ui.get_busy()
+}
+
+/// Save whatever is open before an action that would navigate away from it.
+///
+/// The window's own path for this queues the action in `pending` and replays it after the save;
+/// an action handler cannot use that, because it has to answer for the result. So it saves and
+/// waits here, and refuses if the save did not happen — an `open_note` that silently dropped
+/// someone's unsaved paragraph would be a worse outcome than a refusal naming the conflict.
+fn flush(ui: &NotesApp, s: &State) -> Result<(), String> {
+    if !s.borrow().ready {
+        return Err(refuse(
+            ui,
+            "The library is unavailable; resolve the storage error and run `reload`.",
+        ));
+    }
+    if !s.borrow().current.as_ref().is_some_and(Note::dirty) {
+        return Ok(());
+    }
+    save(ui, s);
+    settle(ui, s);
+    if s.borrow().current.as_ref().is_some_and(Note::dirty) {
+        let why = ui.get_notice().to_string();
+        return Err(refuse(
+            ui,
+            if why.is_empty() {
+                "The open note has unsaved changes that could not be written; nothing else was \
+                 done."
+                    .to_string()
+            } else {
+                format!("The open note could not be saved, so nothing else was done: {why}")
+            },
+        ));
+    }
+    Ok(())
+}
+
+/// What the open note now is, read back out of the app and off the disk rather than predicted.
+///
+/// Every action that touches a note answers with this, so "it worked" is never the app's opinion
+/// of its own handler: `matches_disk` is the file compared against the text in the window.
+fn written(ui: &NotesApp, s: &State) -> Result<serde_json::Value, String> {
+    let b = s.borrow();
+    let Some(n) = b.current.as_ref() else {
+        return Err(refuse(ui, "No note is open, so there is nothing to report."));
+    };
+    let path = b.dir.join(&n.id);
+    let disk = store::read(&path, store::LIMIT).ok().flatten();
+    Ok(serde_json::json!({
+        "filename": n.id,
+        "title": n.title(),
+        "path": path.display().to_string(),
+        "lines": n.text.lines().count(),
+        "characters": n.text.chars().count(),
+        "words": n.text.split_whitespace().count(),
+        "saved": !n.dirty(),
+        "on_disk": disk.is_some(),
+        "matches_disk": disk.as_deref() == Some(n.text.as_str()),
+        "trashed": n.trash,
+        "notebook": n.field("notebook"),
+        "tags": n.field("tags"),
+        "notice": ui.get_notice().to_string(),
+    }))
+}
+
+/// The one line a mind reads first.
+///
+/// This used to be the word "Notes". The `os_apps` listing prints one summary per open window, so
+/// that line was the whole of what a mind knew about this app before deciding to look closer —
+/// and it did not say whether anything was open, let alone which note or whether it was saved.
+fn view(ui: &NotesApp, s: &State) -> View {
+    let b = s.borrow();
+    let notes = b.notes.iter().filter(|n| !n.trash).count();
+    let trashed = b.notes.iter().filter(|n| n.trash).count();
+    let library = format!(
+        "{notes} note{}{}",
+        if notes == 1 { "" } else { "s" },
+        if trashed == 0 { String::new() } else { format!(", {trashed} in trash") }
+    );
+    let open = b.current.as_ref();
+    let mut summary = match open {
+        _ if !b.ready => "Notes — the library has not opened".to_string(),
+        None => format!("Notes — nothing open, {library}"),
+        Some(n) => format!(
+            "Notes — \"{}\" open{} ({} line{}, {}), {library}",
+            n.title(),
+            if n.trash { " from Trash" } else { "" },
+            n.text.lines().count(),
+            if n.text.lines().count() == 1 { "" } else { "s" },
+            if n.trash {
+                "deleted"
+            } else if n.dirty() {
+                "unsaved"
+            } else {
+                "saved"
             }
-            let value = args[param].as_str().unwrap_or_default();
-            match name {
-                "new_note" => action(
-                    &u,
-                    &b,
-                    &format!("new:{}", if value.is_empty() { "Untitled" } else { value }),
-                ),
-                "open_note" => {
-                    let key = {
-                        let b = b.borrow();
-                        let n = b
+        ),
+    };
+    if ui.get_busy() {
+        summary.push_str(" · working");
+    }
+    let notice = ui.get_notice().to_string();
+    if !notice.is_empty() {
+        summary.push_str(&format!(" · {notice}"));
+    }
+    View::new(summary)
+        .with("open_note", open.map(|n| n.id.clone()))
+        .with("title", open.map(Note::title))
+        .with("path", open.map(|n| b.dir.join(&n.id).display().to_string()))
+        .with("unsaved", open.is_some_and(Note::dirty))
+        .with("lines", open.map(|n| n.text.lines().count() as i64))
+        .with("characters", open.map(|n| n.text.chars().count() as i64))
+        .with("trashed_note_open", open.is_some_and(|n| n.trash))
+        .with("content", open.map(|n| n.text.chars().take(4000).collect::<String>()))
+        .with("notes_directory", b.dir.display().to_string())
+        .with("library_ready", b.ready)
+        .with("busy", ui.get_busy())
+        .with("notice", notice)
+        .with("status", ui.get_status().to_string())
+        .with("folder", ui.get_folder().to_string())
+        .with("preview", ui.get_preview())
+        .with("focus", ui.get_focus_mode())
+        .with("note_count", notes as i64)
+        .with("trash_count", trashed as i64)
+        .with("search_query", ui.get_query().to_string())
+        .with("matches", {
+            use slint::Model;
+            ui.get_notes().row_count() as i64
+        })
+        .with(
+            "notes",
+            b.notes
+                .iter()
+                .take(100)
+                .map(|n| {
+                    serde_json::json!({
+                        "filename": n.id,
+                        "title": n.title(),
+                        "trash": n.trash,
+                        "pinned": n.field("pinned") == "true",
+                        "notebook": n.field("notebook"),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+}
+
+/// One published action: what it says it does, and the code that does it.
+type Handler = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
+
+/// Everything this window offers a mind.
+///
+/// Built as a list rather than pushed straight into `App` so the tests can read exactly what a
+/// mind is shown — since d73760d, `yos describe` prints every action's description and every
+/// argument's type, required flag and description, so what is written here is verbatim what the
+/// model reads — and can run a handler without a socket or an event loop.
+fn surface(ui: &NotesApp, s: &State) -> Vec<(Action, Handler)> {
+    let window = {
+        let weak = ui.as_weak();
+        move || weak.upgrade().ok_or_else(|| "The Notes window is gone.".to_string())
+    };
+    let mut out: Vec<(Action, Handler)> = Vec::new();
+    let mut add =
+        |spec: Action,
+         run: fn(&NotesApp, &State, &serde_json::Value) -> Result<serde_json::Value, String>| {
+            let window = window.clone();
+            let state = s.clone();
+            out.push((
+                spec,
+                Box::new(move |args: &serde_json::Value| {
+                    let ui = window()?;
+                    if ui.get_busy() {
+                        return Err(
+                            "Notes is in the middle of a file operation; read `describe` again \
+                             in a moment."
+                                .to_string(),
+                        );
+                    }
+                    run(&ui, &state, args)
+                }) as Handler,
+            ));
+        };
+
+    add(
+        act(
+            "new_note",
+            "Create a note with this title, put `text` in it if given, save it, and open it. The \
+             title is written as the note's first line, `# <title>`, which is what the library \
+             lists it by; whatever note was open is saved first.",
+        )
+        .arg(arg(
+            "title",
+            "The new note's title. It is written as the first line, `# <title>`, and is what \
+             `open_note` and `search` find it by.",
+        ))
+        .arg(
+            arg(
+                "text",
+                "The body, written under the title on its own lines. Leave it out for a note \
+                 that is only a heading; `append` can add to it later.",
+            )
+            .optional(),
+        ),
+        |ui, s, args| {
+            let title = needed(
+                ui,
+                args,
+                "new_note",
+                "title",
+                "It becomes the note's `# heading` line — for example title=\"Groceries\".",
+            )?;
+            let body = given(args, "text");
+            flush(ui, s)?;
+            new(ui, s, &title, &body)?;
+            settle(ui, s);
+            written(ui, s)
+        },
+    );
+
+    add(
+        act(
+            "open_note",
+            "Open an existing note by its exact title or its filename and show it in the editor. \
+             The note that was open is saved first; a note in the Trash opens read-only.",
+        )
+        .arg(arg(
+            "title",
+            "The note's exact title, or the filename `describe` lists it under (`note-….md`). \
+             Trashed notes are matched too.",
+        )),
+        |ui, s, args| {
+            let wanted = needed(
+                ui,
+                args,
+                "open_note",
+                "title",
+                "Use a title or filename from `describe.notes`.",
+            )?;
+            let key = {
+                let b = s.borrow();
+                let n = b
+                    .notes
+                    .iter()
+                    .find(|n| n.id == wanted || n.title() == wanted)
+                    .ok_or_else(|| {
+                        let titles: Vec<String> = b
                             .notes
                             .iter()
-                            .find(|n| n.id == value || n.title() == value)
-                            .ok_or("Note not found")?;
-                        format!("open:{}{}", if n.trash { "trash:" } else { "" }, n.id)
-                    };
-                    action(&u, &b, &key)
-                }
-                "set_title" | "append" | "set_content" => {
-                    let mut text = b
-                        .borrow()
-                        .current
-                        .as_ref()
-                        .filter(|n| !n.trash)
-                        .ok_or("Open a note first")?
-                        .text
-                        .clone();
-                    if name == "append" {
-                        text.push_str(value)
-                    } else if name == "set_content" {
-                        text = value.into()
-                    } else {
-                        let title = value.replace(['\r', '\n'], " ");
-                        let mut replaced = false;
-                        text = text
-                            .lines()
-                            .map(|l| {
-                                if !replaced && l.starts_with("# ") {
-                                    replaced = true;
-                                    format!("# {title}")
+                            .filter(|n| !n.trash)
+                            .take(8)
+                            .map(|n| format!("\"{}\"", n.title()))
+                            .collect();
+                        refuse(
+                            ui,
+                            format!(
+                                "No note is called \"{wanted}\". The library holds: {}",
+                                if titles.is_empty() {
+                                    "nothing yet".to_string()
                                 } else {
-                                    l.into()
+                                    titles.join(", ")
                                 }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        if !replaced {
-                            text = format!("# {title}\n\n{text}")
-                        }
-                    }
-                    store::validate(&text)?;
-                    u.set_content(text.clone().into());
-                    edit(&u, &b, text);
-                }
-                "search" => {
-                    u.set_query(value.into());
-                    list(&u, &b)
-                }
-                "set_folder" => {
-                    u.set_folder(value.into());
-                    list(&u, &b)
-                }
-                "notebook" | "tags" => {
-                    if name == "notebook" {
-                        u.set_notebook(value.into())
+                            ),
+                        )
+                    })?;
+                format!("open:{}{}", if n.trash { "trash:" } else { "" }, n.id)
+            };
+            flush(ui, s)?;
+            action(ui, s, &key);
+            settle(ui, s);
+            written(ui, s)
+        },
+    );
+
+    add(
+        act(
+            "set_title",
+            "Rename the note that is open by rewriting its first `# heading` line, adding one at \
+             the top if it has none, and save it. Nothing else in the note changes.",
+        )
+        .arg(arg(
+            "title",
+            "The new title, on one line; any line breaks in it become spaces.",
+        )),
+        |ui, s, args| {
+            let title = needed(ui, args, "set_title", "title", "It replaces the `# heading` line.")?;
+            let mut text = open_text(ui, s)?;
+            let title = title.replace(['\r', '\n'], " ");
+            let mut replaced = false;
+            text = text
+                .lines()
+                .map(|l| {
+                    if !replaced && l.starts_with("# ") {
+                        replaced = true;
+                        format!("# {title}")
                     } else {
-                        u.set_tags(value.into())
+                        l.into()
                     }
-                    u.invoke_metadata()
-                }
-                "import" | "export" => {
-                    if b.borrow().current.as_ref().is_some_and(Note::dirty) {
-                        return Err("Save the current draft first".into());
-                    }
-                    u.set_dialog(if name == "import" { 1 } else { 2 });
-                    u.set_path(value.into());
-                    action(&u, &b, "confirm")
-                }
-                _ => action(&u, &b, name),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !replaced {
+                text = format!("# {title}\n\n{text}");
             }
-            Ok(serde_json::json!({"accepted":true,"completed":!u.get_busy()}))
-        });
+            commit(ui, s, text)
+        },
+    );
+
+    add(
+        act(
+            "append",
+            "Add text to the end of the note that is open and save it. Nothing already in the \
+             note is removed; use `set_content` to replace it instead.",
+        )
+        .arg(arg(
+            "text",
+            "Exactly what to add, appended to the last character already there — begin it with \
+             a newline to start it on its own line.",
+        )),
+        |ui, s, args| {
+            let addition = needed(
+                ui,
+                args,
+                "append",
+                "text",
+                "There is nothing to append without it, and the note was left untouched.",
+            )?;
+            let mut text = open_text(ui, s)?;
+            text.push_str(&addition);
+            commit(ui, s, text)
+        },
+    );
+
+    add(
+        // Sensitive: it overwrites the whole note, unsaved paragraphs included. What it replaces
+        // is on disk only if it had been saved, and `undo` only reaches it while this window
+        // stays on this note.
+        act(
+            "set_content",
+            "Replace everything in the note that is open with this text and save it. What was \
+             there is gone from the window; `undo` takes it back while the note stays open.",
+        )
+        .risk("sensitive")
+        .arg(arg(
+            "text",
+            "The note's entire new text, Markdown included — keep the `# <title>` first line if \
+             the note should keep its title. An empty string empties the note.",
+        )),
+        |ui, s, args| {
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| refuse(ui, "`set_content` needs `text`: the note's entire new text."))?
+                .to_string();
+            open_text(ui, s)?;
+            commit(ui, s, text)
+        },
+    );
+
+    add(
+        act(
+            "search",
+            "Filter the library list to the notes whose text or metadata contains this, without \
+             opening anything. `set_folder` decides which section is searched.",
+        )
+        .arg(arg(
+            "query",
+            "Matched case-insensitively against each note's text and its notebook and tags; an \
+             empty string clears the filter.",
+        )),
+        |ui, s, args| {
+            let query = given(args, "query");
+            ui.set_query(query.clone().into());
+            list(ui, s);
+            let (matches, titles) = listed(ui);
+            Ok(serde_json::json!({
+                "query": query,
+                "folder": ui.get_folder().to_string(),
+                "matches": matches,
+                "titles": titles,
+            }))
+        },
+    );
+
+    add(
+        act(
+            "set_folder",
+            "Switch the library list to one section of the library. It changes what `search` and \
+             `describe.matches` list, and opens nothing.",
+        )
+        .arg(arg(
+            "folder",
+            "One of `all`, `recent` (touched in the last seven days), `favorites` (pinned), \
+             `trash`, or `book:<notebook name>`.",
+        )),
+        |ui, s, args| {
+            let folder = needed(
+                ui,
+                args,
+                "set_folder",
+                "folder",
+                "One of `all`, `recent`, `favorites`, `trash`, `book:<name>`.",
+            )?;
+            ui.set_folder(folder.clone().into());
+            list(ui, s);
+            let (matches, titles) = listed(ui);
+            Ok(serde_json::json!({ "folder": folder, "listed": matches, "titles": titles }))
+        },
+    );
+
+    add(
+        act(
+            "notebook",
+            "File the note that is open under a notebook, which is the section `set_folder \
+             book:<name>` lists, and save it. It replaces whatever notebook it was in.",
+        )
+        .arg(arg(
+            "text",
+            "The notebook's name, up to 80 characters; an empty string files the note under none.",
+        )),
+        |ui, s, args| {
+            open_text(ui, s)?;
+            ui.set_notebook(given(args, "text").into());
+            ui.invoke_metadata();
+            save(ui, s);
+            settle(ui, s);
+            written(ui, s)
+        },
+    );
+
+    add(
+        act(
+            "tags",
+            "Replace the tags on the note that is open and save it. Tags are searched by \
+             `search` along with the note's text.",
+        )
+        .arg(arg(
+            "text",
+            "Comma-separated tags, e.g. `work, ideas`, up to 512 characters; an empty string \
+             clears them.",
+        )),
+        |ui, s, args| {
+            open_text(ui, s)?;
+            ui.set_tags(given(args, "text").into());
+            ui.invoke_metadata();
+            save(ui, s);
+            settle(ui, s);
+            written(ui, s)
+        },
+    );
+
+    add(
+        act(
+            "save",
+            "Write the note that is open to its file now instead of waiting for the 750 ms \
+             autosave, and check that the bytes on disk are the text in the window.",
+        ),
+        |ui, s, _| {
+            open_text(ui, s)?;
+            save(ui, s);
+            settle(ui, s);
+            let answer = written(ui, s)?;
+            if answer["matches_disk"] != true {
+                let why = ui.get_notice().to_string();
+                return Err(refuse(
+                    ui,
+                    if why.is_empty() {
+                        format!(
+                            "The note was not written to {}; the draft is still open.",
+                            answer["path"].as_str().unwrap_or_default()
+                        )
+                    } else {
+                        why
+                    },
+                ));
+            }
+            Ok(answer)
+        },
+    );
+
+    add(
+        // Sensitive: the note leaves the library and its file is removed from the notes
+        // directory. It is not `dangerous` because `restore` puts back exactly this note from
+        // the Trash record written before the file is unlinked.
+        act(
+            "trash",
+            "Move the note that is open to the Trash: it leaves the library, its file is removed \
+             from the notes directory, and `restore` puts it back.",
+        )
+        .risk("sensitive"),
+        |ui, s, _| {
+            let (id, title, path) = {
+                let b = s.borrow();
+                let n = b
+                    .current
+                    .as_ref()
+                    .ok_or_else(|| refuse(ui, "No note is open, so there is nothing to trash."))?;
+                if n.trash {
+                    return Err(refuse(ui, "That note is already in the Trash."));
+                }
+                (n.id.clone(), n.title(), b.dir.join(&n.id))
+            };
+            action(ui, s, "trash");
+            settle(ui, s);
+            let b = s.borrow();
+            let gone = b.notes.iter().any(|n| n.id == id && n.trash);
+            if !gone {
+                let why = ui.get_notice().to_string();
+                drop(b);
+                return Err(refuse(
+                    ui,
+                    if why.is_empty() {
+                        format!("\"{title}\" is still in the library; nothing was trashed.")
+                    } else {
+                        why
+                    },
+                ));
+            }
+            Ok(serde_json::json!({
+                "trashed": title,
+                "filename": id,
+                "file_removed": !path.exists(),
+                "in_trash": true,
+                "trash_count": b.notes.iter().filter(|n| n.trash).count(),
+                "notes": b.notes.iter().filter(|n| !n.trash).count(),
+                "open_note": serde_json::Value::Null,
+            }))
+        },
+    );
+
+    add(
+        act(
+            "restore",
+            "Put the trashed note that is open back into the library, writing its file into the \
+             notes directory again. It refuses rather than overwrite a note of the same filename.",
+        ),
+        |ui, s, _| {
+            let id = {
+                let b = s.borrow();
+                let n = b
+                    .current
+                    .as_ref()
+                    .ok_or_else(|| refuse(ui, "No note is open, so there is nothing to restore."))?;
+                if !n.trash {
+                    return Err(refuse(
+                        ui,
+                        "That note is in the library already; only a trashed note can be \
+                         restored. Open it from `set_folder trash` first.",
+                    ));
+                }
+                n.id.clone()
+            };
+            action(ui, s, "restore");
+            settle(ui, s);
+            if s.borrow().notes.iter().any(|n| n.id == id && n.trash) {
+                let why = ui.get_notice().to_string();
+                return Err(refuse(
+                    ui,
+                    if why.is_empty() {
+                        "The note is still in the Trash; nothing was restored.".to_string()
+                    } else {
+                        why
+                    },
+                ));
+            }
+            written(ui, s)
+        },
+    );
+
+    add(
+        act(
+            "copy",
+            "Duplicate the note that is open as a new note with its own filename, save that, and \
+             open it. Unsaved changes go with the copy — it is the way out of \"this note changed \
+             on disk\" — and the original file is left as it is.",
+        ),
+        |ui, s, _| {
+            let from = {
+                let b = s.borrow();
+                let n = b
+                    .current
+                    .as_ref()
+                    .ok_or_else(|| refuse(ui, "No note is open, so there is nothing to copy."))?;
+                n.id.clone()
+            };
+            action(ui, s, "copy");
+            settle(ui, s);
+            let mut answer = written(ui, s)?;
+            if answer["filename"] == serde_json::json!(from) {
+                let why = ui.get_notice().to_string();
+                return Err(refuse(
+                    ui,
+                    if why.is_empty() {
+                        "Nothing was copied; the same note is still open.".to_string()
+                    } else {
+                        why
+                    },
+                ));
+            }
+            answer["copied_from"] = serde_json::json!(from);
+            Ok(answer)
+        },
+    );
+
+    add(
+        act(
+            "reload",
+            "Re-read every note from the notes directory, picking up files changed outside this \
+             window. The open note is saved first and stays open if its file is still there.",
+        ),
+        |ui, s, _| {
+            // Not `flush(..)?`: a library that failed to open is exactly what `reload` is for,
+            // and that is the one case `flush` refuses on. A draft that could not be saved is a
+            // different matter — the window queues the reload behind the save, so it never runs —
+            // and that is caught below rather than reported as a reload that happened.
+            flush(ui, s).ok();
+            action(ui, s, "reload");
+            settle(ui, s);
+            if let Some(queued) = s.borrow().pending.clone() {
+                let why = ui.get_notice().to_string();
+                return Err(refuse(
+                    ui,
+                    format!(
+                        "Nothing was reloaded: `{queued}` is still waiting on the open note, \
+                         which could not be saved{}",
+                        if why.is_empty() { ".".to_string() } else { format!(" — {why}") }
+                    ),
+                ));
+            }
+            let b = s.borrow();
+            Ok(serde_json::json!({
+                "notes": b.notes.iter().filter(|n| !n.trash).count(),
+                "in_trash": b.notes.iter().filter(|n| n.trash).count(),
+                "open_note": b.current.as_ref().map(|n| n.id.clone()),
+                "library_ready": b.ready,
+                "notice": ui.get_notice().to_string(),
+            }))
+        },
+    );
+
+    add(
+        act(
+            "preview",
+            "Turn the rendered Markdown preview of the open note on or off — it is a toggle, and \
+             the answer says which it now is. The note itself is not changed.",
+        ),
+        |ui, s, _| {
+            action(ui, s, "preview");
+            let blocks = {
+                use slint::Model;
+                ui.get_blocks().row_count()
+            };
+            Ok(serde_json::json!({
+                "preview": ui.get_preview(),
+                "blocks": blocks,
+                "title": s.borrow().current.as_ref().map(Note::title),
+            }))
+        },
+    );
+
+    add(
+        act(
+            "focus",
+            "Turn focus mode, which hides the library list and the side panels, on or off — it \
+             is a toggle, and the answer says which it now is.",
+        ),
+        |ui, s, _| {
+            action(ui, s, "focus");
+            Ok(serde_json::json!({
+                "focus_mode": ui.get_focus_mode(),
+                "open_note": s.borrow().current.as_ref().map(Note::title),
+            }))
+        },
+    );
+
+    add(
+        act(
+            "undo",
+            "Take back the last change made to the note that is open in this window, and save \
+             the result. The history is cleared whenever another note is opened.",
+        ),
+        |ui, s, _| {
+            let before = open_text(ui, s)?;
+            undo(ui, s, false);
+            if s.borrow().current.as_ref().is_some_and(|n| n.text == before) {
+                return Err(refuse(
+                    ui,
+                    "There is nothing left to undo on this note in this window.",
+                ));
+            }
+            save(ui, s);
+            settle(ui, s);
+            written(ui, s)
+        },
+    );
+
+    add(
+        act(
+            "redo",
+            "Put back the change that `undo` took off the note that is open, and save the \
+             result. Editing the note discards what redo was holding.",
+        ),
+        |ui, s, _| {
+            let before = open_text(ui, s)?;
+            undo(ui, s, true);
+            if s.borrow().current.as_ref().is_some_and(|n| n.text == before) {
+                return Err(refuse(ui, "There is nothing to redo on this note."));
+            }
+            save(ui, s);
+            settle(ui, s);
+            written(ui, s)
+        },
+    );
+
+    add(
+        // Sensitive: it reads a file from anywhere this user can read, outside the notes
+        // directory, and copies its contents into the library.
+        act(
+            "import",
+            "Read a UTF-8 text or Markdown file from anywhere on disk and add its contents to \
+             the library as a new note, then open it. The file itself is left where it is.",
+        )
+        .risk("sensitive")
+        .arg(arg(
+            "path",
+            "Absolute path to the file to read, or one starting `~/`. Up to 256 KiB of text with \
+             no control characters.",
+        )),
+        |ui, s, args| {
+            let path = needed(ui, args, "import", "path", "An absolute path to a text file.")?;
+            let full = expanded(path.trim());
+            if !full.is_absolute() {
+                return Err(refuse(ui, format!("`import` needs an absolute path; `{path}` is not one.")));
+            }
+            flush(ui, s)?;
+            ui.set_dialog(1);
+            ui.set_path(path.clone().into());
+            action(ui, s, "confirm");
+            settle(ui, s);
+            if ui.get_dialog() != 0 {
+                ui.set_dialog(0);
+                let why = ui.get_notice().to_string();
+                return Err(refuse(
+                    ui,
+                    if why.is_empty() {
+                        format!("Nothing was imported from {}.", full.display())
+                    } else {
+                        why
+                    },
+                ));
+            }
+            let mut answer = written(ui, s)?;
+            answer["imported_from"] = serde_json::json!(full.display().to_string());
+            Ok(answer)
+        },
+    );
+
+    add(
+        // Sensitive: it writes a file outside the notes directory, at a path the caller chooses.
+        // It cannot overwrite — the store publishes the new file with a hard link, which fails if
+        // something is already there — so it is not `dangerous`.
+        act(
+            "export",
+            "Write the open note's text to a file outside the library, at this path. It refuses \
+             rather than overwrite anything already there, and the note stays open.",
+        )
+        .risk("sensitive")
+        .arg(arg(
+            "path",
+            "Absolute path of the file to create, or one starting `~/`. Its folder must exist \
+             and nothing may already be at that path.",
+        )),
+        |ui, s, args| {
+            let path = needed(ui, args, "export", "path", "An absolute path to write to.")?;
+            let full = expanded(path.trim());
+            if !full.is_absolute() {
+                return Err(refuse(ui, format!("`export` needs an absolute path; `{path}` is not one.")));
+            }
+            let text = open_text(ui, s)?;
+            flush(ui, s)?;
+            ui.set_dialog(2);
+            ui.set_path(path.clone().into());
+            action(ui, s, "confirm");
+            settle(ui, s);
+            let written_bytes = store::read(&full, store::LIMIT).ok().flatten();
+            if ui.get_dialog() != 0 || written_bytes.is_none() {
+                ui.set_dialog(0);
+                let why = ui.get_notice().to_string();
+                return Err(refuse(
+                    ui,
+                    if why.is_empty() {
+                        format!("Nothing was written to {}.", full.display())
+                    } else {
+                        why
+                    },
+                ));
+            }
+            Ok(serde_json::json!({
+                "path": full.display().to_string(),
+                "bytes": written_bytes.as_deref().map(str::len),
+                "matches_note": written_bytes.as_deref() == Some(text.as_str()),
+                "title": s.borrow().current.as_ref().map(Note::title),
+            }))
+        },
+    );
+
+    out
+}
+
+/// The open note's text, or a refusal that says what to do about it.
+///
+/// Every editing action starts here rather than reaching into `current` itself, so "no note is
+/// open" and "that note is in the Trash" are one sentence each instead of eighteen.
+fn open_text(ui: &NotesApp, s: &State) -> Result<String, String> {
+    let b = s.borrow();
+    match b.current.as_ref() {
+        None => Err(refuse(
+            ui,
+            "No note is open. Open one with `open_note`, or make one with `new_note`.",
+        )),
+        Some(n) if n.trash => Err(refuse(
+            ui,
+            "The open note is in the Trash and cannot be edited; `restore` puts it back first.",
+        )),
+        Some(n) => Ok(n.text.clone()),
+    }
+}
+
+/// Put new text in the open note, save it, and report what the note now holds.
+fn commit(ui: &NotesApp, s: &State, text: String) -> Result<serde_json::Value, String> {
+    store::validate(&text).map_err(|e| refuse(ui, e))?;
+    ui.set_content(text.clone().into());
+    edit(ui, s, text);
+    save(ui, s);
+    settle(ui, s);
+    written(ui, s)
+}
+
+/// What the library list is showing now: how many rows, and the first few titles.
+fn listed(ui: &NotesApp) -> (usize, Vec<String>) {
+    use slint::Model;
+    let rows = ui.get_notes();
+    let titles = (0..rows.row_count().min(5))
+        .filter_map(|i| rows.row_data(i))
+        .map(|r| r.title.to_string())
+        .collect();
+    (rows.row_count(), titles)
+}
+
+fn control(ui: &NotesApp, s: &State) {
+    let weak = ui.as_weak();
+    let state = s.clone();
+    let mut app = App::new("notes").describe(move || match weak.upgrade() {
+        Some(ui) => view(&ui, &state),
+        None => View::new("Notes — the window is closed"),
+    });
+    for (spec, run) in surface(ui, s) {
+        app = app.action(spec, run);
     }
     app.serve();
 }

@@ -367,8 +367,208 @@ fn real_notes_autosave_navigation_conflict_trash_preview_and_idle() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(redraws, 0);
+
+    // ── What the mind is shown, and what it is told afterwards ──
+    //
+    // These run inside this test rather than as their own `#[test]` because a process may
+    // install exactly one Slint platform — i-slint-core's `EVENTLOOP_PROXY` is a process-wide
+    // `OnceCell`, so a second `set_platform` fails wherever it is called from — and every check
+    // below needs a real window to read the surface off.
+    let published = surface(&ui, &s);
+    every_action_says_what_it_does(&published);
+    one_call_makes_a_titled_note_with_a_body(&ui, &s, &published, &dir);
+    a_missing_required_argument_is_refused_by_name(&ui, &s, &published);
+
     let mut b = s.borrow_mut();
     b.timer.stop();
     b.jobs.send(Job::Stop).unwrap();
     b.worker.take().unwrap().join().unwrap();
+}
+
+// ── The surface a mind reads ────────────────────────────────────────────────
+//
+// Called from the window test above, because only one Slint platform may exist per process.
+
+/// Run one published action by name, the way `app.act` would.
+///
+/// The runtime's own dispatch checks the ceiling, the required arguments and the revision guard
+/// before it gets here; this is the handler underneath, which is where the app's own refusals and
+/// its answer come from.
+fn act_on(
+    published: &[(Action, Handler)],
+    name: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let (_, handler) = published
+        .iter()
+        .find(|(spec, _)| spec.name == name)
+        .unwrap_or_else(|| panic!("Notes does not publish `{name}`"));
+    handler(&args)
+}
+
+/// The check that would have caught `"Notes: append"`.
+///
+/// Every one of these descriptions used to be `format!("Notes: {name}")` and every argument used
+/// to have none, which is why a model asked for a note titled Groceries produced a note with no
+/// title: nothing it was shown said `new_note` took one. Since d73760d `yos describe` prints
+/// each action's description and each argument's type, required flag and description, so what is
+/// asserted here is verbatim what the model reads.
+fn every_action_says_what_it_does(published: &[(Action, Handler)]) {
+    assert!(
+        published.len() >= 18,
+        "the surface lost actions: {} published",
+        published.len()
+    );
+    for (spec, _) in published {
+        assert_ne!(
+            spec.description,
+            format!("Notes: {}", spec.name),
+            "`{}` still carries the placeholder the old loop generated",
+            spec.name
+        );
+        assert!(
+            spec.description.len() >= 20,
+            "`{}` has nothing a reader who cannot see the screen could use: {:?}",
+            spec.name,
+            spec.description
+        );
+        assert!(
+            spec.description.split_whitespace().count() >= 5,
+            "`{}` is not a sentence: {:?}",
+            spec.name,
+            spec.description
+        );
+        for p in &spec.params {
+            assert!(
+                p.description.len() >= 15,
+                "`{}` takes `{}` and says nothing about what goes in it",
+                spec.name,
+                p.name
+            );
+        }
+        assert!(
+            ["safe", "standard", "sensitive", "dangerous"].contains(&spec.permission),
+            "`{}` is graded `{}`, which is not a grade this OS defines",
+            spec.name,
+            spec.permission
+        );
+    }
+    // The four that have to be able to do damage, and say so.
+    for name in ["trash", "set_content", "import", "export"] {
+        let (spec, _) = published.iter().find(|(s, _)| s.name == name).unwrap();
+        assert_eq!(
+            spec.permission, "sensitive",
+            "`{name}` removes a note, overwrites one, or reads and writes outside the notes \
+             directory; it cannot be graded `{}`",
+            spec.permission
+        );
+    }
+}
+
+/// "Create a note titled Groceries listing milk, eggs and bread" — in one call.
+///
+/// The measured failure: the model called `new_note` and then `append`, the note ended up with no
+/// title, and the user was told "New note **Groceries** created". The title has to be written as
+/// the note's first `# heading` line, the body underneath it, and the answer has to name the file
+/// it wrote so the claim is checkable.
+fn one_call_makes_a_titled_note_with_a_body(
+    ui: &NotesApp,
+    s: &State,
+    published: &[(Action, Handler)],
+    dir: &std::path::Path,
+) {
+    let answer = act_on(
+        published,
+        "new_note",
+        serde_json::json!({ "title": "Groceries", "text": "milk\neggs\nbread" }),
+    )
+    .expect("new_note with a title and a body");
+
+    let filename = answer["filename"]
+        .as_str()
+        .expect("the answer names the file it wrote")
+        .to_string();
+    assert_eq!(answer["title"], "Groceries", "answer: {answer}");
+    assert_eq!(answer["saved"], true, "answer: {answer}");
+    assert_eq!(
+        answer["matches_disk"], true,
+        "the answer claims the bytes on disk are the note: {answer}"
+    );
+    assert_eq!(answer["path"], dir.join(&filename).display().to_string());
+    assert_eq!(answer["lines"], 5, "answer: {answer}");
+
+    let on_disk = std::fs::read_to_string(dir.join(&filename)).expect("the note is on disk");
+    assert!(
+        on_disk.starts_with("# Groceries\n"),
+        "the title has to be the note's first heading line: {on_disk:?}"
+    );
+    assert!(
+        on_disk.contains("milk\neggs\nbread"),
+        "the body has to be in the note: {on_disk:?}"
+    );
+
+    // Fault 3: the summary was the word "Notes". It is the first thing a mind reads and the only
+    // thing the `os_apps` listing prints per app.
+    let summary = view(ui, s).summary;
+    assert!(
+        summary.contains("\"Groceries\" open"),
+        "the summary has to name the open note: {summary:?}"
+    );
+    assert!(
+        summary.contains("saved") && summary.contains("note"),
+        "and whether it is saved, and how much is in the library: {summary:?}"
+    );
+
+    // `append` adds and does not replace, and says how much is there now.
+    let after = act_on(published, "append", serde_json::json!({ "text": "\nbutter\n" }))
+        .expect("append to the open note");
+    assert_eq!(after["filename"], serde_json::json!(filename));
+    assert_eq!(after["title"], "Groceries", "appending must not lose the title");
+    assert_eq!(after["saved"], true);
+    assert!(
+        std::fs::read_to_string(dir.join(&filename)).unwrap().ends_with("butter\n"),
+        "append has to reach the file"
+    );
+}
+
+/// `append` with nothing to append used to answer `{"accepted": true, "completed": false}`.
+fn a_missing_required_argument_is_refused_by_name(
+    ui: &NotesApp,
+    s: &State,
+    published: &[(Action, Handler)],
+) {
+    let (spec, _) = published.iter().find(|(s, _)| s.name == "append").unwrap();
+    let text = spec.params.iter().find(|p| p.name == "text").expect("append takes `text`");
+    assert!(
+        text.required,
+        "`text` has to be declared required, or the runtime accepts `append` with no text \
+         before the handler is ever reached"
+    );
+
+    let before = s.borrow().current.as_ref().map(|n| n.text.clone());
+    let refusal = act_on(published, "append", serde_json::json!({}))
+        .expect_err("append with no text must be refused");
+    assert!(
+        refusal.contains("text"),
+        "the refusal has to name the argument that was missing: {refusal}"
+    );
+    // Contract point 4: said twice — to the caller, and on screen for the person.
+    assert!(
+        ui.get_notice().contains("text"),
+        "the refusal has to reach the window's notice too: {:?}",
+        ui.get_notice()
+    );
+    assert_eq!(
+        s.borrow().current.as_ref().map(|n| n.text.clone()),
+        before,
+        "a refused append must not have changed the note"
+    );
+
+    // And an action that names the note it cannot find, rather than a bare failure.
+    let missing = act_on(published, "open_note", serde_json::json!({ "title": "Nothing here" }))
+        .expect_err("opening a note that does not exist must be refused");
+    assert!(
+        missing.contains("Nothing here") && missing.contains("Groceries"),
+        "the refusal has to say what it could not find and what there is: {missing}"
+    );
 }

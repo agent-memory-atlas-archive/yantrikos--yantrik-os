@@ -9,6 +9,7 @@ use std::{
     sync::mpsc,
     time::Duration,
 };
+use yantrik_app_runtime::control::{Action, App, Param, View};
 use yantrik_app_runtime::prelude::*;
 slint::include_modules!();
 
@@ -732,90 +733,749 @@ fn action(ui: &TextEditorApp, s: &State, id: &str) {
         _ => {}
     }
 }
+// ── What the mind is shown, and what it is told afterwards ─────────────────
+//
+// This surface used to be two `for name in [...]` loops. The first built ten actions as
+// `Action::new(name, &format!("Editor: {name}"))` with no arguments and answered every one of
+// them `{"accepted": true}`; the second built six more, gave each a single argument called
+// `path` or `text` with no description — `select_tab` took a "text" that had to be a number —
+// and answered `{"accepted": true, "completed": !busy}`. So a mind driving the editor was shown
+// "Editor: replace-all" and told, afterwards, that it had been accepted: never which file, never
+// how many matches were replaced, never whether anything reached the disk.
+//
+// Every action is now written out with the sentence a reader who cannot see the screen needs,
+// every argument says what goes in it, and every answer is read back out of the document and off
+// the disk after the work has settled.
+
+/// A refusal the person at the window sees too.
+///
+/// Contract point 4: failure is said twice — to the caller, and in the app's `notice`, which is
+/// `describe.notice` and the amber line above the editor.
+fn refuse(ui: &TextEditorApp, message: impl Into<String>) -> String {
+    let message = message.into();
+    ui.set_notice(message.clone().into());
+    message
+}
+
+/// One action, with the one sentence a reader who cannot see the screen needs.
+///
+/// The guard is the point: a description that is only the action's name, or too short to say
+/// what it does and to which document, stops the app before `serve()` — and inside the tests,
+/// which build this same list. `Action::new` takes any `&str`; `yantrik-app-runtime` is shared
+/// by fourteen apps and is not this change's to alter, so the check lives here.
+fn act(name: &'static str, sentence: &'static str) -> Action {
+    assert!(
+        sentence.len() >= 20 && !sentence.starts_with("Editor:"),
+        "editor action `{name}` was given a placeholder description: {sentence:?}"
+    );
+    Action::new(name, sentence)
+}
+
+/// One argument, with the format it takes and what leaving it out means. Required by default.
+fn arg(name: &'static str, sentence: &'static str) -> Param {
+    assert!(
+        sentence.len() >= 15,
+        "editor argument `{name}` was given no usable description: {sentence:?}"
+    );
+    Param::text(name).describe(sentence)
+}
+
+/// A required text argument that has to say something, or a refusal that names it.
+fn needed(
+    ui: &TextEditorApp,
+    args: &serde_json::Value,
+    action: &str,
+    name: &str,
+    hint: &str,
+) -> Result<String, String> {
+    match args.get(name).and_then(|v| v.as_str()) {
+        Some(v) if !v.trim().is_empty() => Ok(v.to_string()),
+        Some(_) => Err(refuse(ui, format!("`{action}` was given an empty `{name}`. {hint}"))),
+        None => Err(refuse(ui, format!("`{action}` needs `{name}`. {hint}"))),
+    }
+}
+
+/// Wait, on the UI thread, for the file work this action started.
+///
+/// The editor opens and saves on one worker: the handler sends a job, sets `busy`, and `receive`
+/// applies the answer when the worker wakes the event loop. An action handler runs on the UI
+/// thread too, so returning as soon as the job was sent is why `save` could only ever answer
+/// "accepted" — the caller was told nothing about the file it had asked to write. Draining the
+/// channel here is what lets the answer report the bytes on disk. The 800 ms budget leaves the
+/// runtime's 3 s `UI_ROUNDTRIP` intact even for a call that waits twice, and a save of the 1 MiB
+/// this editor allows is still sub-millisecond; an unsettled call answers `modified: true`
+/// rather than guess.
+fn settle(ui: &TextEditorApp, s: &State) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_millis(800);
+    while ui.get_busy() && std::time::Instant::now() < deadline {
+        receive(ui, s);
+        if !ui.get_busy() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    receive(ui, s);
+    !ui.get_busy()
+}
+
+/// Refuse while a dialog is waiting for an answer, naming the answer it wants.
+///
+/// The window ignores almost every action while a dialog is up. A caller that was told
+/// `accepted: true` for an action the window had already dropped on the floor is the fault this
+/// closes: the refusal says which dialog is open and which action answers it.
+fn no_dialog(ui: &TextEditorApp, name: &str) -> Result<(), String> {
+    match ui.get_dialog() {
+        0 => Ok(()),
+        3 => Err(refuse(
+            ui,
+            format!(
+                "`{name}` cannot run while the editor is asking about unsaved changes ({}). \
+                 Answer it first: `save` writes the tab and closes it, `discard` throws the \
+                 changes away, `cancel` leaves it open.",
+                ui.get_close_label()
+            ),
+        )),
+        other => Err(refuse(
+            ui,
+            format!(
+                "`{name}` cannot run while the {} dialog is open; `cancel` closes it.",
+                match other {
+                    1 => "Open file",
+                    2 => "Save As",
+                    _ => "Go to line",
+                }
+            ),
+        )),
+    }
+}
+
+/// What the active tab now is, read back out of the document and off the disk.
+///
+/// Every action that touches a document answers with this, so "it worked" is never the app's
+/// opinion of its own handler: `matches_disk` is the file compared against the text in the tab.
+fn document_now(ui: &TextEditorApp, s: &State) -> serde_json::Value {
+    let b = s.borrow();
+    let d = &b.docs[b.active];
+    let disk = d.path.as_deref().and_then(|p| document::read(p).ok());
+    serde_json::json!({
+        "title": d.title(),
+        "path": d.path.as_ref().map(|p| p.display().to_string()),
+        "tab": b.active,
+        "tabs": b.docs.len(),
+        "lines": d.text.bytes().filter(|c| *c == b'\n').count() + 1,
+        "characters": d.text.chars().count(),
+        "bytes": d.text.len(),
+        "modified": d.dirty(),
+        "on_disk": disk.is_some(),
+        "matches_disk": disk.as_deref() == Some(d.text.as_str()),
+        "language": document::language(d.path.as_deref()),
+        "notice": ui.get_notice().to_string(),
+    })
+}
+
+/// The one line a mind reads first.
+///
+/// This used to be `Text Editor — <filename>` and nothing else: not whether the file had unsaved
+/// changes, not how much was in it, not how many tabs were open, and not that a dialog was
+/// blocking every action the caller was about to try.
+fn view(ui: &TextEditorApp, s: &State) -> View {
+    let b = s.borrow();
+    let d = &b.docs[b.active];
+    let lines = d.text.bytes().filter(|c| *c == b'\n').count() + 1;
+    let mut summary = format!(
+        "Text Editor — {}{}, {} line{}, {}",
+        d.title(),
+        if d.path.is_none() { " (no file yet)" } else { "" },
+        lines,
+        if lines == 1 { "" } else { "s" },
+        if d.dirty() { "unsaved" } else { "saved" }
+    );
+    if b.docs.len() > 1 {
+        summary.push_str(&format!(" · tab {} of {}", b.active + 1, b.docs.len()));
+    }
+    let unsaved = b.docs.iter().filter(|d| d.dirty()).count();
+    if unsaved > 1 {
+        summary.push_str(&format!(" ({unsaved} tabs unsaved)"));
+    }
+    match ui.get_dialog() {
+        0 => {}
+        3 => summary.push_str(" · asking about unsaved changes: save, discard or cancel"),
+        1 => summary.push_str(" · Open file dialog is up"),
+        2 => summary.push_str(" · Save As dialog is up"),
+        _ => summary.push_str(" · Go to line dialog is up"),
+    }
+    if ui.get_busy() {
+        summary.push_str(" · working");
+    }
+    let notice = ui.get_notice().to_string();
+    if !notice.is_empty() {
+        summary.push_str(&format!(" · {notice}"));
+    }
+    View::new(summary)
+        .with("path", serde_json::json!(d.path))
+        .with("title", d.title())
+        .with("modified", d.dirty())
+        .with("lines", lines as i64)
+        .with("characters", d.text.chars().count() as i64)
+        .with("content", d.text.chars().take(4000).collect::<String>())
+        .with("bytes", d.text.len())
+        .with("language", document::language(d.path.as_deref()))
+        .with(
+            "tabs",
+            b.docs
+                .iter()
+                .map(|d| serde_json::json!({"name": d.title(), "path": d.path, "modified": d.dirty()}))
+                .collect::<Vec<_>>(),
+        )
+        .with("active_tab", b.active)
+        .with("busy", ui.get_busy())
+        .with("notice", notice)
+        .with("dialog", ui.get_dialog())
+        .with("dialog_is", ui.get_close_label().to_string())
+        .with("recovery", ui.get_recovery_status().to_string())
+        .with("cursor_line", ui.get_cursor_line())
+        .with("cursor_column", ui.get_cursor_column())
+        .with("find_query", ui.get_query().to_string())
+        .with("find_count", ui.get_match_count())
+        .with("replacement", ui.get_replacement().to_string())
+}
+
+/// One published action: what it says it does, and the code that does it.
+type Handler = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
+
+/// Everything this window offers a mind.
+///
+/// Built as a list rather than pushed straight into `App` so the tests can read exactly what a
+/// mind is shown and run a handler without a socket or an event loop.
+fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
+    let window = {
+        let weak = ui.as_weak();
+        move || weak.upgrade().ok_or_else(|| "The Editor window is gone.".to_string())
+    };
+    let mut out: Vec<(Action, Handler)> = Vec::new();
+    let mut add = |spec: Action,
+                   run: fn(
+        &TextEditorApp,
+        &State,
+        &serde_json::Value,
+    ) -> Result<serde_json::Value, String>| {
+        let window = window.clone();
+        let state = s.clone();
+        let name = spec.name.clone();
+        out.push((
+            spec,
+            Box::new(move |args: &serde_json::Value| {
+                let ui = window()?;
+                if ui.get_busy() {
+                    return Err(format!(
+                        "`{name}` cannot run while the editor is reading or writing a file; \
+                         read `describe` again in a moment."
+                    ));
+                }
+                run(&ui, &state, args)
+            }) as Handler,
+        ));
+    };
+
+    add(
+        act(
+            "new",
+            "Open an empty new tab and make it the active one. Nothing is written to disk until \
+             `save_as` gives it a path; up to eight tabs can be open.",
+        ),
+        |ui, s, _| {
+            no_dialog(ui, "new")?;
+            let before = s.borrow().docs.len();
+            action(ui, s, "new");
+            if s.borrow().docs.len() == before {
+                return Err(refuse(
+                    ui,
+                    "Eight tabs are already open; close one before opening another.",
+                ));
+            }
+            Ok(document_now(ui, s))
+        },
+    );
+
+    add(
+        act(
+            "open",
+            "Open the UTF-8 text file at this path in a tab and make it active; a file already \
+             open is brought forward instead of opened twice. The file is not changed.",
+        )
+        .arg(arg(
+            "path",
+            "Absolute path to the file, or one starting `~/`. Up to 1 MiB of UTF-8 text; a \
+             binary or larger file is refused and nothing is opened.",
+        )),
+        |ui, s, args| {
+            no_dialog(ui, "open")?;
+            let path = needed(ui, args, "open", "path", "An absolute path to a text file.")?;
+            let full = expanded(path.trim());
+            let before = s.borrow().docs[s.borrow().active].path.clone();
+            open(ui, s, full.clone());
+            settle(ui, s);
+            let answer = document_now(ui, s);
+            if answer["path"] != serde_json::json!(full.display().to_string())
+                && s.borrow().docs[s.borrow().active].path == before
+            {
+                let why = ui.get_notice().to_string();
+                return Err(refuse(
+                    ui,
+                    if why.is_empty() {
+                        format!("{} was not opened.", full.display())
+                    } else {
+                        why
+                    },
+                ));
+            }
+            Ok(answer)
+        },
+    );
+
+    add(
+        act(
+            "save",
+            "Write the active tab back to the file it was opened from and check the bytes on \
+             disk. A tab with no file is refused — give `save_as` a path. When the editor is \
+             asking about unsaved changes, this is the answer that writes the tab and closes it.",
+        ),
+        |ui, s, _| {
+            let answering = ui.get_dialog() == 3;
+            if !answering {
+                no_dialog(ui, "save")?;
+            }
+            if s.borrow().docs[s.borrow().active].path.is_none() {
+                return Err(refuse(
+                    ui,
+                    "This tab has never been written anywhere; `save_as` with a path decides \
+                     where it goes.",
+                ));
+            }
+            let path = s.borrow().docs[s.borrow().active].path.clone();
+            action(ui, s, if answering { "save-close" } else { "save" });
+            settle(ui, s);
+            // Read back through the tab that holds that path — a save that closed its tab has
+            // moved the active one, and answering about whatever is now in front would be a
+            // different document.
+            let b = s.borrow();
+            let d = b.docs.iter().find(|d| d.path == path);
+            let wrote = d.map(|d| !d.dirty()).unwrap_or(true);
+            let on_disk = path.as_deref().and_then(|p| document::read(p).ok());
+            drop(b);
+            if !wrote || on_disk.is_none() {
+                let why = ui.get_notice().to_string();
+                return Err(refuse(
+                    ui,
+                    if why.is_empty() {
+                        "The file was not written; the draft is still open.".to_string()
+                    } else {
+                        why
+                    },
+                ));
+            }
+            Ok(serde_json::json!({
+                "path": path.as_ref().map(|p| p.display().to_string()),
+                "bytes": on_disk.as_deref().map(str::len),
+                "lines": on_disk.as_deref().map(|t| t.bytes().filter(|c| *c == b'\n').count() + 1),
+                "saved": true,
+                "closed_the_tab": answering,
+                "tabs": s.borrow().docs.len(),
+                "now": document_now(ui, s),
+            }))
+        },
+    );
+
+    add(
+        // Standard, like `save`: writing a file the caller named is this app's one job, and the
+        // store refuses to overwrite — an existing path is an error, never a silent replacement.
+        act(
+            "save_as",
+            "Write the active tab to this path and keep the tab on it from now on. It refuses \
+             rather than overwrite a file that already exists.",
+        )
+        .arg(arg(
+            "path",
+            "Absolute path of the file to write, or one starting `~/`. Its folder must exist and \
+             nothing may already be at that path.",
+        )),
+        |ui, s, args| {
+            if ui.get_dialog() != 0 && ui.get_dialog() != 2 && ui.get_dialog() != 3 {
+                no_dialog(ui, "save_as")?;
+            }
+            let path = needed(ui, args, "save_as", "path", "An absolute path to write to.")?;
+            let full = expanded(path.trim());
+            save(ui, s, Some(full.clone()));
+            settle(ui, s);
+            let answer = document_now(ui, s);
+            if answer["path"] != serde_json::json!(full.display().to_string())
+                || answer["matches_disk"] != true
+            {
+                let why = ui.get_notice().to_string();
+                return Err(refuse(
+                    ui,
+                    if why.is_empty() {
+                        format!("Nothing was written to {}.", full.display())
+                    } else {
+                        why
+                    },
+                ));
+            }
+            Ok(answer)
+        },
+    );
+
+    add(
+        act(
+            "show",
+            "Bring the Editor window to the front. Nothing in any tab is read or changed.",
+        ),
+        |ui, s, _| {
+            let _ = ui.show();
+            Ok(serde_json::json!({ "shown": true, "now": document_now(ui, s) }))
+        },
+    );
+
+    add(
+        act(
+            "close",
+            "Close the active tab. A tab with unsaved changes is not closed: the window asks, \
+             and `save`, `discard` or `cancel` answers it. The last tab closed leaves an empty one.",
+        ),
+        |ui, s, _| {
+            no_dialog(ui, "close")?;
+            let (before, title) = {
+                let b = s.borrow();
+                (b.docs.len(), b.docs[b.active].title())
+            };
+            action(ui, s, "close");
+            let asking = ui.get_dialog() == 3;
+            Ok(serde_json::json!({
+                "closed": !asking && s.borrow().docs.len() < before,
+                "was": title,
+                "awaiting_answer": asking,
+                "asking": if asking { ui.get_close_label().to_string() } else { String::new() },
+                "tabs": s.borrow().docs.len(),
+                "now": document_now(ui, s),
+            }))
+        },
+    );
+
+    add(
+        act(
+            "cancel",
+            "Dismiss whichever dialog is open and leave every tab exactly as it was. Nothing is \
+             closed, saved or discarded.",
+        ),
+        |ui, s, _| {
+            let was = ui.get_dialog();
+            if was == 0 {
+                return Err(refuse(ui, "No dialog is open, so there is nothing to cancel."));
+            }
+            action(ui, s, "cancel");
+            Ok(serde_json::json!({
+                "dialog_closed": ui.get_dialog() == 0,
+                "was_asking": was,
+                "now": document_now(ui, s),
+            }))
+        },
+    );
+
+    add(
+        // Sensitive: this is the action that throws away work. The tab's unsaved text is gone
+        // when it returns — the draft recovery file is rewritten without it — and nothing on
+        // this machine keeps a copy.
+        act(
+            "discard",
+            "Throw away the unsaved changes in the tab the window is asking about and close it. \
+             The text that was never saved is gone and cannot be recovered.",
+        )
+        .risk("sensitive"),
+        |ui, s, _| {
+            if ui.get_dialog() != 3 {
+                return Err(refuse(
+                    ui,
+                    "Nothing is waiting to be discarded; `close` asks first, and only a tab with \
+                     unsaved changes is ever asked about.",
+                ));
+            }
+            let (before, title) = {
+                let b = s.borrow();
+                (b.docs.len(), b.docs[b.active].title())
+            };
+            action(ui, s, "discard");
+            Ok(serde_json::json!({
+                "discarded": title,
+                "closed": s.borrow().docs.len() < before || before == 1,
+                "tabs": s.borrow().docs.len(),
+                "now": document_now(ui, s),
+            }))
+        },
+    );
+
+    add(
+        act(
+            "find",
+            "Search the active tab for this text, open the find bar, and select the first match. \
+             It reads the document and changes nothing in it.",
+        )
+        .arg(arg(
+            "text",
+            "The text to look for, matched literally. Case is ignored unless the find bar's \
+             match-case box is ticked; an empty query clears the matches.",
+        )),
+        |ui, s, args| {
+            no_dialog(ui, "find")?;
+            let query = needed(ui, args, "find", "text", "The text to look for.")?;
+            ui.set_query(query.clone().into());
+            ui.set_show_find(true);
+            search(ui, s, true);
+            Ok(serde_json::json!({
+                "query": query,
+                "matches": ui.get_match_count(),
+                "at_match": ui.get_match_index(),
+                "in": s.borrow().docs[s.borrow().active].title(),
+            }))
+        },
+    );
+
+    add(
+        act(
+            "find-next",
+            "Move the selection to the next match of the current `find` query, wrapping round at \
+             the end of the document. Nothing is changed.",
+        ),
+        |ui, s, _| step_match(ui, s, "find-next"),
+    );
+
+    add(
+        act(
+            "find-prev",
+            "Move the selection to the previous match of the current `find` query, wrapping \
+             round at the start of the document. Nothing is changed.",
+        ),
+        |ui, s, _| step_match(ui, s, "find-prev"),
+    );
+
+    add(
+        act(
+            "replace_text",
+            "Set the text that `replace` and `replace-all` will put in place of a match. By \
+             itself it changes nothing in the document.",
+        )
+        .arg(arg(
+            "text",
+            "What each match becomes. An empty string is allowed and deletes the match instead.",
+        )),
+        |ui, s, args| {
+            let with = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| refuse(ui, "`replace_text` needs `text`: what each match becomes."))?;
+            ui.set_replacement(with.into());
+            Ok(serde_json::json!({
+                "replacement": with,
+                "query": ui.get_query().to_string(),
+                "matches_waiting": ui.get_match_count(),
+                "in": s.borrow().docs[s.borrow().active].title(),
+            }))
+        },
+    );
+
+    add(
+        act(
+            "replace",
+            "Replace the one match the selection is on with the `replace_text` text. The tab is \
+             changed in the window; nothing is written until `save`.",
+        ),
+        |ui, s, _| replace_matches(ui, s, "replace"),
+    );
+
+    add(
+        act(
+            "replace-all",
+            "Replace every match of the current `find` query in the active tab at once. The tab \
+             is changed in the window; nothing is written until `save`.",
+        ),
+        |ui, s, _| replace_matches(ui, s, "replace-all"),
+    );
+
+    add(
+        // Sensitive: it overwrites the whole tab, unsaved paragraphs included, in one call.
+        // What it replaces is on disk only if it had been saved.
+        act(
+            "set_content",
+            "Replace everything in the active tab with this text. The file on disk is untouched \
+             until `save`; whatever was in the tab and unsaved is gone.",
+        )
+        .risk("sensitive")
+        .arg(arg(
+            "text",
+            "The tab's entire new text, up to 1 MiB and 20,000 lines of UTF-8 with no control \
+             characters. An empty string empties the tab.",
+        )),
+        |ui, s, args| {
+            no_dialog(ui, "set_content")?;
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| refuse(ui, "`set_content` needs `text`: the tab's entire new text."))?
+                .to_string();
+            document::validate(&text).map_err(|e| refuse(ui, e))?;
+            ui.set_content(text.clone().into());
+            edit(ui, s, text.clone());
+            let answer = document_now(ui, s);
+            if s.borrow().docs[s.borrow().active].text != text {
+                return Err(refuse(ui, "The tab was not changed; the text was rejected."));
+            }
+            Ok(answer)
+        },
+    );
+
+    add(
+        // Published because `set_content` and `replace-all` rewrite a whole tab in one call and
+        // the person at the keyboard had Ctrl+Z while a mind had nothing: a caller that could
+        // destroy a draft could not put it back.
+        act(
+            "undo",
+            "Take back the last change to the active tab, including a whole-tab `set_content` or \
+             `replace-all`. Up to 64 steps are kept per tab and none of it touches the file.",
+        ),
+        |ui, s, _| step_history(ui, s, "undo"),
+    );
+
+    add(
+        act(
+            "redo",
+            "Put back the change `undo` took off the active tab. Editing the tab in any other \
+             way discards what redo was holding.",
+        ),
+        |ui, s, _| step_history(ui, s, "redo"),
+    );
+
+    add(
+        act(
+            "select_tab",
+            "Make one of the open tabs the active one, by its position in `describe.tabs`. \
+             Nothing is saved, closed or changed.",
+        )
+        .arg(
+            Param::number("index")
+                .describe(
+                    "Which tab, counting from 0 in the order `describe.tabs` lists them; \
+                     `describe.active_tab` is the one in front now.",
+                ),
+        ),
+        |ui, s, args| {
+            no_dialog(ui, "select_tab")?;
+            let index = args
+                .get("index")
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+                .ok_or_else(|| {
+                    refuse(ui, "`select_tab` needs `index`: which tab, counting from 0.")
+                })?;
+            let open = s.borrow().docs.len();
+            if index < 0 || index as usize >= open {
+                return Err(refuse(
+                    ui,
+                    format!("There is no tab {index}; {open} are open, numbered 0 to {}.", open - 1),
+                ));
+            }
+            ui.invoke_select_tab(index as i32);
+            if s.borrow().active != index as usize {
+                return Err(refuse(ui, format!("Tab {index} did not come forward.")));
+            }
+            Ok(document_now(ui, s))
+        },
+    );
+
+    out
+}
+
+/// Step the active tab's history, and refuse rather than report a move that did not happen.
+fn step_history(ui: &TextEditorApp, s: &State, id: &str) -> Result<serde_json::Value, String> {
+    no_dialog(ui, id)?;
+    let before = s.borrow().docs[s.borrow().active].text.clone();
+    action(ui, s, id);
+    if s.borrow().docs[s.borrow().active].text == before {
+        return Err(refuse(
+            ui,
+            format!("There is nothing left to {id} in this tab; it is unchanged."),
+        ));
+    }
+    Ok(document_now(ui, s))
+}
+
+/// Walk to the next or previous match, and say where that left the selection.
+fn step_match(
+    ui: &TextEditorApp,
+    s: &State,
+    id: &str,
+) -> Result<serde_json::Value, String> {
+    no_dialog(ui, id)?;
+    if ui.get_match_count() == 0 {
+        return Err(refuse(
+            ui,
+            format!(
+                "Nothing matches {:?} in this tab, so there is no match to step to. `find` sets \
+                 the query.",
+                ui.get_query()
+            ),
+        ));
+    }
+    action(ui, s, id);
+    Ok(serde_json::json!({
+        "query": ui.get_query().to_string(),
+        "at_match": ui.get_match_index(),
+        "matches": ui.get_match_count(),
+        "in": s.borrow().docs[s.borrow().active].title(),
+    }))
+}
+
+/// Replace one match or all of them, and count what actually changed.
+fn replace_matches(
+    ui: &TextEditorApp,
+    s: &State,
+    id: &str,
+) -> Result<serde_json::Value, String> {
+    no_dialog(ui, id)?;
+    let intended = if id == "replace-all" { ui.get_match_count() } else { 1.min(ui.get_match_count()) };
+    if intended == 0 {
+        return Err(refuse(
+            ui,
+            format!(
+                "Nothing matches {:?} in this tab, so there is nothing to replace. `find` sets \
+                 the query and `replace_text` sets what it becomes.",
+                ui.get_query()
+            ),
+        ));
+    }
+    let before = s.borrow().docs[s.borrow().active].text.clone();
+    action(ui, s, id);
+    let after = s.borrow().docs[s.borrow().active].text.clone();
+    if after == before {
+        let why = ui.get_notice().to_string();
+        return Err(refuse(
+            ui,
+            if why.is_empty() { "Nothing was replaced.".to_string() } else { why },
+        ));
+    }
+    let mut answer = document_now(ui, s);
+    answer["replaced"] = serde_json::json!(intended);
+    answer["with"] = serde_json::json!(ui.get_replacement().to_string());
+    answer["matches_left"] = serde_json::json!(ui.get_match_count());
+    Ok(answer)
+}
+
 fn publish_control(ui: &TextEditorApp, s: State) {
-    use yantrik_app_runtime::control::{Action, App, Param, View};
     let weak = ui.as_weak();
     let state = s.clone();
-    let mut app=App::new("editor").describe(move||{
-        let b=state.borrow();let d=&b.docs[b.active];let ui=weak.upgrade();
-        View::new(format!("Text Editor — {}",d.title())).with("path",serde_json::json!(d.path)).with("modified",d.dirty()).with("content",d.text.chars().take(4000).collect::<String>()).with("bytes",d.text.len()).with("tabs",b.docs.iter().map(|d|serde_json::json!({"name":d.title(),"path":d.path,"modified":d.dirty()})).collect::<Vec<_>>()).with("active_tab",b.active).with("busy",ui.as_ref().is_some_and(|u|u.get_busy())).with("notice",ui.as_ref().map(|u|u.get_notice().to_string())).with("dialog",ui.as_ref().map(|u|u.get_dialog())).with("recovery",ui.as_ref().map(|u|u.get_recovery_status().to_string())).with("cursor_line",ui.as_ref().map(|u|u.get_cursor_line())).with("cursor_column",ui.as_ref().map(|u|u.get_cursor_column())).with("find_count",ui.as_ref().map(|u|u.get_match_count()))
+    let mut app = App::new("editor").describe(move || match weak.upgrade() {
+        Some(ui) => view(&ui, &state),
+        None => View::new("Text Editor — the window is closed"),
     });
-    for name in [
-        "new",
-        "save",
-        "show",
-        "close",
-        "cancel",
-        "discard",
-        "find-next",
-        "find-prev",
-        "replace",
-        "replace-all",
-    ] {
-        let weak = ui.as_weak();
-        let state = s.clone();
-        app = app.action(Action::new(name, &format!("Editor: {name}")), move |_| {
-            let ui = weak.upgrade().ok_or("Editor closed")?;
-            if ui.get_busy() {
-                return Err("Editor is busy".into());
-            }
-            if name == "show" {
-                let _ = ui.show();
-            } else {
-                action(&ui, &state, name);
-            }
-            Ok(serde_json::json!({"accepted":true}))
-        });
-    }
-    for name in [
-        "open",
-        "save_as",
-        "set_content",
-        "find",
-        "replace_text",
-        "select_tab",
-    ] {
-        let param = if name == "open" || name == "save_as" {
-            "path"
-        } else {
-            "text"
-        };
-        let weak = ui.as_weak();
-        let state = s.clone();
-        app = app.action(
-            Action::new(name, &format!("Editor: {name}")).arg(Param::text(param)),
-            move |args| {
-                let ui = weak.upgrade().ok_or("Editor closed")?;
-                if ui.get_busy() {
-                    return Err("Editor is busy".into());
-                }
-                if ui.get_dialog() == 3 {
-                    return Err("Resolve unsaved changes first".into());
-                }
-                let text = args[param].as_str().ok_or("Missing parameter")?;
-                match name {
-                    "open" => open(&ui, &state, expanded(text)),
-                    "save_as" => save(&ui, &state, Some(expanded(text))),
-                    "set_content" => {
-                        document::validate(text)?;
-                        ui.set_content(text.into());
-                        edit(&ui, &state, text.into());
-                    }
-                    "find" => {
-                        ui.set_query(text.into());
-                        ui.set_show_find(true);
-                        search(&ui, &state, true);
-                    }
-                    "replace_text" => ui.set_replacement(text.into()),
-                    "select_tab" => {
-                        let i = text.parse::<i32>().map_err(|_| "Expected tab index")?;
-                        ui.invoke_select_tab(i);
-                    }
-                    _ => {}
-                }
-                Ok(serde_json::json!({"accepted":true,"completed":!ui.get_busy()}))
-            },
-        );
+    for (spec, run) in surface(ui, &s) {
+        app = app.action(spec, run);
     }
     app.serve();
 }

@@ -324,10 +324,235 @@ fn real_editor_keyboard_tabs_search_save_close_and_recovery() {
         redraws, 0,
         "inactive editor should not keep requesting frames"
     );
+
+    // ── What the mind is shown, and what it is told afterwards ──
+    //
+    // These run inside this test rather than as their own `#[test]` because a process may
+    // install exactly one Slint platform — i-slint-core's `EVENTLOOP_PROXY` is a process-wide
+    // `OnceCell` — and every check below needs a real window to read the surface off.
+    let published = surface(&ui, &s);
+    every_action_says_what_it_does(&published);
+    the_editor_answers_with_what_it_wrote(&ui, &s, &published, &dir);
+    a_missing_required_argument_is_refused_by_name(&ui, &s, &published);
+
     let mut b = s.borrow_mut();
     b.recovery_timer.stop();
     let _ = b.jobs.send(Job::Shutdown(b.docs.clone()));
     if let Some(w) = b.worker.take() {
         w.join().unwrap();
     }
+}
+
+// ── The surface a mind reads ────────────────────────────────────────────────
+//
+// Called from the window test above, because only one Slint platform may exist per process.
+
+/// Run one published action by name, the way `app.act` would.
+fn act_on(
+    published: &[(Action, Handler)],
+    name: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let (_, handler) = published
+        .iter()
+        .find(|(spec, _)| spec.name == name)
+        .unwrap_or_else(|| panic!("the editor does not publish `{name}`"));
+    handler(&args)
+}
+
+/// The check that would have caught `"Editor: replace-all"`.
+///
+/// Sixteen actions were built in two loops, all sixteen described as `Editor: <name>`, with a
+/// single argument named `path` or `text` and no description at all — `select_tab` took a "text"
+/// that had to be a number. Since d73760d `yos describe` prints each action's description and
+/// each argument's type, required flag and description, so this is verbatim what a model reads.
+fn every_action_says_what_it_does(published: &[(Action, Handler)]) {
+    assert!(
+        published.len() >= 16,
+        "the surface lost actions: {} published",
+        published.len()
+    );
+    for (spec, _) in published {
+        assert_ne!(
+            spec.description,
+            format!("Editor: {}", spec.name),
+            "`{}` still carries the placeholder the old loop generated",
+            spec.name
+        );
+        assert!(
+            spec.description.len() >= 20,
+            "`{}` has nothing a reader who cannot see the screen could use: {:?}",
+            spec.name,
+            spec.description
+        );
+        assert!(
+            spec.description.split_whitespace().count() >= 5,
+            "`{}` is not a sentence: {:?}",
+            spec.name,
+            spec.description
+        );
+        for p in &spec.params {
+            assert!(
+                p.description.len() >= 15,
+                "`{}` takes `{}` and says nothing about what goes in it",
+                spec.name,
+                p.name
+            );
+            assert!(
+                p.required,
+                "`{}` has an optional `{}`; every argument on this surface is needed, and one \
+                 that may be left out has to say what leaving it out means",
+                spec.name,
+                p.name
+            );
+        }
+        assert!(
+            ["safe", "standard", "sensitive", "dangerous"].contains(&spec.permission),
+            "`{}` is graded `{}`, which is not a grade this OS defines",
+            spec.name,
+            spec.permission
+        );
+    }
+    // The two that throw away unsaved text.
+    for name in ["discard", "set_content"] {
+        let (spec, _) = published.iter().find(|(s, _)| s.name == name).unwrap();
+        assert_eq!(
+            spec.permission, "sensitive",
+            "`{name}` destroys unsaved work and cannot be graded `{}`",
+            spec.permission
+        );
+    }
+}
+
+/// Every answer reports what was observed: the path, the bytes, the count that changed.
+///
+/// Each of these used to answer `{"accepted": true}` or `{"accepted": true, "completed": true}`.
+fn the_editor_answers_with_what_it_wrote(
+    ui: &TextEditorApp,
+    s: &State,
+    published: &[(Action, Handler)],
+    dir: &Path,
+) {
+    let fresh = act_on(published, "new", serde_json::json!({})).expect("a new tab");
+    assert_eq!(fresh["title"], "Untitled", "answer: {fresh}");
+    assert_eq!(fresh["path"], serde_json::Value::Null, "answer: {fresh}");
+    assert_eq!(fresh["modified"], false, "answer: {fresh}");
+
+    let written = act_on(
+        published,
+        "set_content",
+        serde_json::json!({ "text": "alpha\nbeta\nalpha\n" }),
+    )
+    .expect("set_content on the new tab");
+    assert_eq!(written["lines"], 4, "answer: {written}");
+    assert_eq!(written["modified"], true, "answer: {written}");
+    assert_eq!(written["on_disk"], false, "nothing has been written yet: {written}");
+
+    let found = act_on(published, "find", serde_json::json!({ "text": "alpha" })).expect("find");
+    assert_eq!(found["matches"], 2, "answer: {found}");
+
+    act_on(published, "replace_text", serde_json::json!({ "text": "omega" })).expect("replace_text");
+    let replaced = act_on(published, "replace-all", serde_json::json!({})).expect("replace-all");
+    assert_eq!(replaced["replaced"], 2, "the answer counts what it changed: {replaced}");
+    assert_eq!(s.borrow().docs[s.borrow().active].text, "omega\nbeta\nomega\n");
+
+    // A caller that can rewrite a whole tab has to be able to put it back.
+    let undone = act_on(published, "undo", serde_json::json!({})).expect("undo the replace-all");
+    assert_eq!(undone["modified"], true, "answer: {undone}");
+    assert_eq!(s.borrow().docs[s.borrow().active].text, "alpha\nbeta\nalpha\n");
+    act_on(published, "redo", serde_json::json!({})).expect("redo it");
+    assert_eq!(s.borrow().docs[s.borrow().active].text, "omega\nbeta\nomega\n");
+
+    // A tab that has never been written anywhere used to open a dialog and answer `accepted`.
+    let refused = act_on(published, "save", serde_json::json!({}))
+        .expect_err("save on a tab with no file must be refused");
+    assert!(
+        refused.contains("save_as"),
+        "the refusal has to name the action that would work: {refused}"
+    );
+
+    let path = dir.join("surface.txt");
+    let saved = act_on(
+        published,
+        "save_as",
+        serde_json::json!({ "path": path.display().to_string() }),
+    )
+    .expect("save_as to a fresh path");
+    assert_eq!(saved["path"], path.display().to_string(), "answer: {saved}");
+    assert_eq!(saved["matches_disk"], true, "answer: {saved}");
+    assert_eq!(saved["modified"], false, "answer: {saved}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file is on disk"),
+        "omega\nbeta\nomega\n"
+    );
+
+    // Fault 3: the summary was the filename and nothing else.
+    let summary = view(ui, s).summary;
+    assert!(
+        summary.contains("surface.txt") && summary.contains("saved"),
+        "the summary has to name the file and whether it is saved: {summary:?}"
+    );
+    assert!(
+        summary.contains("tab "),
+        "and which tab of how many: {summary:?}"
+    );
+
+    // A refusal names what it could not do, and reaches the screen.
+    let missing = dir.join("not-here.txt");
+    let failed = act_on(
+        published,
+        "open",
+        serde_json::json!({ "path": missing.display().to_string() }),
+    )
+    .expect_err("opening a file that is not there must be refused");
+    assert!(!failed.is_empty(), "the refusal has to say something");
+    assert!(
+        !ui.get_notice().is_empty(),
+        "and it has to reach the window notice too"
+    );
+
+    let out_of_range = act_on(published, "select_tab", serde_json::json!({ "index": 99 }))
+        .expect_err("there is no tab 99");
+    assert!(
+        out_of_range.contains("99") && out_of_range.contains("open"),
+        "the refusal has to say how many tabs there are: {out_of_range}"
+    );
+}
+
+/// `set_content` with nothing to put in used to answer `{"accepted": true, "completed": true}`.
+fn a_missing_required_argument_is_refused_by_name(
+    ui: &TextEditorApp,
+    s: &State,
+    published: &[(Action, Handler)],
+) {
+    let (spec, _) = published.iter().find(|(s, _)| s.name == "set_content").unwrap();
+    assert!(
+        spec.params.iter().any(|p| p.name == "text" && p.required),
+        "`text` has to be declared required, or the runtime accepts `set_content` with no text"
+    );
+
+    let before = s.borrow().docs[s.borrow().active].text.clone();
+    let refusal = act_on(published, "set_content", serde_json::json!({}))
+        .expect_err("set_content with no text must be refused");
+    assert!(
+        refusal.contains("text"),
+        "the refusal has to name the argument that was missing: {refusal}"
+    );
+    assert!(
+        ui.get_notice().contains("text"),
+        "the refusal has to reach the window notice too: {:?}",
+        ui.get_notice()
+    );
+    assert_eq!(
+        s.borrow().docs[s.borrow().active].text,
+        before,
+        "a refused set_content must not have changed the tab"
+    );
+
+    let no_path = act_on(published, "open", serde_json::json!({}))
+        .expect_err("open with no path must be refused");
+    assert!(
+        no_path.contains("path"),
+        "the refusal has to name the argument that was missing: {no_path}"
+    );
 }

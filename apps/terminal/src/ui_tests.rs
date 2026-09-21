@@ -287,6 +287,16 @@ fn real_window_shell_tabs_search_clipboard_resize_and_idle() {
     ui.invoke_action("confirm-close".into());
     assert_eq!(state.borrow().tabs.len(), 7);
     assert!(!ui.get_confirm_close());
+
+    // ── What the mind is shown, and what it is told afterwards ──
+    //
+    // These run inside this test rather than as their own `#[test]` because a process may
+    // install exactly one Slint platform — i-slint-core's `EVENTLOOP_PROXY` is a process-wide
+    // `OnceCell` — and every check below needs a real window and a real PTY.
+    let published = surface(&ui, &state);
+    every_action_says_what_it_does(&published);
+    the_terminal_answers_with_what_the_shell_did(&ui, &state, &published, &queue, &window, &dir);
+
     for tab in state.borrow_mut().tabs.drain(..) {
         tab.session.shutdown();
     }
@@ -346,4 +356,180 @@ fn physical_modifiers_never_become_shell_control_bytes() {
     assert_eq!(encode_key(&event, false).unwrap(), b"\x10");
     event.text = "q".into();
     assert_eq!(encode_key(&event, false).unwrap(), b"\x11");
+}
+
+// ── The surface a mind reads ────────────────────────────────────────────────
+//
+// Called from the window test above, because only one Slint platform may exist per process.
+
+/// Run one published action by name, the way `app.act` would.
+fn act_on(
+    published: &[(Action, Handler)],
+    name: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let (_, handler) = published
+        .iter()
+        .find(|(spec, _)| spec.name == name)
+        .unwrap_or_else(|| panic!("the terminal does not publish `{name}`"));
+    handler(&args)
+}
+
+/// Every action says what it does, documents its arguments, and is graded for what it can do.
+fn every_action_says_what_it_does(published: &[(Action, Handler)]) {
+    assert!(
+        published.len() >= 4,
+        "the surface lost actions: {} published",
+        published.len()
+    );
+    for (spec, _) in published {
+        assert_ne!(
+            spec.description,
+            format!("Terminal: {}", spec.name),
+            "`{}` carries a placeholder description",
+            spec.name
+        );
+        assert!(
+            spec.description.len() >= 20,
+            "`{}` has nothing a reader who cannot see the screen could use: {:?}",
+            spec.name,
+            spec.description
+        );
+        assert!(
+            spec.description.split_whitespace().count() >= 5,
+            "`{}` is not a sentence: {:?}",
+            spec.name,
+            spec.description
+        );
+        for p in &spec.params {
+            assert!(
+                p.description.len() >= 15,
+                "`{}` takes `{}` and says nothing about what goes in it",
+                spec.name,
+                p.name
+            );
+            assert!(p.required, "`{}` must need its `{}`", spec.name, p.name);
+        }
+        // Everything here starts or drives a shell process on this machine.
+        assert_eq!(
+            spec.permission, "sensitive",
+            "`{}` starts or feeds a shell and cannot be graded `{}`",
+            spec.name, spec.permission
+        );
+    }
+    // The two that only queue bytes on a PTY have to say the work is not finished when they
+    // return, or the envelope around them reports `settled: true` for a command that has not
+    // run — which is exactly what `run` did while answering `"completed": false` in its own body.
+    for name in ["run", "send_input"] {
+        let (spec, _) = published.iter().find(|(s, _)| s.name == name).unwrap();
+        assert!(
+            spec.deferred,
+            "`{name}` only starts the work and must declare it"
+        );
+        assert_eq!(spec.schema()["settles"], "later");
+    }
+}
+
+/// The answers report the shell, not the fact that a write was queued.
+fn the_terminal_answers_with_what_the_shell_did(
+    ui: &TerminalApp,
+    state: &State,
+    published: &[(Action, Handler)],
+    queue: &Queue,
+    window: &MinimalSoftwareWindow,
+    dir: &std::path::Path,
+) {
+    let pid = state.borrow().session().unwrap().pid();
+    let answer = act_on(
+        published,
+        "run",
+        serde_json::json!({ "command": "printf 'SURFACE:%s\\n' ok" }),
+    )
+    .expect("run a command in the active shell");
+
+    assert_eq!(answer["sent"], "printf 'SURFACE:%s\\n' ok", "answer: {answer}");
+    assert_eq!(answer["shell_pid"], pid, "the answer names the shell it typed into: {answer}");
+    assert_eq!(answer["alive"], true, "answer: {answer}");
+    assert_eq!(answer["finished"], false, "a run never claims the command finished: {answer}");
+    assert_eq!(
+        answer["directory"],
+        state.borrow().session().unwrap().cwd().display().to_string(),
+        "answer: {answer}"
+    );
+    assert!(
+        answer["screen_tail"].as_str().is_some_and(|t| !t.is_empty()),
+        "the answer carries what the shell had printed: {answer}"
+    );
+    assert!(
+        answer["output"].as_str().is_some_and(|o| o.contains("SURFACE")),
+        "and what appeared after the command was sent: {answer}"
+    );
+
+    // And the command really ran — checked against the screen, not the answer.
+    wait(queue, window, || ui.get_screen_text().contains("SURFACE:ok"));
+
+    // Fault 3: the summary was the working directory and nothing else.
+    let summary = view(ui, &state.borrow()).summary;
+    assert!(
+        summary.starts_with("Terminal — ") && summary.contains(&dir.display().to_string()),
+        "the summary has to name the directory: {summary:?}"
+    );
+    assert!(
+        summary.contains("idle at a prompt") || summary.contains("running:"),
+        "and whether anything is running in it: {summary:?}"
+    );
+    assert!(
+        summary.contains("tab "),
+        "and which tab of how many: {summary:?}"
+    );
+
+    // An empty command used to be `command is empty`, with nothing on screen.
+    let refusal = act_on(published, "run", serde_json::json!({ "command": "   " }))
+        .expect_err("a blank command must be refused");
+    assert!(
+        refusal.contains("command"),
+        "the refusal has to name the argument: {refusal}"
+    );
+    assert!(
+        ui.get_notice().contains("command"),
+        "and reach the window notice too: {:?}",
+        ui.get_notice()
+    );
+
+    let relative = act_on(
+        published,
+        "open_directory",
+        serde_json::json!({ "directory": "somewhere/relative" }),
+    )
+    .expect_err("a relative directory must be refused");
+    assert!(
+        relative.contains("absolute"),
+        "the refusal has to say what was wrong with it: {relative}"
+    );
+
+    let folder = dir.join("folder with spaces; literal");
+    let opened = act_on(
+        published,
+        "open_directory",
+        serde_json::json!({ "directory": folder.display().to_string() }),
+    )
+    .expect("open a tab in a real folder");
+    assert_eq!(opened["directory"], folder.display().to_string(), "answer: {opened}");
+    assert_eq!(opened["tabs"], 8, "answer: {opened}");
+    assert_eq!(opened["alive"], true, "answer: {opened}");
+    assert_ne!(opened["shell_pid"], pid, "a new tab is a new shell: {opened}");
+
+    // The eight-tab cap used to `return` in silence while the surface answered `{"tabs": 8}`.
+    let capped = act_on(published, "new_tab", serde_json::json!({}))
+        .expect_err("a ninth tab must be refused, not silently dropped");
+    assert!(
+        capped.contains("eight"),
+        "the refusal has to say why: {capped}"
+    );
+    assert_eq!(state.borrow().tabs.len(), 8, "and nothing may have been opened");
+    assert!(
+        ui.get_notice().contains("eight"),
+        "and the person at the window is told too: {:?}",
+        ui.get_notice()
+    );
 }
