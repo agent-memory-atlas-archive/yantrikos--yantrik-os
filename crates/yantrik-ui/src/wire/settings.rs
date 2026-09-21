@@ -66,6 +66,15 @@ pub struct UserSettings {
     /// every process involved, including the mind it names.
     #[serde(default)]
     pub preferred_mind: String,
+    /// What a mind on the socket may do without being asked: `plan`, `ask` or `auto`.
+    ///
+    /// Deliberately not `bypass`. Bypass is the fourth mode and it is never written here — a
+    /// machine that booted into "do not ask me about anything" would be in a mode nobody had
+    /// chosen in that sitting, and the only thing that makes bypass acceptable is that somebody
+    /// picked it, just now, off a confirmation that said what it meant. A bypass persists the
+    /// mode it will fall back to; see `mind_mode::persist`.
+    #[serde(default)]
+    pub mind_mode: String,
 }
 
 impl Default for UserSettings {
@@ -88,6 +97,9 @@ impl Default for UserSettings {
                 .map(|s| s.to_string())
                 .collect(),
             preferred_mind: String::new(),
+            // The behaviour that shipped before modes existed, so an upgrade changes nothing
+            // about a machine somebody already trusts.
+            mind_mode: "ask".into(),
         }
     }
 }
@@ -188,6 +200,38 @@ pub fn set_preferred_mind(id: &str) {
         return;
     }
     settings.preferred_mind = id.to_string();
+    save(&settings);
+}
+
+/// What a mind on the socket may do without being asked. Empty means the file predates modes.
+///
+/// Read through the same shared handle as `place()` and `preferred_mind()`, for the same reason:
+/// a direct load here and a `persist` there would each write the whole struct from their own copy
+/// and quietly undo each other.
+pub fn mind_mode() -> String {
+    match LIVE.get().and_then(|s| s.lock().ok()) {
+        Some(settings) => settings.mind_mode.clone(),
+        None => load().mind_mode,
+    }
+}
+
+/// Record the mode. Never called with `bypass` — see the field's comment and `mind_mode::persist`.
+pub fn set_mind_mode(mode: &str) {
+    if let Some(shared) = LIVE.get() {
+        if let Ok(mut settings) = shared.lock() {
+            if settings.mind_mode == mode {
+                return;
+            }
+            settings.mind_mode = mode.to_string();
+        }
+        persist(shared);
+        return;
+    }
+    let mut settings = load();
+    if settings.mind_mode == mode {
+        return;
+    }
+    settings.mind_mode = mode.to_string();
     save(&settings);
 }
 

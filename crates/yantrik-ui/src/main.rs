@@ -65,6 +65,8 @@ mod mime_dispatch;
 mod lens;
 mod lock;
 mod markdown;
+/// What the mind may do without being asked: plan / ask / auto / bypass. See its module doc.
+mod mind_mode;
 mod notifications;
 mod onboarding;
 mod icons;

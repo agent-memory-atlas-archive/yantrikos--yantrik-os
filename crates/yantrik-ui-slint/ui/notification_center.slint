@@ -1,12 +1,24 @@
-// Notification Center — persistent notification history.
-// Screen 9. Grouped by app-name with collapsible sections, unread dots, per-group clear.
-// V52 polish: premium cards, hover states, better empty state, theme tokens.
+// Notification Center — screen 9.
+//
+// It lists what the notifications service holds, grouped by app, newest first. It used to list
+// the shell's own private JSON file in `~/.yantrik/`, which only the shell could write and only
+// the shell could read — so a notification from `notify-send`, from Chromium, or from any of our
+// own apps was never in it. There is one store now and this is a view of it.
+//
+// When the service is not running this says so in a sentence. An empty list and a dead service
+// look identical, and "All caught up" over a service that is down is the confident lie this repo
+// exists to stop.
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { AppHeader } from "components/app_header.slint";
 import { AppColor } from "components/app_color.slint";
+
+export struct NotifActionData {
+    id: string,
+    label: string,
+}
 
 export struct NotificationData {
     id: string,
@@ -21,6 +33,12 @@ export struct NotificationData {
     group-name: string,
     group-icon: string,
     group-count: int,
+    // The sender's buttons. Empty for a group header.
+    actions: [NotifActionData],
+    // Where it came in from — "yantrik" or "freedesktop". Shown on the row, because "who told
+    // me this" is the first question about a notification from a program nobody remembers
+    // installing.
+    source: string,
 }
 
 export component NotificationCenter inherits Rectangle {
@@ -41,11 +59,17 @@ export component NotificationCenter inherits Rectangle {
 
     in property <[NotificationData]> notifications: [];
     in property <int> unread-count: 0;
+    /// Is the one store answering? Everything below is about what to say when it is not.
+    in property <bool> service-up: true;
+    /// Why it is not, in the words the shell was given. Empty when all is well.
+    in property <string> service-notice: "";
 
     callback back-pressed();
     callback clear-all();
     callback mark-all-read();
     callback notification-tapped(string);
+    callback notification-dismissed(string);
+    callback notification-action(string, string);  // notification id, action id
     callback clear-group(string);
 
     VerticalLayout {
@@ -67,10 +91,11 @@ export component NotificationCenter inherits Rectangle {
             show-back: true;
             icon: Icons.alerts;
             title: "Notifications";
-            subtitle: root.unread-count > 0 ? "\{root.unread-count} unread" : "";
+            subtitle: !root.service-up ? "service not running"
+                    : root.unread-count > 0 ? "\{root.unread-count} unread" : "";
             actions: [
                 { id: "read",  icon: Icons.check, label: "Mark all read", disabled: root.unread-count == 0 },
-                { id: "clear", icon: Icons.trash, label: "Clear all" },
+                { id: "clear", icon: Icons.trash, label: "Clear all", disabled: root.notifications.length == 0 },
             ];
             back => { root.back-pressed(); }
             action(id) => {
@@ -88,16 +113,50 @@ export component NotificationCenter inherits Rectangle {
                 spacing: Theme.sp-1;
                 alignment: start;
 
+                // The service is not answering.
+                //
+                // Said as a sentence, not as an empty list: the two look the same and mean
+                // opposite things. Nothing is lost while it is down — notifications posted
+                // meanwhile land in the file when it comes back — and the sentence says so, so
+                // nobody goes looking for a message that is simply not readable yet.
+                if !root.service-up : Rectangle {
+                    height: down.preferred-height;
+                    border-radius: Theme.r-lg;
+                    background: Theme.bg-card;
+                    border-width: 1px;
+                    border-color: Theme.color-danger-dim;
+
+                    down := VerticalLayout {
+                        padding: Theme.sp-4;
+                        spacing: Theme.sp-2;
+
+                        Text {
+                            text: "The notifications service is not running.";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-body;
+                            font-weight: Theme.fw-headline;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: root.service-notice != "" ? root.service-notice
+                                : "Nothing is lost — this screen cannot read the store until the service is back. It is started on demand, so opening this screen again usually brings it up.";
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-caption;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
                 // Empty state
                 //
                 // Was a bell EMOJI at 48px with two loose lines of text under it. The emoji
                 // drew as a tofu box on a machine with no emoji font -- a question mark in a
                 // rectangle, in the middle of an otherwise empty screen. YEmptyState is what
                 // every other view uses to say it has nothing, and it has no emoji in it.
-                if root.notifications.length == 0 : YEmptyState {
+                if root.service-up && root.notifications.length == 0 : YEmptyState {
                     icon-path: Icons.alerts;
                     title: "All caught up";
-                    description: "System notifications will appear here.";
+                    description: "Notifications from this desktop and from any application on it appear here.";
                 }
 
                 for notif[idx] in root.notifications : VerticalLayout {
@@ -168,6 +227,10 @@ export component NotificationCenter inherits Rectangle {
                         border-radius: Theme.r-lg;
                         border-width: notif.urgency == 2 ? 1px : 0px;
                         border-color: notif.urgency == 2 ? Theme.color-danger-dim : transparent;
+                        // Everything variable on this card lives inside `nc`, one unconditional
+                        // layout, so this Rectangle has a real preferred height. A Rectangle
+                        // whose children are all behind `if` reports zero and its content spills
+                        // upward off the screen — see the note in toast_banner.slint.
                         height: nc.preferred-height;
                         animate background { duration: Theme.dur-fast; }
 
@@ -197,6 +260,22 @@ export component NotificationCenter inherits Rectangle {
                                 }
 
                                 Text { text: notif.time-ago; color: Theme.text-dim; font-size: Theme.fs-caption; vertical-alignment: center; }
+
+                                // Dismiss this one. The list had no way to remove a single
+                                // notification — only the whole app group or everything — so
+                                // reading one message meant clearing four.
+                                TouchArea {
+                                    width: 24px; height: 24px;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.notification-dismissed(notif.id); }
+                                    Icon {
+                                        commands: Icons.close;
+                                        size: 11px;
+                                        tint: parent.has-hover ? Theme.text-primary : Theme.text-dim;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                }
                             }
 
                             if notif.body != "" && notif.body != notif.summary : Text {
@@ -204,6 +283,40 @@ export component NotificationCenter inherits Rectangle {
                                 color: Theme.text-dim;
                                 font-size: Theme.fs-caption;
                                 wrap: word-wrap;
+                            }
+
+                            // The sender's own buttons. For a freedesktop notification, pressing
+                            // one sends `ActionInvoked` back to the program that raised it; for
+                            // one of ours, the app hears about it the same way. A button that
+                            // did nothing would be the dead control this repo forbids, so these
+                            // are only drawn for a notification that published actions.
+                            if notif.actions.length > 0 : HorizontalLayout {
+                                spacing: Theme.sp-2;
+                                alignment: start;
+                                padding-top: 2px;
+
+                                for action in notif.actions : Rectangle {
+                                    width: act-label.preferred-width + Theme.sp-4;
+                                    height: 26px;
+                                    border-radius: Theme.r-sm;
+                                    background: act-ta.has-hover ? Theme.accent.transparentize(75%) : Theme.bg-deep;
+                                    border-width: 1px;
+                                    border-color: Theme.accent.transparentize(70%);
+
+                                    act-ta := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.notification-action(notif.id, action.id); }
+                                    }
+
+                                    act-label := Text {
+                                        text: action.label;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-caption;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        wrap: no-wrap;
+                                    }
+                                }
                             }
                         }
                     }

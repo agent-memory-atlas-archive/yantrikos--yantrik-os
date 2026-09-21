@@ -47,6 +47,11 @@ export struct ApprovalRequest {
     grade: string,          // safe | standard | sensitive | dangerous
     args: [string],         // one `key: value` per entry, each already cut to fit one line
     warning: string,        // "" unless there is something that cannot be undone
+    // Whether "Allow for this session" may be offered at all. False for `dangerous` and for any
+    // action whose own published sentence says it cannot be undone — the same predicate that
+    // draws `warning`, so the card can never offer to stop asking about the thing it is warning
+    // about. Decided in approvals.rs from the UNCLIPPED purpose.
+    can-session: bool,
     decision: string,       // "" while waiting; then allowed | denied | expired
     record: string,         // the one line that stays in the conversation afterwards
     age-text: string,       // "94s left", while waiting
@@ -80,6 +85,7 @@ export struct ApprovalRequest {
 export component ApprovalCard inherits Rectangle {
     in property <ApprovalRequest> data;
     callback allow();
+    callback allow-session();
     callback deny();
 
     property <bool> waiting: root.data.decision == "";
@@ -293,6 +299,40 @@ export component ApprovalCard inherits Rectangle {
                     }
                 }
             }
+
+            // "Stop asking me about this one" — the third choice, and deliberately the least
+            // inviting thing on the card.
+            //
+            // It exists because approval fatigue is the failure this design is most afraid of,
+            // and forty identical cards for one long job is how it arrives. A person who can say
+            // "yes to file moves, keep asking about everything else" never has to reach for
+            // bypass, which is the blunt instrument this is trying to make unnecessary.
+            //
+            // Below the button row rather than beside it, at caption size, in dim text with a
+            // subtle border: Deny is still the ordinary filled button and the easy default, and
+            // the standing yes costs the most deliberate aim of the three. Not drawn at all for
+            // `dangerous`, or for an action the app says cannot be undone — see `can-session`.
+            if root.data.can-session : Rectangle {
+                height: 30px;
+                border-radius: Theme.r-md;
+                background: session-ta.has-hover ? Theme.hover-fill : transparent;
+                border-width: 1px;
+                border-color: Theme.border-subtle;
+
+                session-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.allow-session(); }
+                }
+                Text {
+                    text: "Allow " + root.data.app + "." + root.data.action + " for this session";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-caption;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
         }
     }
 
@@ -333,6 +373,9 @@ export component IntentLens inherits Rectangle {
 
     // Callbacks
     callback approval-allow(string);   // request id — a click, and nothing else, creates a grant
+    // request id — the same grant, plus a standing rule for that (app, action) until the shell
+    // restarts. Still a click and nothing else. See `mind_mode.rs`.
+    callback approval-allow-session(string);
     callback approval-deny(string);    // request id
     callback query-changed(string);
     callback submit-query(string);
@@ -1308,6 +1351,7 @@ export component IntentLens inherits Rectangle {
                     for item[idx] in root.approvals : ApprovalCard {
                         data: item;
                         allow => { root.approval-allow(item.id); }
+                        allow-session => { root.approval-allow-session(item.id); }
                         deny => { root.approval-deny(item.id); }
                     }
 

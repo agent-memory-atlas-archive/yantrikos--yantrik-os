@@ -204,7 +204,8 @@ cp "$PROJECT_ROOT/config/labwc/themerc" "$ROOT/share/labwc/themerc"
 # comes to have no visible way to close a window.
 cp "$PROJECT_ROOT/config/labwc/"*.png "$ROOT/share/labwc/" 2>/dev/null \
   || fail "no titlebar button icons in config/labwc — run scripts/render-window-buttons.py"
-# What starts with the desktop: the notification daemon and the polkit agent.
+# What starts with the desktop: the polkit agent, and the note saying why no notification
+# daemon is started beside it — the notifications service holds that bus name.
 cp "$PROJECT_ROOT/config/labwc/autostart" "$ROOT/share/labwc/autostart"
 # Barlow is embedded in each app binary, which the compositor cannot read a font out of, so the
 # same files also ship loose for fontconfig.

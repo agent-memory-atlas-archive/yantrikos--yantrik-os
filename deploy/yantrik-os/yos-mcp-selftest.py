@@ -19,7 +19,12 @@ What it is actually checking, in one line each:
     drift apart;
   * granted / denied / no-answer / above-the-machine-ceiling / no-shell each produce a distinct
     message, and only the first of them runs anything;
-  * a grant whose arguments do not match is refused and nothing runs.
+  * a grant whose arguments do not match is refused and nothing runs;
+  * each of the four modes does what `design/mind-modes-2026-09-21.md` says it does — including
+    that `bypass` still cannot pass the machine ceiling and `plan` refuses browser writes;
+  * `YOS_MCP_MAX_PERMISSION` can only make things stricter than the desktop's mode;
+  * an unreadable desktop falls back to `ask` and says so, rather than assuming anything;
+  * an action nobody was asked about is reported to the shell's audit action, with its outcome.
 """
 
 import importlib.util
@@ -96,6 +101,11 @@ state = load()
 
 if argv[:1] == ["describe"]:
     target = argv[1]
+    # Every describe is recorded with its whole command line, so the test can tell the READER's
+    # form (`--fold`, for a mind paying by the token) from the one the bridge parses for itself
+    # (plain, because a folded family has no purpose lines and the card needs one).
+    state.setdefault("describes", []).append(argv)
+    save(state)
     if target == "shell":
         if state.get("shell_down"):
             die("shell is not open.")
@@ -108,9 +118,23 @@ if argv[:1] == ["describe"]:
                 {"id": "builtin", "name": "Yantrik Mind", "answering": False},
                 {"id": "hermes", "name": "Hermes Agent", "answering": True},
             ],
+            "mind_audit_recent": [],
         }
+        # A desktop with no `mode` key at all is the older-shell case: the bridge must fall back
+        # to `ask` and say it did, rather than guessing something looser out of a missing field.
+        if "mode" in state:
+            body["mind_mode"] = {
+                "mode": state["mode"],
+                "previous": "ask",
+                "bypass_expires_in_secs": None,
+                "session_rules": state.get("rules", []),
+            }
         if state.get("machine_ceiling"):
             body["tool_permission"] = state["machine_ceiling"]
+        if "--fold" in argv:
+            # What `render_state` does: the same JSON, one top-level key per line, and the
+            # shell's `apps` table left out. Parsed from the first `{` exactly as before.
+            body.pop("apps", None)
         print("Yantrik - desktop screen")
         print("revision: c0ffee")
         print(json.dumps(body, indent=2))
@@ -121,6 +145,12 @@ if argv[:1] == ["describe"]:
         sys.stdout.write(DESCRIBE_CALENDAR)
         raise SystemExit(0)
     die("%s is not open." % target)
+
+if argv[:1] == ["web"]:
+    state.setdefault("web", []).append(argv)
+    save(state)
+    envelope({"navigated": True})
+    raise SystemExit(0)
 
 if argv[:1] == ["act"]:
     target, action = argv[1], argv[2]
@@ -162,6 +192,14 @@ if argv[:1] == ["act"]:
         envelope({"request_id": rid, "consumed": True})
         raise SystemExit(0)
 
+    if target == "shell" and action == "record_unasked_action":
+        if state.get("shell_down"):
+            die("shell.app.act refused: the shell is gone")
+        state.setdefault("audited", []).append(args)
+        save(state)
+        envelope({"recorded": "%s.%s" % (args.get("app"), args.get("action"))})
+        raise SystemExit(0)
+
     state.setdefault("acted", []).append({"app": target, "action": action, "args": args})
     save(state)
     envelope({"done": True})
@@ -179,7 +217,13 @@ def load_mcp(fake, state_path, ceiling="standard", requester=""):
     """
     os.environ["YOS_BIN"] = str(fake)
     os.environ["FAKE_YOS_STATE"] = str(state_path)
-    os.environ["YOS_MCP_MAX_PERMISSION"] = ceiling
+    # `None` means the harness set no cap at all, which is the ordinary case and the one where
+    # the desktop's own mode decides alone. An empty or absent variable and a set one are
+    # genuinely different to the bridge, so the test has to be able to produce both.
+    if ceiling is None:
+        os.environ.pop("YOS_MCP_MAX_PERMISSION", None)
+    else:
+        os.environ["YOS_MCP_MAX_PERMISSION"] = ceiling
     os.environ["YOS_MCP_REQUESTER"] = requester
     # Short, because two cases below wait the whole thing out. The shell's own 120s request
     # lifetime is not involved: the fake answers from a file.
@@ -207,15 +251,23 @@ def act(module, app, action, args):
 
 
 def case(tmp, name, answer="granted", machine_ceiling="sensitive", shell_down=False,
-         ceiling="standard", requester=""):
-    """A scratch desktop in a known mood, and a yos-mcp pointed at it."""
+         ceiling="standard", requester="", mode="ask", rules=None, no_mode=False):
+    """A scratch desktop in a known mood, and a yos-mcp pointed at it.
+
+    `no_mode` publishes a shell that says nothing about its mode — an older desktop, or one
+    answering from a version that predates them. The bridge has to fall back to `ask`.
+    """
     state_path = tmp / (name + ".json")
-    state_path.write_text(json.dumps({
+    body = {
         "answer": answer,
         "machine_ceiling": machine_ceiling,
         "shell_down": shell_down,
-    }), encoding="utf-8")
+        "rules": rules or [],
+    }
+    if not no_mode:
+        body["mode"] = mode
     fake = tmp / "yos"
+    state_path.write_text(json.dumps(body), encoding="utf-8")
     module = load_mcp(fake, state_path, ceiling=ceiling, requester=requester)
     return module, state_path
 
@@ -381,6 +433,163 @@ with tempfile.TemporaryDirectory() as d:
     check("a client is told how long one os_act can take",
           module.OS_ACT_MAX_SECONDS >= module.APPROVAL_WAIT + module.ACT_TIMEOUT,
           module.OS_ACT_MAX_SECONDS)
+
+    # ── The modes ───────────────────────────────────────────────────────────────────────
+    #
+    # 11. Plan: reading is open, every change is refused, and the refusal asks for the plan
+    # rather than reading as a fault. This is the mode a person picks when they want to see
+    # what a mind INTENDS, so the one thing it must not do is sound broken.
+    module, state = case(tmp, "plan-standard", mode="plan")
+    text, is_error = act(module, "calendar", "add_event", {"title": "X", "date": "2026-10-02"})
+    s = read(state)
+    check("plan mode runs nothing, not even a standard action", not s.get("acted"), s)
+    check("plan mode asks nobody", not s.get("requests"), s)
+    check("plan mode says it is a setting and asks for the plan",
+          "plan mode" in text and "WOULD do" in text and "not a failure" in text, text)
+
+    module, state = case(tmp, "plan-safe", mode="plan")
+    text, is_error = act(module, "calendar", "list_events", {})
+    check("plan mode still runs a safe action", not is_error and read(state).get("acted"), text)
+
+    # And the browser: reading a page is looking, typing into one is not.
+    module, state = case(tmp, "plan-web", mode="plan")
+    text, is_error = module.run_tool(module.BY_NAME["web_go"], {"url": "https://example.com/"})
+    check("plan mode refuses a browser write", is_error and "plan mode" in text, text)
+    check("and nothing reached the browser", not read(state).get("web"), read(state))
+    text, is_error = module.run_tool(module.BY_NAME["web_text"], {})
+    check("plan mode still lets the page be read", not is_error, text)
+
+    # 12. Auto: sensitive runs unasked and is written down; dangerous still asks.
+    #
+    # `ceiling=None` from here on, because these cases are about the DESKTOP's mode and a
+    # harness that sets no cap is the ordinary case. The cap gets its own cases at 15.
+    module, state = case(tmp, "auto", mode="auto", answer="pending", ceiling=None)
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("auto runs a sensitive action without asking", not s.get("requests"), s)
+    check("and it actually runs", not is_error and len(s.get("acted", [])) == 1, text)
+    check("an unasked run is reported to the shell's audit action",
+          len(s.get("audited", [])) == 1, s.get("audited"))
+    audited = (s.get("audited") or [{}])[0]
+    check("the audit line carries the action, grade, mode, arguments and outcome",
+          audited.get("app") == "calendar" and audited.get("action") == "delete_event"
+          and audited.get("grade") == "sensitive" and audited.get("mode") == "auto"
+          and audited.get("args_json") == {"id": "evt-3"}
+          and audited.get("outcome") == "ok", audited)
+    check("and the mind is told nobody was asked",
+          "Nobody was asked" in text and "auto" in text, text)
+
+    # 13. Bypass: even a dangerous action runs — but only up to the machine's own ceiling.
+    module, state = case(tmp, "bypass", mode="bypass", machine_ceiling="dangerous", ceiling=None)
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("bypass asks nobody", not s.get("requests"), s)
+    check("bypass runs it", not is_error and len(s.get("acted", [])) == 1, text)
+    check("bypass writes it down anyway", len(s.get("audited", [])) == 1, s.get("audited"))
+
+    module, state = case(tmp, "bypass-ceiling", mode="bypass", machine_ceiling="standard", ceiling=None)
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("bypass does NOT reach past the machine ceiling", not s.get("acted"), s)
+    check("and the refusal names the standing policy, not the mode",
+          "tool_permission" in text and "no mode changes it" in text, text)
+
+    # 14. A session rule: the person said "stop asking me about this one".
+    module, state = case(tmp, "rule", mode="ask", answer="pending", ceiling=None,
+                         rules=[{"app": "calendar", "action": "delete_event"}])
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-9"})
+    s = read(state)
+    check("a session rule covers the action with arguments nobody approved",
+          not s.get("requests") and len(s.get("acted", [])) == 1, s)
+    check("and it is recorded as a rule rather than as the mode",
+          (s.get("audited") or [{}])[0].get("mode") == "rule", s.get("audited"))
+
+    module, state = case(tmp, "rule-other", mode="ask", answer="pending",
+                         rules=[{"app": "calendar", "action": "list_events"}])
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("a rule for one action is not a rule for its neighbour",
+          len(s.get("requests", [])) == 1 and not s.get("acted"), s)
+
+    # 15. YOS_MCP_MAX_PERMISSION can only ever be STRICTER than the desktop's mode.
+    module, state = case(tmp, "cap-strict", mode="bypass", machine_ceiling="dangerous",
+                         ceiling="standard", answer="pending")
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("a stricter session cap turns a bypass run back into a question",
+          len(s.get("requests", [])) == 1 and not s.get("acted"), s)
+
+    module, state = case(tmp, "cap-loose", mode="ask", machine_ceiling="dangerous",
+                         ceiling="dangerous", answer="pending")
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("and a loose session cap cannot make an `ask` desktop stop asking",
+          len(s.get("requests", [])) == 1 and not s.get("acted"), s)
+
+    # 15b. With no cap set at all, the desktop's mode is the whole policy — and for a desktop in
+    # `ask` mode that is exactly what the historical default of `standard` used to do, so an
+    # existing deployment that simply stops setting the variable sees no change.
+    module, state = case(tmp, "nocap", mode="ask", answer="pending", ceiling=None)
+    text, is_error = act(module, "calendar", "add_event", {"title": "X", "date": "2026-10-02"})
+    check("with no cap, an ask desktop still runs a standard action unasked",
+          not is_error and not read(state).get("requests"), text)
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    check("and still asks about a sensitive one",
+          len(read(state).get("requests", [])) == 1, read(state))
+
+    # 15c. The taint rule is NOT a permission grade and no mode turns it off — not even bypass.
+    #
+    # A mode says how much the person trusts this mind; the taint says what this session has
+    # already read. They are different questions, and a bypass that switched off the second one
+    # would turn "do not ask me about things" into "carry my private state out to a web page".
+    module, state = case(tmp, "taint-bypass", mode="bypass", machine_ceiling="dangerous",
+                         ceiling=None)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "secret"})
+    check("bypass does not switch off the taint rule",
+          is_error and "already read private state" in text, text)
+    check("and nothing reached the browser", not read(state).get("web"), read(state))
+
+    # 16. A desktop that will not say what mode it is in: fall back to `ask`, and say so.
+    module, state = case(tmp, "nomode", no_mode=True, answer="pending")
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("an unreadable mode still asks about a sensitive action",
+          len(s.get("requests", [])) == 1, s)
+    check("and the fallback is stated rather than assumed silently",
+          "could not read the desktop's mind-mode" in text and "fell back to" in text, text)
+
+    module, state = case(tmp, "nomode-standard", no_mode=True)
+    text, is_error = act(module, "calendar", "add_event", {"title": "X", "date": "2026-10-02"})
+    check("an unreadable mode does not block ordinary work",
+          not is_error and read(state).get("acted"), text)
+
+    # 17. The describe a mind reads is folded; the one the bridge parses for itself is not.
+    #
+    # `--fold` prints a large family of actions as signatures only, which is the whole saving —
+    # and a folded family has no purpose lines, which is exactly what `action_detail` needs for
+    # the card. The two must not converge.
+    module, state = case(tmp, "fold")
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    describes = read(state).get("describes") or []
+    check("os_describe asks for the folded form",
+          describes and describes[-1] == ["describe", "calendar", "--fold"], describes)
+
+    module, state = case(tmp, "fold-actions")
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar", "actions": "files_"})
+    describes = read(state).get("describes") or []
+    check("os_describe forwards an actions prefix",
+          describes and describes[-1] == ["describe", "calendar", "--fold", "--actions", "files_"],
+          describes)
+
+    module, state = case(tmp, "fold-detail")
+    module.action_detail("calendar", "delete_event")
+    describes = read(state).get("describes") or []
+    check("action_detail does NOT fold, because the card needs the purpose line",
+          describes and describes[-1] == ["describe", "calendar"], describes)
+    grade, purpose = module.action_detail("calendar", "delete_event")
+    check("and it still reads the purpose the card shows",
+          grade == "sensitive" and "not recoverable" in purpose.lower(), (grade, purpose))
 
 print()
 if failures:

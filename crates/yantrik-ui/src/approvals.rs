@@ -171,6 +171,11 @@ struct Record {
     created_at: String,
     decided: Option<Instant>,
     decided_at: String,
+    /// The person pressed "Allow for this session" rather than "Allow once". It changes nothing
+    /// about THIS grant — still single-use, still bound to these exact arguments — only the line
+    /// left in the transcript, so a person scrolling back can see which of the two they chose.
+    /// The standing part of that decision lives in `mind_mode`, not here.
+    session: bool,
     /// The stored state. Expiry is not stored: it is a fact about the clock, derived on every
     /// read, so a request cannot be alive merely because nothing looked at it.
     state: Status,
@@ -207,6 +212,11 @@ pub struct Card {
     pub args: Vec<String>,
     /// A sentence to put in front of the buttons, or empty. See [`warning_for`].
     pub warning: String,
+    /// Whether the card may offer "Allow for this session" as a third choice. See
+    /// [`may_offer_session_rule`] — computed from the UNCLIPPED purpose, because the phrase that
+    /// says an action is irreversible can sit past [`PURPOSE_CHARS`] and a card that dropped it
+    /// would offer a standing yes for exactly the action that must not have one.
+    pub can_session: bool,
     pub status: Status,
     /// The one-line transcript record, once this has been decided. Empty while pending.
     pub record: String,
@@ -286,15 +296,16 @@ pub fn args_rows(value: &serde_json::Value) -> Vec<String> {
     rows
 }
 
-/// The warning line, or empty.
+/// Does the app's own sentence about this action say it cannot be taken back?
 ///
-/// Two sources, because the two things a person needs warning about are different. The grade is
-/// the OS's own judgement about the action; the purpose is the app's own sentence about it, and
-/// `delete_event` publishes "It is not recoverable" there. A card that shows the grade but drops
-/// that sentence is the exact failure commit d73760d fixed one layer down.
-pub fn warning_for(grade: &str, purpose: &str) -> String {
+/// Pulled out of [`warning_for`] because two features now need the same judgement and they must
+/// not be allowed to disagree: the card draws a red line when this is true, and
+/// `mind_mode::person_add_rule` refuses to mint a standing yes when it is. A person offered
+/// "stop asking me about this" for something the app says is irreversible has been offered the
+/// wrong thing.
+pub fn unrecoverable(purpose: &str) -> bool {
     let lower = purpose.to_ascii_lowercase();
-    let unrecoverable = [
+    [
         "not recoverable",
         "cannot be undone",
         "can't be undone",
@@ -304,7 +315,28 @@ pub fn warning_for(grade: &str, purpose: &str) -> String {
         "no undo",
     ]
     .iter()
-    .any(|phrase| lower.contains(phrase));
+    .any(|phrase| lower.contains(phrase))
+}
+
+/// May the card offer "Allow for this session" for this action?
+///
+/// Two exclusions, both of them about what a standing yes would cost if it were wrong. A
+/// `dangerous` action is the one the whole card exists for, and an action the app itself says
+/// cannot be undone is one where a second, unwatched run is the damage. Everything else — the
+/// routine `sensitive` surface a long job trips over forty times — is exactly what the session
+/// rule is for.
+pub fn may_offer_session_rule(grade: &str, purpose: &str) -> bool {
+    grade != "dangerous" && !unrecoverable(purpose)
+}
+
+/// The warning line, or empty.
+///
+/// Two sources, because the two things a person needs warning about are different. The grade is
+/// the OS's own judgement about the action; the purpose is the app's own sentence about it, and
+/// `delete_event` publishes "It is not recoverable" there. A card that shows the grade but drops
+/// that sentence is the exact failure commit d73760d fixed one layer down.
+pub fn warning_for(grade: &str, purpose: &str) -> String {
+    let unrecoverable = unrecoverable(purpose);
 
     match (grade == "dangerous", unrecoverable) {
         (true, true) => "This is graded dangerous and the app says it cannot be undone.".into(),
@@ -426,6 +458,7 @@ impl Store {
             created_at: at.to_string(),
             decided: None,
             decided_at: String::new(),
+            session: false,
             state: Status::Pending,
         });
         Ok(Requested { id, status: Status::Pending, fresh: true })
@@ -440,6 +473,25 @@ impl Store {
     /// A person pressed Allow. **UI only** — see the module doc.
     pub(crate) fn grant(&mut self, id: &str, now: Instant, at: &str) -> Result<(), String> {
         self.decide(id, Status::Granted, now, at)
+    }
+
+    /// A person pressed "Allow for this session". **UI only** — see the module doc.
+    ///
+    /// The grant itself is identical to [`Store::grant`]: one action, these arguments, once.
+    /// What differs is the record line, because "did I say yes to this once or for the rest of
+    /// the day?" is a question people ask afterwards and the transcript is where they look.
+    /// The standing part is a rule in `mind_mode`, which the caller adds beside this.
+    pub(crate) fn grant_for_session(
+        &mut self,
+        id: &str,
+        now: Instant,
+        at: &str,
+    ) -> Result<(), String> {
+        self.decide(id, Status::Granted, now, at)?;
+        if let Some(record) = self.records.iter_mut().find(|r| r.id == id) {
+            record.session = true;
+        }
+        Ok(())
     }
 
     /// A person pressed Deny. **UI only** — see the module doc.
@@ -565,6 +617,7 @@ impl Store {
                 purpose: clip(&record.purpose, PURPOSE_CHARS),
                 args: args_rows(&record.args),
                 warning: warning_for(&record.grade, &record.purpose),
+                can_session: may_offer_session_rule(&record.grade, &record.purpose),
                 status,
                 record: record_line(record, status),
                 age_secs: now.duration_since(record.created).as_secs(),
@@ -615,13 +668,14 @@ fn denied_recently(record: &Record, now: Instant) -> bool {
 /// The line that stays in the conversation after the card is gone.
 fn record_line(record: &Record, status: Status) -> String {
     let what = format!("{}.{}", record.app, record.action);
+    let allowed = if record.session { "Allowed for this session" } else { "Allowed once" };
     match status {
         Status::Pending => String::new(),
-        Status::Granted => format!("Allowed once: {what} — {}", record.decided_at),
-        Status::Consumed => format!("Allowed once: {what} — {}", record.decided_at),
+        Status::Granted => format!("{allowed}: {what} — {}", record.decided_at),
+        Status::Consumed => format!("{allowed}: {what} — {}", record.decided_at),
         Status::Denied => format!("Denied: {what} — {}", record.decided_at),
         Status::Expired if record.state == Status::Granted => {
-            format!("Allowed once: {what} — {} (grant expired unused)", record.decided_at)
+            format!("{allowed}: {what} — {} (grant expired unused)", record.decided_at)
         }
         Status::Expired => format!("Not answered: {what} — asked {}", record.created_at),
     }
@@ -665,9 +719,20 @@ pub(crate) fn grant(id: &str) -> Result<(), String> {
     locked().grant(id, Instant::now(), &hhmm())
 }
 
+/// **UI only.** See the module doc: the single caller is the "Allow for this session" callback.
+pub(crate) fn grant_for_session(id: &str) -> Result<(), String> {
+    locked().grant_for_session(id, Instant::now(), &hhmm())
+}
+
 /// **UI only.** See the module doc: the single caller is the Deny button's callback.
 pub(crate) fn deny(id: &str) -> Result<(), String> {
     locked().deny(id, Instant::now(), &hhmm())
+}
+
+/// One card by id, as the UI sees it. Used by the session-rule callback, which needs the
+/// action's grade and purpose to decide whether a rule may exist for it at all.
+pub fn card(id: &str) -> Option<Card> {
+    cards().into_iter().find(|c| c.id == id)
 }
 
 pub fn consume(
@@ -1082,6 +1147,52 @@ mod approvals_tests {
         assert!(warning_for("dangerous", "Erase the disk. It is not recoverable.")
             .contains("cannot be undone"));
         assert!(warning_for("standard", "Open a note.").is_empty());
+    }
+
+    /// The predicate the card draws its warning from is the same one that decides whether a
+    /// standing yes may exist. Two features, one judgement — if they ever disagree, a person is
+    /// offered "stop asking me about this" for an action the card has just called irreversible.
+    #[test]
+    fn approvals_a_session_rule_is_never_offered_for_what_the_card_warns_about() {
+        assert!(may_offer_session_rule("sensitive", "Move a file to another folder."));
+        assert!(may_offer_session_rule("standard", "Open a note."));
+
+        for (grade, purpose) in [
+            ("dangerous", "End a process."),
+            ("sensitive", "Delete an event from the calendar. It is not recoverable."),
+            ("sensitive", "Erase the device. This cannot be undone."),
+            ("sensitive", "Remove the container permanently."),
+        ] {
+            assert!(
+                !may_offer_session_rule(grade, purpose),
+                "a rule must not be offered for `{purpose}`"
+            );
+            assert!(
+                !warning_for(grade, purpose).is_empty(),
+                "and the card must already be warning about it: `{purpose}`"
+            );
+        }
+    }
+
+    /// The card says which of the two the person chose, because they will ask afterwards.
+    #[test]
+    fn approvals_a_session_grant_says_so_in_the_transcript() {
+        let mut store = Store::new();
+        let now = Instant::now();
+        let id = ask(&mut store, now);
+        store.grant_for_session(&id, now, "12:03").expect("a person pressed the third button");
+
+        let card = store.cards(now).into_iter().find(|c| c.id == id).unwrap();
+        assert_eq!(card.record, "Allowed for this session: calendar.delete_event — 12:03");
+
+        // And it is still one grant, for these arguments, once — the standing part lives in
+        // `mind_mode`, not in the store.
+        let call = serde_json::json!({"id": "evt-3", "confirm": true});
+        store.consume(&id, "calendar", "delete_event", &call, now).unwrap();
+        let again = store
+            .consume(&id, "calendar", "delete_event", &call, now)
+            .expect_err("a session rule does not make the grant reusable");
+        assert!(again.contains("already used"), "{again}");
     }
 
     #[test]

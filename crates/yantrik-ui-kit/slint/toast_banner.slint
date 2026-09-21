@@ -1,120 +1,240 @@
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
 
+export struct ToastActionData {
+    id: string,
+    label: string,
+}
+
 export struct ToastData {
-    id: int,
+    // The notifications service's id, as a string. It was an `int` made from the wall clock,
+    // which meant two toasts raised in the same millisecond had the same id and dismissing one
+    // dismissed both — and nothing could be acted on afterwards, because no store knew the
+    // number. It is the store's id now, so pressing a button here reaches the notification it
+    // was drawn from.
+    id: string,
     app-name: string,
     summary: string,
     body: string,
     urgency: int,      // 0=low, 1=normal, 2=critical
-    icon-char: string,  // first char of app name
+    icon-char: string, // first char of the app name
+    actions: [ToastActionData],
 }
 
+// Toasts, bottom-right, stacking upward with the newest on top.
+//
+// ── Why the bottom and not the top ──
+//
+// The approval card — the one the mind puts up when it needs a yes — is an overlay at the TOP
+// right: `x = parent.width - 420px`, `y = status-bar-height + sp-4`, 404px wide, and its height
+// grows with the request. Toasts were at the top right too, 360px wide at `x = parent.width -
+// 380px`, so the two overlapped by 360 of 404 pixels. Whichever was declared later in app.slint
+// won, and a toast could cover the buttons on a question the machine was waiting to have
+// answered — or be covered by it and never be read.
+//
+// The two could have been stacked, but the card's height is not knowable from out here: it is
+// built inside a conditional block, so there is no element to measure. A fixed reserve would be
+// a guess that goes wrong the first time a request has a long argument list.
+//
+// So they are on opposite edges: questions at the top, where they are waited for; news at the
+// bottom, where it can be ignored. Neither can ever cover the other, and neither has to know
+// the other's size.
 export component ToastBanner inherits Rectangle {
     in property <[ToastData]> toasts: [];
-    callback toast-clicked(int);    // toast id
-    callback toast-dismissed(int);  // toast id
+    /// How many more are waiting behind the ones shown.
+    in property <int> overflow: 0;
+    /// Height of whatever owns the bottom edge — the taskbar in the shell, nothing in an app.
+    in property <length> bottom-inset: Theme.taskbar-height;
+
+    callback toast-clicked(string);            // notification id
+    callback toast-dismissed(string);          // notification id
+    callback toast-action(string, string);     // notification id, action id
 
     width: 100%;
     height: 100%;
-    // No background — overlay on top of content
+    // No background — an overlay on top of whatever screen is up.
 
-    // Show up to 3 toasts stacked from top-right
-    for toast[idx] in root.toasts : Rectangle {
+    Rectangle {
         x: parent.width - 380px;
-        y: 32px + idx * 80px;
         width: 360px;
-        height: 72px;
-        border-radius: 14px;
-        background: @linear-gradient(135deg, Theme.bg-card.transparentize(75%) 0%, Theme.bg-deep.transparentize(75%) 100%);
-        border-width: 1px;
-        border-color: toast.urgency == 2 ? Theme.color-emotional.transparentize(75%) : Theme.cyan.transparentize(87%);
-        drop-shadow-blur: 20px;
-        drop-shadow-color: Theme.overlay-backdrop;
-        opacity: 0.97;
-        clip: true;
+        // The stack's bottom edge is pinned just above the taskbar and it grows upward, so the
+        // oldest toast never moves and a new one appears above it.
+        height: stack.preferred-height;
+        y: parent.height - root.bottom-inset - Theme.sp-3 - self.height;
+        background: transparent;
 
-        // Urgency accent bar on left
-        Rectangle {
-            x: 0; y: 0;
-            width: 3px;
-            height: parent.height;
-            background: toast.urgency == 2 ? Theme.color-emotional :
-                        toast.urgency == 1 ? Theme.amber : Theme.cyan;
-        }
+        stack := VerticalLayout {
+            spacing: Theme.sp-2;
+            alignment: end;
 
-        TouchArea {
-            width: 100%;
-            height: 100%;
-            clicked => { root.toast-clicked(toast.id); }
-        }
+            for toast in root.toasts : Rectangle {
+                // ── The Slint size trap, which cost an afternoon ──
+                //
+                // A non-layout element takes its preferred size from its UNCONDITIONAL
+                // children. Every text on a toast past the summary is behind an `if`, so a
+                // Rectangle whose children were those conditionals reported a preferred height
+                // of zero and its content spilled out of the top. Everything variable lives
+                // inside `card` — one unconditional VerticalLayout — and the card's height is
+                // that layout's.
+                height: card.preferred-height;
+                border-radius: 14px;
+                background: @linear-gradient(135deg, Theme.bg-card.transparentize(15%) 0%, Theme.bg-deep.transparentize(15%) 100%);
+                border-width: 1px;
+                border-color: toast.urgency == 2 ? Theme.color-emotional.transparentize(60%) : Theme.cyan.transparentize(80%);
+                drop-shadow-blur: 24px;
+                drop-shadow-color: Theme.overlay-backdrop;
+                clip: true;
 
-        HorizontalLayout {
-            padding-left: 14px;
-            padding-right: 14px;
-            spacing: 10px;
+                // Urgency accent bar down the left edge.
+                Rectangle {
+                    x: 0; y: 0;
+                    width: 3px;
+                    height: parent.height;
+                    background: toast.urgency == 2 ? Theme.color-emotional :
+                                toast.urgency == 1 ? Theme.amber : Theme.cyan;
+                }
 
-            // App icon circle
-            Rectangle {
-                width: 36px;
-                height: 36px;
-                y: (parent.height - 36px) / 2;
-                border-radius: 18px;
-                background: toast.urgency == 2 ? Theme.color-emotional.transparentize(87%) :
-                            toast.urgency == 1 ? Theme.amber.transparentize(87%) : Theme.cyan.transparentize(87%);
+                // The body is a click target — it opens the app that sent this. Declared before
+                // the content so the action buttons, which come after, are on top of it and get
+                // the press instead.
+                body-ta := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    mouse-cursor: pointer;
+                    clicked => { root.toast-clicked(toast.id); }
+                }
+
+                card := VerticalLayout {
+                    padding-top: 12px;
+                    padding-bottom: 12px;
+                    padding-left: 14px;
+                    padding-right: 12px;
+                    spacing: Theme.sp-1;
+
+                    HorizontalLayout {
+                        spacing: 10px;
+
+                        Rectangle {
+                            width: 34px;
+                            height: 34px;
+                            border-radius: 17px;
+                            background: toast.urgency == 2 ? Theme.color-emotional.transparentize(85%) :
+                                        toast.urgency == 1 ? Theme.amber.transparentize(85%) : Theme.cyan.transparentize(85%);
+
+                            Text {
+                                text: toast.icon-char;
+                                color: toast.urgency == 2 ? Theme.color-emotional :
+                                       toast.urgency == 1 ? Theme.amber : Theme.cyan;
+                                font-size: Theme.fs-body;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 2px;
+
+                            Text {
+                                text: toast.app-name;
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-micro;
+                                letter-spacing: 1px;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: toast.summary;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-body;
+                                font-weight: 500;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
+                        }
+
+                        // Dismiss.
+                        TouchArea {
+                            width: 24px;
+                            height: 24px;
+                            mouse-cursor: pointer;
+                            clicked => { root.toast-dismissed(toast.id); }
+
+                            Icon {
+                                commands: Icons.close;
+                                size: 12px;
+                                tint: parent.has-hover ? Theme.text-primary : Theme.text-dim;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+
+                    if toast.body != "" && toast.body != toast.summary : Text {
+                        text: toast.body;
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-caption;
+                        wrap: word-wrap;
+                        // Two lines of detail; the rest is in the notification centre. A toast
+                        // that can grow to any height is a toast that can cover the screen.
+                        max-height: 32px;
+                        overflow: elide;
+                    }
+
+                    // The sender's buttons. `default` is the freedesktop action for "the person
+                    // clicked the notification itself", not a button — pressing the body above
+                    // is what invokes it, so it is not drawn here.
+                    if toast.actions.length > 0 : HorizontalLayout {
+                        spacing: Theme.sp-2;
+                        alignment: end;
+
+                        for action in toast.actions : Rectangle {
+                            width: label.preferred-width + Theme.sp-4;
+                            height: 26px;
+                            border-radius: Theme.r-sm;
+                            background: action-ta.has-hover ? Theme.accent.transparentize(75%) : Theme.bg-elevated;
+                            border-width: 1px;
+                            border-color: Theme.accent.transparentize(70%);
+
+                            action-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.toast-action(toast.id, action.id); }
+                            }
+
+                            label := Text {
+                                text: action.label;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-caption;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                wrap: no-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // What is not being shown. Without it three toasts and thirty look identical, and a
+            // person who stepped away has no way to tell.
+            if root.overflow > 0 : Rectangle {
+                height: 22px;
+                border-radius: Theme.r-sm;
+                background: Theme.bg-deep.transparentize(25%);
+
+                more-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toast-clicked(""); }
+                }
 
                 Text {
-                    text: toast.icon-char;
-                    color: toast.urgency == 2 ? Theme.color-emotional :
-                           toast.urgency == 1 ? Theme.amber : Theme.cyan;
-                    font-size: Theme.fs-body;
-                    font-weight: 700;
+                    text: "+" + root.overflow + " more";
+                    color: more-ta.has-hover ? Theme.text-primary : Theme.text-dim;
+                    font-size: Theme.fs-micro;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
-            }
-
-            // Text content
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: center;
-                spacing: 2px;
-
-                // App name
-                HorizontalLayout {
-                    spacing: 6px;
-                    Text {
-                        text: toast.app-name;
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        letter-spacing: 1px;
-                    }
-                }
-
-                Text {
-                    text: toast.summary;
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-body;
-                    font-weight: 500;
-                    overflow: elide;
-                }
-
-                if toast.body != "" : Text {
-                    text: toast.body;
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-micro;
-                    overflow: elide;
-                }
-            }
-
-            // Dismiss X button
-            TouchArea {
-                width: 24px;
-                height: 24px;
-                y: (parent.height - 24px) / 2;
-                clicked => { root.toast-dismissed(toast.id); }
-
-                Icon { commands: Icons.close; size: 12px; tint: Theme.text-dim; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
             }
         }
     }

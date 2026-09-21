@@ -90,10 +90,10 @@ packages:
   # The region selector. `grim` alone captures a whole output; every screenshot-a-region
   # binding on every desktop is grim plus slurp.
   - slurp
-  # Notifications. The shell has a notification centre and a D-Bus notification path, and
-  # with no daemon holding org.freedesktop.Notifications an application that posts one is
-  # talking to nobody. notify-send is how scripts and our own services raise them.
-  - mako-notifier
+  # Notifications. The daemon is ours: the notifications-service holds
+  # org.freedesktop.Notifications and is the machine's one notification store, so mako is not
+  # installed — two daemons cannot own one bus name and the loser's notifications vanish.
+  # notify-send is the client, not a daemon, and it lands in the same store as everything else.
   - libnotify-bin
   # Portals: the file picker, the screenshot and the screen-share a sandboxed or foreign
   # application asks the desktop for. Chromium's "Upload file" dialog goes through this.

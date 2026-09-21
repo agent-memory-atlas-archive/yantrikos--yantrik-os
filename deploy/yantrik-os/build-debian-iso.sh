@@ -243,7 +243,7 @@ apt-get install -y -qq \
 # Browser pin that ran `chromium` and found nothing, no notification daemon, no portals, no
 # screenshots — each failing quietly. No `|| true`: a desktop missing its runtime is a failed
 # build, and the parity check after this step names anything user-data.yaml gains later.
-apt-get install -y -qq     seatd     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp     qemu-guest-agent     mako-notifier libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr     lxpolkit     udisks2     brightnessctl     bluez alsa-utils
+apt-get install -y -qq     seatd     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp     qemu-guest-agent     libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr     lxpolkit     udisks2     brightnessctl     bluez alsa-utils
 
 # Three programs the shell shells out to by name, and did not have.
 #   swaybg     — yantrik-companion-tools/src/wallpaper.rs: setting a wallpaper did nothing
@@ -664,8 +664,12 @@ ENV
 # Autostart — Yantrik is the shell
 sudo tee "$LABWC_DIR/autostart" > /dev/null <<'AUTOSTART'
 #!/bin/sh
-# Start notification daemon
-mako &
+# No notification daemon is started here.
+#
+# mako used to be, and it raced the desktop for org.freedesktop.Notifications: whichever won
+# the name got every notify-send on the machine, and if it was mako the shell's notification
+# centre stayed empty. The notifications service owns that name now and is the one store.
+# libnotify-bin is still installed — that is the notify-send client, not a daemon.
 
 # Start Yantrik OS as the desktop shell
 /opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml >> /opt/yantrik/logs/yantrik-os.log 2>&1 &
@@ -738,29 +742,17 @@ bright6=80d8e8
 bright7=e0e0e8
 FOOTINI
 
-# ── mako config ──
-MAKO_DIR="$ROOTFS/home/yantrik/.config/mako"
-sudo mkdir -p "$MAKO_DIR"
-sudo tee "$MAKO_DIR/config" > /dev/null <<'MAKO'
-font=DejaVu Sans 11
-background-color=#0c0b10e6
-text-color=#c8c8d0
-border-color=#5ac8d460
-border-size=1
-border-radius=8
-padding=12
-margin=12
-width=360
-default-timeout=8000
-max-visible=3
-anchor=top-right
-MAKO
+# No mako config is written.
+#
+# It used to be: a themed popup style for a daemon we no longer start. Leaving the file behind
+# would be an instruction for a program that is not installed, and the next person to read it
+# would reasonably conclude mako was meant to be running.
 
 # Fix ownership
 sudo chown -R 1000:1000 "$ROOTFS/home/yantrik"
 sudo chown -R 1000:1000 "$ROOTFS/opt/yantrik"
 
-ok "labwc + foot + mako configured"
+ok "labwc + foot configured"
 
 # ── Auto-login via systemd ──
 # Override getty@tty1 to auto-login as yantrik and start labwc

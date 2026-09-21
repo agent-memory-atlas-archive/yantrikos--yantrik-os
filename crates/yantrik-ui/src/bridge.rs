@@ -662,9 +662,11 @@ fn worker_loop(
     let mut delivered_cooldowns: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     const DELIVERED_COOLDOWN_SECS: f64 = 7200.0; // 2 hours between same proactive key
 
-    // Track last real user message timestamp (not EXECUTE/system messages)
-    // Used for synthesis gate conversation activity detection
-    let mut last_user_message_ts: f64 = 0.0;
+    // The "when did a person last say something" clock is not here any more. It lived in this
+    // worker and was bumped only in the `SendMessage` arm below, which only messages bound for
+    // the BUILT-IN companion ever reach — so with a harness mind answering, the Synthesis Gate
+    // saw an idle user through a live conversation. It is one clock for every mind now, in
+    // `wire::notifications`, bumped at the dispatch both entry points go through.
 
     // Push initial state to UI
     //
@@ -709,18 +711,15 @@ fn worker_loop(
                 if let Some(id) = &job {
                     board.start(id);
                 }
-                // Track real user message timestamp for synthesis gate
-                // Skip system-generated prompts (startup brief, etc.)
+                // A system-generated prompt is not a person talking, and must not make the
+                // Synthesis Gate think somebody is. `wire::chat::dispatch` is bumped by a
+                // person typing; this arm also carries the startup brief, EXECUTE urges and
+                // the companion's own reflection prompts, so it bumps nothing.
                 let is_system_generated = text.contains("You just started up")
                     || text.contains("EXECUTE ")
                     || text.starts_with("Reflect naturally")
                     || text.starts_with("Recall shared references");
-                if !is_system_generated {
-                    last_user_message_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs_f64();
-                }
+                tracing::trace!(is_system_generated, "companion SendMessage");
 
                 // Update ambient sentiment from user message
                 ambient.update_from_message(&text);
@@ -1105,23 +1104,36 @@ fn worker_loop(
                     } else {
                         notif.clone()
                     };
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            let messages = ui.get_messages();
-                            let model = messages
-                                .as_any()
-                                .downcast_ref::<VecModel<crate::MessageData>>()
-                                .unwrap();
-                            model.push(crate::MessageData {
-                                role: SharedString::from("assistant"),
-                                content: SharedString::from(&text),
-                                is_streaming: false,
-                                blocks: ModelRc::default(),
-                            });
-                            crate::wire::toast::push_toast(
-                                &weak, "Task Complete", &notif_text, "", 1,
-                            );
-                        }
+                    // A finished task is a result somebody is waiting on, so it is never held —
+                    // but it is still only written into the transcript when the built-in
+                    // companion is the mind the person is talking to. Otherwise it is a
+                    // notification, which is where news belongs when the conversation is
+                    // somebody else's. See `wire::notifications::route_result`.
+                    crate::wire::notifications::deliver_result(notif, move |_lens_was_closed| {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                let messages = ui.get_messages();
+                                let model = messages
+                                    .as_any()
+                                    .downcast_ref::<VecModel<crate::MessageData>>()
+                                    .unwrap();
+                                model.push(crate::MessageData {
+                                    role: SharedString::from("assistant"),
+                                    content: SharedString::from(&text),
+                                    is_streaming: false,
+                                    blocks: ModelRc::default(),
+                                });
+                                // Through the notifications service, and only when the Lens is
+                                // shut: with it open the answer is already in the conversation
+                                // a few pixels away, and a toast over it says the same thing
+                                // twice. It used to be a private toast either way, so a
+                                // background task that finished while the person was elsewhere
+                                // left no trace.
+                                crate::wire::notifications::companion_said(
+                                    &ui, "Task complete", &notif_text,
+                                );
+                            }
+                        });
                     });
                     // Forward to Telegram
                     if companion.config.telegram.enabled && companion.config.telegram.forward_proactive {
@@ -1730,11 +1742,18 @@ fn worker_loop(
                         now_ts - last < jittered_delivery_cd
                     } else { false };
 
-                    // Synthesis Gate: check similarity, budget, conversation state
-                    // Use last_user_message_ts (real user messages only) for activity check,
-                    // not session_turn_count which gets bumped by EXECUTE urges too
-                    let user_idle_secs = now_ts - last_user_message_ts;
-                    let conversation_active = last_user_message_ts > 0.0 && user_idle_secs < 300.0;
+                    // Synthesis Gate: check similarity, budget, conversation state.
+                    //
+                    // This clock used to be bumped in this worker's own `SendMessage` arm,
+                    // which only messages bound for the BUILT-IN companion ever reach. With a
+                    // harness answering, a live conversation looked idle from here and the gate
+                    // let messages through mid-answer — the fault that put "you once said: User
+                    // is interested in: technology" into the middle of somebody asking Hermes
+                    // for this machine's IP address. `wire::notifications` keeps the same clock
+                    // for every mind, bumped at the one dispatch both entry points go through.
+                    let user_idle_secs = crate::wire::notifications::seconds_since_user_message()
+                        .unwrap_or(f64::MAX);
+                    let conversation_active = crate::wire::notifications::conversation_active();
                     let gate_result = yantrik_companion::synthesis_gate::evaluate(
                         &msg.text,
                         companion.last_sent_messages(10),
@@ -1793,6 +1812,28 @@ fn worker_loop(
                             },
                             yantrik_os::EventSource::ProactiveEngine,
                         );
+                    } else if matches!(
+                        crate::wire::notifications::route_proactive(
+                            crate::wire::notifications::situation_now()
+                        ),
+                        crate::wire::notifications::ProactiveDelivery::Hold
+                    ) {
+                        // A mind is mid-answer. Checked here, before anything is recorded as
+                        // sent: an urge that was held has not been said, and marking it sent
+                        // would make the anti-repetition tracker suppress it the next time it
+                        // is genuinely due.
+                        tracing::info!(
+                            text = msg.text,
+                            "Holding proactive message — a mind is answering right now"
+                        );
+                        companion.record_suppressed_urge(&delivery_key, "a mind is mid-answer");
+                        event_bus.emit(
+                            yantrik_os::EventKind::ProactiveSuppressed {
+                                reason: "a mind is mid-answer".into(),
+                                urge_ids: msg.urge_ids.clone(),
+                            },
+                            yantrik_os::EventSource::ProactiveEngine,
+                        );
                     } else {
                         tracing::info!(
                             text = msg.text,
@@ -1823,28 +1864,39 @@ fn worker_loop(
                         let text = msg.text.clone();
                         let notif_text = msg.text.clone();
                         let weak = ui_weak.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade() {
-                                let messages = ui.get_messages();
-                                let model = messages
-                                    .as_any()
-                                    .downcast_ref::<VecModel<crate::MessageData>>()
-                                    .unwrap();
-                                model.push(crate::MessageData {
-                                    role: SharedString::from("assistant"),
-                                    content: SharedString::from(&text),
-                                    is_streaming: false,
-                                    blocks: ModelRc::default(),
+                        // Where this goes depends on who is answering. The transcript belongs
+                        // to the mind the person is talking to; when that is not this one, an
+                        // unprompted line in it reads as the answer to whatever they just
+                        // asked. See the section in `wire::notifications` — that is a fault
+                        // somebody watched happen.
+                        let route = crate::wire::notifications::deliver_proactive(
+                            &msg.text,
+                            move |_lens_was_closed| {
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = weak.upgrade() {
+                                        let messages = ui.get_messages();
+                                        let model = messages
+                                            .as_any()
+                                            .downcast_ref::<VecModel<crate::MessageData>>()
+                                            .unwrap();
+                                        model.push(crate::MessageData {
+                                            role: SharedString::from("assistant"),
+                                            content: SharedString::from(&text),
+                                            is_streaming: false,
+                                            blocks: ModelRc::default(),
+                                        });
+                                        // Kept, and only raised when the Lens is closed — and
+                                        // re-checked here on the UI thread, which is the one
+                                        // place that reading is exact.
+                                        crate::wire::notifications::companion_said(
+                                            &ui,
+                                            "The mind said something",
+                                            &notif_text,
+                                        );
+                                    }
                                 });
-                                crate::wire::toast::push_toast(
-                                    &weak,
-                                    "Companion",
-                                    &notif_text,
-                                    "",
-                                    1,
-                                );
-                            }
-                        });
+                            },
+                        );
 
                         // Forward proactive messages to Telegram
                         if companion.config.telegram.enabled && companion.config.telegram.forward_proactive {
@@ -1855,12 +1907,21 @@ fn worker_loop(
                             }
                         }
 
-                        // Emit proactive delivered event
+                        // Emit proactive delivered event.
+                        //
+                        // The channel is read off the route rather than hardcoded to "chat":
+                        // it was "chat" even when the message never reached a chat, which made
+                        // the event log agree with the bug rather than describe it.
                         event_bus.emit(
                             yantrik_os::EventKind::ProactiveDelivered {
                                 urge_ids: msg.urge_ids.clone(),
                                 text_preview: msg.text.chars().take(100).collect(),
-                                delivery_channel: "chat".into(),
+                                delivery_channel: match route {
+                                    crate::wire::notifications::ProactiveDelivery::NotifyOnly => {
+                                        "notification".into()
+                                    }
+                                    _ => "chat".into(),
+                                },
                             },
                             yantrik_os::EventSource::ProactiveEngine,
                         );

@@ -15,8 +15,12 @@ reason = "Stores calendar events as JSON files in user data directory"
 binary = "calendar-service"
 methods = [
     "calendar.events",
+    "calendar.get_event",
     "calendar.create_event",
     "calendar.update_event",
     "calendar.delete_event",
+    "calendar.upsert_remote",
+    "calendar.revision",
+    "app.describe",
 ]
 autostart = false

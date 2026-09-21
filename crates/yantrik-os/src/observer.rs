@@ -59,6 +59,9 @@ impl Default for SystemObserverConfig {
 /// and fan all events into a single crossbeam channel.
 pub struct SystemObserver {
     event_rx: Receiver<SystemEvent>,
+    /// Kept so something outside the observer can put an event on the same channel — see
+    /// [`SystemObserver::inject`].
+    event_tx: Sender<SystemEvent>,
     _handles: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -72,7 +75,7 @@ impl SystemObserver {
         if config.mock {
             // Mock mode — emit fake events on timers (for QEMU dev)
             tracing::info!("SystemObserver starting in MOCK mode");
-            let h = spawn_mock(event_tx);
+            let h = spawn_mock(event_tx.clone());
             handles.push(h);
         } else {
             // Real monitors
@@ -121,18 +124,19 @@ impl SystemObserver {
                 .expect("failed to spawn network monitor");
             handles.push(h);
 
-            // Notification daemon (session D-Bus — org.freedesktop.Notifications)
-            let tx = event_tx.clone();
-            let h = std::thread::Builder::new()
-                .name("yos-notifications".into())
-                .spawn(move || {
-                    crate::notifications::run_notification_daemon(tx);
-                })
-                .expect("failed to spawn notification daemon");
-            handles.push(h);
+            // No notification daemon here.
+            //
+            // This used to hold `org.freedesktop.Notifications` from a thread of its own — and
+            // so did mako, started from the same session's labwc autostart. Only one process
+            // can own a well-known name, so which of the two a `notify-send` reached depended
+            // on start order; the audit of 17 September caught mako winning by a few hundred
+            // milliseconds, which left the shell's notification centre empty on a machine that
+            // was showing popups all day. The name belongs to the notifications service now,
+            // which is also the one store, and the shell reads that store over its socket.
+            // See services/notifications-service/src/freedesktop.rs.
 
             // Keybind daemon (session D-Bus — org.yantrik.Keybinds)
-            let tx = event_tx;
+            let tx = event_tx.clone();
             let h = std::thread::Builder::new()
                 .name("yos-keybinds".into())
                 .spawn(move || {
@@ -144,7 +148,25 @@ impl SystemObserver {
 
         Self {
             event_rx,
+            event_tx,
             _handles: handles,
+        }
+    }
+
+    /// Put an event on the same channel the monitor threads use.
+    ///
+    /// For a fact about the machine that is observed somewhere other than in this crate. The
+    /// shell learns about notifications by polling the notifications service — which owns
+    /// `org.freedesktop.Notifications`, because only one process can — and puts each one back
+    /// here so the feature registry, the activity feed and the system context see them exactly
+    /// as they did when this crate ran the daemon itself.
+    ///
+    /// Drops the event rather than blocking if the channel is full: the channel is bounded at
+    /// 256 and the only reason it would fill is that nothing is draining it, in which case
+    /// waiting would hold up whoever called this.
+    pub fn inject(&self, event: SystemEvent) {
+        if self.event_tx.try_send(event).is_err() {
+            tracing::debug!("system event channel is full; an injected event was dropped");
         }
     }
 

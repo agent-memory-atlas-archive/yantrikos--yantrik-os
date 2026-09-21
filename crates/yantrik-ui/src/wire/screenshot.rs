@@ -46,15 +46,15 @@ pub fn take_screenshot(ui_weak: slint::Weak<App>, mode: yantrik_os::screenshot::
 
                 tracing::info!(result = %msg, "Screenshot captured");
 
-                let _ = slint::invoke_from_event_loop(move || {
-                    super::toast::push_toast(
-                        &ui_weak,
-                        "Screenshot",
-                        &toast_body,
-                        "",
-                        0, // low urgency
-                    );
-                });
+                // Through the notifications service — this thread is not the UI thread, and
+                // `notify::send` does not need it to be. It used to hop back to the event loop
+                // to raise a private toast that nothing kept, so "where did that screenshot
+                // go" was unanswerable six seconds later.
+                let _ = &ui_weak;
+                yantrik_app_runtime::notify::send(
+                    yantrik_app_runtime::notify::Notification::new("Screenshot", toast_body)
+                        .urgency(yantrik_app_runtime::notify::Level::Low),
+                );
             }
             Err(e) => {
                 // Don't show notification for user-cancelled region selection
@@ -65,15 +65,14 @@ pub fn take_screenshot(ui_weak: slint::Weak<App>, mode: yantrik_os::screenshot::
 
                 tracing::warn!(error = %e, "Screenshot capture failed");
 
-                let _ = slint::invoke_from_event_loop(move || {
-                    super::toast::push_toast(
-                        &ui_weak,
+                let _ = &ui_weak;
+                yantrik_app_runtime::notify::send(
+                    yantrik_app_runtime::notify::Notification::new(
                         "Screenshot",
-                        &format!("Failed: {e}"),
-                        "",
-                        2, // critical urgency
-                    );
-                });
+                        format!("Failed: {e}"),
+                    )
+                    .urgency(yantrik_app_runtime::notify::Level::Critical),
+                );
             }
         }
     });

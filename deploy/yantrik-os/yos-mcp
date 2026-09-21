@@ -46,9 +46,10 @@ SHELL_CALL_TIMEOUT = 20      # one `yos act shell …` or `yos describe …`
 # request the person had just allowed.
 APPROVAL_WAIT = int(os.environ.get("YOS_MCP_APPROVAL_WAIT", "110"))
 APPROVAL_POLL = 2.0
-# describe the app + describe the shell + request + poll + consume + the action itself.
-OS_ACT_MAX_SECONDS = (2 * SHELL_CALL_TIMEOUT      # action_detail, machine_ceiling
+# describe the app + describe the shell + request + poll + consume + the action + the audit line.
+OS_ACT_MAX_SECONDS = (2 * SHELL_CALL_TIMEOUT      # action_detail, shell_state
                       + 2 * SHELL_CALL_TIMEOUT    # request_approval, consume_approval
+                      + SHELL_CALL_TIMEOUT        # record_unasked_action, on the unasked path
                       + APPROVAL_WAIT
                       + ACT_TIMEOUT)
 
@@ -127,13 +128,35 @@ TOOLS = [
                        "Takes a short name: 'shell' (the desktop — windows, files, opening apps), "
                        "'system-monitor' (this machine's CPU, memory, disk and processes), "
                        "'weather' (local weather where this machine is), 'network' (connection "
-                       "and Wi-Fi), 'notifications', 'notes', 'calendar', 'email'.",
+                       "and Wi-Fi), 'notifications', 'notes', 'calendar', 'email'. An app with a "
+                       "large family of related actions lists that family as signatures and "
+                       "grades only — enough to see that an action exists — and says so; pass "
+                       "that family's prefix as `actions` to get what each of them does.",
         "inputSchema": {
             "type": "object",
-            "properties": {"app": {"type": "string", "description": "short app name"}},
+            "properties": {
+                "app": {"type": "string", "description": "short app name"},
+                "actions": {
+                    "type": "string",
+                    "description": "Optional. When an app's answer lists a family of actions as "
+                                   "signatures only (e.g. `files_*`), pass that family's prefix "
+                                   "here — `files_` — to get what each of those actions does and "
+                                   "what its arguments mean.",
+                },
+            },
             "required": ["app"],
         },
-        "argv": lambda a: ["describe", a["app"]],
+        # `--fold` is what makes a describe affordable to READ. Measured on the live desktop,
+        # `describe shell` cost a mind about 3,400 tokens that then sat in its conversation for
+        # the whole session; folded it is about 2,200 with nothing lost — the state object is
+        # printed one key per line instead of one bracket per line, and a family of twenty
+        # `files_*` actions is listed by signature with a line saying how to expand it. That
+        # expansion is `actions`. See `render_state` and `render_folded` in `yos`.
+        #
+        # This is the READER's form. Nothing the bridge parses for itself asks for it — see the
+        # note on `action_detail`.
+        "argv": lambda a: ["describe", a["app"], "--fold"] + (
+            ["--actions", str(a["actions"])] if a.get("actions") else []),
         "timeout": 20,
     },
     {
@@ -151,15 +174,21 @@ TOOLS = [
                        "action the app does not list is refused. To open an app: app 'shell', "
                        "action 'open_app', args {\"name\": \"notes\"}. Returns whether the "
                        "action settled and what the app looks like afterwards, so the effect can "
-                       "be checked rather than assumed. An action graded `sensitive` or above "
-                       "does not fail: this ASKS the person at the machine, putting a card on "
-                       "their screen with the action, its arguments and what it does, and WAITS "
-                       "for them — up to about two minutes, so this one call can take that long. "
-                       "The answer says what happened. If they allowed it, it ran, once, with "
-                       "exactly those arguments. If they said no, it did not run and you should "
-                       "not ask again unless they raise it themselves. If they did not answer, "
-                       "say so plainly — do not retry in a loop. Never tell a person to edit a "
-                       "setting or an environment variable to get past this; the card is the way.",
+                       "be checked rather than assumed. What happens to an action above the "
+                       "routine grades depends on the mode the PERSON has this desktop in, which "
+                       "is shown on a chip in their status bar and published in os_describe "
+                       "shell as `mind_mode`. In `ask` it puts a card on their screen with the "
+                       "action, its arguments and what it does, and WAITS for them — up to about "
+                       "two minutes, so this one call can take that long; if they allowed it, it "
+                       "ran once with exactly those arguments, and if they said no it did not "
+                       "run and you should not ask again unless they raise it themselves. In "
+                       "`auto` or `bypass` it simply runs and is written into their record of "
+                       "unasked actions — report those as things you did, not as things you were "
+                       "permitted. In `plan` every change is refused: say what you WOULD do, in "
+                       "full, and leave it with them. Never tell a person to edit a setting or an "
+                       "environment variable to get past any of this; the card and the mode chip "
+                       "are the way, and you can set a STRICTER mode yourself with shell's "
+                       "set_mind_mode.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -470,7 +499,25 @@ def taint_refusal(name, args):
 
 
 LADDER = ["safe", "standard", "sensitive", "dangerous"]
-CEILING = os.environ.get("YOS_MCP_MAX_PERMISSION", "standard")
+
+# A cap this SESSION puts on itself, set by whoever started the bridge. It bounds what may run
+# without a person being asked, so a harness that wants to be careful on a machine in `auto`
+# sets it to `standard` and gets cards back instead of silent runs.
+#
+# It binds only when it is actually SET, and that is the whole of why: the desktop now has a
+# real policy — the mode the person chose — and a default sitting here would quietly overrule
+# it. The historical default was `standard`, which is exactly what `ask` mode already does, so
+# leaving it unset changes nothing for the desktop this bridge shipped against and stops `auto`
+# from being neutered by a value nobody set.
+#
+# It can only ever TIGHTEN. The mode and the machine ceiling both outrank it, so setting it to
+# `dangerous` on a desktop in `ask` mode does not stop the asking. A value that is not on the
+# ladder is not a permission to do anything, so it is treated as unset rather than left to
+# whatever `LADDER.index` would have raised.
+CEILING = os.environ.get("YOS_MCP_MAX_PERMISSION", "").strip()
+CEILING_SET = CEILING in LADDER
+if not CEILING_SET:
+    CEILING = "standard"
 
 
 # Why the last attempt to grade (app, action) came back empty, in words for the caller.
@@ -497,6 +544,12 @@ def action_detail(app, action):
 
     Two-space signature, seven-space purpose, nine-space arguments — so the purpose is the line
     under the signature indented past it but not as far as an argument.
+
+    **Not `--fold`.** The folded form is for a mind reading a describe, and it prints a large
+    family of actions as signatures only — no purpose lines. This function's whole job is to
+    recover the purpose line, because it is what the approval card shows the person. Folding here
+    would produce cards that named an action and gave no reason for it, for exactly the apps with
+    the most actions.
     """
     p = yos(["describe", app], SHELL_CALL_TIMEOUT)
     if p is None or p.returncode != 0:
@@ -529,14 +582,102 @@ def action_detail(app, action):
 def shell_state():
     """The shell's own state object out of `yos describe shell`, or None.
 
-    One read, two answers: this machine's standing ceiling, and which mind the desktop says is
-    answering. Both used to be separate `yos describe shell` invocations; asking the same
-    question twice on the path to putting a card up is two chances for them to disagree.
+    One read, four answers: this machine's standing ceiling, what the mind may do without being
+    asked, the session rules a person has granted, and which mind the desktop says is answering.
+    Each of those used to be — or would have been — its own `yos describe shell`, and asking the
+    same question twice on the path to putting a card up is two chances for them to disagree.
+
+    `--fold` because this is read by a program, not by a mind: it prints the same state object,
+    still parseable from the first `{`, without the pretty-printing. The one thing folding leaves
+    out of the SHELL's state is its `apps` list — nothing here needs it, and anything added later
+    that does must drop the flag rather than reach for a missing key.
     """
-    p = yos(["describe", "shell"], SHELL_CALL_TIMEOUT)
+    p = yos(["describe", "shell", "--fold"], SHELL_CALL_TIMEOUT)
     if p is None or p.returncode != 0:
         return None
     return result_object(p.stdout or "")
+
+
+# ── What the mind may do without being asked ────────────────────────────────────────────
+#
+# One fixed policy — ask about everything sensitive — is wrong at both ends of a day's work. A
+# long trusted job becomes forty cards, and a person trained to click Allow forty times will
+# click it on the forty-first without reading; "just look, don't touch" had no expression at all.
+# So the desktop has a mode, the person sets it, and this bridge reads it.
+#
+# The decision table below is a SECOND implementation of `mind_mode::Modes::decide` in
+# `crates/yantrik-ui/src/mind_mode.rs`, which is the definition and the one with the unit tests.
+# It is duplicated deliberately: the alternative is a second round trip per `os_act` to ask the
+# shell to decide, and the mode already arrives on the read this bridge was making anyway. The
+# cost is that the two can drift; the selftest checks this copy against the same table.
+MODES = ["plan", "ask", "auto", "bypass"]
+
+
+def mind_mode(state):
+    """`(mode, rules)` as the desktop publishes them, or `(None, [])` if it did not say.
+
+    `None` is not a mode and is never treated as one: the caller falls back to `ask` with no
+    rules, which is the strictest thing that still lets ordinary work happen.
+    """
+    block = (state or {}).get("mind_mode") or {}
+    mode = str(block.get("mode") or "")
+    if mode not in MODES:
+        return None, []
+    rules = []
+    for rule in block.get("session_rules") or []:
+        app, action = str(rule.get("app") or ""), str(rule.get("action") or "")
+        if app and action:
+            rules.append((app, action))
+    return mode, rules
+
+
+def decide(level, app, action, mode, rules, machine):
+    """Run it, ask about it, or refuse it. Returns `("run", unasked) | ("ask", None) |
+    ("refuse", why)`.
+
+    Order is the security argument. The machine's ceiling is consulted FIRST, so no mode — not
+    even bypass — reaches past the owner's standing policy, and nothing above it is ever put in
+    front of a person either: a card no answer of theirs could satisfy teaches them that the card
+    is noise.
+
+    `unasked` is true when `ask` mode would have raised a card and this mode did not. That is
+    exactly the set of actions the audit log exists for; a person who loosened the mode is owed a
+    record of what that bought.
+    """
+    rank = LADDER.index(level)
+
+    if machine is not None and rank > LADDER.index(machine):
+        return "refuse", (
+            "%s.%s is graded %s, and this machine does not allow callers like this past %s "
+            "(`tool_permission`, on the AI page in Settings). The person was NOT asked, because "
+            "nothing they could answer would let it run — this limit is the machine's standing "
+            "policy, and no mode changes it. Say what you were trying to do; only someone at the "
+            "keyboard can change that setting." % (app, action, level, machine))
+
+    would_ask = rank >= LADDER.index("sensitive")
+    covered = (app, action) in rules
+
+    if mode == "plan":
+        if rank == 0:
+            return "run", False
+        return "refuse", (
+            "the desktop is in plan mode, so %s.%s was NOT run and nothing on this machine was "
+            "changed. This is a setting, not a failure, and not something to work around: "
+            "os_describe, os_apps, os_perception and reading the web are all still open to you. "
+            "Say what you WOULD do — the exact actions and arguments, in order — and let the "
+            "person decide. They switch the mode from the chip in the status bar."
+            % (app, action))
+
+    if mode == "bypass":
+        return "run", would_ask
+    if mode == "auto":
+        if rank >= LADDER.index("dangerous"):
+            return ("run", True) if covered else ("ask", None)
+        return "run", would_ask
+    # `ask`, and anything unrecognised, which is handled by the caller before it gets here.
+    if would_ask:
+        return ("run", True) if covered else ("ask", None)
+    return "run", False
 
 
 def machine_ceiling(state):
@@ -683,21 +824,22 @@ def ask_the_person(app, action, grade, purpose, args, requester):
 
 
 def guard_act(args):
-    """Decide whether this action runs, asking the person when it is above this session's ceiling.
+    """Decide whether this action runs, asking the person when the desktop's mode says to.
 
-    Returns `(refusal, note)`: a refusal to hand back instead of running, or no refusal and a
-    note to carry back beside the action's own output.
+    Returns `(refusal, note, audit)`: a refusal to hand back instead of running; or no refusal, a
+    note to carry back beside the action's own output, and — when it ran without anybody being
+    asked — the record to report to the shell once the outcome is known.
 
     This used to be a wall. `delete_event` is graded `sensitive`, this bridge's ceiling is
-    `standard`, and somebody who typed "delete the dentist appointment from my calendar" was
-    told to raise an environment variable. The grade was right and the refusal was right; what
-    was missing was any way to ask. There is one now, and the ladder below it is unchanged —
-    what was refused is now a question, and only a person's click answers it.
+    `standard`, and somebody who typed "delete the dentist appointment from my calendar" was told
+    to raise an environment variable. Then it became a question. It is now a question the PERSON
+    has already answered in general — plan, ask, auto or bypass — and this reads their answer per
+    call rather than applying one policy to a whole day's work.
     """
     app, action = args.get("app"), args.get("action")
     if not app or not action:
         return ("os_act needs both an app and an action — see os_describe for what an app "
-                "offers."), None
+                "offers."), None, None
 
     level, purpose = action_detail(app, action)
     if level is None:
@@ -706,41 +848,125 @@ def guard_act(args):
             return ("%s is not open, so %s was not run — nothing is wrong with the request. "
                     "Open it with os_act on shell: open_app name=%s (os_apps lists the exact "
                     "name to open each app by), then call this again."
-                    % (app, action, app)), None
+                    % (app, action, app)), None, None
         return ("%s.%s was not run, because how the OS grades it could not be read: %s"
-                % (app, action, why or "os_describe %s would not answer." % app)), None
+                % (app, action, why or "os_describe %s would not answer." % app)), None, None
     if level not in LADDER:
         return ("%s.%s is graded %r, which is not a level this OS defines. Refusing."
-                % (app, action, level)), None
-    if LADDER.index(level) <= LADDER.index(CEILING):
-        return None, None
+                % (app, action, level)), None, None
 
-    # Above this session's ceiling, so the person gets asked — unless the machine's own standing
-    # policy already says no. That policy is the owner's, set at the keyboard in Settings, and an
-    # approval must not be able to exceed it: a card allowed here would still be refused by the
-    # app itself with a `CEILING:` message, and the person would have pressed Allow for nothing.
-    #
-    # One read of the shell answers both this and who the card should name.
+    # One read of the shell, before every action, answers all of it: the machine's standing
+    # ceiling, the mode the person set, the rules they granted this session, and the name to put
+    # on a card. The read used to happen only above the fixed ceiling, because there was nothing
+    # else to ask about; now the mode decides every call, so it happens every call.
     state = shell_state()
     machine = machine_ceiling(state)
-    if machine is not None and LADDER.index(level) > LADDER.index(machine):
-        return ("%s.%s is graded %s, and this machine does not allow callers like this past %s "
-                "(`tool_permission`, on the AI page in Settings). The person was NOT asked, "
-                "because nothing they could answer would let it run — this limit is the "
-                "machine's standing policy, not this session's. Say what you were trying to do; "
-                "only someone at the keyboard can change that setting."
-                % (app, action, level, machine)), None
+    mode, rules = mind_mode(state)
+    unreadable = ""
+    if mode is None:
+        # Fail closed and say so. `ask` with no rules is the strictest mode that still lets
+        # ordinary work happen, and a bridge that guessed `auto` from a desktop it could not
+        # read would be inventing permission out of a failure.
+        mode, rules = "ask", []
+        unreadable = ("(this bridge could not read the desktop's mind-mode, so it fell back to "
+                      "`ask` — the strict default — and nothing was assumed.)")
 
     try:
         bound = effective_args(args)
     except ValueError as e:
-        return str(e), None
+        return str(e), None, None
+
+    verdict, detail = decide(level, app, action, mode, rules, machine)
+
+    # YOS_MCP_MAX_PERMISSION, which a harness sets on ITS side, can only ever be STRICTER than
+    # the desktop's mode. It bounds what may run without asking; anything above it that the mode
+    # would have run quietly becomes a question instead. It can never loosen anything: a desktop
+    # in `ask` mode asks whatever this is set to, and a desktop in `plan` mode has already
+    # refused above. Only when it is set — see CEILING_SET.
+    if CEILING_SET and verdict == "run" and LADDER.index(level) > LADDER.index(CEILING):
+        verdict, detail = "ask", None
+
+    if verdict == "refuse":
+        return join(unreadable, detail), None, None
+
+    if verdict == "run":
+        unasked = bool(detail)
+        if not unasked:
+            return None, (unreadable or None), None
+        covered = (app, action) in rules
+        audit = {
+            "app": app, "action": action, "grade": level,
+            "mode": "rule" if covered else mode,
+            "args_json": bound,
+            "requester": requester_name(state),
+        }
+        note = ("Nobody was asked about this. The desktop is in `%s` mode%s, so it ran straight "
+                "away; in `ask` mode this would have put a card in front of the person. It has "
+                "been written into the machine's record of unasked actions, which they can read "
+                "from the mode chip in the status bar. Report it as something you did, not as "
+                "something you were permitted."
+                % (mode, " and they have allowed %s.%s for this session" % (app, action)
+                   if covered else ""))
+        return None, join(unreadable, note), audit
 
     allowed, message = ask_the_person(
         app, action, level, purpose, bound, requester_name(state))
     if allowed:
-        return None, message
-    return message, None
+        return None, join(unreadable, message), None
+    return join(unreadable, message), None, None
+
+
+def join(prefix, text):
+    """Two sentences, or whichever of them there is."""
+    if not prefix:
+        return text
+    if not text:
+        return prefix
+    return prefix + " " + text
+
+
+# The three tools that put something INTO the world through the browser. Plan mode refuses them
+# for the same reason it refuses an `os_act`: it is the mode for looking, and typing into a page
+# or opening a URL that carries data is not looking. Reading — web_read, web_text, web_find —
+# stays open, because a plan nobody could research would be worthless.
+WEB_WRITES = {"web_go", "web_click", "web_type"}
+
+
+def plan_refusal(name):
+    """Refuse a browser write while the desktop is in plan mode. None = allow.
+
+    Its own read of the shell, because these tools do not go through `guard_act`. That is one
+    `yos describe shell` per browser write, which is the honest cost of the mode being a fact
+    about the desktop rather than a flag this process cached and stopped checking.
+    """
+    if name not in WEB_WRITES:
+        return None
+    mode, _ = mind_mode(shell_state())
+    if mode != "plan":
+        # Unreadable shell included: fail closed is `ask`, and `ask` does not block a browser
+        # write — the taint rule and `yos web`'s own commitment check still do.
+        return None
+    return ("the desktop is in plan mode, so %s was not run and nothing was changed. Reading the "
+            "page — web_read, web_text, web_find — still works. Say what you WOULD click or type "
+            "and let the person decide; they switch the mode from the chip in the status bar."
+            % name)
+
+
+def report_unasked(audit, outcome):
+    """Write one unasked action into the machine's record. Returns a warning, or None.
+
+    It records; it authorises nothing, and failing to record does not undo anything — the action
+    has already run by the time this is called, because the outcome is half of what is worth
+    writing down. A failure is reported to the caller rather than swallowed: "everything it does
+    without being asked is written down" stops being true the moment this fails silently.
+    """
+    if not audit:
+        return None
+    _, err = shell_call("record_unasked_action", dict(audit, outcome=outcome))
+    if err is None:
+        return None
+    return ("(this ran without anybody being asked and could NOT be written into the machine's "
+            "record of that: %s. Tell the person what you did.)" % err)
 
 
 def run_tool(tool, args):
@@ -765,10 +991,14 @@ def run_tool(tool, args):
             "Say which app, e.g. {\"app\": \"shell\"} for the desktop." if "app" in missing else "",
         )).strip(), True
 
-    # What the person said, when they were asked. Carried back on the successful path too, so a
-    # mind reporting "done" also reports that somebody authorised it — the difference between
-    # "I deleted it" and "you allowed it and I deleted it" is the whole point of asking.
+    # What the person said, when they were asked — or that they were not asked at all. Carried
+    # back on the successful path too, so a mind reporting "done" also reports how it was allowed
+    # to: the difference between "I deleted it", "you allowed it and I deleted it" and "nobody
+    # was asked and I deleted it" is the whole point of all of this.
     note = None
+    # Set when this ran without anybody being asked, and reported to the shell after it has run,
+    # because the outcome is half of what is worth writing down.
+    audit = None
 
     if tool["name"] == "os_act":
         # os_describe lists actions as `act: new_note()`, and a model copying that sends
@@ -776,10 +1006,17 @@ def run_tool(tool, args):
         # punctuation cost a whole confirmed turn on the third live drive.
         args = dict(args)
         args["action"] = str(args["action"]).strip().split("(", 1)[0].strip()
-        refusal, note = guard_act(args)
+        refusal, note, audit = guard_act(args)
         if refusal is not None:
             return "refused: " + refusal, True
 
+    refusal = plan_refusal(tool["name"])
+    if refusal is not None:
+        return "refused: " + refusal, True
+
+    # The taint rule is not a permission grade and no mode turns it off — not even bypass. A
+    # mode says how much the person trusts the mind; the taint says what this session has
+    # already read, which is a fact about the session rather than a policy anybody set.
     refusal = taint_refusal(tool["name"], args)
     if refusal is not None:
         return "refused: " + refusal, True
@@ -801,10 +1038,16 @@ def run_tool(tool, args):
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
+        note = join(note, report_unasked(audit, "timed out"))
         return (prefix(note, "timed out after %ss — the desktop did not answer. It may be busy "
                             "rather than broken; nothing was rolled back." % timeout)), True
     except FileNotFoundError:
         return "%s is not installed on this machine, so the desktop cannot be reached." % YOS, True
+
+    # What actually happened goes into the machine's record, for every action nobody was asked
+    # about. Written after the run rather than before it, because "it was attempted" is a much
+    # weaker thing for a person to read than "it was done" or "it failed".
+    note = join(note, report_unasked(audit, "ok" if p.returncode == 0 else "failed"))
 
     out = (p.stdout or "").strip()
     err = (p.stderr or "").strip()

@@ -510,7 +510,9 @@ impl AppContext {
             scorer: Rc::new(RefCell::new(features::UrgencyScorer::new())),
             system_snapshot: Rc::new(RefCell::new(yantrik_os::SystemSnapshot::default())),
             accumulator: Rc::new(RefCell::new(ActivityAccumulator::new())),
-            notification_store: Rc::new(RefCell::new(notifications::NotificationStore::load())),
+            // A mirror of the notifications service's store, not a store of its own. It starts
+            // empty and the first poll fills it; the service owns the file.
+            notification_store: Rc::new(RefCell::new(notifications::NotificationMirror::new())),
             voice_config,
             image_viewer_state: Rc::new(RefCell::new(ImageViewerState::default())),
             editor_file_path: Rc::new(RefCell::new(String::new())),

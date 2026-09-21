@@ -60,6 +60,8 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
     let request_ui = ui.as_weak();
     let status_ui = ui.as_weak();
     let consume_ui = ui.as_weak();
+    let mode_ui = ui.as_weak();
+    let audit_ui = ui.as_weak();
 
     surface
         .action(
@@ -114,6 +116,18 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     if given.is_empty() { "an unnamed caller".to_string() } else { given }
                 };
 
+                // A card in plan mode is a question with no useful answer: the mode refuses the
+                // action whatever the person presses, so putting it on screen would only teach
+                // them that the card is noise. The bridge already knows not to ask — this is
+                // the same rule enforced where a caller that skipped the bridge reaches it.
+                if let crate::mind_mode::Decision::Refuse { why } =
+                    crate::mind_mode::decide(&grade, &app, &action)
+                {
+                    if crate::mind_mode::current() == crate::mind_mode::Mode::Plan {
+                        return Err(why);
+                    }
+                }
+
                 let asked = approvals::request(
                     &requester, &app, &action, parsed, &grade, &purpose,
                 )?;
@@ -141,6 +155,11 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // somebody's screen by asking the same thing in a loop.
                 if asked.fresh {
                     take_the_screen();
+                    // And say so where everything else is said. The card is on screen for two
+                    // minutes; the notification is what is still there afterwards, so a person
+                    // who was away learns that a mind asked for something and got no answer.
+                    // Critical, so Do Not Disturb does not swallow a question.
+                    crate::wire::notifications::approval_waiting(&requester, &app, &action);
                 }
 
                 Ok(serde_json::json!({
@@ -227,6 +246,111 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 }))
             },
         )
+        .action(
+            // `safe`, and it is the same argument as the three above: it does not decide
+            // anything a person has not already decided. It can only take permission AWAY.
+            //
+            // Published because a mind putting itself into plan mode is a genuinely useful
+            // thing — "check my work before I touch anything" — and harmless by construction.
+            // Raising is refused here and the refusal says where a person does it, because a
+            // mind told only "no" invents a way: the whole approval card exists because one
+            // told somebody to edit an environment variable.
+            Action::new(
+                "set_mind_mode",
+                "Tighten what you may do on this desktop without being asked. Four modes, \
+                 loosest first: `bypass` (nothing is asked), `auto` (only destructive actions \
+                 are asked about), `ask` (anything that matters is asked about), `plan` (read \
+                 only — every change is refused). You can only move DOWN this list. A request to \
+                 loosen it is refused: that is the person's decision, made at the keyboard, and \
+                 `plan` is the useful one to set yourself before a long piece of work you want \
+                 checked first.",
+            )
+            .risk("safe")
+            .arg(
+                Param::text("mode")
+                    .describe("plan, ask or auto — and only if it is tighter than the current mode"),
+            ),
+            move |args| {
+                let wanted = required(args, "mode")?;
+                let settled = crate::mind_mode::lower_from_socket(&wanted)?;
+                if let Some(ui) = mode_ui.upgrade() {
+                    publish_mode(&ui);
+                }
+                tracing::info!(mode = settled.as_str(), "a caller tightened the mind mode");
+                Ok(serde_json::json!({
+                    "mode": settled.as_str(),
+                    "means": settled.meaning(),
+                    "note": "only the person at this machine can loosen this again.",
+                }))
+            },
+        )
+        .action(
+            // `safe` for the narrowest possible reason: it writes a line down. It authorises
+            // nothing, it unlocks nothing, and a caller that lies to it has lied in a log rather
+            // than gained anything — which is why it is the bridge that calls it, immediately
+            // after an action that nobody was asked about, rather than the shell trying to
+            // observe something it cannot see.
+            Action::new(
+                "record_unasked_action",
+                "Write down one action that ran WITHOUT the person being asked — because the \
+                 desktop is in auto or bypass mode, or because a session rule covers it. Call it \
+                 straight after the action, with what actually happened. It records; it cannot \
+                 authorise anything, and not calling it does not stop anything running. The \
+                 person reads these in the mode menu and in ~/.local/share/yantrik/mind-audit.jsonl.",
+            )
+            .risk("safe")
+            .arg(Param::text("app"))
+            .arg(Param::text("action"))
+            .arg(Param::text("grade").describe("The action's grade, as os_describe reports it"))
+            .arg(
+                Param::text("mode")
+                    .optional()
+                    .describe("The mode it ran under: auto, bypass, or rule"),
+            )
+            .arg(
+                Param::text("args_json")
+                    .optional()
+                    .describe("The exact arguments it ran with, as a JSON object"),
+            )
+            .arg(Param::text("requester").optional().describe("Who ran it"))
+            .arg(
+                Param::text("outcome")
+                    .optional()
+                    .describe("What happened: ok, failed, or a short phrase"),
+            ),
+            move |args| {
+                let app = required(args, "app")?;
+                let action = required(args, "action")?;
+                let grade = required(args, "grade")?;
+                let parsed = args_value(args.get("args_json"))?;
+                let mode = {
+                    let given = text(args.get("mode"));
+                    if given.is_empty() { crate::mind_mode::current().as_str().to_string() } else { given }
+                };
+                let requester = {
+                    let given = text(args.get("requester"));
+                    if given.is_empty() { "an unnamed caller".to_string() } else { given }
+                };
+                let outcome = {
+                    let given = text(args.get("outcome"));
+                    // "It ran and nobody said how it went" is worse to read than an honest
+                    // blank, so it is named rather than left empty.
+                    if given.is_empty() { "not reported".to_string() } else { given }
+                };
+
+                let entry = crate::mind_mode::record(
+                    &mode, &requester, &app, &action, &parsed, &grade, &outcome,
+                );
+                if let Some(ui) = audit_ui.upgrade() {
+                    publish_mode(&ui);
+                }
+                tracing::info!(
+                    mode = %mode, app = %app, action = %action, outcome = %outcome,
+                    "an action ran without the person being asked"
+                );
+                Ok(serde_json::json!({ "recorded": entry.line() }))
+            },
+        )
 }
 
 /// What `describe shell` publishes under `pending_approvals`.
@@ -251,6 +375,22 @@ pub fn pending_for_describe() -> serde_json::Value {
             })
             .collect(),
     )
+}
+
+/// What `describe shell` publishes under `mind_mode`.
+///
+/// The bridge reads this on the same `describe shell` it already reads the ceiling from, and
+/// makes the run/ask/refuse decision itself — one read per `os_act` rather than a second round
+/// trip to ask the shell to decide. That means the table lives in two places, which is a real
+/// cost and is written down in `design/mind-modes-2026-09-21.md`; the Rust one in
+/// `mind_mode::Modes::decide` is the definition and the one with the tests.
+pub fn mind_mode_for_describe() -> serde_json::Value {
+    crate::mind_mode::snapshot()
+}
+
+/// The last few things that ran without anybody being asked. See `mind_mode`'s audit section.
+pub fn mind_audit_for_describe() -> serde_json::Value {
+    crate::mind_mode::recent_for_describe()
 }
 
 /// The machine's standing ceiling for callers on the socket, published so the bridge can read it.
@@ -289,6 +429,40 @@ pub fn wire(ui: &App) {
         }
     });
 
+    // "Allow for this session" — one click that does two things, in this order.
+    //
+    // The grant first, because that is what the caller waiting on the socket needs and it is
+    // the half that cannot be got any other way. Then the rule, which is what stops the same
+    // question coming back. If the rule is refused — the published grade or purpose changed
+    // between the paint and the press — the person still got the one action they pressed for,
+    // and the refusal is logged rather than silently swallowed.
+    let session_ui = ui.as_weak();
+    ui.on_approval_allow_session(move |id| {
+        let id = id.to_string();
+        let card = approvals::card(&id);
+        match approvals::grant_for_session(&id) {
+            Ok(()) => tracing::info!(request = %id, "a person allowed one action for this session"),
+            Err(e) => {
+                tracing::info!(request = %id, reason = %e, "Allow for this session did not apply");
+                if let Some(ui) = session_ui.upgrade() {
+                    sync(&ui);
+                }
+                return;
+            }
+        }
+        if let Some(card) = card {
+            if let Err(e) =
+                crate::mind_mode::person_add_rule(&card.app, &card.action, &card.grade, &card.purpose)
+            {
+                tracing::warn!(request = %id, reason = %e, "no session rule was made for it");
+            }
+        }
+        if let Some(ui) = session_ui.upgrade() {
+            sync(&ui);
+            publish_mode(&ui);
+        }
+    });
+
     let deny_ui = ui.as_weak();
     ui.on_approval_deny(move |id| {
         let id = id.to_string();
@@ -301,11 +475,61 @@ pub fn wire(ui: &App) {
         }
     });
 
+    // ── The mode, and the two things only a person may do to it ──
+    //
+    // These three callbacks are the ONLY callers of `mind_mode::person_*`, and they are
+    // callbacks — a `TouchArea` in `mind_mode_menu.slint`, reached by a pointer. Nothing on the
+    // control surface can reach them; `mind_mode_only_a_person_can_raise_the_mode` below reads
+    // the source of every `control*.rs` to keep it that way.
+    let chosen_ui = ui.as_weak();
+    ui.on_mind_mode_chosen(move |mode| {
+        let Some(mode) = crate::mind_mode::Mode::parse(&mode) else { return };
+        // Bypass has its own callback because it has its own confirmation and its own duration.
+        // Letting it arrive here would mean one click could enter it, which is the one mode
+        // that must cost a deliberate second answer.
+        if mode == crate::mind_mode::Mode::Bypass {
+            tracing::warn!("bypass does not arrive through the plain mode chooser");
+            return;
+        }
+        crate::mind_mode::person_set_mode(mode, crate::mind_mode::Bypass::Hour);
+        tracing::info!(mode = mode.as_str(), "a person set the mind mode");
+        if let Some(ui) = chosen_ui.upgrade() {
+            publish_mode(&ui);
+        }
+    });
+
+    let bypass_ui = ui.as_weak();
+    ui.on_mind_bypass_chosen(move |duration| {
+        let Some(bypass) = crate::mind_mode::Bypass::parse(&duration) else { return };
+        crate::mind_mode::person_set_mode(crate::mind_mode::Mode::Bypass, bypass);
+        tracing::warn!(duration = %duration, "a person put this desktop into bypass");
+        if let Some(ui) = bypass_ui.upgrade() {
+            publish_mode(&ui);
+        }
+    });
+
+    let revoke_ui = ui.as_weak();
+    ui.on_mind_rule_revoked(move |app, action| {
+        crate::mind_mode::person_revoke_rule(&app, &action);
+        tracing::info!(app = %app, action = %action, "a person revoked a session rule");
+        if let Some(ui) = revoke_ui.upgrade() {
+            publish_mode(&ui);
+        }
+    });
+
+    publish_mode(ui);
+
     let tick_ui = ui.as_weak();
     let timer = Timer::default();
     timer.start(TimerMode::Repeated, REFRESH, move || {
         if let Some(ui) = tick_ui.upgrade() {
             sync_if_changed(&ui);
+            // The countdown on the chip has to move every second while a bypass is running, and
+            // a lapsed one has to stop saying "Bypass" — which nothing pushes, because an expiry
+            // is a fact about the clock. Republished only when the label actually changes, so a
+            // machine in `ask` mode rebuilds nothing on any of these ticks.
+            crate::mind_mode::lapse();
+            publish_mode_if_changed(&ui);
         }
     });
     // The same keep-alive every timer in `wire::timers` uses: a dropped `Timer` stops.
@@ -474,6 +698,7 @@ fn row_for(card: Card) -> crate::ApprovalRequest {
             card.args.into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
         )),
         warning: card.warning.into(),
+        can_session: card.can_session,
         decision: match card.status {
             Status::Pending => "",
             Status::Granted | Status::Consumed => "allowed",
@@ -529,6 +754,91 @@ fn publish(ui: &App, cards: Vec<Card>) {
     if waiting == 0 {
         give_the_screen_back();
     }
+}
+
+// ── The mode onto the screen ────────────────────────────────────────
+
+thread_local! {
+    /// What the chip and the menu are showing, so a tick that changes nothing repaints nothing.
+    static MODE_SHOWN: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+fn mode_fingerprint() -> String {
+    // Three cheap reads, deliberately not `snapshot()`: that one reads the machine ceiling off
+    // disk, and this is asked once a second whether or not the menu is open.
+    //
+    // The chip label carries the countdown, so a bypass rebuilds once a second and nothing else
+    // ever does. The audit's length is enough: entries are append-only.
+    format!(
+        "{}|{}|{}",
+        crate::mind_mode::chip_label(),
+        crate::mind_mode::rules_summary(),
+        crate::mind_mode::recent(crate::mind_mode::AUDIT_PUBLISHED).len(),
+    )
+}
+
+fn publish_mode_if_changed(ui: &App) {
+    let now = mode_fingerprint();
+    let changed = MODE_SHOWN.with(|shown| {
+        if *shown.borrow() == now {
+            false
+        } else {
+            *shown.borrow_mut() = now;
+            true
+        }
+    });
+    if changed {
+        publish_mode(ui);
+    }
+}
+
+fn publish_mode(ui: &App) {
+    MODE_SHOWN.with(|shown| *shown.borrow_mut() = mode_fingerprint());
+
+    let mode = crate::mind_mode::current();
+    ui.set_mind_mode(mode.as_str().into());
+    ui.set_mind_mode_label(crate::mind_mode::chip_label().into());
+    ui.set_mind_mode_means(mode.meaning().into());
+    ui.set_mind_ceiling(machine_ceiling().into());
+
+    let snapshot = crate::mind_mode::snapshot();
+    let rules: Vec<crate::MindRule> = snapshot["session_rules"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|r| {
+                    let app = r["app"].as_str().unwrap_or_default().to_string();
+                    let action = r["action"].as_str().unwrap_or_default().to_string();
+                    crate::MindRule {
+                        label: format!("{app}.{action}").into(),
+                        app: app.into(),
+                        action: action.into(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ui.set_mind_session_rules(ModelRc::new(VecModel::from(rules)));
+
+    // Newest first on screen. The list answers "what has it just done", and a person scanning it
+    // reads from the top — which is the opposite of the transcript order the approval records
+    // use, where the newest belongs nearest the thing waiting on you.
+    let mut audit: Vec<crate::MindAuditEntry> = crate::mind_mode::recent(
+        crate::mind_mode::AUDIT_PUBLISHED,
+    )
+    .into_iter()
+    .map(|e| crate::MindAuditEntry {
+        at: e.at.into(),
+        what: format!("{}.{}", e.app, e.action).into(),
+        // One line, already bounded the way the card bounds them. Joined with two spaces rather
+        // than newlines because this is a single elided `Text` in a menu, not a card. The grade
+        // and the mode it ran under stay in `describe shell` and in the file; see the struct.
+        args: e.args.join("  ").into(),
+        outcome: e.outcome.into(),
+    })
+    .collect();
+    audit.reverse();
+    ui.set_mind_audit(ModelRc::new(VecModel::from(audit)));
 }
 
 // ── Arguments as they actually arrive ───────────────────────────────
@@ -699,6 +1009,125 @@ mod control_approvals_tests {
             assert!(
                 names.iter().any(|n| n == wanted),
                 "`{wanted}` is not published any more; the approval flow is broken. Published: {}",
+                names.join(", ")
+            );
+        }
+    }
+
+    /// The words that would be a way to loosen the mode, or mint a session rule, if one existed.
+    const MODE_WORDS: &[&str] = &["mode", "rule", "bypass", "permission", "ceiling"];
+
+    /// The one action allowed to carry them, and why it is not a way to loosen anything:
+    /// `set_mind_mode` refuses every request that would make the desktop more permissive.
+    const MODE_PERMITTED: &[&str] = &["set_mind_mode"];
+
+    /// The functions in `mind_mode` that a person's click reaches, and nothing else may.
+    const PERSON_ONLY: &[&str] = &["person_set_mode", "person_add_rule", "person_revoke_rule"];
+
+    /// The function those callbacks are wired in. Anything else naming them is the bug.
+    const CALLBACK_HOME: &str = "wire";
+
+    /// The top-level function each line of a source file belongs to.
+    ///
+    /// Line-based and deliberately dumb: a top-level `fn` in this crate starts at column zero
+    /// (optionally behind `pub` or `pub(crate)`), and a closure inside one never does. Brace
+    /// matching would be the "proper" way and would trip over the braces inside the string
+    /// literals these files are full of — `{\"id\": \"evt-3\"}` and friends.
+    fn enclosing_fns(src: &str) -> Vec<String> {
+        let mut current = String::from("(top level)");
+        let mut out = Vec::new();
+        for line in src.lines() {
+            let head = line
+                .strip_prefix("pub(crate) ")
+                .or_else(|| line.strip_prefix("pub "))
+                .unwrap_or(line);
+            if let Some(rest) = head.strip_prefix("fn ") {
+                let name: String =
+                    rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                if !name.is_empty() {
+                    current = name;
+                }
+            }
+            out.push(current.clone());
+        }
+        out
+    }
+
+    /// Only a person can make this desktop more permissive.
+    ///
+    /// The same property as `approvals_published_actions_cannot_grant` and the same reason for
+    /// checking it mechanically: somebody adds `allow_mode` or `add_session_rule` to unblock a
+    /// demo, it ships, and a mind can put the machine into bypass and then do as it likes. Two
+    /// halves, because there are two ways in — publishing an action that loosens it, and calling
+    /// the person-only functions from somewhere a caller on the socket can reach.
+    #[test]
+    fn mind_mode_only_a_person_can_raise_the_mode() {
+        let actions = published_actions();
+        assert!(
+            actions.len() > 10,
+            "only {} actions were found — the scan is not reading the control modules any more",
+            actions.len()
+        );
+
+        let offenders: Vec<String> = actions
+            .iter()
+            .filter(|(name, _)| {
+                let lower = name.to_ascii_lowercase();
+                MODE_WORDS.iter().any(|w| lower.contains(w))
+                    && !MODE_PERMITTED.contains(&name.as_str())
+            })
+            .map(|(name, file)| format!("{name} (in {file})"))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "the shell publishes an action that reads as a change to what the mind may do \
+             unasked: {}\n\n\
+             A caller on the socket must not be able to loosen the mode or mint a session rule. \
+             `set_mind_mode` is the only published action about modes and it can only TIGHTEN. \
+             If this action genuinely cannot loosen anything, rename it so it does not read like \
+             it can.",
+            offenders.join(", ")
+        );
+
+        // And the person-only functions are called from exactly one place: the callback wiring.
+        for path in control_sources() {
+            let whole = std::fs::read_to_string(&path).unwrap();
+            // The published surface is the code, not the tests. This module's own test block
+            // names these functions in a constant, and a test asserting about a name is not a
+            // caller of it.
+            let src = whole.split("#[cfg(test)]").next().unwrap_or("").to_string();
+            let file = path.file_name().unwrap().to_string_lossy().to_string();
+            let owners = enclosing_fns(&src);
+            for (index, line) in src.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for wanted in PERSON_ONLY {
+                    if !line.contains(wanted) {
+                        continue;
+                    }
+                    assert_eq!(
+                        owners[index], CALLBACK_HOME,
+                        "{file}:{} calls `{wanted}` from `{}`. It may only be called from \
+                         `{CALLBACK_HOME}`, where the callers are Slint callbacks a person's \
+                         click arrives on. Anything reachable from an action handler makes the \
+                         mode chip decorative.",
+                        index + 1,
+                        owners[index],
+                    );
+                }
+            }
+        }
+    }
+
+    /// And `set_mind_mode` is actually published, so deleting it cannot make the scan pass.
+    #[test]
+    fn mind_mode_the_tightening_action_is_published() {
+        let names: Vec<String> = published_actions().into_iter().map(|(n, _)| n).collect();
+        for wanted in ["set_mind_mode", "record_unasked_action"] {
+            assert!(
+                names.iter().any(|n| n == wanted),
+                "`{wanted}` is not published any more. Published: {}",
                 names.join(", ")
             );
         }

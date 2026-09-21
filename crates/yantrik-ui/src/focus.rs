@@ -41,12 +41,15 @@ pub fn start(ui: &App, duration_secs: u32) {
         if let Some(ui) = ui_weak.upgrade() {
             if *r == 0 {
                 end(&ui);
-                crate::wire::toast::push_toast(
-                    &ui_weak,
-                    "Focus",
-                    "Session complete. Nice work.",
-                    "",
-                    0, // low urgency
+                // Through the service, so the notification centre has it and a mind can read
+                // that the session ended. It used to be a private toast: six seconds on screen
+                // and then gone, with nothing anywhere that it had happened.
+                yantrik_app_runtime::notify::send(
+                    yantrik_app_runtime::notify::Notification::new(
+                        "Focus",
+                        "Session complete. Nice work.",
+                    )
+                    .urgency(yantrik_app_runtime::notify::Level::Low),
                 );
                 tracing::info!("Focus mode completed (timer expired)");
             } else {

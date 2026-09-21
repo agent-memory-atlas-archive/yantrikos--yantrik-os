@@ -11,7 +11,7 @@ use crate::app_context::{self, AppContext};
 use crate::mime_dispatch::{self, FileAction};
 use crate::app_context::FileClipOp;
 use crate::{
-    bridge, cards, filebrowser, focus, lock, notifications, onboarding, App, BreadcrumbSegment,
+    bridge, cards, filebrowser, focus, lock, onboarding, App, BreadcrumbSegment,
     FileDetailData, FileEntry, FileTabData, MemoryItem,
 };
 
@@ -25,7 +25,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     super::files::wire(ui, ctx);
     wire_whisper_cards(ui, ctx);
     wire_memory_search(ui, ctx);
-    wire_notifications(ui, ctx);
+    // Notifications are wired in `wire::notifications`, which owns the poll of the one
+    // store, the toasts, and the notification centre — they were four callbacks over a
+    // private store here, and they had no way to reach the service.
     wire_quick_settings(ui);
 }
 
@@ -245,47 +247,6 @@ fn wire_whisper_cards(ui: &App, ctx: &AppContext) {
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_lens_open(true);
         }
-    });
-}
-
-// ── Notifications ──
-
-fn wire_notifications(ui: &App, ctx: &AppContext) {
-    // Clear all notifications
-    let store = ctx.notification_store.clone();
-    let ui_weak = ui.as_weak();
-    ui.on_notification_clear_all(move || {
-        store.borrow_mut().clear();
-        notifications::sync_to_ui(&store.borrow(), &ui_weak);
-        tracing::debug!("Notifications cleared");
-    });
-
-    // Mark all as read
-    let store = ctx.notification_store.clone();
-    let ui_weak = ui.as_weak();
-    ui.on_notification_mark_all_read(move || {
-        store.borrow_mut().mark_all_read();
-        notifications::sync_to_ui(&store.borrow(), &ui_weak);
-        tracing::debug!("All notifications marked as read");
-    });
-
-    // Tap a notification (mark as read)
-    let store = ctx.notification_store.clone();
-    let ui_weak = ui.as_weak();
-    ui.on_notification_tapped(move |id| {
-        if let Ok(id_num) = id.to_string().parse::<u64>() {
-            store.borrow_mut().mark_read(id_num);
-            notifications::sync_to_ui(&store.borrow(), &ui_weak);
-        }
-    });
-
-    // Clear all notifications for a specific app group
-    let store = ctx.notification_store.clone();
-    let ui_weak = ui.as_weak();
-    ui.on_notification_clear_group(move |app_name| {
-        store.borrow_mut().clear_group(&app_name.to_string());
-        notifications::sync_to_ui(&store.borrow(), &ui_weak);
-        tracing::debug!(app = %app_name, "Notification group cleared");
     });
 }
 

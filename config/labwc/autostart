@@ -9,10 +9,19 @@
 # rather than the file dying at the first absence and silently skipping what follows.
 
 # ── Notifications ───────────────────────────────────────────────────────────────────────
-# Holds org.freedesktop.Notifications on the session bus. The shell has a notification centre
-# and a D-Bus path into it; without a daemon owning that name, `notify-send` and every
-# application's notification simply went nowhere.
-command -v mako >/dev/null && mako &
+# Nothing is started here any more, and that is the fix rather than an omission.
+#
+# This line used to be `command -v mako >/dev/null && mako &`. mako held
+# org.freedesktop.Notifications, drew popups in its own style, and kept them in its own head —
+# so the shell's notification centre stayed empty all day on a machine that was showing
+# notifications all day. Worse, the shell ALSO implemented that interface and claimed the same
+# name from a thread of its own, so which of the two a `notify-send` reached came down to start
+# order; the audit of 17 September caught mako winning by a few hundred milliseconds.
+#
+# The notifications service owns the name now. It is the machine's one notification store, it is
+# autostarted by the shell, and the shell draws what it holds. `libnotify-bin` stays installed —
+# that is only the `notify-send` client, and it now lands in the same store as everything else.
+# See design/notifications-2026-09-21.md.
 
 # ── Authorisation ───────────────────────────────────────────────────────────────────────
 # The polkit daemon was already running with no agent to show a prompt, so anything asking to

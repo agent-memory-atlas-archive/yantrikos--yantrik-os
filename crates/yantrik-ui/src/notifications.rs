@@ -1,236 +1,395 @@
-//! Notification store — persistent notification history.
+//! The shell's view of the one notification store.
 //!
-//! Captures every D-Bus notification (via SystemObserver events) into a
-//! capped ring buffer. Powers the Notification Center (screen 9).
+//! ## What this used to be
 //!
-//! Notifications are persisted to `~/.yantrik/notifications.json` so they
-//! survive reboots. The store sorts entries by app-name for grouped display,
-//! inserting synthetic "group header" rows that the UI renders differently.
+//! A second store. `NotificationStore` kept its own `Vec` in the shell process and wrote it to
+//! `~/.yantrik/notifications.json` — a file only the shell could write and only the shell could
+//! read. It was fed by the shell's own D-Bus daemon (which raced mako for the bus name) and by
+//! `push_toast`, and it was invisible to the notifications service, to every app, and to a mind.
+//! Meanwhile the service had a third store, in memory, that nothing ever wrote to.
+//!
+//! ## What it is now
+//!
+//! A mirror, not a store. The notifications service owns the file; this holds what the last poll
+//! of `notifications.since(revision)` said, so the notification centre and the unread badge can
+//! be drawn without a socket call per frame. Nothing here is authoritative: dismissing goes to
+//! the service and comes back on the next poll.
+//!
+//! It also knows whether the service answered, because an empty notification centre and a dead
+//! service look identical on screen and mean opposite things.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use serde::{Deserialize, Serialize};
+use yantrik_ipc_contracts::notifications::{Notification, Since, Urgency};
 
-/// A single notification entry (also the on-disk representation).
-#[derive(Clone, Serialize, Deserialize)]
-pub struct NotificationEntry {
-    pub id: u64,
-    pub app: String,
-    pub summary: String,
-    pub body: String,
-    pub urgency: u8,
-    pub timestamp: f64,
-    pub read: bool,
+/// How many notifications the shell keeps in memory. The service keeps 500; this is the same
+/// bound so the notification centre can show everything the store holds without the shell
+/// growing without limit if the service's cap is ever raised.
+const MAX_MIRRORED: usize = 500;
+
+/// What the last poll said, plus whether there was a last poll.
+pub struct NotificationMirror {
+    /// Oldest first, as the store hands them over.
+    items: Vec<Notification>,
+    /// The store revision this mirror is caught up to.
+    revision: u64,
+    /// `None` when the service answered. Otherwise why it did not, in its own words.
+    notice: Option<String>,
+    /// Whether a poll has ever succeeded. The first one must not raise 400 toasts for
+    /// everything that happened while the machine was off.
+    primed: bool,
 }
 
-/// In-memory notification store, kept on main thread (Rc<RefCell>).
-pub struct NotificationStore {
-    entries: Vec<NotificationEntry>,
-    counter: u64,
+/// Shared handle, kept on the UI thread.
+pub type SharedStore = Rc<RefCell<NotificationMirror>>;
+
+impl Default for NotificationMirror {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-/// Shared handle to the notification store.
-pub type SharedStore = Rc<RefCell<NotificationStore>>;
-
-/// Path to the persistence file.
-fn persist_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let dir = std::path::PathBuf::from(home).join(".yantrik");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join("notifications.json")
-}
-
-impl NotificationStore {
+impl NotificationMirror {
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
-            counter: 0,
+            items: Vec::new(),
+            revision: 0,
+            // Not "down" and not "up": nothing has been asked yet, and claiming either before
+            // the first poll would put a wrong sentence on the notification centre for a second.
+            notice: None,
+            primed: false,
         }
     }
 
-    /// Load from disk, falling back to empty on any error.
-    pub fn load() -> Self {
-        let path = persist_path();
-        match std::fs::read_to_string(&path) {
-            Ok(json) => match serde_json::from_str::<Vec<NotificationEntry>>(&json) {
-                Ok(entries) => {
-                    let counter = entries.iter().map(|e| e.id).max().unwrap_or(0);
-                    tracing::info!(
-                        count = entries.len(),
-                        path = %path.display(),
-                        "Loaded notifications from disk"
-                    );
-                    Self { entries, counter }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to parse notifications.json, starting fresh");
-                    Self::new()
-                }
-            },
-            Err(_) => Self::new(),
-        }
+    /// The revision to ask for next.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
-    /// Save current entries to disk.
-    fn persist(&self) {
-        let path = persist_path();
-        match serde_json::to_string(&self.entries) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
-                    tracing::warn!(error = %e, "Failed to write notifications.json");
+    /// Fold in what the store said changed, and answer with what deserves a toast.
+    ///
+    /// A notification earns a toast when it is new, or when its `created_at` moved — which is
+    /// what a sender replacing an earlier notification does ("downloading…" becoming
+    /// "finished"). Marking one read or dismissing it also changes it, and must not re-raise it.
+    pub fn apply(&mut self, since: Since) -> Vec<Notification> {
+        let first_poll = !self.primed;
+        self.primed = true;
+        self.notice = None;
+
+        let mut fresh = Vec::new();
+        for incoming in since.changed {
+            match self.items.iter().position(|e| e.id == incoming.id) {
+                Some(index) => {
+                    let replaced = self.items[index].created_at != incoming.created_at;
+                    if replaced && !incoming.dismissed {
+                        fresh.push(incoming.clone());
+                    }
+                    self.items[index] = incoming;
+                }
+                None => {
+                    if !first_poll && !incoming.dismissed {
+                        fresh.push(incoming.clone());
+                    }
+                    self.items.push(incoming);
                 }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to serialize notifications");
-            }
         }
+        self.revision = since.revision;
+
+        if self.items.len() > MAX_MIRRORED {
+            let excess = self.items.len() - MAX_MIRRORED;
+            self.items.drain(0..excess);
+        }
+        fresh
     }
 
-    /// Add a new notification.
-    pub fn push(&mut self, app: String, summary: String, body: String, urgency: u8) {
-        self.counter += 1;
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
-        self.entries.push(NotificationEntry {
-            id: self.counter,
-            app,
-            summary,
-            body,
-            urgency,
-            timestamp,
-            read: false,
-        });
-        // Cap at 200 entries (oldest removed first)
-        if self.entries.len() > 200 {
-            self.entries.remove(0);
-        }
-        self.persist();
+    /// The service could not be reached. Said once per outage by the caller, held here so the
+    /// notification centre can print it instead of an empty list.
+    pub fn unreachable(&mut self, why: String) {
+        self.notice = Some(why);
     }
 
-    /// Get all entries grouped by app-name (sorted alphabetically by app,
-    /// newest-first within each group).
-    pub fn entries_grouped(&self) -> Vec<&NotificationEntry> {
-        // Collect entries into groups keyed by app name
-        let mut groups: std::collections::BTreeMap<String, Vec<&NotificationEntry>> =
-            std::collections::BTreeMap::new();
-        for e in &self.entries {
-            groups
-                .entry(e.app.to_lowercase())
-                .or_default()
-                .push(e);
-        }
-        // Within each group, sort newest first
-        let mut result = Vec::new();
-        for (_key, mut group) in groups {
-            group.sort_by(|a, b| b.timestamp.partial_cmp(&a.timestamp).unwrap());
-            result.extend(group);
-        }
-        result
+    pub fn service_up(&self) -> bool {
+        self.notice.is_none()
     }
 
-    /// Get all entries, newest first (ungrouped — kept for backward compat).
-    pub fn entries_newest_first(&self) -> impl Iterator<Item = &NotificationEntry> {
-        self.entries.iter().rev()
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 
-    /// Count of unread notifications.
+    /// Unread and not dismissed — the badge.
     pub fn unread_count(&self) -> usize {
-        self.entries.iter().filter(|e| !e.read).count()
+        self.items
+            .iter()
+            .filter(|n| !n.read && !n.dismissed)
+            .count()
     }
 
-    /// Mark all as read.
-    pub fn mark_all_read(&mut self) {
-        for e in &mut self.entries {
-            e.read = true;
+    /// Everything still showing, newest first.
+    pub fn showing(&self) -> Vec<&Notification> {
+        let mut out: Vec<&Notification> = self.items.iter().filter(|n| !n.dismissed).collect();
+        out.reverse();
+        out
+    }
+
+    /// One notification by id, for a click that has to know who sent it.
+    pub fn get(&self, id: &str) -> Option<&Notification> {
+        self.items.iter().find(|n| n.id == id)
+    }
+
+    /// Mark one read here and now, so the badge moves on the click rather than on the next
+    /// poll. The service is told separately and its answer overwrites this.
+    pub fn mark_read_locally(&mut self, id: &str) {
+        if let Some(n) = self.items.iter_mut().find(|n| n.id == id) {
+            n.read = true;
         }
-        self.persist();
     }
 
-    /// Mark a specific notification as read by ID.
-    pub fn mark_read(&mut self, id: u64) {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
-            e.read = true;
+    /// Dismiss one here and now, for the same reason.
+    pub fn dismiss_locally(&mut self, id: &str) {
+        if let Some(n) = self.items.iter_mut().find(|n| n.id == id) {
+            n.dismissed = true;
+            n.read = true;
         }
-        self.persist();
     }
 
-    /// Clear all notifications for a specific app name.
-    pub fn clear_group(&mut self, app_name: &str) {
-        let lower = app_name.to_lowercase();
-        self.entries.retain(|e| e.app.to_lowercase() != lower);
-        self.persist();
-    }
-
-    /// Clear all notifications.
-    pub fn clear(&mut self) {
-        self.entries.clear();
-        self.persist();
+    /// The three most recent, for `describe shell`.
+    pub fn latest_for_describe(&self, limit: usize) -> Vec<serde_json::Value> {
+        self.showing()
+            .into_iter()
+            .take(limit)
+            .map(|n| {
+                serde_json::json!({
+                    "id": n.id,
+                    "app": n.app,
+                    "title": n.title,
+                    "urgency": n.urgency.as_str(),
+                    "read": n.read,
+                    "at": n.created_at,
+                })
+            })
+            .collect()
     }
 }
 
-/// Convert a NotificationEntry to a Slint NotificationData struct.
-pub fn to_slint_data(entry: &NotificationEntry, now: f64) -> crate::NotificationData {
+/// Seconds since an RFC 3339 timestamp, for "4 minutes ago".
+///
+/// A timestamp that will not parse reads as "just now" rather than as a wild number: the store
+/// writes these itself, so an unparseable one means a hand-edited file, and a row that says
+/// "in 54 years" is worse than one that says nothing useful.
+pub fn seconds_since(created_at: &str) -> f64 {
+    match chrono::DateTime::parse_from_rfc3339(created_at) {
+        Ok(then) => (chrono::Utc::now().timestamp() - then.timestamp()).max(0) as f64,
+        Err(_) => 0.0,
+    }
+}
+
+/// The urgency as the 0/1/2 the Slint components have always drawn.
+pub fn urgency_int(urgency: Urgency) -> i32 {
+    urgency.hint_byte() as i32
+}
+
+/// Convert one notification to the Slint row.
+pub fn to_slint_data(n: &Notification) -> crate::NotificationData {
     crate::NotificationData {
-        id: entry.id.to_string().into(),
-        app_name: entry.app.clone().into(),
-        summary: entry.summary.clone().into(),
-        body: entry.body.clone().into(),
-        urgency: entry.urgency as i32,
-        time_ago: crate::bridge::format_time_ago(now - entry.timestamp).into(),
-        is_read: entry.read,
+        id: n.id.clone().into(),
+        app_name: n.app.clone().into(),
+        summary: n.title.clone().into(),
+        body: n.body.clone().into(),
+        urgency: urgency_int(n.urgency),
+        time_ago: crate::bridge::format_time_ago(seconds_since(&n.created_at)).into(),
+        is_read: n.read,
         is_group_header: false,
-        group_name: entry.app.clone().into(),
-        group_icon: entry.app.chars().next().unwrap_or('?').to_uppercase().to_string().into(),
+        group_name: n.app.clone().into(),
+        group_icon: first_letter(&n.app),
         group_count: 0,
+        actions: slint::ModelRc::new(slint::VecModel::from(
+            n.actions
+                .iter()
+                // `default` is the freedesktop action for "the person clicked the notification
+                // itself", not a button. It is invoked by tapping the row; drawing it as a
+                // button beside the row would offer the same thing twice.
+                .filter(|a| a.id != "default")
+                .map(|a| crate::NotifActionData {
+                    id: a.id.clone().into(),
+                    label: a.label.clone().into(),
+                })
+                .collect::<Vec<_>>(),
+        )),
+        source: n.source.as_str().into(),
     }
 }
 
-/// Sync the full notification list to the UI, grouped by app-name with
-/// synthetic group-header rows inserted before each group.
-pub fn sync_to_ui(store: &NotificationStore, ui_weak: &slint::Weak<crate::App>) {
-    if let Some(ui) = ui_weak.upgrade() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
+fn first_letter(app: &str) -> slint::SharedString {
+    app.chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string()
+        .into()
+}
 
-        let grouped = store.entries_grouped();
+/// Put the whole list on screen: grouped by app, newest group first, newest within a group
+/// first, with a synthetic header row before each group.
+///
+/// Groups used to be ordered alphabetically, so a notification that arrived a second ago sat
+/// under "Zoom" at the bottom of the screen if that was where its app's name fell. They are in
+/// the order the apps last said something now, which is the order a person is looking for.
+pub fn sync_to_ui(mirror: &NotificationMirror, ui_weak: &slint::Weak<crate::App>) {
+    let Some(ui) = ui_weak.upgrade() else { return };
 
-        let mut items: Vec<crate::NotificationData> = Vec::new();
-        let mut current_app: Option<String> = None;
-
-        for entry in &grouped {
-            let app_lower = entry.app.to_lowercase();
-            if current_app.as_ref() != Some(&app_lower) {
-                // Count notifications in this group
-                let group_count = grouped
-                    .iter()
-                    .filter(|e| e.app.to_lowercase() == app_lower)
-                    .count();
-
-                // Insert group header
-                items.push(crate::NotificationData {
-                    id: slint::SharedString::default(),
-                    app_name: entry.app.clone().into(),
-                    summary: entry.app.clone().into(),
-                    body: format!("{} notification{}", group_count, if group_count == 1 { "" } else { "s" }).into(),
-                    urgency: 0,
-                    time_ago: slint::SharedString::default(),
-                    is_read: true,
-                    is_group_header: true,
-                    group_name: entry.app.clone().into(),
-                    group_icon: entry.app.chars().next().unwrap_or('?').to_uppercase().to_string().into(),
-                    group_count: group_count as i32,
-                });
-                current_app = Some(app_lower);
-            }
-            items.push(to_slint_data(entry, now));
+    let showing = mirror.showing();
+    let mut order: Vec<String> = Vec::new();
+    for n in &showing {
+        let key = n.app.to_lowercase();
+        if !order.contains(&key) {
+            order.push(key);
         }
+    }
 
-        ui.set_notification_unread_count(store.unread_count() as i32);
-        ui.set_notification_list(slint::ModelRc::new(slint::VecModel::from(items)));
+    let mut items: Vec<crate::NotificationData> = Vec::new();
+    for key in &order {
+        let group: Vec<&&Notification> = showing
+            .iter()
+            .filter(|n| n.app.to_lowercase() == *key)
+            .collect();
+        let Some(first) = group.first() else { continue };
+        items.push(crate::NotificationData {
+            id: slint::SharedString::default(),
+            app_name: first.app.clone().into(),
+            summary: first.app.clone().into(),
+            body: slint::SharedString::default(),
+            urgency: 0,
+            time_ago: slint::SharedString::default(),
+            is_read: true,
+            is_group_header: true,
+            group_name: first.app.clone().into(),
+            group_icon: first_letter(&first.app),
+            group_count: group.len() as i32,
+            actions: slint::ModelRc::default(),
+            source: first.source.as_str().into(),
+        });
+        for n in group {
+            items.push(to_slint_data(n));
+        }
+    }
+
+    ui.set_notification_unread_count(mirror.unread_count() as i32);
+    ui.set_notification_service_up(mirror.service_up());
+    ui.set_notification_service_notice(mirror.notice().unwrap_or_default().into());
+    ui.set_notification_list(slint::ModelRc::new(slint::VecModel::from(items)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yantrik_ipc_contracts::notifications::Source;
+
+    fn note(id: &str, app: &str, created_at: &str) -> Notification {
+        Notification {
+            id: id.into(),
+            app: app.into(),
+            title: format!("from {app}"),
+            body: String::new(),
+            urgency: Urgency::Normal,
+            created_at: created_at.into(),
+            read: false,
+            dismissed: false,
+            actions: Vec::new(),
+            source: Source::Yantrik,
+            replaces_id: None,
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn the_first_poll_raises_no_toasts() {
+        // Otherwise every boot opens with a wall of toasts for everything that happened while
+        // the machine was off — which is how a notification system gets turned off.
+        let mut mirror = NotificationMirror::new();
+        let fresh = mirror.apply(Since {
+            revision: 3,
+            changed: vec![
+                note("1", "Downloads", "2026-09-21T09:00:00Z"),
+                note("2", "Calendar", "2026-09-21T09:01:00Z"),
+            ],
+        });
+        assert!(fresh.is_empty());
+        assert_eq!(mirror.unread_count(), 2);
+        assert_eq!(mirror.revision(), 3);
+    }
+
+    #[test]
+    fn a_new_notification_after_that_is_a_toast() {
+        let mut mirror = NotificationMirror::new();
+        mirror.apply(Since { revision: 1, changed: vec![note("1", "A", "2026-09-21T09:00:00Z")] });
+        let fresh = mirror.apply(Since {
+            revision: 2,
+            changed: vec![note("2", "B", "2026-09-21T09:05:00Z")],
+        });
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].id, "2");
+    }
+
+    #[test]
+    fn being_read_or_dismissed_does_not_re_raise_a_toast() {
+        let mut mirror = NotificationMirror::new();
+        mirror.apply(Since { revision: 1, changed: vec![note("1", "A", "2026-09-21T09:00:00Z")] });
+        let mut read = note("1", "A", "2026-09-21T09:00:00Z");
+        read.read = true;
+        assert!(mirror.apply(Since { revision: 2, changed: vec![read] }).is_empty());
+        let mut gone = note("1", "A", "2026-09-21T09:00:00Z");
+        gone.dismissed = true;
+        assert!(mirror.apply(Since { revision: 3, changed: vec![gone] }).is_empty());
+        assert_eq!(mirror.unread_count(), 0);
+        assert!(mirror.showing().is_empty());
+    }
+
+    #[test]
+    fn a_replaced_notification_is_raised_again() {
+        // "debian.iso — 40%" becoming "debian.iso — finished" is news, and it keeps the same id.
+        let mut mirror = NotificationMirror::new();
+        mirror.apply(Since {
+            revision: 1,
+            changed: vec![note("1", "Downloads", "2026-09-21T09:00:00Z")],
+        });
+        let fresh = mirror.apply(Since {
+            revision: 2,
+            changed: vec![note("1", "Downloads", "2026-09-21T09:07:00Z")],
+        });
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(mirror.showing().len(), 1, "it replaced, it did not add");
+    }
+
+    #[test]
+    fn a_service_that_did_not_answer_is_not_an_empty_list() {
+        let mut mirror = NotificationMirror::new();
+        assert!(mirror.service_up(), "nothing has been asked yet");
+        mirror.unreachable("the notifications service is unreachable".into());
+        assert!(!mirror.service_up());
+        assert!(mirror.notice().is_some());
+        // And a successful poll clears it without anyone having to remember to.
+        mirror.apply(Since { revision: 1, changed: vec![] });
+        assert!(mirror.service_up());
+    }
+
+    #[test]
+    fn the_mirror_is_bounded() {
+        let mut mirror = NotificationMirror::new();
+        mirror.apply(Since { revision: 1, changed: vec![] });
+        for i in 0..(MAX_MIRRORED + 20) {
+            mirror.apply(Since {
+                revision: i as u64 + 2,
+                changed: vec![note(&i.to_string(), "Flood", "2026-09-21T09:00:00Z")],
+            });
+        }
+        assert_eq!(mirror.showing().len(), MAX_MIRRORED);
+    }
+
+    #[test]
+    fn an_unparseable_timestamp_reads_as_just_now_not_as_a_wild_number() {
+        assert_eq!(seconds_since("not a timestamp"), 0.0);
+        assert!(seconds_since("2020-01-01T00:00:00Z") > 0.0);
     }
 }

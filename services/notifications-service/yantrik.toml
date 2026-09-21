@@ -2,7 +2,7 @@
 id = "com.yantrikos.notifications"
 name = "Notifications Service"
 version = "0.1.0"
-description = "In-memory notification store — add, list, dismiss, and action notifications"
+description = "The one notification store on this machine — and the session's org.freedesktop.Notifications daemon"
 publisher = "Yantrik OS"
 roles = ["service"]
 icon = "bell"
@@ -12,8 +12,10 @@ binary = "notifications-service"
 methods = [
     "notifications.list",
     "notifications.add",
+    "notifications.since",
     "notifications.dismiss",
     "notifications.dismiss_all",
+    "notifications.mark_read",
     "notifications.action",
 ]
 autostart = true

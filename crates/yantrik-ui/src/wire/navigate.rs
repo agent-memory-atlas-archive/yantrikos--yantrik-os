@@ -139,10 +139,17 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             }
             // Directory I/O is owned by the asynchronous Files controller.
             8 => { if let Some(ui)=ui_weak.upgrade() { ui.invoke_file_refresh(); } }
-            // Notification Center — sync from store
+            // Notification Center — draw the mirror at once, and mark what is showing as read.
+            //
+            // Read on open, because opening this screen IS reading them: leaving the badge at
+            // eleven after somebody has looked at all eleven is how a badge stops meaning
+            // anything. The service is told off-thread and its answer arrives on the next poll.
             9 => {
-                let store = notification_store.borrow();
-                notifications::sync_to_ui(&store, &ui_weak);
+                {
+                    let store = notification_store.borrow();
+                    notifications::sync_to_ui(&store, &ui_weak);
+                }
+                super::notifications::mark_showing_read(&ui_weak);
             }
             // System Dashboard — populate from snapshot
             10 => {

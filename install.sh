@@ -236,7 +236,7 @@ apk update -q
 
 # Core packages (required)
 apk add -q \
-    labwc foot mako \
+    labwc foot \
     dbus dbus-openrc \
     eudev eudev-openrc \
     mesa-dri-gallium \
@@ -650,10 +650,13 @@ mkdir -p "$LABWC_DIR"
 } > "$LABWC_DIR/environment"
 
 # Autostart
+# No notification daemon is installed or started: the notifications service owns
+# org.freedesktop.Notifications and is the machine's one notification store. Two daemons
+# cannot own one bus name, and the one that loses is invisible to everything else. See
+# design/notifications-2026-09-21.md.
 cat > "$LABWC_DIR/autostart" <<'AUTOSTART'
 #!/bin/sh
 foot --server &
-mako &
 /opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml >> /opt/yantrik/logs/yantrik-os.log 2>&1 &
 AUTOSTART
 chmod +x "$LABWC_DIR/autostart"
@@ -722,32 +725,11 @@ bright6=80d8e8
 bright7=e0e0e8
 FOOTINI
 
-# Mako notification config
-MAKO_DIR="/home/$YANTRIK_USER/.config/mako"
-mkdir -p "$MAKO_DIR"
-cat > "$MAKO_DIR/config" <<'MAKOCONF'
-font=DejaVu Sans 11
-background-color=#0c0b10e6
-text-color=#c8c8d0
-border-color=#5ac8d460
-border-size=1
-border-radius=8
-padding=12
-margin=12
-width=360
-default-timeout=8000
-max-visible=3
-layer=overlay
-anchor=top-right
-
-[urgency=critical]
-background-color=#1a0a0ae6
-border-color=#e86b6b80
-default-timeout=0
-MAKOCONF
+# No mako config is written: nothing here starts mako any more, and a themed config file
+# for a program that is not installed is an instruction to the next reader to install it.
 
 chown -R "$YANTRIK_USER:$YANTRIK_USER" "/home/$YANTRIK_USER/.config"
-ok "labwc + foot + mako configured"
+ok "labwc + foot configured"
 echo
 
 # ═══════════════════════════════════════════════════════════════

@@ -20,6 +20,7 @@ pub mod image_viewer;
 mod lens;
 pub mod media_player;
 mod navigate;
+pub mod notifications;
 mod power;
 pub mod screenshot;
 pub mod settings;
@@ -76,7 +77,9 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     media_player::wire(ui, ctx);
     package_manager::wire(ui, ctx);
     screenshot::wire(ui, ctx);
-    toast::wire(ui, ctx);
+    // Owns the notification centre, the toasts and the poll of the one store. `toast` is the
+    // drawing half and has no `wire` of its own any more.
+    notifications::wire(ui, ctx);
     skill_store::wire(ui, ctx);
     device_dashboard::wire(ui, ctx);
     permission_dashboard::wire(ui, ctx);

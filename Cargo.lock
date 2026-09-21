@@ -978,8 +978,10 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "tracing",
  "uuid7",
  "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
  "yantrik-service-sdk",
 ]
 
@@ -5175,9 +5177,10 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
- "uuid7",
+ "tracing",
  "yantrik-ipc-contracts",
  "yantrik-service-sdk",
+ "zbus",
 ]
 
 [[package]]
@@ -10786,6 +10789,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "cpal",
  "crossbeam-channel",
  "html2text",

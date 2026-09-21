@@ -27,6 +27,10 @@ export component StatusBar inherits Rectangle {
     in property <bool> wifi-connected: false;
     in property <int> pending-count: 0;
     in property <int> whisper-hint-count: 0;
+    // Unread notifications, from the one notification store. The status bar is the only thing
+    // on screen from every app, so it is where "something happened while you were elsewhere"
+    // has to be visible.
+    in property <int> notification-unread: 0;
     in property <bool> incognito-enabled: false;
     in property <bool> dnd-enabled: false;
     in property <string> active-project: "";
@@ -45,6 +49,7 @@ export component StatusBar inherits Rectangle {
     callback anchor-clicked();
     callback queue-clicked();
     callback whisper-hint-clicked();
+    callback notifications-clicked();
     callback settings-tapped();
     callback power-pressed();
     callback ai-privacy-clicked();
@@ -53,6 +58,12 @@ export component StatusBar inherits Rectangle {
     in property <string> active-harness-id: "";
     in property <string> active-harness-name: "";
     callback active-mind-clicked();
+
+    // What that mind may do without being asked: plan | ask | auto | bypass. The label carries
+    // the countdown during a bypass ("Bypass 43m"). See components/mind_mode_menu.slint.
+    in property <string> mind-mode: "ask";
+    in property <string> mind-mode-label: "Ask";
+    callback mind-mode-clicked();
 
     height: Theme.status-bar-height;
     // Glass, not paint. This bar is drawn over the wallpaper on every screen, and an
@@ -192,6 +203,62 @@ export component StatusBar inherits Rectangle {
 
             Rectangle { width: 1px; height: 14px; y: (parent.height - 14px) / 2; background: Theme.separator; }
 
+            // ── What the mind may do without asking ──
+            //
+            // Always on the bar, unlike the mind chip beside it, and that is the point: the mode
+            // is a fact about what this machine will let happen to it, and a person must never be
+            // surprised by it. In `plan` they would otherwise only find out when the mind said it
+            // could not do anything; in `bypass` they are owed a permanent, unmissable reminder
+            // and a countdown, which is why the label carries the time left and this chip goes
+            // red rather than accent-tinted.
+            //
+            // Immediately to the LEFT of the mind chip: the two answer the same question — who
+            // is acting, and how freely — and they belong together.
+            TouchArea {
+                width: mode-row.preferred-width + Theme.sp-3;
+                height: Theme.status-bar-height;
+                mouse-cursor: pointer;
+                clicked => { root.mind-mode-clicked(); }
+
+                Rectangle {
+                    width: parent.width;
+                    height: 20px;
+                    y: (parent.height - 20px) / 2;
+                    border-radius: Theme.r-sm;
+                    background: root.mind-mode == "bypass" ? Theme.color-danger-dim
+                        : root.mind-mode == "plan" ? Theme.tint-amber
+                        : Theme.hover-fill;
+                    border-width: root.mind-mode == "bypass" ? 1px : 0px;
+                    border-color: Theme.color-danger;
+
+                    mode-row := HorizontalLayout {
+                        padding-left: 7px;
+                        padding-right: 7px;
+                        spacing: 5px;
+                        alignment: center;
+
+                        Icon {
+                            commands: root.mind-mode == "plan" ? Icons.eye : Icons.shield;
+                            size: 12px;
+                            tint: root.mind-mode == "bypass" ? Theme.color-danger
+                                : root.mind-mode == "plan" ? Theme.amber
+                                : Theme.text-secondary;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            text: root.mind-mode-label;
+                            max-width: 120px; overflow: elide;
+                            color: root.mind-mode == "bypass" ? Theme.color-danger
+                                : root.mind-mode == "plan" ? Theme.amber
+                                : Theme.text-secondary;
+                            font-size: Theme.fs-micro;
+                            font-weight: root.mind-mode == "bypass" ? 700 : 500;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
             // ── Which mind is answering ──
             //
             // Shown ONLY when it is not the built-in one. On a machine using the companion this
@@ -308,6 +375,31 @@ export component StatusBar inherits Rectangle {
 
                     whisper-text := Text {
                         text: root.whisper-hint-count;
+                        color: Theme.text-on-accent;
+                        font-size: Theme.fs-micro;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Unread notifications — opens the notification centre
+            if root.notification-unread > 0 : TouchArea {
+                width: unread-badge.preferred-width + 4px;
+                height: Theme.status-bar-height;
+                mouse-cursor: pointer;
+                clicked => { root.notifications-clicked(); }
+
+                unread-badge := Rectangle {
+                    width: max(20px, unread-text.preferred-width + 10px);
+                    height: 20px;
+                    y: (parent.height - 20px) / 2;
+                    border-radius: self.height / 2;
+                    background: Theme.accent;
+
+                    unread-text := Text {
+                        text: root.notification-unread > 99 ? "99+" : root.notification-unread;
                         color: Theme.text-on-accent;
                         font-size: Theme.fs-micro;
                         font-weight: 700;

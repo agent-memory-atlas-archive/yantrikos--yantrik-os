@@ -7,7 +7,7 @@
 #   - Alpine Linux 3.21 minimal
 #   - labwc Wayland compositor
 #   - Yantrik UI (pre-compiled binary)
-#   - Foot terminal, grim/slurp, wl-clipboard, mako
+#   - Foot terminal, grim/slurp, wl-clipboard (notifications are the shell's own service)
 #   - Pre-baked demo project with deliberate bug
 #   - First-boot onboarding tutorial
 #
@@ -119,7 +119,7 @@ sudo chroot "$ROOTFS" /bin/sh -c '
     apk add --no-cache \
         eudev mesa-dri-gallium mesa-egl \
         labwc foot wlr-randr \
-        grim slurp wl-clipboard mako \
+        grim slurp wl-clipboard \
         dbus dbus-openrc ttf-dejavu \
         seatd seatd-openrc \
         linux-firmware-none
@@ -172,8 +172,8 @@ sudo tee "$LABWC_DIR/autostart" > /dev/null << 'AUTOEOF'
 # Start foot terminal server
 foot --server &
 
-# Start notification daemon
-mako &
+# No notification daemon: the notifications service owns org.freedesktop.Notifications
+# and is the machine's one notification store.
 
 # Start Yantrik OS
 /opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml &

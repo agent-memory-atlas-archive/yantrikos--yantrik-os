@@ -2,7 +2,7 @@
 name = "notifications-service"
 version = "0.1.0"
 edition = "2021"
-description = "Yantrik notification service — in-memory notification store with JSON-RPC interface"
+description = "Yantrik notification service — the one notification store on the machine, and the session's org.freedesktop.Notifications daemon"
 
 [[bin]]
 name = "notifications-service"
@@ -14,4 +14,9 @@ yantrik-service-sdk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
-uuid7 = { workspace = true }
+# This process *is* the session notification daemon, so that mako and the shell are not both
+# racing it for the bus name. `zbus::blocking` on a thread of its own, as the shell's old
+# implementation did — the service's own runtime is tokio, and blocking inside a tokio worker
+# panics.
+zbus = { workspace = true }
+tracing = { workspace = true }

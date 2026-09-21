@@ -78,8 +78,9 @@ if [ -d "$CHROME/labwc" ]; then
   # The titlebar buttons live beside the themerc, because that is where labwc looks for them:
   # <name>-active.png / <name>-inactive.png in the theme directory, replacing the built-ins.
   cp -f "$CHROME/labwc/"*.png "$HOME/.local/share/themes/Yantrik/labwc/" 2>/dev/null || true
-  # What starts with the desktop: the notification daemon and the polkit agent. Without this
-  # file labwc starts neither, and both are things a desktop is simply assumed to have.
+  # What starts with the desktop: the polkit agent. No notification daemon — the
+  # notifications service holds org.freedesktop.Notifications and is started by the shell;
+  # starting a second one here is what used to make half the machine's notifications vanish.
   if [ -f "$CHROME/labwc/autostart" ]; then
     cp -f "$CHROME/labwc/autostart" "$HOME/.config/labwc/autostart"
     chmod +x "$HOME/.config/labwc/autostart"

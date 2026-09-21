@@ -186,6 +186,18 @@ export component SettingsScreen inherits Rectangle {
     in property <int> max-tokens: 512;
     in property <string> tool-permission: "sensitive";
 
+    // What a mind may do without being asked. The same control as the status bar's mode chip,
+    // shown here beside `tool-permission` because the two are only understandable together: the
+    // mode says how often you are asked, the ceiling says what no mode can reach. Somebody who
+    // reads one without the other will conclude that Bypass means "anything".
+    in property <string> mind-mode: "ask";
+    in property <string> mind-mode-label: "Ask";
+    in property <string> mind-mode-means: "";
+    callback mind-mode-chosen(string);
+    /// Bypass is not set from here. It routes to the status bar's menu, which is where the
+    /// confirmation and the durations live — one place, so there is one thing to get right.
+    callback mind-bypass-requested();
+
     // Security
     in property <int> auto-lock-secs: 300;
     in-out property <bool> incognito-mode: false;
@@ -1034,6 +1046,87 @@ export component SettingsScreen inherits Rectangle {
                                                     vertical-alignment: center;
                                                 }
                                             }
+                                        }
+                                    }
+
+                                    // ── What the mind may do without asking ──
+                                    //
+                                    // Directly under the ceiling above it, and saying so, because
+                                    // the pair is the whole policy: the ceiling is the wall no
+                                    // mode can reach past, and the mode decides what happens
+                                    // below it. The same four choices as the status-bar chip; the
+                                    // chip is where the countdown lives, so Bypass sends you
+                                    // there rather than having a second confirmation here.
+                                    Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                                    VerticalLayout {
+                                        spacing: Theme.sp-2;
+
+                                        Text {
+                                            text: "What the mind may do without asking";
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.fs-body;
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: Theme.sp-2;
+
+                                            for choice in [
+                                                { id: "plan", label: "Plan" },
+                                                { id: "ask", label: "Ask" },
+                                                { id: "auto", label: "Auto" },
+                                                { id: "bypass", label: "Bypass" },
+                                            ] : Rectangle {
+                                                height: 28px;
+                                                horizontal-stretch: 1;
+                                                border-radius: Theme.r-sm;
+                                                background: root.mind-mode == choice.id
+                                                    ? (choice.id == "bypass" ? Theme.color-danger-dim : Theme.tint-accent)
+                                                    : (mode-ta.has-hover ? Theme.hover-fill : transparent);
+                                                border-width: 1px;
+                                                border-color: root.mind-mode == choice.id
+                                                    ? (choice.id == "bypass" ? Theme.color-danger : Theme.accent-dim)
+                                                    : Theme.border-subtle;
+
+                                                mode-ta := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => {
+                                                        if (choice.id == "bypass") {
+                                                            root.mind-bypass-requested();
+                                                        } else {
+                                                            root.mind-mode-chosen(choice.id);
+                                                        }
+                                                    }
+                                                }
+                                                Text {
+                                                    text: choice.id == "bypass" && root.mind-mode == "bypass"
+                                                        ? root.mind-mode-label : choice.label;
+                                                    color: choice.id == "bypass" ? Theme.color-danger
+                                                        : root.mind-mode == choice.id ? AppIdentity.accent
+                                                        : Theme.text-secondary;
+                                                    font-size: Theme.fs-micro;
+                                                    font-weight: root.mind-mode == choice.id ? 700 : 500;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            text: root.mind-mode-means;
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-caption;
+                                            wrap: word-wrap;
+                                        }
+                                        Text {
+                                            text: "No mode reaches past the tool permission above — "
+                                                + root.tool-permission
+                                                + ". That wall is enforced inside every app, and only you can move it. "
+                                                + "Bypass is time-boxed and is chosen from the mode chip in the status bar, "
+                                                + "where its countdown stays in front of you.";
+                                            color: Theme.text-dim;
+                                            font-size: Theme.fs-micro;
+                                            wrap: word-wrap;
                                         }
                                     }
                                 }

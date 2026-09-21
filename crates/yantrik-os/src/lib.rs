@@ -11,14 +11,12 @@ pub mod event_bus;
 pub mod entity_graph;
 pub mod observer;
 pub mod screenshot;
-pub mod dbus_notif;
 
 mod battery;
 mod files;
 pub mod keybinds;
 mod mock;
 mod network;
-mod notifications;
 mod processes;
 
 pub use events::{FileChangeKind, ProcessInfo, SystemEvent, SystemSnapshot};

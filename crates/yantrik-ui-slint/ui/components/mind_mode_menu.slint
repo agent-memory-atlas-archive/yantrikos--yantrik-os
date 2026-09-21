@@ -1,0 +1,414 @@
+// What the mind may do without being asked — the chip's menu.
+//
+// One fixed policy was wrong at both ends of the day: forty cards for a long trusted job, and no
+// way at all to say "just look, don't touch". This is where a person picks between the four
+// modes, sees the rules they have granted for this session, and reads what the machine did while
+// it was not asking. See `crates/yantrik-ui/src/mind_mode.rs` and
+// `design/mind-modes-2026-09-21.md`.
+//
+// ── Two rules this file follows deliberately ──
+//
+// 1. **Every row is a fixed height.** Not because the layout needs it, but because this menu has
+//    to be drivable from a script with a uinput pointer, and a row whose height depends on how
+//    many lines its description wrapped to has no coordinate anybody can write down. The design
+//    doc states the exact y of every row and derives it from the numbers below; changing one of
+//    them means changing that table.
+//
+// 2. **Nothing here takes keyboard focus.** Every control is a `TouchArea`, for the same reason
+//    the approval card's buttons are: there is no default action and Enter cannot reach
+//    anything. Entering bypass in particular must cost two deliberate pointer movements — the
+//    mode row, then a duration on a confirmation that says what it means.
+
+import { Theme } from "theme.slint";
+import { Icon, Icons } from "icon.slint";
+
+// One standing yes for an (app, action), until the shell restarts.
+export struct MindRule {
+    app: string,
+    action: string,
+    label: string,      // "files.move" — what the row shows
+}
+
+// One thing that ran without the person being asked.
+//
+// Four fields, not the seven the log records. The grade and the mode it ran under are in
+// `describe shell` and in ~/.local/share/yantrik/mind-audit.jsonl; here the question is "what did
+// it do and did it work", and a 316px row that tried to answer more than that would elide the
+// arguments — which are the part a person actually reads.
+export struct MindAuditEntry {
+    at: string,         // local HH:MM
+    what: string,       // "files.move"
+    args: string,       // the arguments, bounded the way the card bounds them
+    outcome: string,    // ok | failed | …
+}
+
+// One mode row. Fixed height, so its centre is arithmetic.
+component ModeRow inherits Rectangle {
+    in property <string> label;
+    in property <string> means;
+    in property <bool> selected;
+    in property <bool> danger;
+    callback chosen();
+
+    height: 44px;
+    border-radius: Theme.r-md;
+    background: root.selected ? (root.danger ? Theme.color-danger-dim : Theme.tint-accent)
+        : ta.has-hover ? Theme.hover-fill : transparent;
+    border-width: 1px;
+    border-color: root.selected ? (root.danger ? Theme.color-danger : Theme.accent-dim)
+        : transparent;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.sp-2;
+        padding-right: Theme.sp-2;
+        spacing: Theme.sp-2;
+
+        // The selected mode is marked rather than only tinted: a tint is a colour somebody has
+        // to have been told the meaning of, and this bar is read in a glance.
+        Rectangle {
+            width: 4px;
+            y: (parent.height - 22px) / 2;
+            height: 22px;
+            border-radius: 2px;
+            background: root.selected ? (root.danger ? Theme.color-danger : Theme.accent)
+                : transparent;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: root.label;
+                color: root.danger ? Theme.color-danger : Theme.text-primary;
+                font-size: Theme.fs-body;
+                font-weight: root.selected ? 600 : 500;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+            Text {
+                text: root.means;
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// A full-width button. Fixed height for the same reason the rows are.
+component MenuButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger;
+    callback pressed();
+
+    height: 36px;
+    border-radius: Theme.r-md;
+    background: ta.has-hover
+        ? (root.danger ? Theme.color-danger-dim : Theme.hover-fill-strong)
+        : (root.danger ? transparent : Theme.bg-elevated);
+    border-width: 1px;
+    border-color: root.danger ? Theme.color-danger : Theme.border-default;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.pressed(); }
+    }
+    Text {
+        text: root.label;
+        color: root.danger ? Theme.color-danger : Theme.text-primary;
+        font-size: Theme.fs-body-strong;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: no-wrap;
+        overflow: elide;
+    }
+}
+
+export component MindModeMenu inherits Rectangle {
+    in property <string> mode: "ask";
+    in property <string> mode-label: "Ask";
+    in property <string> ceiling: "sensitive";
+    in property <[MindRule]> rules: [];
+    in property <[MindAuditEntry]> audit: [];
+
+    // The confirmation is a second screen inside the same box rather than a dialog over it, so
+    // the geometry stays one panel and a script driving it has one set of coordinates.
+    in-out property <bool> confirming-bypass: false;
+    in-out property <bool> showing-audit: false;
+
+    callback mode-chosen(string);      // plan | ask | auto
+    callback bypass-chosen(string);    // 15m | 1h | restart
+    callback rule-revoked(string, string);   // app, action
+
+    width: 340px;
+    height: body.preferred-height;
+    border-radius: Theme.r-lg;
+    // The whole panel goes red-edged in bypass. It is the one state where a person walking past
+    // the machine should be able to tell from across the room.
+    background: Theme.glass-card;
+    border-width: 1px;
+    border-color: root.mode == "bypass" ? Theme.color-danger : Theme.glass-border-strong;
+    drop-shadow-blur: 18px;
+    drop-shadow-color: Theme.overlay-shadow;
+
+    body := VerticalLayout {
+        padding: Theme.sp-3;
+        spacing: Theme.sp-2;
+
+        // ── The confirmation, when one is up ──
+        //
+        // Bypass does not arrive from a single click. This says what it means in the plainest
+        // words available, then offers the three durations — and the durations ARE the answer,
+        // so there is no separate "confirm" to press by reflex.
+        if root.confirming-bypass : VerticalLayout {
+            spacing: Theme.sp-2;
+
+            Text {
+                height: 18px;
+                text: "Stop asking me anything";
+                color: Theme.color-danger;
+                font-size: Theme.fs-body-strong;
+                font-weight: 600;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+            // 64px is four lines at fs-caption in a 316px column, which is what this wraps to
+            // with the longest ceiling word in it. Fixed rather than preferred, because every
+            // row below it has a written-down y in design/mind-modes-2026-09-21.md.
+            Text {
+                height: 64px;
+                text: "Everything this machine allows, the mind will do, without a card and "
+                    + "without waiting for you. Your machine ceiling (" + root.ceiling
+                    + ") still holds. Pick how long.";
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+
+            MenuButton {
+                label: "15 minutes";
+                danger: true;
+                pressed => { root.confirming-bypass = false; root.bypass-chosen("15m"); }
+            }
+            MenuButton {
+                label: "1 hour";
+                danger: true;
+                pressed => { root.confirming-bypass = false; root.bypass-chosen("1h"); }
+            }
+            MenuButton {
+                label: "Until the shell restarts";
+                danger: true;
+                pressed => { root.confirming-bypass = false; root.bypass-chosen("restart"); }
+            }
+            MenuButton {
+                label: "Cancel";
+                pressed => { root.confirming-bypass = false; }
+            }
+        }
+
+        // ── The menu proper ──
+        if !root.confirming-bypass : VerticalLayout {
+            spacing: Theme.sp-2;
+
+            Text {
+                height: 16px;
+                text: "What the mind may do without asking";
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                font-weight: 600;
+                vertical-alignment: center;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+
+            VerticalLayout {
+                spacing: Theme.sp-1;
+
+                ModeRow {
+                    label: "Plan";
+                    means: "Look, don't touch. It reads; changes nothing.";
+                    selected: root.mode == "plan";
+                    chosen => { root.mode-chosen("plan"); }
+                }
+                ModeRow {
+                    label: "Ask";
+                    means: "It asks you before anything that could matter.";
+                    selected: root.mode == "ask";
+                    chosen => { root.mode-chosen("ask"); }
+                }
+                ModeRow {
+                    label: "Auto";
+                    means: "Gets on with it. Destructive ones still ask.";
+                    selected: root.mode == "auto";
+                    chosen => { root.mode-chosen("auto"); }
+                }
+                ModeRow {
+                    label: root.mode == "bypass" ? root.mode-label : "Bypass";
+                    means: "It does not ask. Time-boxed, and it says so.";
+                    selected: root.mode == "bypass";
+                    danger: true;
+                    // Straight into the confirmation, never into the mode.
+                    chosen => { root.confirming-bypass = true; }
+                }
+            }
+
+            // The machine's own wall, beside the modes rather than on another screen — the two
+            // are only understandable together. A person who has just chosen Bypass should be
+            // able to read, on the same panel, what bypass still cannot do.
+            Rectangle { height: 1px; background: Theme.border-subtle; }
+            Text {
+                height: 30px;
+                text: "This machine never allows a caller past " + root.ceiling
+                    + ", whatever the mode says. Settings → AI & Intelligence.";
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                wrap: word-wrap;
+            }
+
+            // ── The standing yeses, each with a way out of it ──
+            if root.rules.length > 0 : VerticalLayout {
+                spacing: Theme.sp-1;
+
+                Rectangle { height: 1px; background: Theme.border-subtle; }
+                Text {
+                    height: 16px;
+                    text: "Allowed for this session";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                }
+                for rule in root.rules : Rectangle {
+                    height: 24px;
+                    HorizontalLayout {
+                        spacing: Theme.sp-2;
+                        Text {
+                            text: rule.label;
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-caption;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: no-wrap;
+                            overflow: elide;
+                        }
+                        Rectangle {
+                            width: 24px;
+                            border-radius: Theme.r-sm;
+                            background: revoke-ta.has-hover ? Theme.hover-fill : transparent;
+                            revoke-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.rule-revoked(rule.app, rule.action); }
+                            }
+                            Icon {
+                                commands: Icons.close;
+                                size: 12px;
+                                tint: revoke-ta.has-hover ? Theme.color-danger : Theme.text-dim;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── What it did while it was not asking ──
+            Rectangle { height: 1px; background: Theme.border-subtle; }
+            Rectangle {
+                height: 28px;
+                border-radius: Theme.r-sm;
+                background: audit-ta.has-hover ? Theme.hover-fill : transparent;
+                audit-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.showing-audit = !root.showing-audit; }
+                }
+                HorizontalLayout {
+                    padding-left: Theme.sp-2;
+                    padding-right: Theme.sp-2;
+                    Text {
+                        text: "See what it did without asking";
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-caption;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        wrap: no-wrap;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.audit.length;
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if root.showing-audit : VerticalLayout {
+                spacing: 2px;
+
+                if root.audit.length == 0 : Text {
+                    height: 20px;
+                    text: "Nothing yet. In Ask mode there is nothing to list — you were asked.";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+                for entry in root.audit : Rectangle {
+                    height: 20px;
+                    HorizontalLayout {
+                        spacing: Theme.sp-2;
+                        Text {
+                            text: entry.at;
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-micro;
+                            vertical-alignment: center;
+                            wrap: no-wrap;
+                        }
+                        Text {
+                            text: entry.what;
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-micro;
+                            vertical-alignment: center;
+                            wrap: no-wrap;
+                        }
+                        Text {
+                            text: entry.args;
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-micro;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: no-wrap;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: entry.outcome;
+                            color: entry.outcome == "ok" ? Theme.color-success : Theme.color-warning;
+                            font-size: Theme.fs-micro;
+                            vertical-alignment: center;
+                            wrap: no-wrap;
+                        }
+                    }
+                }
+                Text {
+                    height: 26px;
+                    text: "The full list is in ~/.local/share/yantrik/mind-audit.jsonl";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+}

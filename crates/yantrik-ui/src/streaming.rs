@@ -139,6 +139,9 @@ fn open_bubbles(ui_weak: &slint::Weak<App>, asked: Option<&str>) -> Option<usize
     ui.set_is_generating(true);
     ui.set_is_thinking(true);
     ui.set_companion_status("thinking".into());
+    // Readable from the companion worker thread, which cannot touch a Slint property and must
+    // not put an unprompted message into a transcript that is mid-answer.
+    crate::wire::notifications::note_answer_started();
     if asked.is_some() {
         // Shown, not merely recorded.
         ui.set_lens_chat_mode(true);
@@ -192,6 +195,7 @@ fn pump(
         }
         if done {
             finished.set(true);
+            crate::wire::notifications::note_answer_ended();
             if let Some(ui) = ui_weak.upgrade() {
                 let messages = ui.get_messages();
                 if let Some(model) = messages.as_any().downcast_ref::<VecModel<MessageData>>() {

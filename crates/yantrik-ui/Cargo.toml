@@ -33,6 +33,8 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+# Notification timestamps arrive from the service as RFC 3339; the centre draws "4 minutes ago".
+chrono = { workspace = true }
 cpal = { workspace = true }
 rubato = { workspace = true }
 anyhow = "1"

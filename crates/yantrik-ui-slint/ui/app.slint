@@ -21,7 +21,7 @@ import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AISt
 import { SkillData } from "skill_store.slint";
 import { MemoryBrowser, MemoryItem } from "memory_browser.slint";
 import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem } from "file_browser.slint";
-import { NotificationCenter, NotificationData } from "notification_center.slint";
+import { NotificationCenter, NotificationData, NotifActionData } from "notification_center.slint";
 import { SystemDashboard, ProcessData } from "system_dashboard.slint";
 import { VoiceOverlay } from "voice_overlay.slint";
 import { ImageViewer } from "image_viewer.slint";
@@ -31,11 +31,12 @@ import { AboutScreen, ComponentVersionData } from "about.slint";
 import { PackageManager, PackageData, PendingAction } from "package_manager.slint";
 import { DeviceDashboardScreen, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData } from "device_dashboard.slint";
 import { PermissionDashboardScreen, UserData, GroupData, PermFileData } from "permission_dashboard.slint";
-import { ToastBanner, ToastData } from "components/toast_banner.slint";
+import { ToastBanner, ToastData, ToastActionData } from "components/toast_banner.slint";
 import { CommandItem } from "components/command_palette.slint";
 import { ContentBlock, MessageData } from "components/message_bubble.slint";
 import { UrgeCardData } from "components/glance_card.slint";
 import { LensResult, ApprovalRequest, ApprovalCard } from "components/intent_lens.slint";
+import { MindModeMenu, MindRule, MindAuditEntry } from "components/mind_mode_menu.slint";
 import { WhisperCardItem } from "components/whisper_card.slint";
 import { BriefSection } from "components/morning_brief.slint";
 import { ClipboardEntryData } from "components/clipboard_panel.slint";
@@ -51,7 +52,7 @@ import { YMenuAction } from "components/y_context_menu.slint";
 import { Icons } from "components/icon.slint";
 import { Tr } from "translations.slint";
 
-export { HarnessData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction }
+export { HarnessData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, MindRule, MindAuditEntry, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, NotifActionData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, ToastActionData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction }
 
 export component App inherits Window {
     default-font-family: Theme.font-ui;
@@ -129,7 +130,34 @@ export component App inherits Window {
     /// existence anywhere in this OS — there is no action on the shell's control surface that
     /// grants. See crates/yantrik-ui/src/approvals.rs.
     callback approval-allow(string);
+    /// The same grant, plus a standing rule for that (app, action) until the shell restarts.
+    /// Never offered for `dangerous` or for an action the app says cannot be undone.
+    callback approval-allow-session(string);
     callback approval-deny(string);
+
+    // ── What the mind may do without being asked ──
+    //
+    // Filled by `control_approvals::publish_mode`. One fixed policy — ask about every sensitive
+    // action — was wrong at both ends: forty cards for a long trusted job, and no way to say
+    // "just look, don't touch". See crates/yantrik-ui/src/mind_mode.rs.
+    in property <string> mind-mode: "ask";
+    /// The chip's text: the mode, and the countdown while a bypass is running.
+    in property <string> mind-mode-label: "Ask";
+    in property <string> mind-mode-means: "";
+    /// The machine's own wall, shown beside the mode because neither is understandable alone.
+    in property <string> mind-ceiling: "sensitive";
+    in property <[MindRule]> mind-session-rules: [];
+    in property <[MindAuditEntry]> mind-audit: [];
+    in-out property <bool> mind-menu-open: false;
+    /// The menu's two sub-panels, held here rather than inside it because the chip that opens
+    /// the menu has to be able to reset them, and the menu lives behind an `if`.
+    in-out property <bool> mind-menu-confirming: false;
+    in-out property <bool> mind-menu-audit-open: false;
+    /// These three are the only way this desktop becomes MORE permissive. They are callbacks,
+    /// reached by a pointer; nothing on the control surface can raise the mode or make a rule.
+    callback mind-mode-chosen(string);
+    callback mind-bypass-chosen(string);
+    callback mind-rule-revoked(string, string);
 
     // Desktop state
     in property <[UrgeCardData]> urges: [];
@@ -289,10 +317,17 @@ export component App inherits Window {
     in property <string> notification-text: "";
     in-out property <bool> show-notification: false;
 
-    // Toast notification banners (stacking, glassmorphic)
+    // Toast notification banners (bottom-right, stacking upward, newest on top).
+    //
+    // The ids are the notifications service's, as strings. They were ints made from the wall
+    // clock, so two toasts raised in the same millisecond shared an id, and nothing that was
+    // dismissed could afterwards be found in any store.
     in property <[ToastData]> toast-queue: [];
-    callback toast-clicked(int);
-    callback toast-dismissed(int);
+    /// How many more are waiting behind the three shown.
+    in property <int> toast-overflow: 0;
+    callback toast-clicked(string);
+    callback toast-dismissed(string);
+    callback toast-action(string, string);
 
     // Ambient Intelligence state
     // Ambient animation budget, in milliseconds per tick, set from Rust at startup.
@@ -538,9 +573,15 @@ export component App inherits Window {
     // Notification Center state (screen 9)
     in property <[NotificationData]> notification-list: [];
     in property <int> notification-unread-count: 0;
+    /// Is the one notification store answering? An empty list and a dead service look the same
+    /// and mean opposite things, so the centre is told which it is looking at.
+    in property <bool> notification-service-up: true;
+    in property <string> notification-service-notice: "";
     callback notification-clear-all();
     callback notification-mark-all-read();
     callback notification-tapped(string);
+    callback notification-dismissed(string);
+    callback notification-action(string, string);
     callback notification-clear-group(string);
 
     // System Dashboard state (screen 10)
@@ -1323,6 +1364,7 @@ export component App inherits Window {
             approvals: root.approvals;
             approvals-waiting: root.approvals-waiting;
             approval-allow(id) => { root.approval-allow(id); }
+            approval-allow-session(id) => { root.approval-allow-session(id); }
             approval-deny(id) => { root.approval-deny(id); }
             // Urges
             urges: root.urges;
@@ -1608,6 +1650,16 @@ export component App inherits Window {
                 toggle-dnd-mode => { root.toggle-dnd-mode(); }
                 cycle-accent-color => { root.cycle-accent-color(); }
                 cycle-tool-permission => { root.cycle-tool-permission(); }
+                // The mode, beside the ceiling it can never reach past.
+                mind-mode: root.mind-mode;
+                mind-mode-label: root.mind-mode-label;
+                mind-mode-means: root.mind-mode-means;
+                mind-mode-chosen(m) => { root.mind-mode-chosen(m); }
+                // One confirmation, in one place: the chip's menu, where the countdown will be.
+                mind-bypass-requested => {
+                    root.mind-menu-open = true;
+                    root.mind-menu-confirming = true;
+                }
                 cycle-auto-lock => { root.cycle-auto-lock(); }
                 wallpaper-path <=> root.wallpaper-path;
                 wallpaper-changed(wp) => { root.wallpaper-changed(wp); }
@@ -1844,6 +1896,8 @@ export component App inherits Window {
                 width: 100%; height: 100%;
                 notifications: root.notification-list;
                 unread-count: root.notification-unread-count;
+                service-up: root.notification-service-up;
+                service-notice: root.notification-service-notice;
                 back-pressed => {
                     root.current-screen = 1;
                     root.navigate(1);
@@ -1851,6 +1905,8 @@ export component App inherits Window {
                 clear-all => { root.notification-clear-all(); }
                 mark-all-read => { root.notification-mark-all-read(); }
                 notification-tapped(id) => { root.notification-tapped(id); }
+                notification-dismissed(id) => { root.notification-dismissed(id); }
+                notification-action(id, action) => { root.notification-action(id, action); }
                 clear-group(name) => { root.notification-clear-group(name); }
             }
         }
@@ -2493,6 +2549,8 @@ export component App inherits Window {
             y: 0;
             width: 100%;
             clock-text: root.clock-text;
+            notification-unread: root.notification-unread-count;
+            notifications-clicked => { root.current-screen = 9; root.navigate(9); }
             companion-status: root.companion-status;
             companion-online: root.companion-online;
             battery-available: root.battery-available;
@@ -2513,6 +2571,15 @@ export component App inherits Window {
             active-harness-id: root.active-harness-id;
             active-harness-name: root.active-harness-name;
             harness-driving: root.harness-driving;
+            mind-mode: root.mind-mode;
+            mind-mode-label: root.mind-mode-label;
+            // Closing it also drops the two sub-panels, so it never reopens mid-confirmation on
+            // a question the person walked away from.
+            mind-mode-clicked => {
+                root.mind-menu-open = !root.mind-menu-open;
+                root.mind-menu-confirming = false;
+                root.mind-menu-audit-open = false;
+            }
             anchor-clicked => { root.lens-open = !root.lens-open; root.open-lens(); }
             queue-clicked => { root.lens-open = true; root.open-lens(); }
             whisper-hint-clicked => { root.whisper-hint-clicked(); }
@@ -2732,8 +2799,13 @@ export component App inherits Window {
         if toast-queue.length > 0 : ToastBanner {
             width: 100%; height: 100%;
             toasts: root.toast-queue;
+            overflow: root.toast-overflow;
+            // Above the taskbar on the desktop screen; flush to the bottom edge everywhere
+            // else, because no other screen draws one.
+            bottom-inset: root.current-screen == 1 ? Theme.taskbar-height : 0px;
             toast-clicked(id) => { root.toast-clicked(id); }
             toast-dismissed(id) => { root.toast-dismissed(id); }
+            toast-action(id, action) => { root.toast-action(id, action); }
         }
 
         // Approval cards, over whatever screen is up.
@@ -2784,6 +2856,7 @@ export component App inherits Window {
                     for item in root.pending-approvals : ApprovalCard {
                         data: item;
                         allow => { root.approval-allow(item.id); }
+                        allow-session => { root.approval-allow-session(item.id); }
                         deny => { root.approval-deny(item.id); }
                     }
 
@@ -2796,6 +2869,52 @@ export component App inherits Window {
                         overflow: elide;
                     }
                 }
+            }
+        }
+
+        // The mode menu, under the chip that opens it.
+        //
+        // Same exclusions as the approval card: not on boot, onboarding, lock or login. A mode
+        // that could be loosened from a locked screen is a way to act on a machine without
+        // unlocking it, which is the same hole the card's exclusion closes.
+        //
+        // Anchored 12px in from the right edge rather than centred under the chip, because the
+        // chip's own x depends on what else is in the bar (battery, CPU, the mind chip) and a
+        // menu that moved about would be untestable and hard to aim at. On 1280×800 that puts
+        // it at x = 928…1268, y = 36 — the numbers the design doc's verification steps use.
+        if root.mind-menu-open
+            && root.current-screen != 0 && root.current-screen != 2
+            && root.current-screen != 3 && root.current-screen != 32
+            : Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+
+            // Click anywhere else to put it away. Behind the panel, so it never swallows a
+            // press meant for a mode row.
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    root.mind-menu-open = false;
+                    root.mind-menu-confirming = false;
+                    root.mind-menu-audit-open = false;
+                }
+            }
+
+            MindModeMenu {
+                x: parent.width - 352px;
+                y: Theme.status-bar-height + Theme.sp-1;
+                mode: root.mind-mode;
+                mode-label: root.mind-mode-label;
+                ceiling: root.mind-ceiling;
+                rules: root.mind-session-rules;
+                audit: root.mind-audit;
+                confirming-bypass <=> root.mind-menu-confirming;
+                showing-audit <=> root.mind-menu-audit-open;
+                mode-chosen(m) => { root.mind-mode-chosen(m); root.mind-menu-open = false; }
+                bypass-chosen(d) => { root.mind-bypass-chosen(d); root.mind-menu-open = false; }
+                rule-revoked(app, action) => { root.mind-rule-revoked(app, action); }
             }
         }
 

@@ -115,6 +115,8 @@ export component DesktopScreen inherits Rectangle {
     in property <[ApprovalRequest]> approvals: [];
     in property <int> approvals-waiting: 0;
     callback approval-allow(string);
+    /// The same grant plus a standing rule for that (app, action) — see mind_mode.rs.
+    callback approval-allow-session(string);
     callback approval-deny(string);
 
     // Urges (for quiet queue)
@@ -1052,6 +1054,7 @@ export component DesktopScreen inherits Rectangle {
         approvals-waiting: root.approvals-waiting;
 
         approval-allow(id) => { root.approval-allow(id); }
+        approval-allow-session(id) => { root.approval-allow-session(id); }
         approval-deny(id) => { root.approval-deny(id); }
         query-changed(text) => { root.lens-query(text); }
         submit-query(text) => { root.lens-submit(text); }

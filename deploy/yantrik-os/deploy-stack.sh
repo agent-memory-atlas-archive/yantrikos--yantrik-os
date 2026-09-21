@@ -93,10 +93,9 @@ apk add -q pciutils \
     speech-dispatcher \
     ca-certificates \
     gcc musl-dev \
-    grim slurp wl-clipboard jq bc diffutils \
-    mako
+    grim slurp wl-clipboard jq bc diffutils
 
-echo "  Installed: labwc, foot, mako, dbus, eudev, mesa, fonts, seatd, gcompat, wayland"
+echo "  Installed: labwc, foot, dbus, eudev, mesa, fonts, seatd, gcompat, wayland"
 
 # Build wlrctl (window management CLI for Wayland)
 if ! command -v wlrctl >/dev/null 2>&1; then
@@ -409,8 +408,8 @@ cat > "$LABWC_DIR/autostart" <<'AUTOSTART'
 # Start Foot terminal server (for footclient + scrollback pipe)
 foot --server &
 
-# Start mako notification daemon
-mako &
+# No notification daemon: the notifications service owns org.freedesktop.Notifications
+# and is the machine's one notification store.
 
 # Start Yantrik OS desktop shell
 /opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml >> /opt/yantrik/logs/yantrik-os.log 2>&1 &
@@ -578,35 +577,8 @@ chown -R "$YANTRIK_USER:$YANTRIK_USER" "$LABWC_DIR"
 
 echo "  labwc config written to $LABWC_DIR/"
 
-# Mako notification daemon configuration (Firelight theme)
-MAKO_DIR="/home/$YANTRIK_USER/.config/mako"
-mkdir -p "$MAKO_DIR"
-
-cat > "$MAKO_DIR/config" <<'MAKOCONF'
-# Yantrik OS — Mako notification config (Firelight theme)
-font=DejaVu Sans 11
-background-color=#0c0b10e6
-text-color=#c8c8d0
-border-color=#5ac8d460
-border-size=1
-border-radius=8
-padding=12
-margin=12
-width=360
-height=120
-default-timeout=8000
-max-visible=3
-layer=overlay
-anchor=top-right
-
-[urgency=critical]
-background-color=#1a0a0ae6
-border-color=#e86b6b80
-default-timeout=0
-MAKOCONF
-
-chown -R "$YANTRIK_USER:$YANTRIK_USER" "$MAKO_DIR"
-echo "  mako config written to $MAKO_DIR/"
+# No mako config: this stack starts no notification daemon of its own. The notifications
+# service owns org.freedesktop.Notifications and is the machine's one notification store.
 
 # Distrobox default container (if installed)
 if command -v distrobox >/dev/null 2>&1; then

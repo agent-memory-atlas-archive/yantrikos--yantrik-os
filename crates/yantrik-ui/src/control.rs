@@ -374,6 +374,15 @@ pub fn publish(
                 // exceed this, and a question the machine will refuse to answer should never
                 // reach the person.
                 .with("tool_permission", crate::control_approvals::machine_ceiling())
+                // What the mind may do without being asked, and the rules a person has granted
+                // for this session. The bridge takes this off the SAME read as the ceiling above
+                // and makes the run/ask/refuse decision from it, so one `describe shell` answers
+                // every question an `os_act` has to ask before it runs.
+                .with("mind_mode", crate::control_approvals::mind_mode_for_describe())
+                // And what it has already done unasked. A mode that stops the asking has to
+                // replace the cards with something, or `auto` is only a quieter way of not
+                // knowing. See `mind_mode`'s audit section.
+                .with("mind_audit_recent", crate::control_approvals::mind_audit_for_describe())
                 // Which mind is answering, and what else could. An agent that can switch this
                 // has to be able to see it first, and without the list it would be guessing at
                 // ids for `use_harness`.
@@ -440,6 +449,10 @@ pub fn publish(
                     },
                 )
                 .with("do_not_disturb", ui.get_dnd_mode())
+                // What the machine is trying to tell the person, so that "is anything waiting
+                // for me" is a read of the shell rather than a second call to the notifications
+                // service — and so a mind can see what it has already said.
+                .with("notifications", crate::wire::notifications::describe_summary())
                 // The ask bar, so "is the Lens up, and what is in it" is a read rather than a
                 // screenshot. `open_lens` answers from these same two properties.
                 .with(

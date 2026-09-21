@@ -5,7 +5,7 @@
 #
 # Creates a fully pre-installed disk image with:
 #   - Alpine Linux 3.21 (kernel, OpenRC, networking)
-#   - labwc Wayland compositor + foot terminal + mako
+#   - labwc Wayland compositor + foot terminal (notifications are the shell's own service)
 #   - Yantrik UI binary + config
 #   - MiniLM embedder model (~87MB)
 #   - glibc compatibility shim
@@ -203,7 +203,7 @@ apk add --no-cache \
 # ── Desktop environment ──
 apk add --no-cache \
     labwc foot wlr-randr \
-    grim slurp wl-clipboard mako \
+    grim slurp wl-clipboard \
     dbus dbus-openrc \
     mesa-dri-gallium mesa-egl \
     seatd seatd-openrc \
@@ -468,10 +468,13 @@ SLINT_BACKEND=winit-software
 ENV
 
 # Autostart
+# No notification daemon is installed or started: the notifications service owns
+# org.freedesktop.Notifications and is the machine's one notification store. Two daemons
+# cannot own one bus name, and the one that loses is invisible to everything else. See
+# design/notifications-2026-09-21.md.
 sudo tee "$LABWC_DIR/autostart" > /dev/null <<'AUTOSTART'
 #!/bin/sh
 foot --server &
-mako &
 /opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml >> /opt/yantrik/logs/yantrik-os.log 2>&1 &
 AUTOSTART
 sudo chmod +x "$LABWC_DIR/autostart"
@@ -540,23 +543,8 @@ bright6=80d8e8
 bright7=e0e0e8
 FOOTINI
 
-# ── mako notification config ──
-MAKO_DIR="$ROOTFS/home/yantrik/.config/mako"
-sudo mkdir -p "$MAKO_DIR"
-sudo tee "$MAKO_DIR/config" > /dev/null <<'MAKO'
-font=DejaVu Sans 11
-background-color=#0c0b10e6
-text-color=#c8c8d0
-border-color=#5ac8d460
-border-size=1
-border-radius=8
-padding=12
-margin=12
-width=360
-default-timeout=8000
-max-visible=3
-anchor=top-right
-MAKO
+# No mako config: this image starts no notification daemon of its own. The notifications
+# service owns org.freedesktop.Notifications.
 
 # Fix ownership
 sudo chown -R 1000:1000 "$ROOTFS/home/yantrik"

@@ -167,16 +167,37 @@ yos describe notes                          # any running app answers for itself
 yantrik ask "what is using the most disk?"  # ask the companion
 ```
 
-Actions are graded safe, standard, sensitive or dangerous, and the sensitive ones need
-approval. `yos-mcp` exposes the same surface over MCP.
+Actions are graded safe, standard, sensitive or dangerous. `yos-mcp` exposes the same surface
+over MCP.
 
-When a mind asks for something graded above the bridge's ceiling, the desktop asks the person:
-a card says who is asking, what it will do and with which arguments, and offers **Allow once**
-and **Deny**. Only that click grants anything — no action on any control surface can — and a
-grant is good for one call with exactly those arguments. Nothing graded above the machine's own
-ceiling (`tool_permission`) is ever asked about.
+**How often you are asked is a mode you set**, from the chip in the status bar beside the mind
+chip, or in Settings → AI & Intelligence:
 
-Because the call waits for a person, **an MCP client must allow `os_act` up to 250 seconds**.
+| mode | the mind may… |
+|---|---|
+| `plan` | read only — every change is refused and it has to tell you what it *would* do |
+| `ask` | routine things run; sensitive ones put a card in front of you (the default) |
+| `auto` | sensitive things run; you are still asked about destructive ones |
+| `bypass` | nothing is asked. Time-boxed — 15 minutes, an hour, or until the shell restarts |
+
+When a mode says to ask, a card says who is asking, what it will do and with which arguments, and
+offers **Allow once**, **Deny**, and — for anything recoverable — **Allow for this session**,
+which stops the asking for that one action until the shell restarts and is listed in the mode
+menu with a ✕ beside it. Only those clicks grant anything: no action on any control surface can
+grant, and none can make the desktop more permissive either. The one published action about modes,
+`set_mind_mode`, can only tighten, so a mind can put itself into plan mode and can never take
+itself out.
+
+Nothing graded above the machine's own ceiling (`tool_permission`, on the AI page in Settings) is
+ever run or even asked about, in any mode — bypass included. Bypass is never written to disk, so
+a machine never boots into it. Everything that runs without you being asked is written down, in
+the mode menu ("See what it did without asking") and in `~/.local/share/yantrik/mind-audit.jsonl`.
+
+`YOS_MCP_MAX_PERMISSION` still exists as a cap a harness puts on itself. It can only ever be
+*stricter* than the desktop's mode — it turns an unasked run into a card — and never looser.
+Leave it unset and the desktop's mode is the whole policy.
+
+Because a call may wait for a person, **an MCP client must allow `os_act` up to 270 seconds**.
 A client that gives up sooner cuts the person off mid-decision. For Hermes:
 
 ```yaml

@@ -85,38 +85,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             }
         }
 
-        // 1c. Capture notifications into store
-        for event in &events {
-            if let yantrik_os::SystemEvent::NotificationReceived {
-                app,
-                summary,
-                body,
-                urgency,
-            } = event
-            {
-                notification_store
-                    .borrow_mut()
-                    .push(app.clone(), summary.clone(), body.clone(), *urgency);
-                // Update badge unless in focus mode (notifications still stored, badge deferred)
-                if let Some(ui) = ui_weak.upgrade() {
-                    if !ui.get_focus_mode() {
-                        ui.set_notification_unread_count(
-                            notification_store.borrow().unread_count() as i32,
-                        );
-                    }
-                }
-                // Push toast banner (only on desktop screen, not in focus mode, respects DND)
-                if let Some(ui_ref) = ui_weak.upgrade() {
-                    if !ui_ref.get_focus_mode() && ui_ref.get_current_screen() == 1 {
-                        // DND check: skip toast if DND is on, UNLESS critical (urgency == 2)
-                        let dnd = ui_ref.get_dnd_mode();
-                        if !dnd || *urgency == 2 {
-                            super::toast::push_toast_no_store(&ui_weak, app, summary, body, *urgency);
-                        }
-                    }
-                }
-            }
-        }
+        // 1c. Notifications are not captured here any more.
+        //
+        // This block used to write every `NotificationReceived` into the shell's own private
+        // store and raise its own toast — a second store and a second toast path beside the
+        // notifications service, which is why a `notify-send` was in the notification centre
+        // and a screenshot was not, or the other way round depending on which daemon had won
+        // the bus name that boot. `wire::notifications` polls the one store, raises the toast,
+        // and puts the event back on this channel, so everything below still sees it.
 
         // 2. Process each event through features
         let mut all_urges = Vec::new();
@@ -478,7 +454,10 @@ fn handle_keybind(ui: &App, action: &str) {
             // Invoke the callback so settings persistence fires too
             ui.invoke_toggle_dnd_mode();
             let msg = if will_enable { "Do Not Disturb: ON" } else { "Do Not Disturb: OFF" };
-            super::toast::push_toast(&ui.as_weak(), "System", msg, "", 0);
+            // The one toast that is deliberately not stored: it acknowledges a key the person
+            // just pressed, and it has to appear while notifications are being silenced. See
+            // `toast::local`.
+            super::toast::local(&ui.as_weak(), "System", msg, "", 0);
             tracing::info!(dnd = will_enable, "Do Not Disturb toggled via hotkey");
         }
         "power-menu" => {

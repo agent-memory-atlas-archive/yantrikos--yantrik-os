@@ -49,6 +49,13 @@ fn dispatch(
     text: &str,
     streams: &streaming::Streams,
 ) {
+    // A person just said something — to whichever mind. The Synthesis Gate, which decides
+    // whether the built-in companion may speak unprompted, used to read a timestamp bumped only
+    // inside the companion's own message arm, so a conversation with a harness mind looked like
+    // an idle user and unprompted messages landed in the middle of somebody else's answer.
+    // This is the one join every typed message passes through, so this is where the clock goes.
+    super::notifications::note_user_message();
+
     let Some(host) = super::harness::host() else {
         // No host yet (very early boot). The builtin is the only thing that could answer.
         streaming::start_ai_stream(ui_weak.clone(), bridge, text, streams);

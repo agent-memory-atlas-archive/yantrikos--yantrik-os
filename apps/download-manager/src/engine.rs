@@ -59,6 +59,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+// Telling the person a transfer ended is fire-and-forget on a thread of its own, so it is safe
+// from a worker and costs this one nothing — see `yantrik_app_runtime::notify`.
+use yantrik_app_runtime::notify;
+use yantrik_app_runtime::serde_json;
 
 /// Read size per loop turn. Also the granularity at which a pause is noticed, which is why it is
 /// not larger: 64 KiB on a slow link is a fraction of a second of latency on the stop button.
@@ -764,13 +768,21 @@ impl Engine {
         let reason = reason.into();
         self.edit(id, |d| {
             d.status = Status::Failed;
-            d.error = reason;
+            d.error = reason.clone();
             d.speed_bps = 0.0;
             d.eta_secs = None;
             d.ended_at = now_stamp();
             d.interrupted = false;
         });
         self.save();
+
+        // A transfer that failed while the window was behind something, or closed, was a red
+        // row nobody ever looked at. Every failure path in this file funnels through here, with
+        // one deliberate exception: cancelling sets `Failed` inline a few hundred lines below,
+        // because a person who pressed Cancel does not need to be told it stopped.
+        if let Some(name) = self.get(id).map(|d| d.filename) {
+            notify::send(notify::Notification::new("Downloads", format!("{name} failed")).body(reason));
+        }
     }
 
     /// One transfer, start to finish, on its own thread.
@@ -946,6 +958,31 @@ impl Engine {
         });
         self.save();
         self.hash_and_compare(id);
+
+        // Told after hashing, not before: on a file with an expected checksum the interesting
+        // news is whether it matched, and a "finished" that arrives a second before "checksum
+        // failed" invites somebody to open a file we are about to say is wrong.
+        if let Some(d) = self.get(id) {
+            let (title, body) = match d.checksum_status.as_str() {
+                "fail" => (
+                    format!("{} finished, but the checksum does not match", d.filename),
+                    format!("Expected {}, got {}", d.checksum_expected, d.file_hash),
+                ),
+                _ => (
+                    format!("{} finished", d.filename),
+                    format!("Saved to {}", d.save_dir.display()),
+                ),
+            };
+            // "Open folder" is a real action on this app's own control surface, taking this id
+            // — the same call the button in the window makes. The shell presses it on our
+            // behalf, starting this app again if the transfer outlived the window, which is the
+            // usual case for a long download.
+            notify::send(
+                notify::Notification::new("Downloads", title)
+                    .body(body)
+                    .action_with("open_folder", "Open folder", serde_json::json!({ "id": id })),
+            );
+        }
     }
 
     /// Hash the file on disk, record it, and compare it with the expected value if there is one.

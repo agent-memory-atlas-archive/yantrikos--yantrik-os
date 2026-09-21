@@ -20,6 +20,8 @@ protocol and prints what came back.
     yos act shell open_app name=notes --full     the reply with the app state
     yos perception [N]                  the last N kernel observations
     yos journal                         is the eye being drained, and how far behind
+    yos notify "Build finished"         tell the person something
+    yos notify "Disk full" "/ is at 98%" --urgency critical
 
     yos web                             what is on the page, as a list of things you can do
     yos web text                        what the page SAYS — the prose a reader sees
@@ -55,6 +57,7 @@ import json
 import os
 import socket
 import sys
+import time
 
 # perception-service needs CAP_SYS_ADMIN at startup so it runs as root and its socket
 # lands in /run/yantrik; everything else lives in the user's runtime dir. A caller
@@ -262,10 +265,13 @@ def cmd_ls(argv):
     running = {name for name, _ in apps}
     closed = [a for a in openable if a.get("opens") == "app" and a.get("describe_as") not in running]
     if closed:
+        # One line each, with what the app is for. This was a comma-separated row of names, and
+        # a row of names is how three different models, asked for a "document", each wrote a
+        # note: Notes was open with a summary that fitted and `documents` was a word in a list.
         print("Can be opened with `act shell open_app name=<name>`:")
-        print("    " + ", ".join(
-            a["name"] if a["name"] == a.get("describe_as") else "%s (then describe %s)" % (a["name"], a["describe_as"])
-            for a in closed))
+        for a in closed:
+            then = "" if a["name"] == a.get("describe_as") else "  (then describe %s)" % a["describe_as"]
+            print("    %-14s %s%s" % (a["name"], a.get("for", ""), then))
     screens = [a["name"] for a in openable if a.get("opens", "").startswith("a screen")]
     if screens:
         print("Screens of the desktop itself (also open_app): %s" % ", ".join(screens))
@@ -474,6 +480,63 @@ def cmd_journal(_):
                 "records", "gaps", "observations_lost", "bytes_on_disk",
                 "seconds_since_progress"):
         print("  %-22s %s" % (key, status.get(key)))
+
+
+# ── Notifications ──
+#
+# One line, because the common case is one line: something finished and the person should
+# be told. It lands in the same store as every notification on the machine — `notify-send`,
+# Chromium, our own apps — so the toast, the notification centre and `yos describe shell`
+# all see it.
+
+
+def ensure_service(name):
+    """Make sure a service is up, asking the desktop to start it if it is not.
+
+    The notifications service is autostarted, but "autostarted" is not "running": it can
+    have died, or the shell can still be coming up. Sending into a socket nobody is behind
+    would lose the message silently, which is the failure this whole path exists to end.
+    """
+    if any(_answers(path) for path in socket_candidates(name)):
+        return
+    call("shell", "app.act", {"action": "start_service", "args": {"name": name}})
+    # The manager returns once it has spawned the process; the socket appears a moment later.
+    for _ in range(20):
+        if any(_answers(path) for path in socket_candidates(name)):
+            return
+        time.sleep(0.1)
+    die("the %s service is not running and the desktop could not start it" % name)
+
+
+def cmd_notify(argv):
+    urgency = "normal"
+    app = "Yantrik"
+    words = []
+    i = 0
+    while i < len(argv):
+        if argv[i] in ("--urgency", "-u") and i + 1 < len(argv):
+            urgency, i = argv[i + 1], i + 2
+        elif argv[i] == "--app" and i + 1 < len(argv):
+            app, i = argv[i + 1], i + 2
+        else:
+            words.append(argv[i])
+            i += 1
+    if not words:
+        die("usage: yos notify <title> [body] [--urgency low|normal|critical] [--app NAME]")
+
+    ensure_service("notifications")
+    stored = call("notifications", "notifications.add", {
+        "app": app,
+        "title": words[0],
+        "body": " ".join(words[1:]),
+        "urgency": urgency,
+    })
+    # The id, because that is what `yos act notifications dismiss id=...` takes, and the
+    # urgency as the store recorded it — a typo in `--urgency` becomes `normal` rather than
+    # a refusal, and printing it is how the sender finds out.
+    print("%s  [%s] %s" % (stored["id"], stored["urgency"], stored["title"]))
+    if stored.get("body"):
+        print("  %s" % stored["body"])
 
 
 # ── The browser ──
@@ -797,6 +860,7 @@ COMMANDS = {
     "act": cmd_act,
     "perception": cmd_perception,
     "journal": cmd_journal,
+    "notify": cmd_notify,
     "web": cmd_web,
 }
 
