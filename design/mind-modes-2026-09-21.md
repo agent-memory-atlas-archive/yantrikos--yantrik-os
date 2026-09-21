@@ -27,6 +27,10 @@ decides what happens to an action **at or below** it.
 | `auto` | ≤ `sensitive` runs without asking; `dangerous` (if the ceiling allows it at all) raises a card. |
 | `bypass` | everything ≤ ceiling runs without asking. Time-boxed: 15 minutes / 1 hour / until the shell restarts, and never persisted. |
 
+*(`auto` gained a second reason to ask later the same day: an action whose own published purpose
+says it cannot be undone. See [Auto was not asking about the thing the menu promised it
+would](#auto-was-not-asking-about-the-thing-the-menu-promised-it-would).)*
+
 The full table, as `mind_mode::Modes::decide` implements it and
 `mind_mode_the_decision_table_is_what_the_doc_says` asserts it, with the ceiling out of the way:
 
@@ -36,6 +40,11 @@ The full table, as `mind_mode::Modes::decide` implements it and
 | `ask` | run | run | **ask** | **ask** |
 | `auto` | run | run | run *(logged)* | **ask** |
 | `bypass` | run | run | run *(logged)* | run *(logged)* |
+
+…for an action the app says nothing about undoing. For one whose published purpose says it
+cannot be undone, the `standard` and `sensitive` columns of `ask` and `auto` are **ask** as well;
+the full second table is
+[below](#auto-was-not-asking-about-the-thing-the-menu-promised-it-would).
 
 *(logged)* is the whole of the difference between this and simply turning the asking off: see
 [Everything it did without being asked](#everything-it-did-without-being-asked).
@@ -115,7 +124,8 @@ being kept off the socket.
 ### 2. The shell owns the mode
 
 `crates/yantrik-ui/src/mind_mode.rs` is a pure state machine: current mode, previous mode, bypass
-deadline, session rules, and `decide(grade, app, action, ceiling, now) -> Run | Ask | Refuse{why}`.
+deadline, session rules, and
+`decide(grade, app, action, unrecoverable, ceiling, now) -> Run | Ask | Refuse{why}`.
 Every method takes `now` so the tests can move the clock, exactly as `approvals.rs` does. The
 effective mode is **derived** on every read rather than stored — a bypass cannot still be in force
 merely because no timer happened to fire — and `lapse()` folds an expired one back into stored
@@ -467,8 +477,15 @@ against the screenshot: they are exact, and a panel that is not there means the 
 
 ### 4. Auto: it runs, and it is written down
 
-Set **Auto** at `(1098, 190)`, then drive a `sensitive` action through the bridge (the
-`delete_event` from the approvals doc). Expect:
+Set **Auto** at `(1098, 190)`, then drive a `sensitive` action through the bridge.
+
+> **Not `delete_event`.** Its published purpose says "It is not recoverable", and since
+> [Auto was not asking about the thing the menu promised it
+> would](#auto-was-not-asking-about-the-thing-the-menu-promised-it-would) that is a card in
+> `auto` too. Use a `sensitive` action that can be undone — `calendar.move_event`, or
+> `files.move` — for the case below, and see that section for the pair driven side by side.
+
+Expect:
 
 - **no card**, and the call returns in about a second rather than blocking;
 - the text begins *"Nobody was asked about this. The desktop is in `auto` mode…"*, followed by the
@@ -735,6 +752,13 @@ not an omission: recoverability decides whether a session rule may be **made**
 at it**. The vectors include a rule on `calendar.delete_event`, which the card would never offer
 one for, precisely so that a table which started consulting it would be caught.
 
+> **This was the bug, written down as a finding.** Both tables not looking at it is exactly why
+> `auto` deleted a calendar event with nobody asked, four hours after this paragraph was
+> written. The field is called `unrecoverable` now, it is a full axis rather than a property of
+> one named rule case, and both tables consult it. See
+> [Auto was not asking about the thing the menu promised it
+> would](#auto-was-not-asking-about-the-thing-the-menu-promised-it-would).
+
 ### What was found between the two copies
 
 **No behavioural disagreement.** All 364 vectors passed against the bridge on the first run.
@@ -800,3 +824,317 @@ yos describe notifications | grep -c "Bypass ended"     # 1
 | `crates/yantrik-ui/src/mind_mode.rs` | 8 more: a lapse is reported once and only once (two ticks past the deadline post one notification); a person ending a bypass announces nothing, and neither does the socket lowering out of one; "until the shell restarts" announces nothing ever, including on the next boot; the count is what the bypass itself bought (a `rule` entry is not counted, nor is anything before the window opened); the notice reads like a person wrote it for 0 / 1 / many; the duration hook can only shorten; the vectors are written; the checked-in vectors are still what `decide` produces |
 | `crates/yantrik-ui/src/control_approvals.rs` | `show_mind_audit` added to the published-actions assertion, so the notification's button cannot become a dead control |
 | `deploy/yantrik-os/yos-mcp-selftest.py` | 72 checks (was 65). New: every one of the 364 vectors; that the file is checked in and not empty; that it still covers all four modes, every grade, a grade this OS does not define, all three layers and all six outcomes |
+
+---
+
+## Auto was not asking about the thing the menu promised it would
+
+21 September 2026, later still. Found on the machine, not in a test.
+
+The mode menu describes Auto as **"It gets on with things. You are still asked about the
+destructive ones."** A person read that, set Auto, and asked a mind to tidy a duplicate calendar
+entry. The event was deleted and no card appeared. The audit line:
+
+```json
+{"action":"delete_event","app":"calendar","grade":"sensitive","mode":"auto","outcome":"ok"}
+```
+
+and the mind, honestly, reported *"Deleted the duplicate… in auto mode, so no card was shown to
+you"*.
+
+Nothing here was broken in the sense of a fault. `calendar.delete_event` is graded `sensitive`,
+the table above says `auto` runs `sensitive` without asking, and it did. The defect is that the
+sentence the person read and the table the machine ran are two different promises. The app's own
+published purpose for that action is:
+
+```
+act: delete_event(id)  [sensitive, settles on return]
+     Take an event off the calendar. It is not recoverable
+```
+
+**"It is not recoverable"** is on the surface, it is printed by `yos describe`, it is the line
+the approval card draws its red warning from, and the decision table was the one part of the
+machine that could not see it. `approvals::unrecoverable(purpose)` already existed — factored
+out of `warning_for` so the card's warning and the session-rule exclusion could not disagree.
+Two features used it, and the one that decides whether anybody is asked did not.
+
+The ladder has four rungs and none of them is "you cannot get this back". `dangerous` is the
+OS's judgement about a *kind* of action; "not recoverable" is the app's statement about *this*
+one. Regrading `delete_event` as `dangerous` to fix it would have been the wrong repair — that
+would put it above `tool_permission` on the default machine, where it is refused outright and
+nobody is asked at all, which is a worse answer to "I want to be asked". So the sentence decides
+beside the grade.
+
+### The rule now
+
+> Below the machine ceiling, and above `safe`: if the action's own published purpose says it
+> cannot be undone, it is not run without somebody being asked — in `plan` (refused), in `ask`
+> and in `auto`. `bypass` still does not ask. And no session rule covers it, in any mode.
+
+As a second table, the same shape as the first, for an action whose purpose matches:
+
+| | `safe` | `standard` | `sensitive` | `dangerous` |
+|---|---|---|---|---|
+| `plan` | run | **refuse** | **refuse** | **refuse** |
+| `ask` | run | **ask** | **ask** | **ask** |
+| `auto` | run | **ask** | **ask** | **ask** |
+| `bypass` | run | run *(logged)* | run *(logged)* | run *(logged)* |
+
+The cells that moved are the four that are bold here and not bold in the first table: `standard`
+and `sensitive` under `ask` and `auto`. Everything else is exactly what it was.
+
+### The edges, each decided rather than fallen into
+
+**`bypass` is unchanged, and it is the only mode that is.** It does not ask, by definition, and
+it says so — on a red confirmation with three durations and a countdown that stays in the status
+bar afterwards. A card drawn after somebody has pressed *"Stop asking me anything"* would make
+that panel a lie, and the only thing that makes bypass acceptable is that it means what it said.
+What bypass owes the person instead is the record, and it pays it: `would_ask` is true for these
+actions, so they land in the audit and are counted in the "Bypass ended" notice.
+
+**`plan` is unchanged.** It already refuses everything above `safe`, for reasons of its own, and
+this adds nothing to that.
+
+**`ask` was already asking about `sensitive`, so nothing a person sees today changes — but the
+rule is applied there too, deliberately.** If it were applied only in `auto`, a `standard` action
+publishing "cannot be undone" would run silently in `ask` and raise a card in `auto`, which is
+the *looser* mode. A ladder where tightening the mode makes the machine ask less is one nobody
+can hold in their head. No `standard` action on this OS publishes such a sentence (see the survey
+below), so this costs nothing today and keeps the ladder monotonic — `plan` ⊂ `ask` ⊂ `auto` ⊂
+`bypass`, at every grade, for both kinds of action.
+
+**`safe` is never asked about, whatever the wording says.** A read destroys nothing. A `safe`
+action whose description happened to contain "permanent" — describing something else — must not
+be able to turn looking into a card, because a card a person cannot make sense of is how they
+learn that cards are noise. `mind_mode_what_cannot_be_undone_is_asked_about_in_auto` pins the
+`safe` row in all four modes, and the selftest pins the bridge's copy of it.
+
+**The machine ceiling still outranks it.** Nothing above `tool_permission` is put in front of
+anybody, in any mode, for any reason — including this one. The ceiling is consulted before the
+mode and therefore before this:
+`mind_mode_the_ceiling_still_outranks_what_cannot_be_undone` runs that for all four modes.
+
+**A session rule never covers such an action, and that is now enforced twice.** It was already
+true at the card: `approvals::may_offer_session_rule` refuses to draw the third row, and
+`Modes::person_add_rule` refuses to mint the rule if it is somehow reached anyway. That check
+happens *once*, at the press. The table now refuses to honour such a rule on *every* call, for
+two reasons — an app can reword its own purpose after a rule was legitimately made, and without
+it the new `auto` behaviour would be worthless, because the card it raises could be answered by
+a rule the card would never have offered.
+`mind_mode_a_session_rule_never_covers_what_cannot_be_undone` drives it under `ask` and `auto`,
+with the same rule shown still covering the same action when it *can* be undone, so it is the
+sentence disarming the rule and not the rule being absent.
+
+**What did NOT change: the wording.** "You are still asked about the destructive ones" and the
+menu's "Gets on with it. Destructive ones still ask." are both unchanged, because they were
+already right. They were the promise; the table was what was failing to keep it. The table moved
+to the sentence rather than the sentence to the table. Both files carry a comment saying so, so
+nobody later softens the copy to match a narrower table. `Mode::meaning()` is the string Settings
+shows and the "Bypass ended" notification quotes, so those three stay in step by construction.
+
+### How `unrecoverable` is matched, on both sides
+
+Seven phrases, lowercased substring match, and the Python is a port of the Rust rather than a
+reading of it. The list is short and blunt on purpose: an app author writing a purpose is not
+filling in a machine-readable field, so the match has to catch the sentences people actually
+write, and it does not get to be clever.
+
+```rust
+// crates/yantrik-ui/src/approvals.rs — unchanged by this work
+pub fn unrecoverable(purpose: &str) -> bool {
+    let lower = purpose.to_ascii_lowercase();
+    ["not recoverable", "cannot be undone", "can't be undone", "irreversible",
+     "permanently", "permanent", "no undo"]
+        .iter().any(|phrase| lower.contains(phrase))
+}
+```
+
+```python
+# deploy/yantrik-os/yos-mcp
+UNRECOVERABLE_PHRASES = ("not recoverable", "cannot be undone", "can't be undone",
+                         "irreversible", "permanently", "permanent", "no undo")
+
+def unrecoverable(purpose):
+    lower = (purpose or "").lower()
+    return any(phrase in lower for phrase in UNRECOVERABLE_PHRASES)
+```
+
+Two differences, both deliberate. `to_ascii_lowercase` and `.lower()` diverge only for non-ASCII
+letters, and no phrase here contains one. And the Python tolerates `None`, because
+`action_detail` hands back `""` for a purpose it could not read and a bridge that raised there
+would fail an `os_act` over a missing comment line.
+
+They are held together by a check rather than by this paragraph: the selftest's *"every phrase
+this bridge matches on is one the shell matches on"* reads `approvals.rs` and looks for each of
+the seven inside the body of `unrecoverable`. The **vectors do not carry the sentence** — they
+carry the answer, as a boolean input. That is on purpose: if each side read a purpose for itself,
+a difference of one phrase would surface as a hundred disagreeing vectors instead of as the one
+thing it is.
+
+### The survey: what actually publishes such a purpose
+
+Every `Action::new(name, description)` on this OS — 161 of them across `apps/`, `crates/` and
+`services/` — put through the predicate. Three match:
+
+| app | action | grade | phrase | asked about in `auto`? |
+|---|---|---|---|---|
+| calendar | `delete_event` | `sensitive` | "not recoverable" | **now yes** — this defect |
+| network-manager | `wifi_disconnect` | `dangerous` | "cannot be undone" | yes already, on its grade |
+| network-manager | `wifi_radio` | `dangerous` | "cannot be undone" | yes already, on its grade |
+
+So exactly one published action changes behaviour today, and it is the one the defect was
+reported against. The other two were already asked about because they are graded `dangerous`;
+the rule now holds them for a second, independent reason, which is the right way round.
+
+**No `safe`-graded action matches, so there is no grading bug to report.** That was the thing
+worth checking — a `safe` action whose text tripped the predicate would be either mis-graded or
+badly worded, and either way something to raise rather than paper over. The nearest miss is
+`shell.files_delete`, graded `dangerous`, whose purpose is "Move a file or folder to recoverable
+Trash": it contains "recoverable" and not "not recoverable", so the predicate says nothing about
+it, which is correct — the Trash *is* the undo.
+
+One near-miss outside the OS's own action surface, noted because a grep finds it and it is not
+this: `yantrik-companion-tools`'s `forget_memory` describes itself as "Delete one memory by ID;
+permanent". That is a tool description in the companion's own LLM tool schema, not an
+`Action::new` on a control surface, so it never reaches `os_act`, `action_detail` or this table.
+If those tools ever move onto the socket, that string starts deciding something and should be
+looked at then.
+
+### Threading it through
+
+**The shell.** `Modes::decide` takes `unrecoverable: bool` as a parameter, after `action` and
+before `ceiling`. Not a global and not a lookup inside the function: establishing it means
+reading another app's control surface over a socket, and `decide` runs inside the mode lock.
+
+Its one caller is `control_approvals::request_approval`, and it does **not** take the requester's
+word for it. `request_approval` has always had a `purpose` argument and it is optional — so a
+caller that simply left it out would have talked the desktop into answering `not_needed` for
+`calendar.delete_event` on a machine in `auto`, which is the whole defect again, reachable from
+the socket without the bridge. So `settle_grade` — which already asked the app what its own
+action is graded, for exactly this class of reason — now returns the app's own `description`
+beside its `permission`, out of the same single `app.describe`. The decision is made on **either**
+sentence saying so: the published one, which is what counts, and the caller's, which can only
+ever tighten and is kept because the shell's own surface publishes a grade and no description.
+The card also falls back to the published sentence when the caller sent none, so the red warning
+line, the session-rule offer and the decision all read one sentence rather than three.
+
+**The bridge.** `action_detail` already returned `(grade, purpose)` — it has always read the
+purpose, which is why it deliberately does not use `--fold`. So `guard_act` gains one line,
+`cannot_undo = unrecoverable(purpose)`, and passes it to `decide`. No new call and no new read of
+the desktop.
+
+**The audit's "unasked" keeps its meaning.** `unasked` is "`ask` mode would have raised a card
+and this mode did not", so `ask`'s own definition had to move with the rule: `would_ask` is now
+`rank >= sensitive OR irreversible`. That is what makes a `standard` unrecoverable action run
+under `bypass` land in the log, and what keeps the "Bypass ended" count honest. The bridge also
+stops labelling such a run `"mode": "rule"` when a rule happens to exist for it — the rule did
+not let it through, the bypass did, and the lapse notice counts what the bypass itself bought.
+
+### What the mind is told
+
+A card is only as good as the sentence a mind can relay from it. In `auto` the honest report
+available before this was *"the desktop is in auto and it asked me anyway"*, which reads as a
+fault and is the shape of a thing somebody tries to route around. So the message carries the
+reason:
+
+> The desktop is in `auto` mode, which would normally have run a `sensitive` action without
+> asking — but calendar.delete_event publishes a purpose that says it cannot be undone, and this
+> machine always asks about those. That is a setting working, not a fault: do not look for
+> another route to the same effect.
+
+It is **asked of the table**, not restated beside it: `guard_act` runs the same `decide` a second
+time with the flag taken away and adds the sentence only if it would have run. One extra call to
+a pure function, and no second copy of the rule to drift out of step with the first.
+
+### The vectors
+
+`deploy/yantrik-os/mind-mode-vectors.json`: **584 vectors** (was 364), from the same generator as
+before — `mind_mode_write_vectors`, the gated test in `mind_mode.rs`. There is still exactly one
+generator, and neither implementation can move alone.
+
+```sh
+YANTRIK_WRITE_VECTORS=1 cargo test --offline --profile fast \
+  -p yantrik-ui --bin yantrik-ui mind_mode_write_vectors
+```
+
+`recoverable` is gone from the schema and `unrecoverable` has taken its place — the input
+`decide` now takes, rather than a field carried and ignored. It is a **full axis**, not a property
+of one named rule case, and that is the change that matters: before, recoverability varied only
+along the rule dimension, so nothing was ever checked about the corners.
+
+| layer | was | now | what it crosses |
+|---|---|---|---|
+| `shell` | 240 | 360 | 4 modes × 5 grades × **2 unrecoverable** × 3 ceilings × 3 rule shapes |
+| `harness_cap` | 100 | 200 | 4 modes × 4 grades × **2** × 3 caps × 2 rule shapes, + 8 for a cap that is not on the ladder |
+| `browser` | 24 | 24 | unchanged; a page element has no published purpose, so the axis does not apply |
+
+The rule shapes are `none`, `same` and `other`, generated against `files.move` when the action
+can be undone and `calendar.delete_event` when it cannot — so a vector id reads like something a
+person could go and check on a real machine. The old fourth case, `same_unrecoverable`, is not a
+special case any more: it is `rule=same` × `unrecoverable=true`, and it now expects `ask` where
+it used to expect `run_logged`.
+
+The selftest checks that the axis is a real one rather than a column nobody varies: every case is
+generated both ways (`len(paired) * 2 + 24 == len(vectors)`), and **64 cells** change their
+outcome when only the app's sentence changes. It also names the cell the defect came from —
+`auto` + `sensitive` + no rule is `run_logged` when the action can be undone and `ask` when it
+cannot.
+
+### Verifying it on the machine
+
+§4 of [Verifying it on the machine](#verifying-it-on-the-machine) above is two cases now, not
+one. With the desktop in **Auto** at `(1098, 190)`, driving the bridge:
+
+```sh
+# 1. The routine sensitive surface auto exists for. No card; it runs; it is written down.
+os_act calendar move_event {"id": "evt-3", "date": "2026-10-09"}
+#   "Nobody was asked about this. The desktop is in `auto` mode…"
+
+# 2. The one the app says cannot be undone. A CARD, in auto mode.
+os_act calendar delete_event {"id": "evt-3"}
+```
+
+The second must raise a card with the red line *"The app says this cannot be undone."* and **no
+third row** — no "Allow calendar.delete_event for this session", because that offer has never
+been made for this action and could not be honoured now if it were. The text handed back names
+`auto` and says why it asked anyway. Nothing appears in `mind_audit_recent` for it, because
+somebody was asked.
+
+Then the ladder, which is the check worth doing by hand because it is the thing that would have
+been easiest to get backwards:
+
+```sh
+# Ask mode, same action: also a card. Auto must never be stricter than Ask.
+# Bypass, with tool_permission dangerous: NO card, and an audit line — bypass means bypass.
+tail -1 ~/.local/share/yantrik/mind-audit.jsonl
+```
+
+### Tests
+
+| where | what |
+|---|---|
+| `crates/yantrik-ui/src/mind_mode.rs` | 3 more (28 in the module): the second 4×4 table, for an action that cannot be undone — including the `safe` row in all four modes and the `bypass` row that must still run; the machine ceiling outranking the new reason to ask, in all four modes; a session rule never covering such an action under `ask` or `auto`, with the same rule still covering the same action when it can be undone. `mind_mode_the_decision_table_is_what_the_doc_says` now drives `files.move`, so the grade table is about the grade |
+| `crates/yantrik-ui/src/control_approvals.rs` | `approvals_the_shell_asks_only_what_the_decision_table_says_to_ask` gains the omitted-purpose case: what saying nothing would have bought, what the app's own sentence decides, and that the sentence Calendar publishes today is one the predicate matches |
+| `deploy/yantrik-os/yos-mcp-selftest.py` | 92 checks (was 72), and the fake Calendar gains `move_event` — a `sensitive` action that CAN be undone, without which every "auto runs it quietly" case in the file was written against an action the desktop should have been asking about. New: auto asks about `delete_event` and says why; the card carries the sentence that caused it; nothing is written to the unasked record because somebody was asked; a `safe` action is never asked about however it is worded; bypass still does not ask and writes it down; a rule does not cover it under `ask` or `auto`; every phrase the bridge matches on is one `approvals.rs` matches on; all 584 vectors; both values of the axis, generated in pairs, with 64 cells that turn on it |
+
+```sh
+cargo test --offline --profile fast -p yantrik-ui --bin yantrik-ui        # 236 pass
+python3 deploy/yantrik-os/yos-mcp-selftest.py                            # 92 checks
+python3 tests/app-lints/run.py                                           # 0 new
+```
+
+### Still open, from this
+
+- **A purpose is prose, and the match is seven substrings.** An app that wrote "this removes the
+  file for good" is not caught. The honest fix is a published field on `Action` —
+  `.irreversible()` beside `.risk()` — which would make it a declaration rather than a guess.
+  That is a change to `yantrik-ipc-contracts` and to every app, and it is worth doing; the
+  substring match should stay afterwards as the fallback for an app that declares nothing.
+- **The shell's own surface publishes no purpose to read.** `published_detail` returns the grade
+  and an empty sentence for `app == "shell"`, because the local registry shortcut in
+  `yantrik-app-runtime::control` exposes only `permission`. Nothing the shell publishes matches
+  the wording today, and the caller's declared purpose is ORed in, so nothing is unprotected —
+  but a `published_purpose` beside `published_grade` in that crate would close it properly.
+- **`request_approval`'s `purpose` argument is now partly decorative.** The published sentence is
+  what decides. Leaving the argument is right — the shell path still needs it — but a caller
+  reading the action's description cannot tell which one wins.

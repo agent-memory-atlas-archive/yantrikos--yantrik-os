@@ -668,7 +668,38 @@ def mind_mode(state):
 OUTCOMES = ("run", "run_logged", "ask", "refuse_grade", "refuse_ceiling", "refuse_mode")
 
 
-def decide(level, app, action, mode, rules, machine, cap=None, tool="os_act"):
+# The same seven phrases, in the same order, as `approvals::unrecoverable` in
+# `crates/yantrik-ui/src/approvals.rs`. Kept as a named constant beside the function rather than
+# inlined, so the two lists can be read side by side without reading two functions.
+UNRECOVERABLE_PHRASES = (
+    "not recoverable",
+    "cannot be undone",
+    "can't be undone",
+    "irreversible",
+    "permanently",
+    "permanent",
+    "no undo",
+)
+
+
+def unrecoverable(purpose):
+    """Does the app's own sentence about this action say it cannot be taken back?
+
+    A port of `approvals::unrecoverable`, phrase for phrase: lowercase the purpose, then look
+    for any of them as a substring. Not a paraphrase and not a regex — the shell draws the
+    card's red warning line from that function and refuses to offer a session rule on the
+    strength of it, and this decides whether the bridge asks at all. Two readings of the same
+    sentence that disagreed would be a desktop that showed a warning about something it had
+    already run, or asked about something the card would not warn about.
+
+    `mind-mode-vectors.json` carries the ANSWER rather than the sentence, so the vectors check
+    the table and not this; the selftest checks this against the same phrases directly.
+    """
+    lower = (purpose or "").lower()
+    return any(phrase in lower for phrase in UNRECOVERABLE_PHRASES)
+
+
+def decide(level, app, action, cannot_undo, mode, rules, machine, cap=None, tool="os_act"):
     """Run it, ask about it, or refuse it — the whole table, as one pure function.
 
     Returns `(verdict, detail)`:
@@ -681,6 +712,12 @@ def decide(level, app, action, mode, rules, machine, cap=None, tool="os_act"):
         ("refuse_grade", why)   the grade is not one this OS defines. None is not `safe`.
         ("refuse_ceiling", why) above the machine's own `tool_permission`.
         ("refuse_mode", why)    plan mode.
+
+    `cannot_undo` is `unrecoverable()` over the action's own published purpose — the second
+    input, and the one that is not a grade. In `auto` it turns a quiet run into a card, exactly
+    as `dangerous` does, and in no mode does a session rule cover it. See the 21 September entry
+    in `design/mind-modes-2026-09-21.md`; the shell's `Modes::decide` takes the same flag in the
+    same position.
 
     `why` is written to be relayed to a person as it stands.
 
@@ -728,8 +765,26 @@ def decide(level, app, action, mode, rules, machine, cap=None, tool="os_act"):
             "policy, and no mode changes it. Say what you were trying to do; only someone at the "
             "keyboard can change that setting." % (app, action, level, machine))
 
-    would_ask = rank >= LADDER.index("sensitive")
-    covered = (app, action) in rules
+    # The app's own sentence about the action, and the one input here that is not a grade.
+    #
+    # Found live on 21 September 2026: `calendar.delete_event` is graded `sensitive` and says
+    # "It is not recoverable", and in `auto` it ran with nobody asked — while the mode menu
+    # promised "You are still asked about the destructive ones". `safe` is excluded, because a
+    # read destroys nothing and wording that happens to match must not turn a look into a card.
+    irreversible = bool(cannot_undo) and rank > 0
+
+    # What `ask` mode would have done, which is what the audit exists to record. It carries
+    # `irreversible` so an action `ask` would now stop for is still written down when a looser
+    # mode runs it anyway.
+    would_ask = rank >= LADDER.index("sensitive") or irreversible
+
+    # A session rule turns an ask into a run, and never covers what the app says cannot be
+    # undone. The card refuses to OFFER one for such an action, which is checked once at the
+    # press; this is checked on every call, so an app that rewords its own purpose after a rule
+    # was made cannot leave a standing yes over an action that has since become irreversible —
+    # and so that the `auto` rule above means something rather than being answerable by a rule
+    # the card would never have made.
+    covered = (app, action) in rules and not irreversible
 
     if mode == "plan":
         if rank == 0:
@@ -743,9 +798,12 @@ def decide(level, app, action, mode, rules, machine, cap=None, tool="os_act"):
                 "— and let the person decide. They switch the mode from the chip in the status "
                 "bar." % (app, action))
     elif mode == "bypass":
+        # Unchanged, and the one mode that is. Bypass does not ask, by definition and by what
+        # its confirmation says; a card after "Stop asking me anything" would make that panel a
+        # lie. It is written down instead — `would_ask` is true here, so it lands in the audit.
         verdict, detail = "run", would_ask
     elif mode == "auto":
-        if rank >= LADDER.index("dangerous"):
+        if rank >= LADDER.index("dangerous") or irreversible:
             verdict, detail = ("run", True) if covered else ("ask", None)
         else:
             verdict, detail = "run", would_ask
@@ -781,6 +839,11 @@ def decide_outcome(vector):
         vector.get("grade"),
         vector.get("app"),
         vector.get("action"),
+        # The ANSWER, not the sentence. The vectors carry what `unrecoverable()` decided rather
+        # than a purpose for each side to read for itself, because then a difference in the
+        # phrase lists would show up as a table disagreement over a hundred vectors instead of
+        # as the one thing it is. The phrase lists are checked against each other separately.
+        vector.get("unrecoverable"),
         vector.get("mode"),
         [tuple(rule) for rule in vector.get("rules") or []],
         vector.get("ceiling"),
@@ -979,7 +1042,7 @@ def guard_act(args):
     if level not in LADDER:
         # The table's own words, and no read of the desktop first: nothing it could say would
         # make a grade this OS does not define into one it does.
-        return decide(level, app, action, "ask", [], None)[1], None, None
+        return decide(level, app, action, False, "ask", [], None)[1], None, None
 
     # One read of the shell, before every action, answers all of it: the machine's standing
     # ceiling, the mode the person set, the rules they granted this session, and the name to put
@@ -1002,10 +1065,16 @@ def guard_act(args):
     except ValueError as e:
         return str(e), None, None
 
+    # The app's own sentence about the action, read off the same `describe` the grade came from.
+    # It is an input to the table now: in `auto`, something the app says cannot be undone is
+    # asked about exactly as a `dangerous` action is. `action_detail` already returned it — it
+    # has always been read for the card's own words — so this costs nothing new.
+    cannot_undo = unrecoverable(purpose)
+    cap = CEILING if CEILING_SET else None
+
     # One call, one table — the harness's own cap included, so there is nothing here that the
     # vectors do not cover. See `decide`; `CEILING` is only a cap when somebody set it.
-    verdict, detail = decide(level, app, action, mode, rules, machine,
-                             cap=CEILING if CEILING_SET else None)
+    verdict, detail = decide(level, app, action, cannot_undo, mode, rules, machine, cap=cap)
 
     if verdict.startswith("refuse"):
         return join(unreadable, detail), None, None
@@ -1014,7 +1083,12 @@ def guard_act(args):
         unasked = bool(detail)
         if not unasked:
             return None, (unreadable or None), None
-        covered = (app, action) in rules
+        # The same test the table made. A rule does not cover what the app says cannot be
+        # undone, so it must not be NAMED as the thing that let this through either: here that
+        # can only be a bypass, and "Bypass ended" counts what the bypass itself bought. (Only
+        # `unasked` actions reach this line, so `cannot_undo` and the table's `irreversible`
+        # cannot differ — a `safe` action is never unasked.)
+        covered = (app, action) in rules and not cannot_undo
         audit = {
             "app": app, "action": action, "grade": level,
             "mode": "rule" if covered else mode,
@@ -1030,11 +1104,27 @@ def guard_act(args):
                    if covered else ""))
         return None, join(unreadable, note), audit
 
+    # Why there is a card at all, when the mode the person chose would otherwise have run this.
+    #
+    # Without it the honest report a mind can make is "the desktop is in auto and it asked me
+    # anyway", which reads as a fault and is the shape of a thing somebody tries to work around.
+    # Asked of the table rather than restated here: run the same decision with the sentence
+    # taken away and see whether it would have gone through. One extra call to a pure function,
+    # and no second copy of the rule to drift.
+    asked_anyway = ""
+    if cannot_undo and decide(level, app, action, False, mode, rules, machine, cap=cap)[0] == "run":
+        asked_anyway = (
+            "The desktop is in `%s` mode, which would normally have run a `%s` action without "
+            "asking — but %s.%s publishes a purpose that says it cannot be undone, and this "
+            "machine always asks about those. That is a setting working, not a fault: do not "
+            "look for another route to the same effect."
+            % (mode, level, app, action))
+
     allowed, message = ask_the_person(
         app, action, level, purpose, bound, requester_name(state))
     if allowed:
-        return None, join(unreadable, message), None
-    return join(unreadable, message), None, None
+        return None, join(unreadable, join(asked_anyway, message)), None
+    return join(unreadable, join(asked_anyway, message)), None, None
 
 
 def join(prefix, text):
@@ -1070,7 +1160,9 @@ def plan_refusal(name):
         # Fail closed is `ask`, and `ask` does not block a browser write — the taint rule and
         # `yos web`'s own commitment check still do.
         mode = "ask"
-    verdict, why = decide(None, "the browser", name, mode, [], None, tool=name)
+    # `False`: a page element is not an action an app publishes a purpose for, so there is no
+    # sentence to read and the browser row of the table never consults one.
+    verdict, why = decide(None, "the browser", name, False, mode, [], None, tool=name)
     return why if verdict == "refuse_mode" else None
 
 

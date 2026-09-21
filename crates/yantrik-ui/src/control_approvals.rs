@@ -132,11 +132,32 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 //
                 // The grade is checked first, because the grade is the one thing the caller
                 // declares that the decision actually turns on.
-                let (grade, grade_note) = match settle_grade(&app, &action, &grade) {
-                    Ok(settled) => settled,
-                    Err(why) => return Err(why),
-                };
-                match crate::mind_mode::decide(&grade, &app, &action) {
+                let (grade, grade_note, published_purpose) =
+                    match settle_grade(&app, &action, &grade) {
+                        Ok(settled) => settled,
+                        Err(why) => return Err(why),
+                    };
+
+                // Whether the app's own sentence says this cannot be taken back. `auto` asks
+                // about those exactly as it asks about a `dangerous` action — the defect of
+                // 21 September, where `calendar.delete_event` ("It is not recoverable", graded
+                // `sensitive`) ran in auto with nobody asked while the mode menu promised the
+                // destructive ones still ask.
+                //
+                // EITHER sentence saying so is enough. The published one is the one that counts
+                // and is read from the app; the caller's is kept in the test because it can only
+                // ever tighten — a requester who adds "this cannot be undone" to a purpose has
+                // asked for a card, which is not a thing worth refusing them — and because the
+                // shell surface publishes no description here to read.
+                let cannot_be_undone = approvals::unrecoverable(&published_purpose)
+                    || approvals::unrecoverable(&purpose);
+                // And the card shows the app's own words when the caller sent none, so the red
+                // warning line, the session-rule offer and the decision above all read one
+                // sentence rather than three.
+                let purpose =
+                    if purpose.trim().is_empty() { published_purpose } else { purpose };
+
+                match crate::mind_mode::decide(&grade, &app, &action, cannot_be_undone) {
                     // The same sentence the bridge relays, from the same function, so a mind
                     // that reached the shell directly and one that came through the bridge hear
                     // one story rather than two.
@@ -463,19 +484,38 @@ const GRADE_LOOKUP: Duration = Duration::from_millis(500);
 /// How much of the "you said X, the app says Y" sentence fits on one elided card row.
 const NOTE_CHARS: usize = 62;
 
-/// The grade to act on, and the note the card owes the person if it is not what was declared.
+/// The grade to act on, the note the card owes the person if it is not what was declared, and
+/// the app's own sentence about the action.
 ///
 /// Refuses rather than guesses. An app this desktop does not have, an action it does not
 /// publish, or a surface that will not say — none of those is a reason to put a card in front of
 /// somebody, because there is nothing behind it for them to allow.
-fn settle_grade(app: &str, action: &str, claimed: &str) -> Result<(String, String), String> {
-    let published = published_grade(app, action)?;
+///
+/// The purpose comes back with the grade because the decision now turns on it too: `auto` asks
+/// about an action whose purpose says it cannot be undone. Read from the app rather than taken
+/// from the request, for the same reason the grade is — `request_approval` takes a `purpose`
+/// argument, and a caller that simply left it out would otherwise have talked the desktop into
+/// running `calendar.delete_event` unasked by saying nothing.
+fn settle_grade(
+    app: &str,
+    action: &str,
+    claimed: &str,
+) -> Result<(String, String, String), String> {
+    let (published, purpose) = published_detail(app, action)?;
     let note = grade_note(claimed, &published);
-    Ok((published, note))
+    Ok((published, note, purpose))
 }
 
-/// What the target app itself says one of its actions is graded.
-fn published_grade(app: &str, action: &str) -> Result<String, String> {
+/// What the target app itself says one of its actions is graded, and what it is for.
+///
+/// The purpose is empty for the shell's own surface: the local registry shortcut below publishes
+/// a grade and nothing else, and reaching the description would mean a new function in
+/// `yantrik-app-runtime`, which this change does not own. Nothing published by the shell matches
+/// the "cannot be undone" wording today — `files_delete` says "Move a file or folder to
+/// recoverable Trash" — and the caller ORs this with what the request declared, so a shell
+/// action that acquired such a sentence would still be asked about as long as the bridge kept
+/// relaying the purpose it reads out of `describe`.
+fn published_detail(app: &str, action: &str) -> Result<(String, String), String> {
     let Some(surface) = surface_for(app) else {
         return Err(format!(
             "there is no app called `{app}` on this desktop, so nothing was put in front of the \
@@ -488,7 +528,7 @@ fn published_grade(app: &str, action: &str) -> Result<String, String> {
     // that thread already holds.
     if surface == "shell" {
         return yantrik_app_runtime::control::published_grade(action)
-            .map(str::to_string)
+            .map(|grade| (grade.to_string(), String::new()))
             .ok_or_else(|| {
                 format!(
                     "`shell` publishes no action called `{action}`, so there is nothing to ask \
@@ -515,13 +555,16 @@ fn published_grade(app: &str, action: &str) -> Result<String, String> {
             )
         })?;
 
+    // One lookup for both facts. Two would be two `app.describe` round trips on the UI thread
+    // for one card, and two chances for the grade and the sentence beside it to come from
+    // different revisions of the same app.
     reply["actions"]
         .as_array()
-        .and_then(|list| {
-            list.iter()
-                .find(|a| a["name"].as_str() == Some(action))
-                .and_then(|a| a["permission"].as_str())
-                .map(str::to_string)
+        .and_then(|list| list.iter().find(|a| a["name"].as_str() == Some(action)))
+        .and_then(|a| {
+            a["permission"].as_str().map(|grade| {
+                (grade.to_string(), a["description"].as_str().unwrap_or_default().to_string())
+            })
         })
         .ok_or_else(|| {
             format!(
@@ -1643,7 +1686,11 @@ mod control_approvals_tests {
 
         for (outcome, mode, ceiling, published, expected) in cases {
             let modes = Modes::new(mode);
-            let decision = modes.decide(published, "calendar", "delete_event", ceiling, Instant::now());
+            // `false`: these cases are about the grade. The app's own sentence about undoing
+            // gets its own assertion below, because it is what decides `calendar.delete_event`
+            // on a real machine.
+            let decision =
+                modes.decide(published, "calendar", "delete_event", false, ceiling, Instant::now());
 
             // The shape `request_approval` branches on. Kept beside the table it is derived from
             // so a fourth outcome cannot be added to `decide` without this failing to classify.
@@ -1676,14 +1723,29 @@ mod control_approvals_tests {
         // decided as `dangerous`. Declared, it would have been run without a card in auto mode;
         // published, the same machine refuses it outright under a `standard` ceiling.
         let auto = Modes::new(Mode::Auto);
-        let claimed = auto.decide("standard", "files", "delete", "standard", Instant::now());
-        let published = auto.decide("dangerous", "files", "delete", "standard", Instant::now());
+        let claimed = auto.decide("standard", "files", "delete", false, "standard", Instant::now());
+        let published =
+            auto.decide("dangerous", "files", "delete", false, "standard", Instant::now());
         assert!(matches!(claimed, Decision::Run { .. }), "what the lie would have bought");
         assert!(
             matches!(&published, Decision::Refuse { why } if why.contains("tool_permission")),
             "and what the published grade actually decides: {published:?}"
         );
         assert!(!super::grade_note("standard", "dangerous").is_empty(), "and the card says so");
+
+        // And the same argument for the sentence beside the grade. `request_approval` takes a
+        // `purpose` argument; a caller that omitted it used to talk this handler into answering
+        // `not_needed` for `calendar.delete_event` on a desktop in `auto` — which is the whole
+        // of the defect, reachable from the socket without the bridge. The handler reads the
+        // purpose the app publishes, so leaving it out changes nothing.
+        let unsaid = auto.decide("sensitive", "calendar", "delete_event", false, "dangerous", Instant::now());
+        let published = auto.decide("sensitive", "calendar", "delete_event", true, "dangerous", Instant::now());
+        assert!(matches!(unsaid, Decision::Run { .. }), "what saying nothing would have bought");
+        assert_eq!(published, Decision::Ask, "and what the app's own sentence decides");
+        assert!(
+            crate::approvals::unrecoverable("Take an event off the calendar. It is not recoverable"),
+            "which is the sentence Calendar actually publishes today"
+        );
     }
 
     #[test]

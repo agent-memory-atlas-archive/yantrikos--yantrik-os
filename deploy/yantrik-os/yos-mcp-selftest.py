@@ -22,6 +22,8 @@ What it is actually checking, in one line each:
   * a grant whose arguments do not match is refused and nothing runs;
   * each of the four modes does what `design/mind-modes-2026-09-21.md` says it does — including
     that `bypass` still cannot pass the machine ceiling and `plan` refuses browser writes;
+  * in `auto`, an action whose own published purpose says it cannot be undone is asked about
+    exactly as a `dangerous` one is, the mind is told why, and no session rule covers it;
   * `YOS_MCP_MAX_PERMISSION` can only make things stricter than the desktop's mode;
   * an unreadable desktop falls back to `ask` and says so, rather than assuming anything;
   * an action nobody was asked about is reported to the shell's audit action, with its outcome;
@@ -101,10 +103,19 @@ revision: c0ffee
        Add an event to the calendar.
          title: string - what it is
          date: string - YYYY-MM-DD
+  act: move_event(id, date)  [sensitive, settles on return]
+       Move an event to another day. Move it back to undo it.
+         id: string - the event's id, as list_events reports it
+         date: string - YYYY-MM-DD
   act: delete_event(id)  [sensitive, settles on return]
        Delete an event from the calendar. It is not recoverable.
          id: string - the event's id, as list_events reports it
 """
+# Two `sensitive` actions, and the difference between them is the sentence under the signature.
+# `move_event` is the routine sensitive surface `auto` exists for; `delete_event` says it cannot
+# be undone, so `auto` asks about it anyway. Before 21 September 2026 there was only the second
+# one here, and every "auto runs it quietly" case in this file was written against an action the
+# desktop should have been asking about.
 
 argv = sys.argv[1:]
 state = load()
@@ -483,12 +494,12 @@ with tempfile.TemporaryDirectory() as d:
     text, is_error = module.run_tool(module.BY_NAME["web_text"], {})
     check("plan mode still lets the page be read", not is_error, text)
 
-    # 12. Auto: sensitive runs unasked and is written down; dangerous still asks.
+    # 12. Auto: a routine sensitive action runs unasked and is written down.
     #
     # `ceiling=None` from here on, because these cases are about the DESKTOP's mode and a
     # harness that sets no cap is the ordinary case. The cap gets its own cases at 15.
     module, state = case(tmp, "auto", mode="auto", answer="pending", ceiling=None)
-    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    text, is_error = act(module, "calendar", "move_event", {"id": "evt-3", "date": "2026-10-09"})
     s = read(state)
     check("auto runs a sensitive action without asking", not s.get("requests"), s)
     check("and it actually runs", not is_error and len(s.get("acted", [])) == 1, text)
@@ -496,12 +507,73 @@ with tempfile.TemporaryDirectory() as d:
           len(s.get("audited", [])) == 1, s.get("audited"))
     audited = (s.get("audited") or [{}])[0]
     check("the audit line carries the action, grade, mode, arguments and outcome",
-          audited.get("app") == "calendar" and audited.get("action") == "delete_event"
+          audited.get("app") == "calendar" and audited.get("action") == "move_event"
           and audited.get("grade") == "sensitive" and audited.get("mode") == "auto"
-          and audited.get("args_json") == {"id": "evt-3"}
+          and audited.get("args_json") == {"id": "evt-3", "date": "2026-10-09"}
           and audited.get("outcome") == "ok", audited)
     check("and the mind is told nobody was asked",
           "Nobody was asked" in text and "auto" in text, text)
+
+    # 12b. And the defect this rule exists for: in `auto`, an action whose own published purpose
+    # says it cannot be undone is asked about exactly as a `dangerous` one is.
+    #
+    # Found live on 21 September 2026. `calendar.delete_event` is graded `sensitive` and says
+    # "It is not recoverable"; in `auto` it deleted an event with nobody asked, while the mode
+    # menu was promising "You are still asked about the destructive ones". The grade ladder has
+    # no rung for "cannot be undone" to sit on, so the app's own sentence decides too.
+    module, state = case(tmp, "auto-unrecoverable", mode="auto", answer="granted", ceiling=None)
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("auto asks about an action the app says cannot be undone",
+          len(s.get("requests", [])) == 1, s)
+    check("and the card carries the sentence that caused it",
+          "not recoverable" in str((s.get("requests") or [{}])[0].get("purpose")).lower(),
+          s.get("requests"))
+    check("and it runs only once the person has allowed it",
+          not is_error and [a["action"] for a in s.get("acted", [])] == ["delete_event"], s)
+    # The mind is told WHY, or the honest report it can make is "the desktop is in auto and it
+    # asked me anyway", which reads as a fault and is the shape of a thing somebody works around.
+    check("and the mind is told why it was asked in auto mode at all",
+          "auto" in text and "cannot be undone" in text and "not a fault" in text, text)
+    check("nothing was written into the unasked record, because somebody was asked",
+          not s.get("audited"), s.get("audited"))
+
+    # A `safe` action is never asked about, whatever its wording says. A read destroys nothing,
+    # and a rule that turned looking into a card would be the fastest way to teach somebody that
+    # cards are noise. (Nothing published on this OS today is both `safe` and matching; the
+    # bridge's own predicate is what is being pinned here.)
+    module, _ = case(tmp, "safe-wording", mode="auto", ceiling=None)
+    check("a safe action is not asked about however its purpose is worded",
+          module.decide("safe", "notes", "read", True, "auto", [], "dangerous") == ("run", False),
+          module.decide("safe", "notes", "read", True, "auto", [], "dangerous"))
+
+    # Bypass is the one mode this does not touch. It says "it does not ask" on a red
+    # confirmation with a countdown, and a card after that would make the panel a lie — so the
+    # action runs and the record is what the person gets instead.
+    module, state = case(tmp, "bypass-unrecoverable", mode="bypass",
+                         machine_ceiling="dangerous", ceiling=None)
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("bypass does not ask about it either, because bypass does not ask",
+          not s.get("requests") and len(s.get("acted", [])) == 1, s)
+    check("and it is written down instead", len(s.get("audited", [])) == 1, s.get("audited"))
+
+    # And the two phrase lists are one list. The shell draws the card's red warning line and
+    # refuses a session rule from `approvals::unrecoverable`; this decides whether there is a
+    # card at all. Two readings of the same sentence that disagreed would be a desktop warning
+    # about something it had already run.
+    module, _ = case(tmp, "phrases", ceiling=None)
+    rust = (HERE.parent.parent / "crates" / "yantrik-ui" / "src" / "approvals.rs")
+    body = rust.read_text(encoding="utf-8")
+    start = body.index("pub fn unrecoverable(")
+    in_rust = [p for p in module.UNRECOVERABLE_PHRASES
+               if '"%s"' % p in body[start:body.index("\n}", start)]]
+    check("every phrase this bridge matches on is one the shell matches on",
+          len(in_rust) == len(module.UNRECOVERABLE_PHRASES),
+          sorted(set(module.UNRECOVERABLE_PHRASES) - set(in_rust)))
+    check("and the sentence Calendar actually publishes is one of them",
+          module.unrecoverable("Take an event off the calendar. It is not recoverable")
+          and not module.unrecoverable("Move a file or folder to recoverable Trash"), None)
 
     # 13. Bypass: even a dangerous action runs — but only up to the machine's own ceiling.
     module, state = case(tmp, "bypass", mode="bypass", machine_ceiling="dangerous", ceiling=None)
@@ -520,8 +592,8 @@ with tempfile.TemporaryDirectory() as d:
 
     # 14. A session rule: the person said "stop asking me about this one".
     module, state = case(tmp, "rule", mode="ask", answer="pending", ceiling=None,
-                         rules=[{"app": "calendar", "action": "delete_event"}])
-    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-9"})
+                         rules=[{"app": "calendar", "action": "move_event"}])
+    text, is_error = act(module, "calendar", "move_event", {"id": "evt-9", "date": "2026-10-09"})
     s = read(state)
     check("a session rule covers the action with arguments nobody approved",
           not s.get("requests") and len(s.get("acted", [])) == 1, s)
@@ -530,10 +602,28 @@ with tempfile.TemporaryDirectory() as d:
 
     module, state = case(tmp, "rule-other", mode="ask", answer="pending",
                          rules=[{"app": "calendar", "action": "list_events"}])
-    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    text, is_error = act(module, "calendar", "move_event", {"id": "evt-3", "date": "2026-10-09"})
     s = read(state)
     check("a rule for one action is not a rule for its neighbour",
           len(s.get("requests", [])) == 1 and not s.get("acted"), s)
+
+    # 14b. And a rule NEVER covers an action the app says cannot be undone, in any mode.
+    #
+    # Two layers, and this is the second. The card refuses to OFFER one for such an action,
+    # which is checked once, at the press; this is the table refusing to honour one, which is
+    # checked on every call. They exist separately because an app can reword its own purpose
+    # after a rule was made — and because the auto rule at 12b would be worthless if a rule the
+    # card would never have made could answer the card it raises.
+    for mode in ("ask", "auto"):
+        module, state = case(tmp, "rule-unrecoverable-" + mode, mode=mode, answer="pending",
+                             ceiling=None,
+                             rules=[{"app": "calendar", "action": "delete_event"}])
+        text, is_error = act(module, "calendar", "delete_event", {"id": "evt-9"})
+        s = read(state)
+        check("in `%s`, a rule does not cover what the app says cannot be undone" % mode,
+              len(s.get("requests", [])) == 1 and not s.get("acted"), s)
+        check("and nothing is recorded as having run under a rule (%s)" % mode,
+              not s.get("audited"), s.get("audited"))
 
     # 15. YOS_MCP_MAX_PERMISSION can only ever be STRICTER than the desktop's mode.
     module, state = case(tmp, "cap-strict", mode="bypass", machine_ceiling="dangerous",
@@ -666,6 +756,40 @@ with tempfile.TemporaryDirectory() as d:
           sorted(set(v.get("layer") for v in vectors)))
     check("and each of the six outcomes actually occurs somewhere in them",
           named == set(module.OUTCOMES), sorted(set(module.OUTCOMES) - named))
+
+    # The `unrecoverable` axis, and that it is a real axis rather than a field nobody varies.
+    #
+    # It was carried for a day as `recoverable`, expected to change nothing, and the file said
+    # so. It decides the table now, so the check has to be the opposite one: both values are
+    # present, and somewhere among them there is a pair identical in every other input whose
+    # outcomes differ. A dimension that never changes an answer is a column, not a test.
+    check("both values of `unrecoverable` are covered",
+          {False, True} <= set(bool(v.get("unrecoverable")) for v in vectors),
+          sorted(set(str(v.get("unrecoverable")) for v in vectors)))
+
+    # Paired on the id with the `unrecoverable=` segment taken out, not on the fields: the two
+    # halves of a pair are generated against DIFFERENT actions (`files.move` and
+    # `calendar.delete_event`, so a vector reads like something a person could check on a real
+    # machine), and their `rules` therefore differ in spelling while meaning the same shape.
+    others = {}
+    for v in vectors:
+        key = "/".join(part for part in str(v.get("id")).split("/")
+                       if not part.startswith("unrecoverable="))
+        others.setdefault(key, {})[bool(v.get("unrecoverable"))] = v.get("expect")
+    paired = [by for by in others.values() if len(by) == 2]
+    check("every case is generated both ways, so the axis is a real one",
+          len(paired) * 2 + 24 == len(vectors), (len(paired), len(vectors)))
+    moved = [by for by in paired if by[False] != by[True]]
+    check("and it changes the answer somewhere: %d cells turn on the app's own sentence"
+          % len(moved), bool(moved), None)
+    # The cell the defect was reported from, named rather than counted.
+    auto_sensitive = [v for v in vectors
+                      if v.get("layer") == "shell" and v.get("mode") == "auto"
+                      and v.get("grade") == "sensitive" and v.get("ceiling") == "dangerous"
+                      and not v.get("rules")]
+    by_undo = {bool(v.get("unrecoverable")): v.get("expect") for v in auto_sensitive}
+    check("auto runs a recoverable sensitive action and asks about one that cannot be undone",
+          by_undo == {False: "run_logged", True: "ask"}, by_undo)
 
     # The person can see what the mind is doing: one raise per change of app, never per action,
     # never for the shell, and never in the way of the action it follows.

@@ -248,6 +248,13 @@ export component MindModeMenu inherits Rectangle {
                     selected: root.mode == "ask";
                     chosen => { root.mode-chosen("ask"); }
                 }
+                // "Destructive ones still ask" is a promise, and on 21 September 2026 it was
+                // not being kept: `calendar.delete_event` is graded `sensitive` and publishes
+                // "It is not recoverable", and Auto ran it with nobody asked. The table was
+                // changed rather than this sentence, because the sentence is what a person
+                // reading it reasonably expects — `mind_mode::Modes::decide` now asks about
+                // anything an app says cannot be undone. Do not soften this line to match a
+                // narrower table; change the table.
                 ModeRow {
                     label: "Auto";
                     means: "Gets on with it. Destructive ones still ask.";
