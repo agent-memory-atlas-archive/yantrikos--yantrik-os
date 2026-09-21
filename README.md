@@ -63,7 +63,9 @@ Not a chatbot. A proactive agent with:
   complexity to match
 - **Pluggable minds** — the built-in companion is one harness among several. Anything that
   speaks the attach protocol can answer instead, managing its own endpoint and credentials.
-  See [docs/harness.md](docs/harness.md).
+  Four exist: Yantrik Mind, Hermes Agent, Pi and DeepSeek — the last three ship as source in
+  `harnesses/`, and none of them is started until you configure it. See
+  [docs/harness.md](docs/harness.md).
 - **YAML plugins** — add tools without writing Rust
 
 ## Architecture
@@ -286,6 +288,7 @@ yantrik-os/
 │   └── yantrik-harness/       the pluggable-mind protocol
 ├── apps/                      16 application binaries
 │   └── desktop-files/         their freedesktop entries
+├── harnesses/                 minds that attach: hermes, pi, deepseek, and the half they share
 ├── services/                  10 background services
 ├── config/labwc/              compositor config, theme and autostart
 ├── deploy/yantrik-os/         cloud-init, session, release and update scripts

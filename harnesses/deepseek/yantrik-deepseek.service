@@ -1,0 +1,23 @@
+[Unit]
+Description=DeepSeek, attached to the Yantrik OS desktop as a mind
+Documentation=file:///opt/yantrik/share/harnesses/deepseek/README.md
+# The harness dials in to the desktop's socket, so it needs the session to exist first. It
+# survives the desktop restarting on its own (it re-attaches), so this is a start ordering and
+# not a dependency.
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/yantrik/share/harnesses/deepseek/yantrik_deepseek.py
+# A harness that dies is a desktop with one fewer mind in the picker, and nothing else notices.
+Restart=on-failure
+RestartSec=5
+# The key lives in ~/.config/yantrik/deepseek.json at mode 600, or in a variable named by
+# `api_key_env`. Do NOT put it here: a unit file is world-readable, and `systemctl show` prints
+# every Environment= line to anyone who asks. To pass one in, use an EnvironmentFile the person
+# owns at mode 600:
+#   EnvironmentFile=%h/.config/yantrik/deepseek.env
+# Nothing in this unit and nothing in the image holds a credential.
+
+[Install]
+WantedBy=default.target

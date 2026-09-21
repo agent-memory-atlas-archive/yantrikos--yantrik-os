@@ -143,3 +143,12 @@ jobs:
 
       - name: The update server's publish path
         run: python3 deploy/yantrik-os/server/publish_selftest.py
+
+      # The harnesses that ship as source (harnesses/lib, harnesses/pi, harnesses/deepseek).
+      # Same shape as the two above: stdlib-only Python over a fake of everything it talks to —
+      # a fake desktop socket, a fake yos-mcp, a fake chat-completions API and a fake `pi` — so
+      # it needs no network, no key, no node and nothing installed. What it is actually holding
+      # is the rule the desktop enforces and a harness cannot test for itself: every turn handed
+      # over is closed exactly once, however the mind behind it behaves.
+      - name: The attachable harnesses close every turn exactly once
+        run: python3 -m unittest discover -s harnesses/tests -v

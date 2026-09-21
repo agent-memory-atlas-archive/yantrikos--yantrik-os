@@ -62,7 +62,7 @@ script that only acts never needs to attach.
 - **Nothing waiting is an ordinary reply**, not an error. You will poll far more often than a
   person types.
 
-## Two harnesses exist
+## Four harnesses exist
 
 **Yantrik Mind** attaches from its own process (`crates/mind-core/src/harness.rs` in its repo).
 It is the reference for a mind written in Rust that already has its own model and memory.
@@ -110,6 +110,68 @@ Two things a gateway-shaped harness has to get right, both learned by running on
 - **A message that arrives while you are working is a turn too.** Queueing it behind the current
   one is fine for a chat app, where nothing is owed; here the turn it came from is owed an
   answer. Answer it — even if the answer is "still working on the last one".
+
+**Pi** (`harnesses/pi`) is the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
+driven over its RPC mode: `pi --mode rpc` on a pipe, one JSON line per message, each desktop turn
+fed in as a `prompt`. It assumes Pi brings everything — provider, key, model, session, loop — and
+that the harness's whole job is carrying text and closing turns.
+
+Pi has no MCP client, so the desktop's tools reach it through a Pi extension
+(`harnesses/pi/extension/yantrik-os.ts`) that asks `yos-mcp` for its tool list and proxies every
+call to it. The extension decides nothing: modes, grades, cards and the taint rule stay in the
+bridge, which is the only place they can be kept correct.
+
+Three things it taught, all about ending:
+
+- **An agent has more ways to finish than to start.** `agent_settled`, an `agent_end` that is
+  never followed by one, a `response` that says the prompt was refused, and the process exiting
+  are four different endings, and each one is a turn the desktop is holding open. They all have
+  to arrive at the same single close.
+- **Silence is not an ending, but it has to become one.** A harness that waits forever on a mind
+  that has stopped talking leaves the person watching a cursor. Failing after a while is worse
+  than answering and better than hanging — and the timeout has to exceed the longest legitimate
+  silence, which on this desktop is an `os_act` waiting about 270 seconds for someone to answer
+  an approval card.
+- **A harness must not answer a dialog.** Pi can open its own `confirm`, and answering it is the
+  most natural thing in the world to automate. It is declined, and the question is repeated into
+  the conversation instead: this desktop already asks for permission in a way the person sees and
+  the machine records, and a second approval path that nobody can see is worse than an
+  inconvenient one.
+
+Pi's own `bash`, `read`, `write` and `edit` are off by default, for the reason in the Hermes
+section above — on this desktop they are an ungraded second route to what the apps already do.
+Turning them on is one line in `~/.config/yantrik/pi.json` and is the person's call.
+
+**DeepSeek** (`harnesses/deepseek`) is the opposite end: no agent, just a model. It is a plain
+tool-calling loop over an OpenAI-compatible `/chat/completions` — stream the answer, collect the
+tool calls, run them through `yos-mcp`, append the results, go again — and it is the reference
+for attaching something that is only an endpoint and a model name. Nothing in it is
+DeepSeek-specific but the defaults; it is tested against a fake server and runs unchanged against
+any OpenAI-compatible endpoint, which is how it can be exercised on a machine with no DeepSeek
+key at all.
+
+What it assumes, and what that cost:
+
+- **Tool calls arrive in pieces.** A streamed `tool_calls` delta splits the function name, the
+  id and the arguments across chunks, several calls can be in flight in one assistant message,
+  and some providers resend the whole name on every chunk instead of a fragment. Concatenating
+  blindly turns `os_act` into `os_actos_act` and the call comes back as an unknown tool.
+- **A model's thinking is not its answer.** `reasoning_content` is dropped rather than streamed:
+  the person asked a question, and on a panel the deliberation reads as rambling.
+- **The key exists in exactly one place.** It goes in the `Authorization` header and nowhere
+  else — not into a log, a chunk, an exception, or the conversation history if the provider
+  echoes it back. Every string the module can produce is redacted, and a test drives the whole
+  loop against a server that deliberately echoes the header to prove it.
+- **Everything the mind reads goes to the provider.** Every tool result — the note it opened, the
+  page it read, the calendar it looked at — is in the next request, because that is what a
+  tool-calling loop is. The README says so in those words, and the config file is the person's
+  rather than the machine's.
+
+Both ship as source in the image and neither is started: a machine that has not been configured
+never talks to a provider. `harnesses/lib/yantrik_harness.py` is the half they share — attach,
+poll, heartbeat, `/stop`, `/new`, the MCP client, and one `_close` that every path out of a turn
+goes through — and `harnesses/tests` runs all of it offline against a fake desktop, a fake
+bridge, a fake chat API and a fake `pi`.
 
 ## What is not here yet
 

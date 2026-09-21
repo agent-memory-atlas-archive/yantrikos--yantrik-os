@@ -1,0 +1,19 @@
+[Unit]
+Description=Pi, attached to the Yantrik OS desktop as a mind
+Documentation=file:///opt/yantrik/share/harnesses/pi/README.md
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/yantrik/share/harnesses/pi/yantrik_pi.py
+Restart=on-failure
+RestartSec=5
+# A user service does not inherit a login shell's PATH, and `pi` and `node` are usually
+# installed per-user (~/.npm-global/bin, ~/.local/node/bin). Either set them here:
+#   Environment=PATH=%h/.npm-global/bin:%h/.local/node/bin:/usr/bin:/bin
+# or put the same string in `path` in ~/.config/yantrik/pi.json, which this harness prepends.
+# Pi's provider keys are Pi's own business and live in ~/.pi/agent. Nothing in this unit and
+# nothing in the image holds one.
+
+[Install]
+WantedBy=default.target

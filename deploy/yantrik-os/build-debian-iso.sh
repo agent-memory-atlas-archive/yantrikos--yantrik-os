@@ -444,6 +444,28 @@ if [ -d "$PROJECT_ROOT/harnesses/hermes" ]; then
     ok "Hermes desktop plugin staged at /opt/yantrik/share/harnesses/hermes"
 fi
 
+# ── The other harnesses ──
+#
+# Same rule as Hermes and for the same reason: source beside the OS, nothing installed into a
+# Python environment the image does not have, and NOTHING ENABLED. Each one needs an endpoint,
+# a model and a key that only the person has, and an image that started one of these on its own
+# would be an image that phoned a provider the first time it booted.
+#
+# `lib` is the half they share (attach, poll, heartbeat, the MCP client, one place a turn is
+# closed); `deepseek` is a tool-calling loop over an OpenAI-compatible API; `pi` drives the pi
+# coding agent over its RPC mode and carries the extension that gives it the desktop's tools.
+# Their unit files are staged beside them, to be copied into ~/.config/systemd/user by whoever
+# decides to run one — see each README.
+for harness in lib deepseek pi; do
+    [ -d "$PROJECT_ROOT/harnesses/$harness" ] || continue
+    sudo mkdir -p "$ROOTFS/opt/yantrik/share/harnesses/$harness"
+    sudo cp -r "$PROJECT_ROOT/harnesses/$harness/." \
+        "$ROOTFS/opt/yantrik/share/harnesses/$harness/" 2>/dev/null || true
+    # __pycache__ from someone's checkout is not part of the image.
+    sudo rm -rf "$ROOTFS/opt/yantrik/share/harnesses/$harness/__pycache__"
+    ok "Harness source staged at /opt/yantrik/share/harnesses/$harness (not enabled)"
+done
+
 # ── The mind, beside the OS ──
 #
 # Installed and enabled, never configured: the OS holds no model, endpoint or key for
