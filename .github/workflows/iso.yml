@@ -24,10 +24,12 @@ on:
     # commit to a branch of that shape and it is built, booted and published as a nightly.
     branches: [main, "iso/**"]
     tags: ["v*"]
-    paths-ignore:
-      - "design/**"
-      - "**.md"
-      - "tests/conformance/**"
+    # No path filter. There was one, to skip documentation-only pushes, and with it the first
+    # push of this workflow started nothing at all: GitHub evaluates path filters over at most
+    # 300 changed files, a branch 86 commits ahead of main changes more than that, and a filter
+    # that cannot be evaluated does not run the workflow and does not say so. An image built
+    # for a README change costs a runner an hour; a pipeline that silently does not run costs
+    # the release. `concurrency` below already collapses a burst of pushes into one build.
   workflow_dispatch:
     inputs:
       channel:
