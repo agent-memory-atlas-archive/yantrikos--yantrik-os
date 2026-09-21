@@ -214,9 +214,13 @@ apt-get install -y -qq \
     xwayland || true
 
 # ── Network + hardware ──
+# iproute2 and iputils-ping: a machine that cannot run `ip addr` or `ping` cannot be debugged by
+# the person sitting at it, and the mind's network tools were found reporting a missing `ping`
+# as an unreachable internet. The tools no longer need either; the person still does.
 apt-get install -y -qq \
     network-manager \
     wpasupplicant \
+    iproute2 iputils-ping \
     pciutils usbutils || true
 
 # ── Firmware (non-free, for real hardware) ──

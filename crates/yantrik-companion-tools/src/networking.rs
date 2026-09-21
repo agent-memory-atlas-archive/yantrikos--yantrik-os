@@ -374,7 +374,13 @@ impl Tool for NetworkPingTool {
                     result.join("\n")
                 }
             }
-            Err(e) => format!("Error (ping not available): {e}"),
+            // Not "unreachable": the host was never asked. `ping` is not part of every build of
+            // this OS, and a mind told a host is down will go and act on that.
+            Err(e) => format!(
+                "Could not ping {host}: the `ping` program is not installed on this machine ({e}). \
+                 Nothing was sent, so this says nothing about whether {host} is reachable; \
+                 network_diagnose checks connectivity without it."
+            ),
         }
     }
 }
@@ -877,55 +883,39 @@ impl Tool for NetworkDiagnoseTool {
             report.push(format!("DNS: FAILED via {}. Name resolution broken.", dns_server));
         }
 
-        // 3. Gateway ping
-        let gateway = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("ip route show default | awk '{print $3}' | head -1")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-        if !gateway.is_empty() {
-            match std::process::Command::new("ping")
-                .args(["-c", "1", "-W", "3", &gateway])
-                .output()
-            {
-                Ok(o) if o.status.success() => {
-                    let text = String::from_utf8_lossy(&o.stdout);
-                    let latency = text.lines()
-                        .find(|l| l.contains("time="))
-                        .and_then(|l| l.split("time=").nth(1))
-                        .and_then(|t| t.split_whitespace().next())
-                        .unwrap_or("?");
-                    report.push(format!("Gateway ({}): OK ({}ms).", gateway, latency));
-                }
-                _ => {
-                    report.push(format!("Gateway ({}): UNREACHABLE. Router may be down or the link is not up.", gateway));
-                }
+        // 3 and 4. The gateway and the internet, without `ip` or `ping`.
+        //
+        // These two lines ran `ip route` and `ping`, and neither program is on the machine this
+        // OS builds. So on a machine with a default route and a working connection the mind was
+        // told "No default route found. Network not configured." and "Internet: UNREACHABLE" —
+        // a missing tool reported as a broken network, to the one reader that would act on it.
+        // The kernel publishes the route and the neighbour table as files, and reaching the
+        // internet is a TCP connect, so neither question needs a program to be installed.
+        let route = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+        match default_route(&route) {
+            Some((gateway, iface)) => {
+                let arp = std::fs::read_to_string("/proc/net/arp").unwrap_or_default();
+                report.push(match neighbour_resolved(&arp, &gateway) {
+                    Some(true) => format!("Gateway ({gateway} via {iface}): OK (it answers on the link)."),
+                    Some(false) => format!(
+                        "Gateway ({gateway} via {iface}): NOT ANSWERING on the link. Router may be down or the cable unplugged."
+                    ),
+                    None => format!(
+                        "Gateway ({gateway} via {iface}): route present; nothing has been sent to it recently, so whether it answers is not known."
+                    ),
+                });
             }
-        } else {
-            report.push("Gateway: No default route found. Network not configured.".to_string());
+            None => report.push("Gateway: No default route found. Network not configured.".to_string()),
         }
 
-        // 4. Internet connectivity
-        match std::process::Command::new("ping")
-            .args(["-c", "1", "-W", "5", "1.1.1.1"])
-            .output()
-        {
-            Ok(o) if o.status.success() => {
-                let text = String::from_utf8_lossy(&o.stdout);
-                let latency = text.lines()
-                    .find(|l| l.contains("time="))
-                    .and_then(|l| l.split("time=").nth(1))
-                    .and_then(|t| t.split_whitespace().next())
-                    .unwrap_or("?");
-                report.push(format!("Internet: OK ({}ms to 1.1.1.1).", latency));
-            }
-            _ => {
-                report.push("Internet: UNREACHABLE. Cannot reach 1.1.1.1.".to_string());
-            }
+        let started = std::time::Instant::now();
+        let target: std::net::SocketAddr = ([1, 1, 1, 1], 443).into();
+        match std::net::TcpStream::connect_timeout(&target, std::time::Duration::from_secs(4)) {
+            Ok(_) => report.push(format!(
+                "Internet: OK ({}ms to open a connection to 1.1.1.1:443).",
+                started.elapsed().as_millis()
+            )),
+            Err(e) => report.push(format!("Internet: UNREACHABLE. Could not connect to 1.1.1.1:443 ({e}).")),
         }
 
         // 5. Wi-Fi, from the service. This used to be `sh -c "iw dev | grep …"`; `iw` is in
@@ -935,7 +925,10 @@ impl Tool for NetworkDiagnoseTool {
             Ok(wifi) if !wifi.adapter_present => {
                 report.push(format!(
                     "Wi-Fi: this machine has no Wi-Fi adapter{}.",
-                    wifi.reason.map(|r| format!(" ({r})")).unwrap_or_default()
+                    wifi.reason
+                        .filter(|r| !r.to_lowercase().contains("no wi-fi adapter"))
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default()
                 ));
             }
             Ok(wifi) => {
@@ -961,6 +954,76 @@ impl Tool for NetworkDiagnoseTool {
     }
 }
 
+
+/// The default route out of `/proc/net/route`: `(gateway, interface)`.
+///
+/// The file is a table of hex fields in host byte order; the default route is the row whose
+/// destination and mask are both zero and whose flags carry RTF_GATEWAY (0x2).
+fn default_route(proc_net_route: &str) -> Option<(String, String)> {
+    proc_net_route.lines().skip(1).find_map(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 8 {
+            return None;
+        }
+        let flags = u32::from_str_radix(f[3], 16).ok()?;
+        if f[1] != "00000000" || f[7] != "00000000" || flags & 0x2 == 0 {
+            return None;
+        }
+        let raw = u32::from_str_radix(f[2], 16).ok()?;
+        // Little-endian on every machine this OS runs on: the first octet is the low byte.
+        let ip = std::net::Ipv4Addr::from(raw.to_le_bytes());
+        Some((ip.to_string(), f[0].to_string()))
+    })
+}
+
+/// Whether the kernel has a completed neighbour entry for `ip` in `/proc/net/arp`.
+/// `None` when it has no entry at all, which is "not known", not "down".
+fn neighbour_resolved(proc_net_arp: &str, ip: &str) -> Option<bool> {
+    proc_net_arp.lines().skip(1).find_map(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 4 || f[0] != ip {
+            return None;
+        }
+        let flags = u32::from_str_radix(f[2].trim_start_matches("0x"), 16).ok()?;
+        // ATF_COM (0x2): the entry is complete — the address answered an ARP request.
+        Some(flags & 0x2 != 0 && f[3] != "00:00:00:00:00:00")
+    })
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::{default_route, neighbour_resolved};
+
+    const ROUTE: &str = "Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
+ens18	00000000	0104A8C0	0003	0	0	100	00000000	0	0	0
+ens18	0004A8C0	00000000	0001	0	0	100	00FFFFFF	0	0	0
+";
+
+    #[test]
+    fn the_default_route_is_read_from_the_kernels_table() {
+        assert_eq!(default_route(ROUTE), Some(("192.168.4.1".into(), "ens18".into())));
+    }
+
+    #[test]
+    fn a_table_with_only_a_subnet_route_has_no_default() {
+        let only_subnet = "Iface	Destination	Gateway	Flags	RefCnt	Use	Metric	Mask
+ens18	0004A8C0	00000000	0001	0	0	100	00FFFFFF
+";
+        assert_eq!(default_route(only_subnet), None);
+        assert_eq!(default_route(""), None);
+    }
+
+    #[test]
+    fn a_gateway_that_answered_is_told_from_one_that_did_not_and_one_never_asked() {
+        let arp = "IP address       HW type     Flags       HW address            Mask     Device
+192.168.4.1      0x1         0x2         aa:bb:cc:dd:ee:ff     *        ens18
+192.168.4.9      0x1         0x0         00:00:00:00:00:00     *        ens18
+";
+        assert_eq!(neighbour_resolved(arp, "192.168.4.1"), Some(true));
+        assert_eq!(neighbour_resolved(arp, "192.168.4.9"), Some(false));
+        assert_eq!(neighbour_resolved(arp, "192.168.4.77"), None);
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -77,7 +77,13 @@ fn refused(what: &str, why: &str) -> String {
 fn format_state(state: &WifiState) -> String {
     if !state.adapter_present {
         return match &state.reason {
-            Some(reason) => format!("This machine has no Wi-Fi adapter ({reason})."),
+            // The service's reason is, on a machine with no adapter, the sentence "this machine
+            // has no Wi-Fi adapter" — so appending it said the same thing twice in one line. It
+            // is added only when it says something the line has not.
+            Some(reason) if !reason.to_lowercase().contains("no wi-fi adapter") => {
+                format!("This machine has no Wi-Fi adapter ({reason}).")
+            }
+            Some(_) => "This machine has no Wi-Fi adapter.".to_string(),
             None => "This machine has no Wi-Fi adapter.".to_string(),
         };
     }
