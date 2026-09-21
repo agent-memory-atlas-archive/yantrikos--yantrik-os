@@ -29,6 +29,7 @@ and point 5 (it takes work from outside) has no `open` action on this surface. `
 """
 
 import hashlib
+import atexit
 import os
 import pathlib
 import sys
@@ -111,6 +112,20 @@ def run():
         # A cold machine: nothing below may be inherited from an earlier run, and the whole
         # point of the first check is that the service is NOT running when the app opens.
         stop_everything()
+
+        # A machine with no account is what sections 1-7 are about, and this probe was written
+        # on one. The day a real account was added it failed three checks, all of them for being
+        # right: the service was up, an account WAS configured, and the mailbox was being read.
+        # So the account file is set aside for the length of the probe — renamed, never opened —
+        # and put back before the leave-as-found checks compare it. `atexit` as well as the
+        # explicit restore below, because a probe that throws halfway must not leave a person's
+        # mail account hidden from their mail app.
+        accounts_aside = None
+        if ACCOUNTS_FILE.exists():
+            accounts_aside = lib.moved_aside(ACCOUNTS_FILE)
+            accounts_aside.__enter__()
+            atexit.register(accounts_aside.restore)
+        probe.note("accounts_file_set_aside", accounts_aside is not None)
         service_before = lib.running(SERVICE_BIN)
         probe.note("service_running_before_the_app_opened", service_before)
 
@@ -322,6 +337,8 @@ def run():
 
         # ── Put the machine back ──────────────────────────────────────────
         stop_everything()
+        if accounts_aside is not None:
+            accounts_aside.restore()
 
         accounts_after = fingerprint(ACCOUNTS_FILE)
         draft_after = fingerprint(DRAFT_FILE)
@@ -339,12 +356,20 @@ def run():
             contract="leave-as-found",
             evidence={"before": draft_before, "after": draft_after, "path": str(DRAFT_FILE)})
 
+        # Somebody's mail app was open when this started: open it again. It comes back as a
+        # new process, so what is compared is which programs are running, not their pids — the
+        # calendar probe compared pids once and failed on a machine that was fine.
+        def programs(lines):
+            return sorted({line.split(None, 1)[1].split()[0] for line in lines if " " in line})
+
+        if lib.running(APP_BIN) == [] and any(APP_BIN in line for line in probe.notes["processes_before"]):
+            open_email()
         leftover = lib.running(APP_BIN) + lib.running(SERVICE_BIN)
         probe.note("processes_after", leftover)
         probe.note("windows_after", lib.toplevels())
         probe.check(
-            "no email process is left running that was not running before",
-            leftover == probe.notes["processes_before"],
+            "the email programs running afterwards are the ones that were running before",
+            programs(leftover) == programs(probe.notes["processes_before"]),
             contract="leave-as-found",
             evidence={"before": probe.notes["processes_before"], "after": leftover})
 
