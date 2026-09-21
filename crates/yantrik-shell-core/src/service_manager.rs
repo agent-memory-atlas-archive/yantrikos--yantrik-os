@@ -314,6 +314,23 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
+    /// One test at a time, from writing its script to the end.
+    ///
+    /// These tests write an executable and then run it, and the harness runs them on parallel
+    /// threads. `fork` copies every open descriptor into the child, and O_CLOEXEC closes them
+    /// only at `exec` — so while one test's script is still open for writing, another test's
+    /// freshly forked child holds a second copy of that write descriptor for a few microseconds.
+    /// If the first test reaches its own `exec` inside that window the kernel refuses with
+    /// ETXTBSY, "Text file busy". It passed three CI runs and failed the fourth, on a loaded
+    /// runner, with a message that says nothing about tests. Nothing in the shell writes the
+    /// binaries it starts, so this is the tests' problem and is fixed in the tests: they take
+    /// turns. A poisoned lock is still a lock — one failed test must not fail the others.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn taking_turns() -> std::sync::MutexGuard<'static, ()> {
+        ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// A directory holding one "service": a script that records its pid and then waits.
     fn fixture(name: &str) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("svcmgr-{}-{name}", std::process::id()));
@@ -352,6 +369,7 @@ mod tests {
 
     #[test]
     fn dropping_one_handle_does_not_stop_the_services_the_others_still_hold() {
+        let _turn = taking_turns();
         // The bug: ServiceManager is Clone, Drop was on the handle, and a function that was
         // handed a clone and returned took every autostart service on the machine down with it.
         let (dir, pidfile) = fixture("clone-drop");
@@ -374,6 +392,7 @@ mod tests {
 
     #[test]
     fn the_last_handle_going_away_stops_what_is_running() {
+        let _turn = taking_turns();
         let (dir, pidfile) = fixture("last-drop");
         let mgr = ServiceManager::new(dir.clone());
         mgr.register("svc", "svc", true);
