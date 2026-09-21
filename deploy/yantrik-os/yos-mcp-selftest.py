@@ -367,7 +367,9 @@ with tempfile.TemporaryDirectory() as d:
     text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
     s = read(state)
     check("a denial runs nothing", not s.get("acted"), s)
-    check("a denial is an error to the client", is_error, text)
+    # An answer, not a failure: unflagged, and REFUSED in its first word (see `run_tool`). A
+    # client that counts isError results takes three of them as a dead server.
+    check("a denial is an answer, and says REFUSED first", not is_error and text.startswith("REFUSED"), text)
     check("a denial says the person said no",
           "said no" in text and "do not ask again" in text.lower(), text)
 
@@ -417,7 +419,7 @@ with tempfile.TemporaryDirectory() as d:
     check("a swapped argument spends no grant", not s.get("spent"), s)
     check("a swapped argument runs nothing", not s.get("acted"), s)
     check("a swapped argument is reported as not gone through",
-          is_error and "could not be spent" in text, text)
+          not is_error and text.startswith("REFUSED") and "could not be spent" in text, text)
 
     # 9. The name on the card comes from the client's own handshake when it sent one.
     #
@@ -472,7 +474,8 @@ with tempfile.TemporaryDirectory() as d:
     # And the browser: reading a page is looking, typing into one is not.
     module, state = case(tmp, "plan-web", mode="plan")
     text, is_error = module.run_tool(module.BY_NAME["web_go"], {"url": "https://example.com/"})
-    check("plan mode refuses a browser write", is_error and "plan mode" in text, text)
+    check("plan mode refuses a browser write",
+          not is_error and text.startswith("REFUSED") and "plan mode" in text, text)
     check("and nothing reached the browser", not read(state).get("web"), read(state))
     text, is_error = module.run_tool(module.BY_NAME["web_text"], {})
     check("plan mode still lets the page be read", not is_error, text)
@@ -565,7 +568,7 @@ with tempfile.TemporaryDirectory() as d:
     module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
     text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "secret"})
     check("bypass does not switch off the taint rule",
-          is_error and "already read private state" in text, text)
+          not is_error and text.startswith("REFUSED") and "already read private state" in text, text)
     check("and nothing reached the browser", not read(state).get("web"), read(state))
 
     # 16. A desktop that will not say what mode it is in: fall back to `ask`, and say so.

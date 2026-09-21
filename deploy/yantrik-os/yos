@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """yos — talk to Yantrik OS from a command line.
 
 The OS publishes a rich control surface over unix sockets and, until now, no way to

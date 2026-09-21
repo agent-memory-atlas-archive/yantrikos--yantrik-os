@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """yos-mcp — the OS's body, offered to a mind as MCP tools.
 
 `yos` is the command line an agent uses to see and act on this machine. This wraps it
@@ -1103,6 +1103,16 @@ def run_tool(tool, args):
     content, which a client cannot tell from success: on the first live drive a refused
     action was reported to the person as "Done — refused: …". MCP marks a tool that ran
     and failed with isError; that is what the flag is for.
+
+    With one exception, learned from a real client. A POLICY answer — the person said no, the
+    desktop is in plan mode, the ceiling forbids it, this session has read private state — is
+    not a failure of this server: it ran, it is healthy, and it answered. Hermes counts isError
+    results and after three in a row declares the whole MCP server "unreachable" for a minute.
+    So three refused writes in plan mode took `os_describe` away as well, and a research
+    sub-agent that was refused three URLs lost the desktop entirely and spent its remaining
+    forty-seven turns being told to wait. Those answers go back unflagged, and say REFUSED in
+    their first word instead, where a model cannot read them as success. Failures — a timeout,
+    a non-zero exit, an app that is not running, a missing argument — stay flagged.
     """
     # Required arguments, said plainly. A call without one used to fail inside argv as a bare
     # KeyError — "could not run os_describe: 'app'" — which tells a model nothing it can act on.
@@ -1130,18 +1140,18 @@ def run_tool(tool, args):
         args["action"] = str(args["action"]).strip().split("(", 1)[0].strip()
         refusal, note, audit = guard_act(args)
         if refusal is not None:
-            return "refused: " + refusal, True
+            return policy_answer(refusal), False
 
     refusal = plan_refusal(tool["name"])
     if refusal is not None:
-        return "refused: " + refusal, True
+        return policy_answer(refusal), False
 
     # The taint rule is not a permission grade and no mode turns it off — not even bypass. A
     # mode says how much the person trusts the mind; the taint says what this session has
     # already read, which is a fact about the session rather than a policy anybody set.
     refusal = taint_refusal(tool["name"], args)
     if refusal is not None:
-        return "refused: " + refusal, True
+        return policy_answer(refusal), False
 
     try:
         argv = [YOS] + tool["argv"](args)
@@ -1206,6 +1216,15 @@ def run_tool(tool, args):
                 "actions. The %s app itself is not open — to change anything, open it (os_act "
                 "on shell: open_app name=%s) and describe it again." % (app, app, app))
     return prefix(note, out + (("\n" + err) if err else "")), False
+
+
+def policy_answer(refusal):
+    """A "no" from the desktop's rules, worded so that it cannot be read as a result.
+
+    Not flagged isError — see `run_tool` — so the wording carries all of it. `refused:` stays in
+    the text because minds, graders and the self-test already look for it.
+    """
+    return "REFUSED — nothing was run. refused: " + refusal
 
 
 def prefix(note, text):

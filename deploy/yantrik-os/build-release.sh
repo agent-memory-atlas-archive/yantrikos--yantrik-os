@@ -146,6 +146,13 @@ for f in yos yos-mcp; do
 done
 echo "   + yos, yos-mcp"
 
+# The page reader `yos web` evaluates in the browser. It sits beside yos because yos looks for
+# it there. It was referenced from the day `yos web` was written and never committed, so every
+# published build answered web_read and web_find with "scan.js is missing next to yos".
+[ -f "$SCRIPT_DIR/scan.js" ] || fail "missing $SCRIPT_DIR/scan.js — yos web cannot read a page without it"
+cp "$SCRIPT_DIR/scan.js" "$ROOT/bin/scan.js"
+echo "   + scan.js"
+
 # The updater ships in the image so a machine can update itself. It is a script, not a
 # compiled binary, so binary discovery does not find it either — and a machine that cannot
 # pull the next build is a machine that gets hand-patched over ssh forever.

@@ -184,6 +184,15 @@ essentials = ask("for b in yantrik-ui yantrik yos yantrik-update yantrik-session
 check("the binaries a desktop cannot do without are there",
       "MISSING" not in essentials and "checked" in essentials, essentials)
 
+# What a mind needs to read a web page. `yos web` evaluates scan.js in the browser and imports
+# `websocket` to reach it; the first was never shipped and the second is only there for the
+# system interpreter, which is why yos names /usr/bin/python3 rather than whatever is on PATH.
+web = ask("[ -s /opt/yantrik/bin/scan.js ] || echo MISSING:scan.js; "
+          "head -1 /opt/yantrik/bin/yos | grep -qx '#!/usr/bin/python3' || echo BAD:shebang; "
+          "/usr/bin/python3 -c 'import websocket' 2>/dev/null || echo MISSING:python3-websocket; echo checked")
+check("the pieces `yos web` reads a page with are all there",
+      "MISSING" not in web and "BAD" not in web and "checked" in web, web)
+
 ssh_state = ask("systemctl is-enabled ssh 2>&1 | head -1")
 ssh_word = ssh_state.strip().splitlines()[-1].strip() if ssh_state.strip() else ""
 check("sshd is not enabled beside a published password",

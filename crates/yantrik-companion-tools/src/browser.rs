@@ -1571,95 +1571,19 @@ fn url_decode(s: &str) -> String {
 /// 9.5 KB were actually visible. Every element still gets an index — so a click on something below
 /// the fold still works, and indices stay stable across looks — but the report leads with what is
 /// in view and says how much is not.
-const SCAN_ELEMENTS_JS: &str = r#"(() => {
-    // Replaced by the caller: see `scan_js`.
-    const showAll = __SHOW_ALL__;
-    const sels = 'a[href], button, input, textarea, select, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [contenteditable="true"], summary, details';
-
-    // The accessible name, in the order the accname algorithm resolves it.
-    const nameOf = (el) => {
-        const byIds = (ids) => ids.split(/\s+/)
-            .map(id => document.getElementById(id))
-            .filter(Boolean)
-            .map(n => (n.innerText || n.textContent || '').trim())
-            .join(' ')
-            .trim();
-
-        const labelledby = el.getAttribute('aria-labelledby');
-        if (labelledby) { const t = byIds(labelledby); if (t) return t; }
-
-        const aria = el.getAttribute('aria-label');
-        if (aria && aria.trim()) return aria.trim();
-
-        if (el.id) {
-            const lab = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
-            if (lab) { const t = (lab.innerText || lab.textContent || '').trim(); if (t) return t; }
-        }
-        const wrapping = el.closest('label');
-        if (wrapping) { const t = (wrapping.innerText || wrapping.textContent || '').trim(); if (t) return t; }
-
-        const own = (el.innerText || el.textContent || '').trim();
-        if (own) return own;
-
-        return (el.placeholder || el.value || el.alt || el.title || '').trim();
-    };
-
-    const els = [];
-    document.querySelectorAll(sels).forEach(el => {
-        const r = el.getBoundingClientRect();
-        if (r.width === 0 && r.height === 0 && el.tagName !== 'INPUT') return;
-        if (el.disabled) return;
-        if (el.closest('[aria-hidden="true"]') && !el.closest('[aria-modal="true"]')) return;
-        els.push(el);
-    });
-    // Indexed before filtering, so an index means the same thing whatever is scrolled into view.
-    window.__yantrik_elements = els;
-
-    const visible = [];
-    const lines = [];
-    els.forEach((el, i) => {
-        const r = el.getBoundingClientRect();
-        const onscreen = r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
-
-        const tag = el.tagName.toLowerCase();
-        const type = el.type || '';
-        const role = el.getAttribute('role') || '';
-        let text = nameOf(el).replace(/\s+/g, ' ');
-        if (text.length > 60) text = text.substring(0, 57) + '...';
-        const name = el.name || el.id || '';
-        const href = el.href || '';
-
-        let desc = '[' + (i+1) + '] ' + tag;
-        if (type && type !== 'submit') desc += '[' + type + ']';
-        if (role) desc += '[' + role + ']';
-        if (name) desc += ' name="' + name + '"';
-        if (text) desc += ' "' + text + '"';
-        if (href && tag === 'a') {
-            try { desc += ' \u2192 ' + new URL(href).pathname.substring(0, 60); } catch(e) { desc += ' \u2192 ' + href.substring(0, 60); }
-        }
-        if (tag === 'input' || tag === 'textarea') {
-            const val = el.value || '';
-            if (val) desc += ' value="' + val.substring(0, 40) + '"';
-        }
-        if (onscreen || showAll) visible.push(desc); else lines.push(desc);
-    });
-
-    const offscreen = lines.length;
-    let out = visible.join('\n');
-    if (offscreen > 0) {
-        // Said rather than silently dropped: an agent that cannot see something must know it is
-        // there, or it will conclude the page does not have it and give up.
-        out += '\n\n(' + offscreen + ' more not currently on screen \u2014 scroll, or ask for all)';
-    }
-    return out;
-})()"#;
+const SCAN_ELEMENTS_JS: &str = include_str!("../../../deploy/yantrik-os/scan.js");
 
 /// The scan, told whether to report everything or only what is in view.
 ///
 /// A substitution rather than two constants: the two versions differed by one boolean and keeping
 /// them as separate strings is how they drift apart.
 fn scan_js(show_all: bool) -> String {
-    SCAN_ELEMENTS_JS.replace("__SHOW_ALL__", if show_all { "true" } else { "false" })
+    // The file says `false`, which is also what `yos web` runs as it stands.
+    if show_all {
+        SCAN_ELEMENTS_JS.replace("const showAll = false;", "const showAll = true;")
+    } else {
+        SCAN_ELEMENTS_JS.to_string()
+    }
 }
 
 // ── Browser Snapshot ──
