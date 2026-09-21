@@ -139,6 +139,24 @@ fn main() {
     //
     // The socket directory is created here rather than by the server, because after this call we
     // may only write inside it and creating it would be a write to its parent.
+    //
+    // What that directory actually is, said plainly because the answer is not what the design
+    // notes assumed. Run as root with no `XDG_RUNTIME_DIR` — which is how a system unit starts
+    // this — `socket_dir()` picks `/run/yantrik` and `harden()` makes it `root:root 0700`. The
+    // desktop user's session therefore cannot traverse it at all, and `perception.sock` inside it
+    // is unreachable to anybody but root, whatever mode the node itself carries. `yos` already
+    // says as much when it tries ("perception runs as root; try sudo").
+    //
+    // The socket node is now bound 0600 rather than the umask's 0755 (see `private_socket_file`
+    // in yantrik-ipc-transport). That is deliberate *including here*: if the session is ever to
+    // reach this service, the grant has to be a named one — a POSIX ACL for the desktop uid on
+    // the directory and the node, or a socket-activated unit that passes the fd — and not the
+    // `o+rwx` that bind used to hand out by accident. A world bit is not an access-control
+    // decision; it is the absence of one. Nothing here is changed to open that path, because the
+    // Landlock ruleset applied on the next line grants writes *inside* this directory and not the
+    // right to change the directory itself, and none of it can be exercised without CAP_NET_ADMIN
+    // on a real kernel. See design/vault-unlock-2026-09-21.md for the commands to check it on a
+    // machine.
     let socket_dir = yantrik_ipc_transport::server::socket_dir();
     scope.restrict_self(&socket_dir);
     // And then walk into it, because a ruleset the kernel accepted is not the same thing as a

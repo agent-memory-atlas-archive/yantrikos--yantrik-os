@@ -99,6 +99,38 @@ fn harden(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::set_permissions(dir, perms)
 }
 
+/// Take the world bits off a socket we just bound.
+///
+/// `bind` creates the socket node under the process umask, which on every machine this ships to
+/// is 022 — so the file came out `srwxr-xr-x`. Connecting to a unix socket needs *write* on the
+/// node, and `x` on a socket means nothing, so 0755 was never the thing letting another user in;
+/// the directory's 0700 was the thing keeping them out. This is the belt to that braces, written
+/// down as a decision in design/approvals-2026-09-21.md and taken here.
+///
+/// There is a window between `bind` and this `chmod` in which the node exists at 0755. It is not
+/// closed, and it does not need to be: for the whole of that window the node is inside a
+/// directory no other uid may traverse, so nobody else can name it, let alone open it. Closing it
+/// properly would mean `umask(0o177)` around the bind — process-global state, in a process that
+/// binds sockets from several threads, which would be a worse bug than the one being fixed.
+///
+/// Best-effort on purpose. A failure here leaves the node exactly as it was before this function
+/// existed — 0755 inside a 0700 directory, which is what every shipped machine has been running.
+/// Returning the error instead would take down a service over a defence-in-depth measure, and a
+/// desktop that will not start is a worse outcome than a socket mode that is merely no better
+/// than yesterday's.
+#[cfg(unix)]
+fn private_socket_file(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(
+            socket = %path.display(),
+            error = %e,
+            "could not take the group and world bits off this socket; it stays at the umask \
+             default. The directory's 0700 is still what keeps other users out."
+        );
+    }
+}
+
 /// Who opened this connection, as the kernel says it — not as the caller says it.
 ///
 /// Every other fact a service has about its caller arrives inside the request, which means the
@@ -237,6 +269,7 @@ impl RpcServer {
         let listener = UnixListener::bind(&self.address).map_err(|e| {
             std::io::Error::new(e.kind(), format!("cannot bind {}: {e}", self.address))
         })?;
+        private_socket_file(path);
         tracing::info!(socket = %self.address, service = handler.service_id(), "RPC server listening (UDS)");
 
         loop {
@@ -371,6 +404,42 @@ mod socket_dir_tests {
         // second call does not attempt one.
         harden(&dir).expect("second harden must be a no-op, not a second chmod");
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A socket this crate binds is not readable, writable or anything else to another user.
+    ///
+    /// Both halves matter and the second is the one that makes this change safe to ship: a unix
+    /// socket needs *write* permission to `connect`, and 0600 keeps the owner's write bit, so the
+    /// session's own clients — `yos`, the conformance suite, every app — connect exactly as
+    /// before. A mode that locked out the owner would be indistinguishable from a dead service.
+    #[test]
+    fn a_bound_socket_is_private_and_its_owner_can_still_connect() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let dir = std::env::temp_dir().join(format!("yantrik-sockmode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("probe.sock");
+
+        let listener = UnixListener::bind(&path).expect("bind");
+        // What `serve_unix` does immediately after its own bind.
+        private_socket_file(&path);
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a freshly bound socket came out {mode:o}. Under the default umask bind(2) makes it \
+             0755, and group/world have no business with a socket that drives this session's \
+             network, notifications and files."
+        );
+
+        UnixStream::connect(&path).expect(
+            "the owner of a 0600 socket must still be able to connect to it — connect(2) needs \
+             write, and the owner has it",
+        );
+        drop(listener);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
