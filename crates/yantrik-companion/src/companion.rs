@@ -3638,50 +3638,18 @@ impl CompanionService {
             Err(_) => return vec![],
         };
         stmt.query_map([], |row| {
-            Ok(yantrikdb_core::types::RecallResult {
-                rid: row.get(0)?,
-                text: row.get(1)?,
-                memory_type: "semantic".to_string(),
-                created_at: 0.0,
-                importance: row.get::<_, f64>(2)?,
-                valence: 0.0,
-                score: row.get::<_, f64>(2)?, // use importance as score
-                scores: yantrikdb_core::types::ScoreBreakdown {
-                    similarity: 1.0,
-                    decay: 1.0,
-                    recency: 1.0,
-                    importance: row.get::<_, f64>(2).unwrap_or(0.8),
-                    graph_proximity: 0.0,
-                    contributions: yantrikdb_core::types::ScoreContributions {
-                        similarity: 1.0, decay: 1.0, recency: 1.0, importance: 1.0, graph_proximity: 0.0,
-                    },
-                    valence_multiplier: 1.0,
-                },
-                why_retrieved: vec!["identity anchor".to_string()],
-                metadata: serde_json::Value::Null,
-                namespace: "default".to_string(),
-                certainty: 0.9,
-                domain: row.get(3)?,
-                source: "companion".to_string(),
-                emotional_state: None,
-                // v0.10 typed temporal status. These rows are read straight
-                // from `memories` with consolidation_status = 'active', so
-                // they are current by construction and carry no chain
-                // successor, no open dispute, and no aging stamp.
-                current_status: yantrikdb_core::types::RecordStatus::Active,
-                superseded_by: None,
-                disputed_with: Vec::new(),
-                aged_last_verified: None,
-                // 0.17/0.18. These rows are read straight out of `memories` by
-                // SQL, so nothing narrowed them: they never went through the
-                // vector index (no matched window to trim to) and they are host
-                // rows rather than rows served from a mounted pack.
-                best_span: None,
-                pack: None,
-            })
+            let rid: String = row.get(0)?;
+            let text: String = row.get(1)?;
+            let importance: f64 = row.get(2)?;
+            let domain: String = row.get(3)?;
+            Ok((rid, text, importance, domain))
         })
         .ok()
-        .map(|rows| rows.flatten().collect())
+        .map(|rows| {
+            rows.flatten()
+                .filter_map(|(rid, text, importance, domain)| identity_fact(rid, text, importance, domain))
+                .collect()
+        })
         .unwrap_or_default()
     }
 
@@ -4895,4 +4863,84 @@ fn extract_quoted_or_last_word(text: &str) -> String {
         .last()
         .unwrap_or("unknown")
         .to_string()
+}
+
+/// A memory row read straight out of `memories`, as the `RecallResult` the rest of the mind
+/// expects.
+///
+/// This was a struct literal naming every field of the engine's `RecallResult`, and it broke
+/// the OS's build on three engine releases running — v0.10 added the temporal-status fields,
+/// 0.17/0.18 added `best_span` and `pack`, 0.23 added `event_time_min`/`max` — each time with
+/// the same one-line patch and a comment explaining why the new field was `None`. Every field
+/// the engine has added since is `#[serde(default)]`, precisely so that older data still
+/// reads; building the value through serde takes the same promise. It names the fields that
+/// have something to say, and whatever the engine adds next defaults the way the engine says
+/// it should. The OS now builds against the engine it is pinned to and the one after it,
+/// which is what lets the pin move without a flag day.
+///
+/// These rows are `consolidation_status = 'active'` by construction — current, no successor,
+/// no dispute, never through the vector index, not served from a pack — which is what the
+/// engine's defaults already say.
+fn identity_fact(
+    rid: String,
+    text: String,
+    importance: f64,
+    domain: String,
+) -> Option<yantrikdb_core::types::RecallResult> {
+    let value = serde_json::json!({
+        "rid": rid,
+        "text": text,
+        "memory_type": "semantic",
+        "created_at": 0.0,
+        "importance": importance,
+        "valence": 0.0,
+        "score": importance, // importance stands in for a relevance score: nothing was searched
+        "scores": {
+            "similarity": 1.0,
+            "decay": 1.0,
+            "recency": 1.0,
+            "importance": importance,
+            "graph_proximity": 0.0,
+            "contributions": {
+                "similarity": 1.0, "decay": 1.0, "recency": 1.0, "importance": 1.0, "graph_proximity": 0.0
+            },
+            "valence_multiplier": 1.0
+        },
+        "why_retrieved": ["identity anchor"],
+        "metadata": null,
+        "namespace": "default",
+        "certainty": 0.9,
+        "domain": domain,
+        "source": "companion",
+        "emotional_state": null
+    });
+    match serde_json::from_value(value) {
+        Ok(fact) => Some(fact),
+        Err(e) => {
+            // The engine made a field required. Say so once per row rather than hand the mind a
+            // context with its identity facts silently missing.
+            tracing::error!(error = %e, "an identity fact could not be built for this engine version");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod identity_fact_tests {
+    use super::identity_fact;
+
+    /// Whatever engine this is built against, a row becomes a result: the point of going
+    /// through serde is that this keeps passing when the engine grows a field.
+    #[test]
+    fn a_row_becomes_a_recall_result_on_this_engine() {
+        let fact = identity_fact("r1".into(), "Their name is Alex".into(), 0.9, "identity".into())
+            .expect("the engine's required fields are all supplied");
+        assert_eq!(fact.rid, "r1");
+        assert_eq!(fact.text, "Their name is Alex");
+        assert_eq!(fact.domain, "identity");
+        assert_eq!(fact.score, 0.9);
+        assert_eq!(fact.why_retrieved, vec!["identity anchor".to_string()]);
+        assert_eq!(fact.current_status, yantrikdb_core::types::RecordStatus::Active);
+        assert!(fact.superseded_by.is_none() && fact.pack.is_none());
+    }
 }
