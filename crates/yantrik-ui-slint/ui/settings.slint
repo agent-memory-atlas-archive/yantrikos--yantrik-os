@@ -305,6 +305,15 @@ export component SettingsScreen inherits Rectangle {
     in-out property <string> privacy-preset: "balanced";  // "maximum", "balanced", "cloud-first"
     callback set-privacy-preset(string);
 
+    // The credential vault. Filled by `wire::vault` from `vault_unlock::cached_status`.
+    in property <bool> vault-protected: false;
+    in property <bool> vault-unlocked: false;
+    /// Why it is unprotected, in the person's words. Only read when `vault-protected` is false.
+    in property <string> vault-why: "";
+    /// Asks the shell to raise its unlock prompt. Carries no passphrase and never will — see
+    /// `no_published_action_can_carry_a_passphrase`.
+    callback vault-set-passphrase();
+
     // V62 — Usage / Cost tracking
     in property <string> usage-period: "monthly";
     in property <float> usage-local-percent: 0.0;
@@ -1785,6 +1794,86 @@ export component SettingsScreen inherits Rectangle {
                                 privacy-layout := VerticalLayout {
                                     padding: Theme.sp-4;
                                     spacing: Theme.sp-3;
+
+                                    // The vault, first, because on most machines the true answer
+                                    // is "not protected" and nothing has ever said so out loud.
+                                    //
+                                    // `vault-why` is written by the shell and is the whole value
+                                    // of this row: a bare "off" reads as a feature nobody turned
+                                    // on, and the real reason — this session signs in without a
+                                    // password — is a fact about the machine that the person can
+                                    // do something about.
+                                    Text {
+                                        text: "Credential vault";
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.fs-body;
+                                    }
+
+                                    Rectangle {
+                                        border-radius: Theme.r-md;
+                                        background: Theme.bg-elevated;
+                                        border-width: 1px;
+                                        border-color: root.vault-protected
+                                            ? Theme.border-subtle : Theme.color-warning;
+                                        height: vault-row.preferred-height;
+
+                                        vault-row := VerticalLayout {
+                                            padding: Theme.sp-3;
+                                            spacing: Theme.sp-1;
+
+                                            Text {
+                                                text: root.vault-protected
+                                                    ? (root.vault-unlocked
+                                                        ? "Locked with a passphrase · open in this session"
+                                                        : "Locked with a passphrase · shut")
+                                                    : "Not protected";
+                                                color: root.vault-protected
+                                                    ? Theme.text-primary : Theme.color-warning;
+                                                font-size: Theme.fs-body-strong;
+                                                wrap: word-wrap;
+                                            }
+
+                                            Text {
+                                                text: root.vault-protected
+                                                    ? "Saved credentials are encrypted under a key that is itself wrapped with your passphrase. A copy of the memory database is no use without it."
+                                                    : root.vault-why;
+                                                color: Theme.text-dim;
+                                                font-size: Theme.fs-caption;
+                                                wrap: word-wrap;
+                                            }
+
+                                            Rectangle {
+                                                height: Theme.h-regular;
+                                                border-radius: Theme.r-md;
+                                                background: vault-btn.has-hover
+                                                    ? Theme.amber-glow : transparent;
+                                                border-width: 1px;
+                                                border-color: Theme.amber;
+
+                                                vault-btn := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    // Raises the shell's own prompt and nothing
+                                                    // else. The passphrase is never typed here:
+                                                    // this panel is reachable from the control
+                                                    // surface (`show_screen settings`), and a
+                                                    // field on a screen an agent can open is a
+                                                    // field an agent can be in front of.
+                                                    clicked => { root.vault-set-passphrase(); }
+                                                }
+                                                Text {
+                                                    text: root.vault-protected
+                                                        ? "Change vault passphrase"
+                                                        : "Set a vault passphrase";
+                                                    color: Theme.amber-light;
+                                                    font-size: Theme.fs-body-strong;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    wrap: no-wrap;
+                                                    overflow: elide;
+                                                }
+                                            }
+                                        }
+                                    }
 
                                     // Privacy presets
                                     Text {

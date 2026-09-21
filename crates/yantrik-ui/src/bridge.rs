@@ -65,6 +65,17 @@ pub enum CompanionCommand {
     ListTools {
         reply_tx: Sender<serde_json::Value>,
     },
+    /// Protect, open, re-wrap or read the credential vault.
+    ///
+    /// Separate from `RunTool` on purpose. `RunTool` takes a name and a `serde_json::Value`, and
+    /// everything that reaches it — every mind, every caller on the shell's socket — can compose
+    /// one. This variant takes a typed `vault_unlock::Op` that nothing deserialises, so the only
+    /// way a passphrase gets onto this channel is Rust code the shell compiled, and there are two
+    /// such places: the login wiring, and the callback behind the shell's own unlock prompt.
+    Vault {
+        op: crate::vault_unlock::Op,
+        reply_tx: Sender<crate::vault_unlock::Reply>,
+    },
     /// Search memories.
     RecallMemories {
         query: String,
@@ -384,6 +395,31 @@ impl CompanionHandle {
 }
 
 impl CompanionBridge {
+    /// Protect, open, re-wrap or read the credential vault.
+    ///
+    /// On `CompanionBridge` and deliberately not on [`CompanionHandle`]. The handle is the part
+    /// that travels: `companion_rpc` holds one and answers other processes with it, so every
+    /// method on it is reachable, eventually, by something on a socket. This one is reachable
+    /// only from code holding the UI's own bridge — the login wiring and the callback behind the
+    /// shell's unlock prompt — which is the whole claim this feature makes about who can supply a
+    /// passphrase.
+    ///
+    /// Blocking, because every caller is a person who has just pressed Enter and is waiting to
+    /// find out. The worker holds the only connection to the memory database.
+    pub fn vault(
+        &self,
+        op: crate::vault_unlock::Op,
+        timeout: std::time::Duration,
+    ) -> Result<crate::vault_unlock::Reply, String> {
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        self.cmd_tx
+            .send(CompanionCommand::Vault { op, reply_tx })
+            .map_err(|_| "companion worker is not running".to_string())?;
+        reply_rx
+            .recv_timeout(timeout)
+            .map_err(|_| "the vault did not answer in time".to_string())
+    }
+
     /// A handle that other threads can hold. See [`CompanionHandle`].
     pub fn handle(&self) -> CompanionHandle {
         CompanionHandle {
@@ -1012,6 +1048,14 @@ fn worker_loop(
             }
             Ok(CompanionCommand::ListTools { reply_tx }) => {
                 let _ = reply_tx.send(companion.tool_catalog());
+            }
+            Ok(CompanionCommand::Vault { op, reply_tx }) => {
+                // Not put on the job board, and not logged. A board ticket carries a label into
+                // `describe shell` and a log line carries a timestamp into a file, and neither is
+                // a thing anybody needs to know about the moment a person typed their password.
+                // An Argon2id unwrap is a fraction of a second, which is why it can sit in the
+                // worker's queue like anything else instead of blocking the UI thread.
+                let _ = reply_tx.send(crate::vault_unlock::run(&companion.db.conn(), op));
             }
             Ok(CompanionCommand::GetBondLevel { reply_tx }) => {
                 let _ = reply_tx.send(companion.bond_level());

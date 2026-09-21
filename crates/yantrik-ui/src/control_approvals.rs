@@ -1336,6 +1336,132 @@ mod control_approvals_tests {
         }
     }
 
+    /// The words a secret would arrive under, in an action name or in one of its parameters.
+    const SECRET_WORDS: &[&str] =
+        &["passphrase", "password", "passwd", "pin", "secret", "credential", "unlock"];
+
+    /// Actions whose *name* may contain one of the words above, and why each is not a way in.
+    ///
+    /// `pin_app` pins an app tile to START. It matches because "pin" is in `SECRET_WORDS` and
+    /// "pin" is what this vault's passphrase used to be called, which is exactly why the word is
+    /// still watched. Kept as an explicit list of two-word justifications so that adding a
+    /// genuine `unlock_vault` has to come past this constant and a reader, rather than past a
+    /// regex somebody loosened to make a build go green.
+    const SECRET_PERMITTED: &[&str] = &["pin_app"];
+
+    /// Arguments whose names may contain one of those words. `pinned` is `pin_app`'s flag.
+    const SECRET_PARAM_PERMITTED: &[&str] = &["pinned"];
+
+    /// Only a person's keystrokes can supply a vault passphrase.
+    ///
+    /// The security property of the vault work, checked the way `approvals_published_actions_
+    /// cannot_grant` checks its own: mechanically, over the source of every `control*.rs`, rather
+    /// than against a list somebody remembers to update. The failure it exists to stop is the
+    /// ordinary one — somebody adds `vault_unlock(passphrase=…)` so a script can bring a machine
+    /// up unattended, it ships, and from then on anything that can open the shell's socket can
+    /// hand the vault a guess. At that point the Argon2id wrapping is protecting a file against
+    /// an attacker who is no longer reading the file.
+    ///
+    /// Two halves, because a passphrase could arrive as an action or as an argument to one.
+    #[test]
+    fn no_published_action_can_carry_a_passphrase() {
+        let actions = published_actions();
+        assert!(
+            actions.len() > 10,
+            "only {} actions were found — the scan is not reading the control modules any more, \
+             which would make this test pass by seeing nothing",
+            actions.len()
+        );
+
+        let offenders: Vec<String> = actions
+            .iter()
+            .filter(|(name, _)| {
+                let lower = name.to_ascii_lowercase();
+                SECRET_WORDS.iter().any(|w| lower.contains(w))
+                    && !SECRET_PERMITTED.contains(&name.as_str())
+            })
+            .map(|(name, file)| format!("{name} (in {file})"))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "the shell publishes an action that reads as a way to supply or handle a secret: {}\n\n\
+             A caller on the socket must not be able to unlock the vault, set its passphrase, or \
+             pass one to anything. The passphrase is typed into the card in `intent_lens.slint` \
+             and reaches `vault_unlock::adopt` through `wire::vault`, and there is no other way \
+             in. If this action genuinely carries no secret, rename it so it does not read like \
+             it does.",
+            offenders.join(", ")
+        );
+
+        // And no argument of any published action is named like one either. An action called
+        // `configure` taking `passphrase` would pass the half above and be exactly the hole.
+        let mut param_offenders: Vec<String> = Vec::new();
+        for path in control_sources() {
+            let whole = std::fs::read_to_string(&path).unwrap();
+            let src = whole.split("#[cfg(test)]").next().unwrap_or("").to_string();
+            let file = path.file_name().unwrap().to_string_lossy().to_string();
+            // `Param::text("name")`, `Param::flag("name")`, and any other constructor on Param.
+            for (index, _) in src.match_indices("Param::") {
+                let rest = &src[index..];
+                let Some(open) = rest.find('"') else { continue };
+                // Only the string literal that opens this Param, not one further down the file.
+                if open > 40 {
+                    continue;
+                }
+                let Some(close) = rest[open + 1..].find('"') else { continue };
+                let name = &rest[open + 1..open + 1 + close];
+                let lower = name.to_ascii_lowercase();
+                if SECRET_WORDS.iter().any(|w| lower.contains(w))
+                    && !SECRET_PARAM_PERMITTED.contains(&name)
+                {
+                    param_offenders.push(format!("{name} (in {file})"));
+                }
+            }
+        }
+        assert!(
+            param_offenders.is_empty(),
+            "a published action takes an argument named like a secret: {}\n\n\
+             Nothing on the shell's socket may carry a passphrase, a PIN or a password, whatever \
+             the action around it is called.",
+            param_offenders.join(", ")
+        );
+    }
+
+    /// The vault's tools do not ask a mind to relay the passphrase either.
+    ///
+    /// A different surface from the one above and the same rule. These tools used to take a `pin`
+    /// argument whose description told the model to ask the user for it — which put the secret
+    /// that protects every credential on the machine into a transcript, a context window, and
+    /// whatever the answering provider keeps. Checked from the source for the same reason: this
+    /// is the kind of argument somebody adds back to unblock something.
+    #[test]
+    fn the_vault_tools_do_not_ask_a_mind_for_the_passphrase() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../yantrik-companion-tools/src/vault.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+
+        // The tool definitions are JSON literals; a parameter is a quoted key in them.
+        for banned in ["\"pin\":", "\"new_pin\":", "\"current_pin\":", "\"passphrase\":"] {
+            assert!(
+                !src.contains(banned),
+                "{} declares a {banned} parameter again.\n\n\
+                 A vault passphrase must not travel through a tool call. A locked vault answers \
+                 LOCKED_ANSWER and raises the desktop's own prompt; the model is told, in that \
+                 answer, that it cannot carry the secret and must not ask for it.",
+                path.display()
+            );
+        }
+
+        // And the answer it gives instead is the recognisable one, not a generic error.
+        assert!(
+            src.contains("VAULT_LOCKED:"),
+            "the locked-vault answer is gone from {}; a mind would be back to reading a generic \
+             failure it has learned to retry",
+            path.display()
+        );
+    }
+
     /// The words that would be a way to loosen the mode, or mint a session rule, if one existed.
     const MODE_WORDS: &[&str] = &["mode", "rule", "bypass", "permission", "ceiling"];
 

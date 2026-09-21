@@ -17,7 +17,7 @@ use crate::{
 
 /// Wire all miscellaneous callbacks.
 pub fn wire(ui: &App, ctx: &AppContext) {
-    wire_lock(ui);
+    wire_lock(ui, ctx);
     wire_onboarding(ui, ctx);
     wire_focus(ui);
     wire_file_open(ui, ctx);
@@ -33,8 +33,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
 // ── Lock screen ──
 
-fn wire_lock(ui: &App) {
+fn wire_lock(ui: &App, ctx: &AppContext) {
     let ui_weak = ui.as_weak();
+    let bridge = ctx.bridge.clone();
     ui.on_try_unlock(move |pin| {
         let pin = pin.to_string();
         if lock::check_pin(&pin) {
@@ -43,6 +44,17 @@ fn wire_lock(ui: &App) {
                 ui.set_lock_error("".into());
                 tracing::info!("Screen unlocked");
             }
+            // The screen is open; now see whether the same keystrokes also open the vault.
+            //
+            // Usually they will not: the screen PIN and the vault passphrase are different
+            // secrets, and on most machines the PIN is still the default. It is offered anyway
+            // because on a machine where the person has made them the same — which is the
+            // obvious thing to do once the desktop has asked for a vault passphrase — coming
+            // back to an unlocked screen with a still-locked vault is a second prompt for a
+            // secret they just typed. A wrong guess here costs one Argon2id derivation and is
+            // silent: the person was unlocking a screen, and telling them they failed at
+            // something they were not attempting is worse than telling them nothing.
+            offer_screen_secret_to_vault(&bridge, &pin);
         } else {
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_lock_error("Wrong PIN".into());
@@ -53,12 +65,48 @@ fn wire_lock(ui: &App) {
 
     let ui_weak_lock = ui.as_weak();
     ui.on_lock_screen(move || {
+        // Before the screen goes dark, not after: the key is zeroed while this is still the
+        // person's own action. A locked screen with the vault's key still in memory protects a
+        // screen — anything already running as this user could read every credential out of the
+        // process for as long as the machine stayed on.
+        crate::vault_unlock::on_screen_lock();
         if let Some(ui) = ui_weak_lock.upgrade() {
             ui.set_current_screen(3);
             ui.set_lock_error("".into());
             ui.set_lock_date_text(app_context::current_date_text().into());
             ui.set_lock_greeting(ui.get_greeting_text());
-            tracing::info!("Screen locked");
+            tracing::info!("Screen locked — the vault's key was zeroed with it");
+        }
+    });
+}
+
+/// Try the secret that just unlocked the screen on the vault, without making anybody wait.
+///
+/// Only when the vault is protected and shut: on an unprotected vault there is nothing to open,
+/// and re-offering a secret to an already-open vault is a derivation for nothing. Runs on its own
+/// thread because Argon2id is deliberately slow and the companion's worker may be mid-thought,
+/// and the one thing that must not happen here is a desktop that freezes on unlock.
+fn offer_screen_secret_to_vault(bridge: &std::sync::Arc<crate::bridge::CompanionBridge>, secret: &str) {
+    use crate::vault_unlock::{self, Op, Outcome};
+
+    if secret.is_empty() || !vault_unlock::protection_known() {
+        return;
+    }
+    let status = vault_unlock::cached_status();
+    if !status.protected || status.unlocked {
+        return;
+    }
+
+    let bridge = bridge.clone();
+    let secret = secret.to_string();
+    std::thread::spawn(move || {
+        match bridge.vault(Op::Adopt(secret), std::time::Duration::from_secs(20)) {
+            Ok(reply) if matches!(reply.outcome, Some(Outcome::Unlocked)) => {
+                tracing::info!("The vault opened with the secret that unlocked the screen");
+                vault_unlock::dismiss();
+            }
+            // Silent on purpose. See the call site: this was not something the person asked for.
+            _ => {}
         }
     });
 }

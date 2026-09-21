@@ -35,7 +35,7 @@ import { ToastBanner, ToastData, ToastActionData } from "components/toast_banner
 import { CommandItem } from "components/command_palette.slint";
 import { ContentBlock, MessageData } from "components/message_bubble.slint";
 import { UrgeCardData } from "components/glance_card.slint";
-import { LensResult, ApprovalRequest, ApprovalCard } from "components/intent_lens.slint";
+import { LensResult, ApprovalRequest, ApprovalCard, VaultUnlockRequest, VaultUnlockCard } from "components/intent_lens.slint";
 import { MindModeMenu, MindRule, MindAuditEntry } from "components/mind_mode_menu.slint";
 import { WhisperCardItem } from "components/whisper_card.slint";
 import { BriefSection } from "components/morning_brief.slint";
@@ -134,6 +134,23 @@ export component App inherits Window {
     /// Never offered for `dangerous` or for an action the app says cannot be undone.
     callback approval-allow-session(string);
     callback approval-deny(string);
+
+    // ── The vault, and the one way a passphrase gets into this machine ──
+    //
+    // Filled by `wire::vault`. `reason` empty means nothing is being asked; anything else puts the
+    // card on screen. There is no control-surface action, tool argument or RPC method that can
+    // set `vault-unlock-submit` going — it is a keystroke in the card below and nothing else,
+    // which is the whole claim the feature makes. See design/vault-unlock-2026-09-21.md.
+    in property <VaultUnlockRequest> vault-unlock: { reason: "", error: "", first-time: false };
+    /// The typed passphrase. Goes to `vault_unlock::adopt` and is not kept by anything on the way.
+    callback vault-unlock-submit(string);
+    callback vault-unlock-dismiss();
+    /// The same three facts `describe shell` publishes under `vault`, for Settings > Privacy.
+    in property <bool> vault-protected: false;
+    in property <bool> vault-unlocked: false;
+    in property <string> vault-why: "";
+    /// Settings asked for the prompt. Carries nothing; it only raises the card above.
+    callback vault-set-passphrase();
 
     // ── What the mind may do without being asked ──
     //
@@ -1714,6 +1731,13 @@ export component App inherits Window {
                 privacy-cloud-confirm <=> root.settings-privacy-cloud-confirm;
                 privacy-preset <=> root.settings-privacy-preset;
                 set-privacy-preset(preset) => { root.set-privacy-preset(preset); }
+                // The vault row reads the same three facts `describe shell` publishes, so the
+                // panel and the control surface cannot disagree about whether this machine's
+                // credentials are protected.
+                vault-protected: root.vault-protected;
+                vault-unlocked: root.vault-unlocked;
+                vault-why: root.vault-why;
+                vault-set-passphrase => { root.vault-set-passphrase(); }
                 // V62 — Usage / Cost tracking
                 usage-period: root.settings-usage-period;
                 usage-local-percent: root.settings-usage-local-percent;
@@ -2874,6 +2898,50 @@ export component App inherits Window {
                         horizontal-alignment: center;
                         wrap: no-wrap;
                         overflow: elide;
+                    }
+                }
+            }
+        }
+
+        // The vault unlock prompt, in the same corner and under the same rules as the card above.
+        //
+        // Excluded from lock (3), login (32), boot (0) and onboarding (2) for a reason that is
+        // sharper here than it is for an approval: a passphrase box that can be typed into from a
+        // *locked* screen would be a way to open the vault without unlocking the machine, which
+        // is precisely the boundary locking the screen exists to draw. `on_screen_lock` has just
+        // zeroed the key; drawing this over the lock screen would hand it back.
+        //
+        // Drawn above the approval card's corner, not beside it: they can both be up at once —
+        // a mind asks to read a credential, the shell asks for the passphrase — and the approval
+        // is the one with a timer on it, so it keeps the position the person is used to.
+        if root.vault-unlock.reason != ""
+            && root.current-screen != 0 && root.current-screen != 2
+            && root.current-screen != 3 && root.current-screen != 32
+            : Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+
+            Rectangle {
+                x: parent.width - 420px;
+                // Below the approval stack when there is one, so neither covers the other. The
+                // 300px is the approval card's bounded worst case — every text on it is clipped
+                // in approvals.rs, so it has one.
+                y: Theme.status-bar-height + Theme.sp-4
+                    + (root.pending-approvals.length > 0 ? 300px : 0px);
+                width: 404px;
+                // Same lesson as the approval overlay: take the height from the layout inside,
+                // never from the card, or the box is sized to nothing and the card draws off it.
+                height: vault-stack.preferred-height;
+                background: transparent;
+
+                vault-stack := VerticalLayout {
+                    alignment: start;
+
+                    VaultUnlockCard {
+                        data: root.vault-unlock;
+                        submit(pass) => { root.vault-unlock-submit(pass); }
+                        dismiss => { root.vault-unlock-dismiss(); }
                     }
                 }
             }

@@ -383,6 +383,16 @@ pub fn publish(
                 // replace the cards with something, or `auto` is only a quieter way of not
                 // knowing. See `mind_mode`'s audit section.
                 .with("mind_audit_recent", crate::control_approvals::mind_audit_for_describe())
+                // Whether the credential vault is actually protected, and when it is not, why.
+                //
+                // Published because the honest answer on most machines is "no", and a machine
+                // that quietly stores credentials under a key sitting in the same file is a
+                // machine that has told nobody. `why` is the whole point of the key: an agent or
+                // a person reading this should get "this session signs in without a password, so
+                // there is nothing to lock the vault with" rather than a bare false they have to
+                // interpret. Never carries the passphrase, or anything derived from one — see
+                // `secret_never_reaches_a_message` in vault_unlock.rs.
+                .with("vault", crate::vault_unlock::cached_status().to_json())
                 // Which mind is answering, and what else could. An agent that can switch this
                 // has to be able to see it first, and without the list it would be guessing at
                 // ids for `use_harness`.

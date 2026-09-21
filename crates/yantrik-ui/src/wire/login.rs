@@ -12,9 +12,10 @@ use crate::app_context::AppContext;
 use crate::App;
 
 /// Wire the login-attempt callback.
-pub fn wire(ui: &App, _ctx: &AppContext) {
+pub fn wire(ui: &App, ctx: &AppContext) {
     let ui_weak = ui.as_weak();
     let fail_count = Arc::new(AtomicU32::new(0));
+    let bridge = ctx.bridge.clone();
 
     // Set hostname from /etc/hostname if available
     if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
@@ -29,6 +30,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         let password = password.to_string();
         let weak = ui_weak.clone();
         let fails = fail_count.clone();
+        let bridge = bridge.clone();
 
         if username.is_empty() {
             if let Some(ui) = weak.upgrade() {
@@ -47,6 +49,19 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         // Authenticate in a background thread to not block the UI
         std::thread::spawn(move || {
             let authenticated = verify_password(&username, &password);
+
+            // The one moment on this machine when a secret a person chose, and the system itself
+            // has just agreed to, exists in this process. The vault's key is wrapped under it
+            // here or it is wrapped under nothing at all — deriving some *other* secret from a
+            // machine that has no other secret would be theatre, and asking the person for a
+            // second password when they have just typed one is a tax on the honest path.
+            //
+            // Ordered after `verify_password` deliberately: an unverified string is a guess, and
+            // a guess must not be able to re-wrap anybody's vault.
+            if authenticated {
+                crate::vault_unlock::note_session_password_seen();
+                adopt_session_password(&bridge, &password);
+            }
 
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
@@ -74,6 +89,54 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             });
         });
     });
+}
+
+/// Hand the just-verified login password to the vault, and say what happened — never what it was.
+///
+/// Three outcomes and each is a different fact about this machine:
+///   * first sign-in on a vault that had no passphrase — it is wrapped now, in place, with
+///     everything already stored still readable;
+///   * every sign-in after that — it opens;
+///   * it does not open — which on this path means one specific thing: the account password has
+///     been changed since the vault was wrapped, and the vault is still wrapped under the old
+///     one. It stays locked, nothing is overwritten, and the person can re-wrap it from the
+///     unlock prompt with the passphrase that does open it.
+///
+/// Every branch logs at most a state. The password is borrowed for the call and is not put in a
+/// span, a field, or a message; `secret_never_reaches_a_message` in `vault_unlock` covers the
+/// strings this function can reach.
+fn adopt_session_password(bridge: &Arc<crate::bridge::CompanionBridge>, password: &str) {
+    use crate::vault_unlock::{Op, Outcome};
+
+    // Generous, because Argon2id is deliberately slow and the worker may be mid-thought. The
+    // person is already past the login screen either way — the vault is not a gate on the
+    // desktop, and making it one would mean a busy companion could keep someone out of their own
+    // machine.
+    let timeout = std::time::Duration::from_secs(20);
+    match bridge.vault(Op::Adopt(password.to_string()), timeout) {
+        Ok(reply) => match reply.outcome {
+            Some(Outcome::Protected) => {
+                tracing::info!("The vault is now wrapped under this account's login password");
+            }
+            Some(Outcome::Unlocked) => {
+                tracing::info!("The vault is open for this session");
+            }
+            Some(Outcome::Wrong) => {
+                tracing::warn!(
+                    "The vault did not open with this login password — it is wrapped under an \
+                     earlier one. It stays locked until someone enters the passphrase that opens \
+                     it; nothing was changed."
+                );
+            }
+            Some(Outcome::Unusable(why)) => {
+                tracing::warn!(reason = %why, "The vault could not be opened at sign-in");
+            }
+            None => {}
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not reach the vault at sign-in");
+        }
+    }
 }
 
 /// Verify username/password against the system.

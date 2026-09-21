@@ -51,6 +51,7 @@ pub mod command_palette;
 pub mod installer;
 pub mod login;
 pub mod services;
+pub mod vault;
 
 use crate::app_context::AppContext;
 use crate::App;
@@ -92,6 +93,9 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     ai_provider::wire(ui, ctx);
     installer::wire(ui, ctx);
     login::wire(ui, ctx);
+    // After `login`, which is the other place a secret reaches the vault, and before `callbacks`,
+    // which owns the lock screen that closes it.
+    vault::wire(ui, ctx);
     callbacks::wire(ui, ctx);
 
     // Last, and on a thread of its own. It must come after `settings::wire`, which is what

@@ -2,15 +2,102 @@
 //!
 //! Tools: vault_store, vault_get, vault_list, vault_delete, vault_generate_password, vault_set_pin
 //!
+//! # A mind does not carry the passphrase
+//!
+//! Every one of these tools used to take a `pin` argument, with a description telling the model to
+//! "ask the user for it". That was written when the PIN was a hash in a table that gated the tools
+//! while the key sat beside it in the clear — so the PIN was a formality and relaying it cost
+//! nothing that was not already lost.
+//!
+//! It is not a formality now. The PIN *is* the passphrase the vault's key is wrapped under, and a
+//! model that asks for it puts it in a conversation: in the transcript, in the context window, on
+//! the wire to whatever provider is answering, and in whatever that provider keeps. A companion
+//! running over Telegram would have carried it across a third party's servers to unlock a vault on
+//! a desk. Asking the person is right; asking them *through the model* is not.
+//!
+//! So the argument is gone, and with it the whole class of bug where a caller supplies the secret.
+//! A locked vault answers [`LOCKED_ANSWER`] and [`request_unlock`] puts a prompt on the desktop,
+//! which the person types into and the model never sees. What the model can do about a locked
+//! vault is tell the person the desktop is asking — which is the true and only answer.
+//!
 //! Security model:
 //!   - All credentials encrypted with AES-256-GCM at rest (vault-specific DEK)
-//!   - DEK auto-generated on first use, stored in vault_security table
-//!   - Optional security PIN protects vault_get (credential retrieval)
-//!   - PIN is blake3-hashed and stored in vault_security table
-//!   - When PIN is set, vault_get requires PIN parameter before returning passwords
-//!   - Prevents unauthorized access over Telegram or shared sessions
+//!   - The DEK is wrapped under a passphrase with Argon2id when the vault is protected; a vault
+//!     that has never been protected keeps it in the file, and `vault_list` says so out loud
+//!   - A protected vault that has not been unlocked in this process returns nothing at all
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use super::{Tool, ToolContext, ToolRegistry, PermissionLevel};
+
+/// What a mind is told when it asks the vault for something and the vault is shut.
+///
+/// A named constant because three places have to agree on it: the tools that return it, the shell
+/// that recognises it, and the tests. Distinguishable from a generic failure on purpose — `Error:
+/// the vault is locked; unlock it with its passphrase` was true, arrived in the same shape as
+/// every transient error a model has learned to retry, and said nothing about the one thing that
+/// resolves it, which is a person at the machine.
+pub const LOCKED_ANSWER: &str =
+    "VAULT_LOCKED: the vault is locked; the person has to unlock it. Do not ask for the \
+     passphrase — you cannot carry it. Tell them the desktop is asking for it.";
+
+/// Set when a mind wanted the vault and could not have it.
+///
+/// The shell polls this and draws the unlock prompt. A latch rather than a call, because this
+/// crate is a leaf: the tools run on the companion's worker thread inside the shell's process, and
+/// a direct call would mean this crate depending on the shell that depends on it.
+static UNLOCK_WANTED: AtomicBool = AtomicBool::new(false);
+/// Why, in the person's words, and whether answering it protects the vault for the first time.
+///
+/// The `bool` is carried rather than worked out by the shell, because the caller already knows it
+/// — `ensure_open` only ever fires on a vault that *is* protected — and the shell would have to
+/// infer it from a cached read that may not have landed yet. Getting it backwards would ask
+/// someone to invent a new passphrase for a vault that already has one.
+static UNLOCK_REASON: Mutex<Option<(String, bool)>> = Mutex::new(None);
+
+/// Ask the desktop to put its unlock prompt on the screen.
+///
+/// `first_time` is true only when the vault has no passphrase yet, so the card asks the person to
+/// choose one instead of asking for one they do not have.
+pub fn request_unlock(reason: &str, first_time: bool) {
+    if let Ok(mut guard) = UNLOCK_REASON.lock() {
+        // First reason wins: a mind retrying three times must not rewrite what the person has
+        // already started reading.
+        if guard.is_none() {
+            *guard = Some((reason.to_string(), first_time));
+        }
+    }
+    UNLOCK_WANTED.store(true, Ordering::Relaxed);
+}
+
+/// Take the pending request, if there is one. Clears it.
+pub fn take_unlock_request() -> Option<(String, bool)> {
+    if !UNLOCK_WANTED.swap(false, Ordering::Relaxed) {
+        return None;
+    }
+    UNLOCK_REASON
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .or_else(|| Some(("a mind asked for a credential".to_string(), false)))
+}
+
+/// Whether this tool call can read the vault, and what to say if it cannot.
+///
+/// One place, so the six tools cannot drift into six different answers. `Ok(())` covers both the
+/// unlocked vault and the legacy unprotected one — the second is not safe, but refusing it would
+/// lock people out of credentials they stored before any of this existed, and `vault_list` is
+/// where that vault is told the truth about itself.
+fn ensure_open(conn: &rusqlite::Connection, reason: &str) -> Result<(), String> {
+    if yantrikdb_core::vault::is_protected(conn) && !yantrikdb_core::vault::is_unlocked() {
+        // Never a first time: this branch is only reachable on a vault that already has a
+        // passphrase, so the card asks for the one that exists.
+        request_unlock(reason, false);
+        return Err(LOCKED_ANSWER.to_string());
+    }
+    Ok(())
+}
 
 pub fn register(reg: &mut ToolRegistry) {
     reg.register(Box::new(VaultStoreTool));
@@ -44,8 +131,7 @@ impl Tool for VaultStoreTool {
                         "password": {"type": "string", "description": "Password or API key to store"},
                         "url": {"type": "string", "description": "Optional URL for the service"},
                         "notes": {"type": "string", "description": "Optional notes (also encrypted)"},
-                        "category": {"type": "string", "description": "Category: general, email, social, dev, finance, work"},
-                        "pin": {"type": "string", "description": "Vault PIN, required if the vault is protected. Ask the user for it."}
+                        "category": {"type": "string", "description": "Category: general, email, social, dev, finance, work"}
                     },
                     "required": ["service", "username", "password"]
                 }
@@ -59,30 +145,16 @@ impl Tool for VaultStoreTool {
         let password = args.get("password").and_then(|v| v.as_str()).unwrap_or_default();
         let url = args.get("url").and_then(|v| v.as_str());
         let notes = args.get("notes").and_then(|v| v.as_str());
-        let pin = args.get("pin").and_then(|v| v.as_str());
         let category = args.get("category").and_then(|v| v.as_str());
 
         if service.is_empty() || username.is_empty() || password.is_empty() {
             return "Error: service, username, and password are required".to_string();
         }
 
-        // The PIN first, because it is now what *produces* the key rather than a gate standing in
-        // front of one. Asking for the encryption before checking the PIN used to work, since the
-        // key was readable either way; on a protected vault it fails with "locked" — true, and
-        // telling the caller nothing it can act on.
-        if yantrikdb_core::vault::has_pin(&ctx.db.conn()) {
-            match pin {
-                None => {
-                    return "VAULT_PIN_REQUIRED: this vault is protected. Ask the user for their \
-                            vault PIN and pass it as `pin`."
-                        .to_string()
-                }
-                Some(p) => {
-                    if !yantrikdb_core::vault::verify_pin(&ctx.db.conn(), p) {
-                        return "VAULT_PIN_INVALID: Incorrect PIN. Access denied.".to_string();
-                    }
-                }
-            }
+        // Writing needs the key as much as reading does — a credential encrypted under a key this
+        // process does not hold is a credential nobody can read back.
+        if let Err(locked) = ensure_open(&ctx.db.conn(), "a mind wants to save a credential") {
+            return locked;
         }
 
         let enc = match yantrikdb_core::vault::vault_encryption(&ctx.db.conn()) {
@@ -116,8 +188,7 @@ impl Tool for VaultGetTool {
                     "type": "object",
                     "properties": {
                         "service": {"type": "string", "description": "Exact service name to look up"},
-                        "search": {"type": "string", "description": "Search by partial service name (alternative to exact match)"},
-                        "pin": {"type": "string", "description": "Vault security PIN (required if PIN is configured). Ask the user for this."}
+                        "search": {"type": "string", "description": "Search by partial service name (alternative to exact match)"}
                     }
                 }
             }
@@ -127,25 +198,12 @@ impl Tool for VaultGetTool {
     fn execute(&self, ctx: &ToolContext, args: &serde_json::Value) -> String {
         let service = args.get("service").and_then(|v| v.as_str());
         let search = args.get("search").and_then(|v| v.as_str());
-        let pin = args.get("pin").and_then(|v| v.as_str());
 
-        // The PIN first, because it is now what *produces* the key rather than a gate standing in
-        // front of one. Asking for the encryption before checking the PIN used to work, since the
-        // key was readable either way; on a protected vault it fails with "locked" — true, and
-        // telling the caller nothing it can act on.
-        if yantrikdb_core::vault::has_pin(&ctx.db.conn()) {
-            match pin {
-                None => {
-                    return "VAULT_PIN_REQUIRED: this vault is protected. Ask the user for their \
-                            vault PIN and pass it as `pin`."
-                        .to_string()
-                }
-                Some(p) => {
-                    if !yantrikdb_core::vault::verify_pin(&ctx.db.conn(), p) {
-                        return "VAULT_PIN_INVALID: Incorrect PIN. Access denied.".to_string();
-                    }
-                }
-            }
+        // The case this whole design is for. A protected vault this process has not opened has no
+        // key, so there is no answer to give — and the answer it gives instead names the one thing
+        // that resolves it, and raises the prompt that lets the person do it.
+        if let Err(locked) = ensure_open(&ctx.db.conn(), "a mind asked for a saved credential") {
+            return locked;
         }
 
         let enc = match yantrikdb_core::vault::vault_encryption(&ctx.db.conn()) {
@@ -220,10 +278,20 @@ impl Tool for VaultListTool {
         match listed {
             Ok(entries) if entries.is_empty() => "Vault is empty. No credentials stored yet.".to_string(),
             Ok(entries) => {
+                // What "off" actually means, rather than a label. An unprotected vault is not a
+                // vault with a feature switched off: its key is in the same file as the
+                // ciphertext, so anyone holding a copy of that file holds every credential in it.
+                // A caller relaying this to a person should be able to say so.
                 let pin_status = if yantrikdb_core::vault::has_pin(&ctx.db.conn()) {
-                    "PIN protection: ENABLED"
+                    if yantrikdb_core::vault::is_unlocked() {
+                        "Locked with a passphrase, and open in this session"
+                    } else {
+                        "Locked with a passphrase, and shut — the person has to unlock it"
+                    }
                 } else {
-                    "PIN protection: DISABLED (set one with vault_set_pin for security)"
+                    "NOT protected: the key is stored in the memory database beside the \
+                     credentials, so anyone with a copy of that file can read all of them. The \
+                     person can set a passphrase from Settings > Privacy & Security."
                 };
                 let mut out = format!("{} credentials stored | {pin_status}\n\n", entries.len());
                 for e in &entries {
@@ -258,8 +326,7 @@ impl Tool for VaultDeleteTool {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "service": {"type": "string", "description": "Service name to delete"},
-                        "pin": {"type": "string", "description": "Vault PIN (required if PIN is configured)"}
+                        "service": {"type": "string", "description": "Service name to delete"}
                     },
                     "required": ["service"]
                 }
@@ -269,21 +336,16 @@ impl Tool for VaultDeleteTool {
 
     fn execute(&self, ctx: &ToolContext, args: &serde_json::Value) -> String {
         let service = args.get("service").and_then(|v| v.as_str()).unwrap_or_default();
-        let pin = args.get("pin").and_then(|v| v.as_str());
 
         if service.is_empty() {
             return "Error: service is required".to_string();
         }
 
-        // PIN verification for destructive vault operations
-        if yantrikdb_core::vault::has_pin(&ctx.db.conn()) {
-            match pin {
-                None => return "VAULT_PIN_REQUIRED: PIN required to delete vault entries. Ask the user for their vault PIN.".to_string(),
-                Some(p) if !yantrikdb_core::vault::verify_pin(&ctx.db.conn(), p) => {
-                    return "VAULT_PIN_INVALID: Incorrect PIN. Access denied.".to_string();
-                }
-                _ => {}
-            }
+        // Deleting does not need the key — the rows come out whatever is in them — but a locked
+        // vault must not be destroyable by something that cannot read it. A caller that cannot
+        // tell you what it is about to delete should not be deleting it.
+        if let Err(locked) = ensure_open(&ctx.db.conn(), "a mind wants to delete a credential") {
+            return locked;
         }
 
         match yantrikdb_core::vault::delete_by_service(&ctx.db.conn(), service) {
@@ -331,6 +393,17 @@ impl Tool for VaultGeneratePasswordTool {
 
 // ── Vault Set PIN ──
 
+/// Ask the desktop to ask the person. The mind cannot answer this one itself.
+///
+/// This tool used to take `new_pin` and `current_pin` and write them straight into the vault's
+/// wrapping, which meant the model was the thing choosing — and carrying — the secret that
+/// protects every credential on the machine. On a companion answering over Telegram that secret
+/// crossed a third party to reach a desk it was standing in front of.
+///
+/// It still exists, and a mind can still start the flow, because "the vault is not protected and
+/// it should be" is a genuinely useful thing for a companion to notice and raise. What it can no
+/// longer do is finish it: the passphrase is typed into a prompt this shell draws, on the machine,
+/// by a person. The tool's answer says that, so a model reading it knows to stop asking.
 struct VaultSetPinTool;
 
 impl Tool for VaultSetPinTool {
@@ -343,13 +416,19 @@ impl Tool for VaultSetPinTool {
             "type": "function",
             "function": {
                 "name": "vault_set_pin",
-                "description": "Set, change, or remove vault PIN",
+                "description": "Ask the desktop to prompt the person for a vault passphrase. \
+                                Takes no passphrase: you cannot set or carry one, and you must \
+                                not ask the person to tell you theirs. The person types it into \
+                                the desktop's own prompt.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["set", "change", "remove"], "description": "Action to perform"},
-                        "current_pin": {"type": "string", "description": "Current PIN (required for 'change' and 'remove')"},
-                        "new_pin": {"type": "string", "description": "New PIN to set (required for 'set' and 'change'). Minimum 4 characters."}
+                        "action": {
+                            "type": "string",
+                            "enum": ["set", "change"],
+                            "description": "'set' for a vault that has no passphrase, 'change' to \
+                                            replace the one it has. Both just raise the prompt."
+                        }
                     },
                     "required": ["action"]
                 }
@@ -359,63 +438,115 @@ impl Tool for VaultSetPinTool {
 
     fn execute(&self, ctx: &ToolContext, args: &serde_json::Value) -> String {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("set");
-        let current_pin = args.get("current_pin").and_then(|v| v.as_str());
-        let new_pin = args.get("new_pin").and_then(|v| v.as_str());
-        let has_pin = yantrikdb_core::vault::has_pin(&ctx.db.conn());
+        let protected = yantrikdb_core::vault::has_pin(&ctx.db.conn());
+
+        // Loud rather than ignored. A model that passed a passphrase here has been told to ask the
+        // person for it by something — an older prompt, a habit, its own reasoning — and the one
+        // useful thing to do is say that the secret it is holding should not have been said out
+        // loud, so whoever reads the transcript knows to change it.
+        for leaked in ["new_pin", "current_pin", "pin", "passphrase", "password"] {
+            if args.get(leaked).is_some() {
+                return format!(
+                    "REFUSED: `{leaked}` is not an argument of this tool and was ignored. A vault \
+                     passphrase cannot travel through a tool call — it is typed on the machine, \
+                     into the desktop's own prompt. If a person just told you one, tell them to \
+                     change it: it is now in this conversation."
+                );
+            }
+        }
 
         match action {
-            "set" => {
-                if has_pin {
-                    return "A PIN is already set. Use action='change' with current_pin to update it.".to_string();
+            "set" | "change" => {
+                if action == "set" && protected {
+                    return "This vault already has a passphrase. Use action='change' to have the \
+                            desktop ask for a new one."
+                        .to_string();
                 }
-                let pin = match new_pin {
-                    Some(p) if p.len() >= 4 => p,
-                    Some(_) => return "Error: PIN must be at least 4 characters".to_string(),
-                    None => return "Error: new_pin is required".to_string(),
-                };
-                match yantrikdb_core::vault::set_pin(&ctx.db.conn(), pin) {
-                    Ok(()) => "Vault PIN set successfully. vault_get and vault_delete now require this PIN.".to_string(),
-                    Err(e) => format!("Error: {e}"),
+                if action == "change" && !protected {
+                    return "This vault has no passphrase yet. Use action='set' to have the \
+                            desktop ask for one."
+                        .to_string();
                 }
-            }
-            "change" => {
-                if !has_pin {
-                    return "No PIN is set. Use action='set' to create one.".to_string();
-                }
-                match current_pin {
-                    None => return "Error: current_pin is required to change PIN".to_string(),
-                    Some(p) if !yantrikdb_core::vault::verify_pin(&ctx.db.conn(), p) => {
-                        return "VAULT_PIN_INVALID: Current PIN is incorrect.".to_string();
-                    }
-                    _ => {}
-                }
-                let pin = match new_pin {
-                    Some(p) if p.len() >= 4 => p,
-                    Some(_) => return "Error: new PIN must be at least 4 characters".to_string(),
-                    None => return "Error: new_pin is required".to_string(),
-                };
-                match yantrikdb_core::vault::set_pin(&ctx.db.conn(), pin) {
-                    Ok(()) => "Vault PIN changed successfully.".to_string(),
-                    Err(e) => format!("Error: {e}"),
-                }
+                request_unlock(
+                    if protected {
+                        "you asked to change the vault's passphrase"
+                    } else {
+                        "a mind suggested locking the vault with a passphrase"
+                    },
+                    !protected,
+                );
+                "The desktop is now asking the person for a vault passphrase. You will not see it \
+                 and you do not need it. Tell them it is on screen, and stop here."
+                    .to_string()
             }
             "remove" => {
-                if !has_pin {
-                    return "No PIN is set.".to_string();
-                }
-                match current_pin {
-                    None => return "Error: current_pin is required to remove PIN".to_string(),
-                    Some(p) if !yantrikdb_core::vault::verify_pin(&ctx.db.conn(), p) => {
-                        return "VAULT_PIN_INVALID: Current PIN is incorrect.".to_string();
-                    }
-                    _ => {}
-                }
-                match yantrikdb_core::vault::remove_pin(&ctx.db.conn()) {
-                    Ok(()) => "Vault PIN removed. Credentials are now accessible without PIN verification.".to_string(),
-                    Err(e) => format!("Error: {e}"),
-                }
+                // Refused outright rather than routed to a prompt. Removing the passphrase writes
+                // the key back into the file in the clear — it is the one vault operation that
+                // makes the machine less safe, and it is not something a mind should be able to
+                // put in front of a person as a one-click suggestion.
+                "REFUSED: removing the vault's passphrase puts its key back in the memory \
+                 database in the clear, where anyone with a copy of that file can read every \
+                 credential. If the person wants that, they can do it in Settings > Privacy & \
+                 Security, where it says so."
+                    .to_string()
             }
-            _ => "Error: action must be 'set', 'change', or 'remove'".to_string(),
+            _ => "Error: action must be 'set' or 'change'".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod vault_tool_tests {
+    use super::*;
+
+    /// The latch is process-wide, so these take turns.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn drain() {
+        let _ = take_unlock_request();
+    }
+
+    /// A retrying caller cannot rewrite what the person is already reading.
+    ///
+    /// The realistic shape of this: a model gets `VAULT_LOCKED`, does not understand that it has
+    /// to stop, and calls `vault_get` four more times. Each call raises the latch again. If the
+    /// last reason won, the card's explanation would change under the person's eyes while they
+    /// typed.
+    #[test]
+    fn the_first_reason_is_the_one_the_person_reads() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        drain();
+
+        request_unlock("a mind asked for a saved credential", false);
+        request_unlock("something else entirely", true);
+
+        let (reason, first_time) = take_unlock_request().expect("a request should be pending");
+        assert_eq!(reason, "a mind asked for a saved credential");
+        assert!(!first_time);
+    }
+
+    /// Taking it clears it. A prompt that came back every second would be unusable.
+    #[test]
+    fn a_request_is_taken_once() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        drain();
+
+        assert!(take_unlock_request().is_none(), "nothing asked, nothing pending");
+        request_unlock("a mind asked for a saved credential", false);
+        assert!(take_unlock_request().is_some());
+        assert!(take_unlock_request().is_none());
+    }
+
+    /// The locked answer is recognisable, and says the two things a model has to know.
+    ///
+    /// It is the difference between this and a generic error: a model reading `Error: …` retries,
+    /// and a model reading this tells the person to look at their screen. The second half — that
+    /// it must not ask for the passphrase — is there because the obvious next move for a helpful
+    /// model is to ask, and asking is the failure.
+    #[test]
+    fn the_locked_answer_tells_a_mind_to_stop_rather_than_to_ask() {
+        assert!(LOCKED_ANSWER.starts_with("VAULT_LOCKED:"));
+        assert!(LOCKED_ANSWER.contains("the person has to unlock it"));
+        assert!(LOCKED_ANSWER.contains("you cannot carry it"));
     }
 }

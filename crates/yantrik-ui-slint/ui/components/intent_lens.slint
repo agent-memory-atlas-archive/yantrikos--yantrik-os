@@ -405,6 +405,197 @@ export component ApprovalCard inherits Rectangle {
     }   // body — see the note at the top of this component about why it is here
 }
 
+/// What the desktop is asking for the vault passphrase about.
+///
+/// `reason` is written by the shell, never by whatever provoked it: a mind asking for a credential
+/// gets its request turned into one of a handful of fixed sentences before it reaches here, so
+/// nothing a caller composed is ever drawn as the explanation for a password box.
+export struct VaultUnlockRequest {
+    /// Why this is on screen, in the person's words. Empty means nothing is being asked.
+    reason: string,
+    /// What was wrong with the last attempt, or empty.
+    error: string,
+    /// True when answering this will protect the vault for the first time rather than open it.
+    first-time: bool,
+}
+
+/// The only way a vault passphrase gets into this machine.
+///
+/// Deliberately the same shape, glass and border language as `ApprovalCard` above, because it is
+/// the same kind of moment: the machine has stopped and is waiting for a person, and the person
+/// should recognise on sight that this is one of those and not a form an app drew. It is a
+/// stronger claim than the approval card makes, though — an approval is a click, and a click can
+/// be described; this is a secret, and there is no control-surface action, no tool argument and no
+/// RPC method that can supply one. `no_published_action_can_carry_a_passphrase` in
+/// `control_approvals.rs` is what keeps that true as the surface grows.
+export component VaultUnlockCard inherits Rectangle {
+    in property <VaultUnlockRequest> data;
+    /// The typed passphrase, on its way to `vault_unlock::adopt` and nowhere else.
+    callback submit(string);
+    callback dismiss();
+
+    // Same reason as ApprovalCard: a plain Rectangle whose children are all behind `if` reports a
+    // preferred height of zero, and the card then draws outside whatever box was sized from it.
+    // One unconditional layout owns the height; everything conditional lives inside it.
+    height: body.preferred-height;
+    background: transparent;
+
+    body := VerticalLayout {
+
+    Rectangle {
+        border-radius: Theme.r-lg;
+        // Opaque for the same reason ApprovalCard is: this is drawn over whatever screen is up,
+        // and a box asking for the passphrase to every credential on the machine must not have
+        // another window's words showing through it.
+        background: Theme.bg-card;
+        border-width: 1px;
+        // Warning-edged, always. There is no "routine" version of being asked for the passphrase
+        // that protects every credential on the machine.
+        border-color: Theme.color-warning;
+        drop-shadow-blur: 18px;
+        drop-shadow-color: Theme.overlay-shadow;
+        height: card-body.preferred-height;
+
+        card-body := VerticalLayout {
+            padding: Theme.sp-3;
+            spacing: Theme.sp-2;
+
+            HorizontalLayout {
+                spacing: Theme.sp-2;
+
+                Rectangle {
+                    width: 6px; height: 6px;
+                    y: 5px;
+                    border-radius: 3px;
+                    background: Theme.color-warning;
+                }
+                Text {
+                    text: root.data.first-time ? "Choose a passphrase for your vault"
+                        : "Your vault passphrase";
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body-strong;
+                    horizontal-stretch: 1;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
+
+            Text {
+                text: root.data.reason;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+
+            // What it is actually for, said once. A person being asked for a password by their own
+            // desktop deserves to know what it unlocks and what it does not, and the honest answer
+            // is short: the file, not the running session.
+            Text {
+                text: root.data.first-time
+                    ? "It wraps the key to your saved credentials. Nothing already saved is lost. If you forget it, they cannot be recovered."
+                    : "Nobody else can supply this — not an app, not an assistant. Only what you type here.";
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                wrap: word-wrap;
+            }
+
+            // The field. `input-type: password` is not a security control — it stops a shoulder,
+            // not a process — but the shell is the process, and this string leaves it only for
+            // `vault::unlock`'s key derivation.
+            Rectangle {
+                height: Theme.h-regular;
+                border-radius: Theme.r-md;
+                background: Theme.bg-elevated;
+                border-width: 1px;
+                border-color: pass-input.has-focus ? Theme.cyan : Theme.border-default;
+
+                HorizontalLayout {
+                    padding-left: Theme.sp-2;
+                    padding-right: Theme.sp-2;
+
+                    pass-input := TextInput {
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-body;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        input-type: password;
+                        single-line: true;
+                        accepted => {
+                            root.submit(self.text);
+                            // Cleared on the way out, whatever happens next. A wrong passphrase
+                            // must not be left sitting in a widget for the next person at the
+                            // keyboard to reveal.
+                            self.text = "";
+                        }
+                    }
+                }
+            }
+
+            if root.data.error != "" : Text {
+                text: root.data.error;
+                color: Theme.color-danger;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.sp-2;
+                padding-top: Theme.sp-1;
+
+                Rectangle {
+                    height: Theme.h-regular;
+                    horizontal-stretch: 1;
+                    border-radius: Theme.r-md;
+                    background: later-ta.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
+                    border-width: 1px;
+                    border-color: Theme.border-default;
+
+                    later-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            pass-input.text = "";
+                            root.dismiss();
+                        }
+                    }
+                    Text {
+                        text: "Not now";
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-body-strong;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    height: Theme.h-regular;
+                    horizontal-stretch: 1;
+                    border-radius: Theme.r-md;
+                    background: unlock-ta.has-hover ? Theme.amber-glow : transparent;
+                    border-width: 1px;
+                    border-color: Theme.amber;
+
+                    unlock-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.submit(pass-input.text);
+                            pass-input.text = "";
+                        }
+                    }
+                    Text {
+                        text: root.data.first-time ? "Lock the vault" : "Unlock";
+                        color: Theme.amber-light;
+                        font-size: Theme.fs-body-strong;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    }   // body — see the note at the top of this component about why it is here
+}
+
 export component IntentLens inherits Rectangle {
     in property <bool> is-open: false;
     in property <bool> is-thinking: false;
