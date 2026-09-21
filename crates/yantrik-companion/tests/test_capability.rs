@@ -2,6 +2,14 @@
 //!
 //! These tests verify the adaptive intelligence layer that adjusts
 //! system behavior based on detected model size.
+//!
+//! The per-tier tool budgets below (10/20/25/30, and 10 for degraded) come from
+//! 8d4a1de, which raised them from 3/5/8/15. That commit updated the unit tests
+//! living next to the code in yantrik-ml but not this integration suite, so
+//! these have asserted the pre-8d4a1de numbers ever since. Same commit for the
+//! StructuredJSON -> NativeFunctionCall expectations: a family whose provider
+//! renders the tool template itself (Qwen, Llama, Phi, Nemotron and the cloud
+//! families) is promoted out of StructuredJSON in `from_model_name`.
 
 use yantrik_ml::{ModelCapabilityProfile, ModelTier, ToolCallMode, SlotMode, ToolFamily};
 
@@ -46,7 +54,8 @@ fn tier_detection_unknown_defaults_medium() {
 fn profile_tiny_model() {
     let p = ModelCapabilityProfile::from_model_name("qwen3.5:0.6b");
     assert_eq!(p.tier, ModelTier::Tiny);
-    assert_eq!(p.max_tools_per_prompt, 3);
+    assert_eq!(p.max_tools_per_prompt, 10);
+    // Tiny stays on MCQ: the native-tool promotion only lifts StructuredJSON.
     assert!(p.uses_mcq());
     assert!(!p.multi_step_capable);
     assert!(!p.supports_repair_loop);
@@ -60,8 +69,8 @@ fn profile_tiny_model() {
 fn profile_small_model() {
     let p = ModelCapabilityProfile::from_model_name("qwen3.5:3b");
     assert_eq!(p.tier, ModelTier::Small);
-    assert_eq!(p.max_tools_per_prompt, 5);
-    assert_eq!(p.tool_call_mode, ToolCallMode::StructuredJSON);
+    assert_eq!(p.max_tools_per_prompt, 20);
+    assert_eq!(p.tool_call_mode, ToolCallMode::NativeFunctionCall);
     assert!(p.use_family_routing);
     assert!(!p.multi_step_capable);
     assert!(p.supports_repair_loop);
@@ -72,8 +81,8 @@ fn profile_small_model() {
 fn profile_medium_model() {
     let p = ModelCapabilityProfile::from_model_name("qwen3.5:9b");
     assert_eq!(p.tier, ModelTier::Medium);
-    assert_eq!(p.max_tools_per_prompt, 8);
-    assert_eq!(p.tool_call_mode, ToolCallMode::StructuredJSON);
+    assert_eq!(p.max_tools_per_prompt, 25);
+    assert_eq!(p.tool_call_mode, ToolCallMode::NativeFunctionCall);
     assert!(p.use_family_routing);
     assert!(p.multi_step_capable);
     assert!(p.supports_repair_loop);
@@ -89,7 +98,7 @@ fn profile_medium_model() {
 fn profile_large_model() {
     let p = ModelCapabilityProfile::from_model_name("qwen3.5:27b-nothink");
     assert_eq!(p.tier, ModelTier::Large);
-    assert_eq!(p.max_tools_per_prompt, 15);
+    assert_eq!(p.max_tools_per_prompt, 30);
     assert!(p.uses_native_tools());
     assert!(p.multi_step_capable);
     assert_eq!(p.max_agent_steps, 15);
@@ -101,7 +110,7 @@ fn profile_large_model() {
 fn profile_degraded() {
     let d = ModelCapabilityProfile::degraded();
     assert_eq!(d.tier, ModelTier::Tiny);
-    assert_eq!(d.max_tools_per_prompt, 3);
+    assert_eq!(d.max_tools_per_prompt, 10);
     assert_eq!(d.max_effective_context, 2048);
     assert_eq!(d.max_history_turns, 2);
     assert!(!d.supports_repair_loop);
@@ -210,7 +219,7 @@ fn profile_summary_contains_key_info() {
     let s = p.summary();
     assert!(s.contains("medium"), "Summary: {}", s);
     assert!(s.contains("9.0B"), "Summary: {}", s);
-    assert!(s.contains("StructuredJSON"), "Summary: {}", s);
+    assert!(s.contains("NativeFunctionCall"), "Summary: {}", s);
     assert!(s.contains("family_routing=true"), "Summary: {}", s);
 }
 
@@ -227,9 +236,9 @@ fn tier_ordering() {
 
 #[test]
 fn medium_profile_limits_tools() {
-    // A 9B model should get max 8 tools per prompt
+    // A 9B model should get max 25 tools per prompt
     let p = ModelCapabilityProfile::from_model_name("qwen3.5:9b");
-    assert_eq!(p.max_tools_per_prompt, 8);
+    assert_eq!(p.max_tools_per_prompt, 25);
     assert!(p.use_family_routing);
 
     // Family routing for "check email" should return Communicate family tools

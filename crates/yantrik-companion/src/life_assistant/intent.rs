@@ -205,31 +205,64 @@ fn required_fields(task_type: &str) -> Vec<String> {
 
 // ── Keyword Scoring ──
 
+/// Does `text` use `keyword` as a word, rather than merely contain its letters?
+///
+/// `str::contains` was matching "eat" inside "weather" and "in " inside
+/// "ordering ", which is how "what is the weather today" came out as a request
+/// for a restaurant. A keyword counts only when both of its ends sit against a
+/// non-alphanumeric character or the end of the string. Multi-word phrases work
+/// the same way — their interior spaces are part of the needle.
+pub(crate) fn contains_keyword(text: &str, keyword: &str) -> bool {
+    if keyword.is_empty() {
+        return false;
+    }
+    text.match_indices(keyword).any(|(i, m)| {
+        let before_ok = text[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = text[i + m.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        before_ok && after_ok
+    })
+}
+
 /// Score how well the text matches a keyword list.
 /// Returns 0.0-1.0 based on number and quality of matches.
 fn score_keywords(text: &str, keywords: &[&str]) -> f64 {
-    let mut hits = 0;
-    let mut phrase_hits = 0;
+    let mut hits = 0u32;
+    let mut phrase_hits = 0u32;
 
     for kw in keywords {
+        if !contains_keyword(text, kw) {
+            continue;
+        }
         if kw.contains(' ') {
             // Multi-word phrase — worth more
-            if text.contains(kw) {
-                phrase_hits += 1;
-            }
-        } else if text.contains(kw) {
+            phrase_hits += 1;
+        } else {
             hits += 1;
         }
     }
 
     // Phrases are worth double
-    let weighted = hits as f64 + phrase_hits as f64 * 2.0;
-    let max_possible = keywords.len() as f64;
+    let weighted = hits + phrase_hits * 2;
+    if weighted == 0 {
+        return 0.0;
+    }
 
-    // Sigmoid-ish: even 2-3 hits should give a decent score
-    let raw = weighted / max_possible.max(1.0);
-    // Boost: 1 hit = ~0.3, 2 hits = ~0.5, 3+ hits = ~0.7+
-    (raw * 3.0).min(1.0)
+    // Saturating curve: 1 hit = 0.30, 2 = 0.51, 3 = 0.66, 4 = 0.76 — which is
+    // what the comment here has always promised. It did not deliver: the score
+    // was `weighted / keywords.len()`, so the answer depended on how long the
+    // list happened to be. RESTAURANT_KEYWORDS has 36 entries, so "I want sushi
+    // tonight" scored 1/36 * 3 = 0.083 against a 0.2 threshold and was not a
+    // life task at all; the same one hit in the 15-entry hotel list scored 0.2
+    // and just barely was. Every keyword added to a task type made that task
+    // type harder to detect. How many of its words the user said is the signal;
+    // how many words we know is not.
+    1.0 - 0.7_f64.powi(weighted as i32)
 }
 
 // ── Parameter Extraction ──
@@ -609,12 +642,16 @@ fn extract_service_type(text: &str, params: &mut HashMap<String, String>) {
 
 /// Extract a "noun phrase" — consecutive words until a stop word or punctuation.
 fn extract_noun_phrase(text: &str) -> String {
+    // Determiners belong here alongside the prepositions: without "this" the
+    // phrase after "in " in "hotel in paris this weekend" ran on to the cap and
+    // the location came out as "paris this weekend". The date is extracted
+    // separately, so the noun phrase has no business swallowing it.
     let stop_words = [
         "and", "or", "but", "the", "a", "an", "is", "are", "was", "were",
-        "that", "which", "who", "where", "when", "how", "what", "with",
-        "for", "from", "to", "of", "on", "at", "by", "in", "near",
-        "under", "below", "above", "please", "can", "could", "would",
-        "should", "i", "me", "my", "you", "your",
+        "that", "this", "these", "those", "which", "who", "where", "when",
+        "how", "what", "with", "for", "from", "to", "of", "on", "at", "by",
+        "in", "near", "under", "below", "above", "please", "can", "could",
+        "would", "should", "i", "me", "my", "you", "your", "it", "we", "us",
     ];
 
     let words: Vec<&str> = text.split_whitespace().collect();

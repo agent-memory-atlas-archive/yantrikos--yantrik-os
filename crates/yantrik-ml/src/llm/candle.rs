@@ -504,8 +504,12 @@ mod tests {
 
     #[test]
     fn test_generation_config_default() {
+        // f1908ff raised this default from 512 to 2048 when the capability
+        // profiles landed: 2048 is the Medium tier's `max_generation_tokens`,
+        // and a profile that wants something else sets it explicitly through
+        // `tool_gen_config`/`chat_gen_config`. This test kept asserting 512.
         let config = GenerationConfig::default();
-        assert_eq!(config.max_tokens, 512);
+        assert_eq!(config.max_tokens, 2048);
         assert!((config.temperature - 0.7).abs() < 0.001);
         assert_eq!(config.top_p, Some(0.9));
     }

@@ -12,7 +12,7 @@
 //! - Morning brief: once daily at configured time
 //!
 //! Architecture:
-//! ```
+//! ```text
 //! ┌─────────────────────────────────────────┐
 //! │         Stewardship Loop (thread)        │
 //! │                                          │

@@ -70,6 +70,29 @@ fn wait(queue: &Queue, window: &MinimalSoftwareWindow, mut condition: impl FnMut
     }
     tick(queue, window);
 }
+/// Directory the UI screenshots are written to.
+///
+/// This used to be `CARGO_MANIFEST_DIR/../../target`, which names the build
+/// directory only when the build directory is the default one inside the
+/// checkout. CI builds this tree from a git worktree against a shared target
+/// directory outside it, so that path pointed at a directory that does not
+/// exist, and `File::create(..).unwrap()` panicked with ENOENT before the test
+/// had asserted anything. It read like a missing display; it is not one. The
+/// window below is a `MinimalSoftwareWindow` behind a substituted
+/// `slint::platform::Platform` and never touches X11 or Wayland, so this test
+/// runs headless — it just has to put its PNGs somewhere that exists.
+///
+/// The test binary lives in `<target>/<profile>/deps/`, so its own path names
+/// the real build directory wherever cargo put it.
+fn shot_dir() -> PathBuf {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("ui-screenshots")))
+        .unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 fn screenshot(window: &MinimalSoftwareWindow, name: &str) {
     let size = window.size();
     let mut pixels = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(size.width, size.height);
@@ -77,9 +100,7 @@ fn screenshot(window: &MinimalSoftwareWindow, name: &str) {
     window.draw_if_needed(|r| {
         r.render(pixels.make_mut_slice(), size.width as usize);
     });
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target")
-        .join(name);
+    let path = shot_dir().join(name);
     let mut png = png::Encoder::new(
         std::fs::File::create(path).unwrap(),
         size.width,

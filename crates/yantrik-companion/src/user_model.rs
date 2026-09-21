@@ -651,22 +651,49 @@ mod tests {
 
     #[test]
     fn test_category_preference_shrinkage() {
+        // `category_preference` is a ratio against the global mean — it answers
+        // "does this category do better than the user's average?", which is what
+        // makes it usable as a multiplier. This test used to send five Social
+        // messages, have all five answered, and then assert Social > 1.0. Every
+        // observation in the model was Social, so Social *was* the average and
+        // the ratio came back 0.99: the test asserted a contrast it never set
+        // up, and no estimator could have passed it. Give it two categories that
+        // actually differ.
         let model = UserModel::new();
         let now = 1700000000.0;
 
-        // Send 5 Social messages, all responded to quickly
         for i in 0..5 {
-            let t = now + (i as f64) * 3600.0;
+            let t = now + (i as f64) * 7200.0;
+            // Social: answered in 2 minutes.
             model.on_proactive_sent("Humor", "Social", t);
-            model.on_user_message(t + 120.0); // 2 min response
+            model.on_user_message(t + 120.0);
+            // Research: ignored.
+            model.on_proactive_sent("Curiosity", "Research", t + 1800.0);
+            model.on_proactive_ignored(t + 3600.0);
         }
 
         let social_pref = model.category_preference("Social");
-        let unknown_pref = model.category_preference("Research");
+        let research_pref = model.category_preference("Research");
+        let unknown_pref = model.category_preference("Finance");
 
-        // Social should be boosted, Research should be near 1.0
         assert!(social_pref > 1.0, "Social preference should be boosted, got {}", social_pref);
-        assert!((unknown_pref - 1.0).abs() < 0.2, "Unknown category should be near 1.0, got {}", unknown_pref);
+        assert!(research_pref < 1.0, "Research preference should be damped, got {}", research_pref);
+        assert!(
+            social_pref > research_pref,
+            "Answered category should outrank ignored one, got {} vs {}",
+            social_pref, research_pref
+        );
+        // A category with no observations of its own falls back to the global
+        // mean, so its ratio is exactly 1.0.
+        assert!(
+            (unknown_pref - 1.0).abs() < 0.2,
+            "Unknown category should be near 1.0, got {}",
+            unknown_pref
+        );
+        // And the contract holds: the multiplier stays inside [0.5, 1.5].
+        for p in [social_pref, research_pref, unknown_pref] {
+            assert!((0.5..=1.5).contains(&p), "preference out of bounds: {}", p);
+        }
     }
 
     #[test]

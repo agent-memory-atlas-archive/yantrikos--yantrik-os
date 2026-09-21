@@ -58,28 +58,48 @@ pub fn check_similarity(new_message: &str, recent_messages: &[String]) -> f64 {
     max_sim
 }
 
-/// Check if the message starts similarly to recent messages.
-/// Returns true if the opening words (first 4) match any recent message.
-pub fn check_opening_similarity(new_message: &str, recent_messages: &[String]) -> bool {
-    let new_opening: String = new_message
+/// Number of leading words that must agree before two openings count as alike.
+const OPENING_MATCH_WORDS: usize = 3;
+
+/// Normalize the first four words of a message for opening comparison.
+fn opening_words(message: &str) -> Vec<String> {
+    message
         .split_whitespace()
         .take(4)
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Check if the message starts similarly to recent messages.
+///
+/// Returns true when a recent message shares the first
+/// [`OPENING_MATCH_WORDS`] words with this one.
+///
+/// This used to require all four opening words to be equal, which is not the
+/// question the gate is asking. "Hey there, how are you doing today?" after
+/// "Hey there, how is the weather?" is precisely the sameness the companion is
+/// supposed to catch itself doing, and exact equality let it through because
+/// the fourth word differed. Punctuation is stripped too, so "Hey there," and
+/// "Hey there" are the same opening.
+pub fn check_opening_similarity(new_message: &str, recent_messages: &[String]) -> bool {
+    let new_opening = opening_words(new_message);
 
     if new_opening.is_empty() {
         return false;
     }
 
     for msg in recent_messages {
-        let msg_opening: String = msg
-            .split_whitespace()
-            .take(4)
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
-        if msg_opening == new_opening {
+        let msg_opening = opening_words(msg);
+        // A message shorter than the window is compared on all of it, so a
+        // repeated one-word greeting still counts as a repeated opening.
+        let n = OPENING_MATCH_WORDS
+            .min(new_opening.len())
+            .min(msg_opening.len());
+        if n > 0 && new_opening[..n] == msg_opening[..n] {
             return true;
         }
     }

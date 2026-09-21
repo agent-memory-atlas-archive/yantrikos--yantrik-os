@@ -191,10 +191,28 @@ fn is_cancel(text: &str) -> bool {
         return true;
     }
 
-    // Prefix patterns
-    let prefixes = ["cancel ", "stop the ", "abort the "];
-    if prefixes.iter().any(|p| text.starts_with(p)) {
-        return true;
+    // Verb + object, but only when the object is the running recipe itself.
+    //
+    // This was a bare `starts_with("cancel ")`, so every sentence opening with
+    // the verb aborted the recipe: "cancel my appointment" and "stop the
+    // download" are *new tasks* the user is asking for, and while a recipe
+    // happened to be running they cancelled it instead and the request was
+    // never heard. `classify` calls this first, ahead of every other branch,
+    // so there was no second chance. The verb alone does not say what is being
+    // cancelled; the object does.
+    const SELF_OBJECTS: &[&str] = &[
+        "that", "this", "it", "them", "all", "everything", "the whole thing",
+        "the recipe", "this recipe", "the task", "this task",
+        "the step", "this step", "the run", "this run",
+        "what you're doing", "what you are doing",
+    ];
+    for verb in ["cancel", "stop", "abort"] {
+        if let Some(rest) = text.strip_prefix(verb).and_then(|r| r.strip_prefix(' ')) {
+            let object = rest.trim().trim_end_matches(['.', '!', '?']).trim();
+            if SELF_OBJECTS.contains(&object) {
+                return true;
+            }
+        }
     }
 
     false
@@ -253,7 +271,12 @@ mod tests {
         assert!(is_cancel("nevermind"));
         assert!(is_cancel("cancel that"));
         assert!(is_cancel("cancel recipe"));
-        assert!(!is_cancel("cancel my appointment")); // This is ambiguous but we catch it via prefix
+        assert!(is_cancel("stop the recipe"));
+        assert!(is_cancel("abort everything"));
+        // A verb the user aimed at something else. These are requests, not
+        // recipe control, and must fall through to normal handling.
+        assert!(!is_cancel("cancel my appointment"));
+        assert!(!is_cancel("stop the download"));
         assert!(!is_cancel("how do i cancel")); // Not a cancel command
     }
 

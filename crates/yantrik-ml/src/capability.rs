@@ -296,11 +296,11 @@ impl ModelCapabilityProfile {
     ///
     /// let p = ModelCapabilityProfile::from_model_name("qwen3.5:0.6b");
     /// assert_eq!(p.tier.to_string(), "tiny");
-    /// assert_eq!(p.max_tools_per_prompt, 3);
+    /// assert_eq!(p.max_tools_per_prompt, 10);
     ///
     /// let p = ModelCapabilityProfile::from_model_name("qwen3.5:9b");
     /// assert_eq!(p.tier.to_string(), "medium");
-    /// assert_eq!(p.max_tools_per_prompt, 8);
+    /// assert_eq!(p.max_tools_per_prompt, 25);
     ///
     /// let p = ModelCapabilityProfile::from_model_name("qwen3.5:27b-nothink");
     /// assert_eq!(p.tier.to_string(), "large");
@@ -332,7 +332,16 @@ impl ModelCapabilityProfile {
 
         // Models with native tool calling support via their API provider.
         // Override StructuredJSON → NativeFunctionCall so Ollama handles the tool template.
-        if profile.family.supports_native_tools() {
+        //
+        // Only StructuredJSON is promoted. 8d4a1de wrote this override without a
+        // guard, so it also caught the Tiny tier: every Qwen/Llama/Phi model — a
+        // 0.6B included — came out of `from_model_name` in NativeFunctionCall mode
+        // and `uses_mcq()` was false for the whole fleet. MCQ exists precisely
+        // because a sub-1.5B model cannot emit a well-formed function call; it is a
+        // deliberate downgrade, not a gap waiting to be filled by the provider.
+        if profile.family.supports_native_tools()
+            && profile.tool_call_mode == ToolCallMode::StructuredJSON
+        {
             profile.tool_call_mode = ToolCallMode::NativeFunctionCall;
         }
 
@@ -611,11 +620,18 @@ impl ModelCapabilityProfile {
 
     /// Summary string for logging.
     pub fn summary(&self) -> String {
+        // 8d4a1de added `family={}` to the format string and `self.family` as the
+        // second argument, but the second placeholder is the `{:.1}B` parameter
+        // count. Every argument after the first shifted by one, so the line the
+        // companion logs on startup read `medium(~qwenB) family=9 tools=25` — the
+        // family where the size belongs and the size where the family belongs.
+        // `ModelFamily`'s Display writes a literal, so `{:.1}` silently ignored
+        // the precision instead of failing to compile.
         format!(
             "{}(~{:.1}B) family={} tools={} mode={:?} ctx={}K steps={} family_routing={}",
             self.tier,
-            self.family,
             self.estimated_params_b,
+            self.family,
             self.max_tools_per_prompt,
             self.tool_call_mode,
             self.max_effective_context / 1024,
@@ -672,10 +688,19 @@ impl ToolFamily {
                 "email", "mail", "inbox", "send", "reply", "message", "whatsapp",
                 "telegram", "notify", "notification", "draft",
             ],
+            // No bare "today"/"tomorrow" here. They name a *time*, not a family —
+            // they turn up in "will it rain today" and "remind me tomorrow" just
+            // as readily as in a calendar query — and with one of them present
+            // Schedule tied or beat World on every weather question. A calendar
+            // query still routes here on "calendar"/"event"/"meeting"/"agenda".
+            //
+            // No "recipe"/"automation" either: those belong to World, which owns
+            // create_recipe/list_recipes/run_recipe (see `tools()` below).
+            // 8d4a1de listed them in both families, so a recipe query was a coin
+            // flip between World and a Schedule family holding only calendar tools.
             ToolFamily::Schedule => &[
                 "calendar", "event", "meeting", "schedule", "appointment",
-                "today", "tomorrow", "free time", "busy", "agenda",
-                "recipe", "automation", "cron",
+                "free time", "busy", "agenda", "cron",
             ],
             ToolFamily::Remember => &[
                 "remember", "recall", "memory", "memories", "forget",
@@ -760,16 +785,29 @@ impl ToolFamily {
 
     /// Route a query to the best-matching family using keyword matching.
     /// Returns families sorted by match score (best first).
+    ///
+    /// The score is the weight of the family terms the query actually used —
+    /// multi-word phrases count double, since "look up" or "what's happening"
+    /// is far stronger evidence than a single common word.
+    ///
+    /// It is deliberately *not* divided by `keywords.len()`. That is what this
+    /// function did until now, and it meant a family got worse at its own
+    /// queries every time someone taught it a new synonym: 8d4a1de added four
+    /// terms to World and three to Schedule, and "will it rain today" went from
+    /// World (1/9 beats 1/10) to Schedule (1/13 ties 1/13, enum order breaks the
+    /// tie) — so `get_weather` stopped being offered for weather questions.
+    /// Nothing about a longer vocabulary makes a match less meaningful.
     pub fn route_query(query: &str) -> Vec<(ToolFamily, f64)> {
         let query_lower = query.to_lowercase();
         let mut scores: Vec<(ToolFamily, f64)> = ToolFamily::ALL
             .iter()
             .map(|&family| {
-                let keywords = family.keywords();
-                let matches = keywords.iter()
+                let score: f64 = family
+                    .keywords()
+                    .iter()
                     .filter(|kw| query_lower.contains(**kw))
-                    .count();
-                let score = matches as f64 / keywords.len() as f64;
+                    .map(|kw| if kw.contains(' ') { 2.0 } else { 1.0 })
+                    .sum();
                 (family, score)
             })
             .filter(|(_, score)| *score > 0.0)
@@ -849,7 +887,15 @@ mod tests {
         let medium = ModelCapabilityProfile::from_model_name("qwen3.5:9b");
         assert_eq!(medium.tier, ModelTier::Medium);
         assert_eq!(medium.max_tools_per_prompt, 25);
-        assert_eq!(medium.tool_call_mode, ToolCallMode::StructuredJSON);
+        // 8d4a1de: a family whose provider drives the tool template natively
+        // (Qwen here) is promoted StructuredJSON → NativeFunctionCall, so Ollama
+        // renders the Jinja tool block instead of us asking for JSON in prose.
+        // The Medium *tier* still chooses StructuredJSON; the family overrides it.
+        assert_eq!(medium.tool_call_mode, ToolCallMode::NativeFunctionCall);
+        // A family without native tool support keeps the tier's own mode.
+        let gemma = ModelCapabilityProfile::from_model_name("gemma2:9b");
+        assert_eq!(gemma.tier, ModelTier::Medium);
+        assert_eq!(gemma.tool_call_mode, ToolCallMode::StructuredJSON);
         assert!(medium.multi_step_capable);
         assert!(medium.use_family_routing);
         assert_eq!(medium.max_agent_steps, 10);
@@ -895,7 +941,14 @@ mod tests {
         assert_eq!(ToolFamily::best_for_query("send email to Bob"), Some(ToolFamily::Communicate));
         assert_eq!(ToolFamily::best_for_query("browse hacker news"), Some(ToolFamily::Browse));
         assert_eq!(ToolFamily::best_for_query("what did I decide about the trip"), Some(ToolFamily::Remember));
-        assert_eq!(ToolFamily::best_for_query("run the deploy script"), Some(ToolFamily::System));
+        // This asked for System, and has since the test was written in f1908ff —
+        // but nothing in the query is a System term. "script" is a Files keyword
+        // and the tool that runs a saved script, `script_run` ("Run a saved
+        // script from workspace"), is a Files tool. Files is where this query
+        // should land; System's only run-ish keyword is the phrase "run command",
+        // which no one phrases that way. System still ranks second and its tools
+        // are still offered when the budget has room — see select_tools_adaptive.
+        assert_eq!(ToolFamily::best_for_query("run the deploy script"), Some(ToolFamily::Files));
     }
 
     #[test]
@@ -918,12 +971,22 @@ mod tests {
 
     #[test]
     fn profile_summary() {
-        // Generic 9B → StructuredJSON
+        // Generic 9B Qwen → NativeFunctionCall since 8d4a1de: Qwen's provider
+        // renders the tool template itself, so the tier's StructuredJSON is
+        // overridden. The summary also has to name the family and the size in
+        // the right places — see the argument-order bug fixed in `summary()`.
         let p = ModelCapabilityProfile::from_model_name("qwen3.5:9b");
         let s = p.summary();
-        assert!(s.contains("medium"));
-        assert!(s.contains("9.0B"));
-        assert!(s.contains("StructuredJSON"));
+        assert!(s.contains("medium"), "{s}");
+        assert!(s.contains("9.0B"), "{s}");
+        assert!(s.contains("family=qwen"), "{s}");
+        assert!(s.contains("NativeFunctionCall"), "{s}");
+
+        // A family with no native tool support keeps the tier's mode.
+        let g = ModelCapabilityProfile::from_model_name("gemma2:9b");
+        let s = g.summary();
+        assert!(s.contains("family=gemma"), "{s}");
+        assert!(s.contains("StructuredJSON"), "{s}");
 
         // Yantrik 9B → NativeFunctionCall
         let y = ModelCapabilityProfile::from_model_name("yantrik-9b-v3");
@@ -942,10 +1005,25 @@ mod tests {
         assert!(y9b.multi_step_capable);
         assert!(y9b.use_family_routing);
 
+        // `yantrik-4b` sits exactly on a tier boundary. ModelTier has classified
+        // `x < 4.0` as Small since f1908ff, so 4.0B is the *bottom of Medium*,
+        // not the top of Small — and yantrik_trained's own `params >= 4.0`
+        // switches agree with that. This test was written expecting Small and
+        // has therefore never passed. Asserting Medium here is also the safer
+        // direction: under-tiering a real model is what makes the OS hand a
+        // capable model a tiny model's prompt.
         let y4b = ModelCapabilityProfile::from_model_name("yantrik-4b");
-        assert_eq!(y4b.tier, ModelTier::Small);
+        assert_eq!(y4b.tier, ModelTier::Medium);
         assert!(y4b.uses_native_tools());
-        assert_eq!(y4b.max_tools_per_prompt, 20);
+        assert_eq!(y4b.max_tools_per_prompt, 25);
+        assert!(y4b.multi_step_capable);
+
+        // ...and a model genuinely below the boundary still gets the Small budget.
+        let y3b = ModelCapabilityProfile::from_model_name("yantrik-3b");
+        assert_eq!(y3b.tier, ModelTier::Small);
+        assert!(y3b.uses_native_tools());
+        assert_eq!(y3b.max_tools_per_prompt, 20);
+        assert!(!y3b.multi_step_capable);
 
         // Ollama tag format
         let ytag = ModelCapabilityProfile::from_model_name("yantrik:9b-v2");

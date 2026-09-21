@@ -5,7 +5,7 @@
 //! we get tokens → background sync pulls their data into the cortex.
 //!
 //! Architecture:
-//! ```
+//! ```text
 //! Settings UI → "Connect Google" → ConnectorManager::start_auth()
 //!                                      ↓
 //!                              Opens browser with OAuth URL

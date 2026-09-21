@@ -230,9 +230,13 @@ impl TaskTemplateRegistry {
         let mut best: Option<(&str, usize)> = None;
 
         for (task_type, keywords) in keyword_map {
+            // Word-boundary matching, not raw substring. `lower.contains("eat")`
+            // is true of "what is the weather today", so every weather question
+            // matched the restaurant template and got answered as a search for
+            // somewhere to have dinner.
             let score: usize = keywords
                 .iter()
-                .filter(|kw| lower.contains(**kw))
+                .filter(|kw| crate::life_assistant::intent::contains_keyword(&lower, kw))
                 .count();
 
             if score > 0 {
