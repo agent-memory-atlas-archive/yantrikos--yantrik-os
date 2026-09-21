@@ -564,3 +564,46 @@ image was built, and it is a one-line addition that deserves its own build to pr
 - [ ] Write release notes that state: live password, passwordless sudo, no LLM by default,
       what data leaves the machine when an onboarding cloud provider is chosen
 - [ ] Decide what happens to the eleven fossil scripts in §7
+
+---
+
+## 12. What was published, 2026-09-21
+
+`yantrik-os-v0.1.0-226-gc55bbd6.iso` — 1,412,284,416 bytes, sha256
+`32de52ca20bd66ee3bf9244adbf481f5f3d60304ee90fa3dfe43b1e4fcdee565` — is at
+`https://iso.yantrikos.com/nightly/`, with its `.sha256`, a `README.txt` of release notes, and
+`yantrik-os-nightly-latest.iso` pointing at it. Built from a clean worktree at `c55bbd6`
+(`git status` empty), uploaded under a dot-name, checksummed **on the server**, and only then
+renamed and linked. The March image is still beside it.
+
+Blockers 1 and 2 of §8 were closed before it was built: the Email fixture's people are
+`example.com` people, and release tarballs carry `config-default.yaml`. The live image writes
+its own `/etc/os-release`, and installs `iproute2` and `iputils-ping`.
+
+The same serial-console interrogation as §10 was run against **this exact image**, scripted
+(`boottest.py`: boot under QEMU TCG, log in on ttyS0, ask, screendump). Its answers: login
+prompt at 58 s; `PRETTY_NAME="Yantrik OS"`; `BUILD` says `git=c55bbd6`, 27 binaries, models
+excluded; `labwc -s /opt/yantrik/bin/yantrik-ui` and the shell running; sockets for a11y,
+network, notifications, system-monitor, weather, the shell, companion and harness; 32 files
+in `/opt/yantrik/bin`, none of them shelved; `ip` and `ping` present; ssh `disabled`;
+`user_name: "User"`, model endpoint on loopback; no `192.168.` address in the config, the
+updater or `/etc/yantrik`; onboarding on the framebuffer. Every shipped executable was
+scanned on the build host for the author's name, the fixture's old domains and the LAN
+prefix: none. (Two `.rlib`s carry them in doc comments; rlibs do not ship.)
+
+**Still true, and said in the README beside the download:** never booted on hardware or
+through UEFI; `yantrik-install` unexercised; live password is a published constant with
+passwordless sudo.
+
+**The updater does not work from the public internet.** The image says
+`HOST=releases.yantrikos.com`, `CHANNEL=beta`. Publicly that name resolves to the web server,
+which has no site for it, so the certificate does not match and `yantrik-update` fails closed
+— safe, and useless. Two things are needed before a public install can update: a public
+`releases.yantrikos.com` (an nginx site and a certificate on the VPS, fed by
+`build-release.sh --publish`), and a decision about the channel — internally `beta` still
+holds March binaries, so the day that host goes live a fresh install on `beta` would be
+offered a build six months older than itself. Whether the updater refuses a downgrade has
+not been checked.
+
+**The source for `c55bbd6` is not on GitHub yet.** The branch is unpushed. The README says a
+nightly can be ahead of the default branch and how to ask; pushing is what makes it true.
