@@ -796,6 +796,39 @@ pub fn publish(
             },
         )
         .action(
+            // For the bridge, which brings an app forward when a mind starts acting on it.
+            //
+            // A mind asked to build slides, book the calendar and start the slideshow did all
+            // three — behind the Notes window, which happened to be the last one opened. The
+            // deck was built unseen and the slideshow ran where nobody could watch it: acting on
+            // an app's surface does nothing to its window, and a Wayland client cannot raise
+            // itself. The person who handed the job over should be able to see it being done.
+            //
+            // Off the UI thread: `wlrctl` is a process, and this surface gives an action three
+            // seconds.
+            Action::new("show_app", "Bring one of this desktop's open apps to the front")
+                .defers()
+                .arg(Param::text("name").describe(
+                    "The app, by the name you describe it by or open it by, e.g. presentation",
+                )),
+            move |args| {
+                let name = args["name"].as_str().unwrap_or_default().trim().to_string();
+                if name.is_empty() {
+                    return Err("`name` is empty".into());
+                }
+                let id = crate::wire::dock::launcher_id(&name);
+                let _ = std::thread::Builder::new().name("yos-show-app".into()).spawn({
+                    let id = id.clone();
+                    move || {
+                        if !crate::windows::present_app(&id) {
+                            tracing::info!(app = %id, "show_app: no window by that app's title is open");
+                        }
+                    }
+                });
+                Ok(serde_json::json!({ "showing": name }))
+            },
+        )
+        .action(
             // Deferred for the same reason as `open_app`, and slightly worse: this spawns
             // `wlrctl toplevel focus` and the wiring discards the result with `let _ =`, so on a
             // machine without wlrctl it succeeds loudly and does nothing at all. Focus is also

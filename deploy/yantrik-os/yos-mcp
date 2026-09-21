@@ -1200,6 +1200,8 @@ def run_tool(tool, args):
             ("\n" + out) if out else "",
             ("\n" + err) if err else "",
         )), True
+    if tool["name"] == "os_act" and p.returncode == 0:
+        follow(app)
     if tool["name"] in PRIVATE_READS and p.returncode == 0:
         # Recorded after the call, not before: a read that failed saw nothing.
         _SAW_PRIVATE.append(tool["name"])
@@ -1216,6 +1218,29 @@ def run_tool(tool, args):
                 "actions. The %s app itself is not open — to change anything, open it (os_act "
                 "on shell: open_app name=%s) and describe it again." % (app, app, app))
     return prefix(note, out + (("\n" + err) if err else "")), False
+
+
+# ── The person can see what the mind is doing ──────────────────────────────────────────
+#
+# Acting on an app's surface does nothing to its window. A mind asked to build slides, book the
+# calendar and start the slideshow did all of it behind whichever window had been opened last,
+# and the slideshow ran where nobody could watch. When a mind starts acting on a different app,
+# that app is brought forward — once per change of app, not once per action, so ten `add_slide`
+# calls are one raise and a person reading something else is interrupted when the work moves,
+# not continuously. `YOS_MCP_FOLLOW=0` turns it off for a mind that works in the background.
+FOLLOW = os.environ.get("YOS_MCP_FOLLOW", "1").strip() not in ("0", "false", "no", "off")
+_FOLLOWING = [None]
+
+
+def follow(app):
+    """Bring `app` forward if the mind has just moved to it. Never fails the action it follows."""
+    if not FOLLOW or not app or app == "shell" or _FOLLOWING[0] == app:
+        return
+    _FOLLOWING[0] = app
+    try:
+        yos(["act", "shell", "show_app", "name=%s" % app], 5)
+    except Exception:
+        pass
 
 
 def policy_answer(refusal):

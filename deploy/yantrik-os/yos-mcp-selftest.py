@@ -219,7 +219,7 @@ die("unknown command %r" % argv)
 '''
 
 
-def load_mcp(fake, state_path, ceiling="standard", requester=""):
+def load_mcp(fake, state_path, ceiling="standard", requester="", follow=False):
     """A fresh copy of the real yos-mcp, pointed at the fake desktop.
 
     Reloaded per case because the module reads its ceiling and its wait out of the environment
@@ -235,6 +235,9 @@ def load_mcp(fake, state_path, ceiling="standard", requester=""):
     else:
         os.environ["YOS_MCP_MAX_PERMISSION"] = ceiling
     os.environ["YOS_MCP_REQUESTER"] = requester
+    # Off for every case but its own: bringing an app forward is one more `act` on the fake
+    # desktop, and the cases below count exactly what ran.
+    os.environ["YOS_MCP_FOLLOW"] = "1" if follow else "0"
     # Short, because two cases below wait the whole thing out. The shell's own 120s request
     # lifetime is not involved: the fake answers from a file.
     os.environ["YOS_MCP_APPROVAL_WAIT"] = "4"
@@ -663,6 +666,23 @@ with tempfile.TemporaryDirectory() as d:
           sorted(set(v.get("layer") for v in vectors)))
     check("and each of the six outcomes actually occurs somewhere in them",
           named == set(module.OUTCOMES), sorted(set(module.OUTCOMES) - named))
+
+    # The person can see what the mind is doing: one raise per change of app, never per action,
+    # never for the shell, and never in the way of the action it follows.
+    state = tmp / "follow.json"
+    state.write_text(json.dumps({"answer": "granted", "machine_ceiling": "sensitive", "mode": "auto"}))
+    module = load_mcp(fake, state, ceiling=None, follow=True)
+    for title in ("One", "Two"):
+        act(module, "calendar", "add_event", {"title": title, "date": "2026-10-02"})
+    act(module, "shell", "open_app", {"name": "notes"})
+    act(module, "calendar", "list_events", {})
+    shown = [a["args"].get("name") for a in read(state).get("acted", []) if a.get("action") == "show_app"]
+    check("an app is brought forward once when the mind moves to it, not once per action",
+          shown == ["calendar"], shown)
+    module._FOLLOWING[0] = "notes"   # the mind has been elsewhere since
+    act(module, "calendar", "list_events", {})
+    shown = [a["args"].get("name") for a in read(state).get("acted", []) if a.get("action") == "show_app"]
+    check("and again when it comes back from another app", shown == ["calendar", "calendar"], shown)
 
 print()
 if failures:

@@ -81,6 +81,26 @@ yos act shell use_harness id=hermes        # once it appears in the picker
 Hermes keeps its model, endpoint, keys and memory in `~/.hermes`, as it always has. The plugin
 reads none of it except the model name, which it passes as the `detail` the picker shows.
 
+**Give the desktop platform the desktop's tools, not Hermes's own.** Hermes arrives with a
+`terminal`, `file`, `code_execution`, `browser` and `web` toolset of its own. On this desktop
+they are a second, ungraded route to everything the apps already offer — and each `terminal`
+call stops on Hermes's own approval, which reaches the person as a paragraph of text to answer
+with `/approve`, five minutes at a time. The first long job given to it (research, slides,
+calendar, a checklist) spent most of its life waiting on those. With them off it did the same
+job through the Terminal, Browser, Presentation, Calendar and Notes *apps*, where every action
+carries the app's grade, the person's mode decides what is asked, and the work is on screen.
+The `hermes tools` command does not know plugin platforms, so set it in `~/.hermes/config.yaml`:
+
+```yaml
+platform_toolsets:
+  yantrik: [skills, todo, memory, session_search, clarify, delegation, yantrik_os]
+delegation:
+  max_iterations: 25        # a research sub-agent that may take 50 turns will take 50
+```
+
+`delegation` is worth keeping: a sub-agent inherits the desktop's tools, so "spin up a research
+agent" works and its work is as visible and as graded as the parent's.
+
 Two things a gateway-shaped harness has to get right, both learned by running one:
 
 - **Close every turn exactly once.** The desktop is waiting on the turn it handed over, and a

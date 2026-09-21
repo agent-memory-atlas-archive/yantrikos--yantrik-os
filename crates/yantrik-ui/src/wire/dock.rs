@@ -223,6 +223,20 @@ const PURPOSES: &[(&str, &str)] = &[
     ("browser", "the web"),
 ];
 
+/// The launcher's id for an app, given either that id or the name its surface is described by.
+///
+/// A mind knows an app by the name it passes to `describe` and `act` — `system-monitor`,
+/// `download-manager` — while windows are titled from the launcher's id (`sysmonitor`,
+/// `downloads`). `show_app` takes whichever the caller has.
+pub fn launcher_id(name: &str) -> String {
+    let want = name.trim().to_lowercase();
+    SURFACES
+        .iter()
+        .find(|(_, surface)| *surface == want)
+        .map(|(id, _)| (*id).to_string())
+        .unwrap_or(want)
+}
+
 /// Everything `open_app` will open, for a caller that cannot read this file.
 ///
 /// `open_app(name)` took a name and the shell's state listed none, so a mind had to guess what
