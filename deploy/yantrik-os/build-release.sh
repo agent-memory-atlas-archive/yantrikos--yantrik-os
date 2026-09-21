@@ -291,6 +291,21 @@ fi
 
 # A manifest, so a running machine can say what it is. "Which build is this?" was
 # unanswerable on the VM all day; a version string in a file costs nothing and settles it.
+#
+# ── No update.conf in the bundle, and no `channel=` in this marker ──
+#
+# Considered and rejected. The bundle is built once and can be published to more than one
+# channel — `--publish` is a separate step further down this same script, and it can be run
+# twice against the same tarball. A channel name baked in here would be right for whichever
+# channel it was published to first and a lie for every other one, and it would be a lie that
+# `yantrik-update` believes: the updater falls back to BUILD's `channel=` when update.conf is
+# silent, so a wrong value here is worse than no value.
+#
+# The channel is known by the thing that DOWNLOADS the bundle, because it downloaded it from a
+# channel URL. cloud-init derives it from YANTRIK_RELEASE_URL and writes update.conf;
+# yantrik-install.sh derives it from the image it installed; the ISO build writes it outright.
+# `yantrik-update apply` adds `channel=` to BUILD when it installs, because at that moment it
+# does know. Nobody guesses.
 cat > "$ROOT/BUILD" <<EOF
 name=$NAME
 version=$VERSION

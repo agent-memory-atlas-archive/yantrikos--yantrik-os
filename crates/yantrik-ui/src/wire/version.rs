@@ -1,16 +1,36 @@
-//! Component version registry and update checker.
+//! The About screen's updates panel: what is installed, which channel this machine follows,
+//! what that channel has, and the two buttons that change either.
 //!
-//! Embeds per-component versions at compile time and checks
-//! releases.yantrikos.com/manifest.json for available updates.
+//! ── What this file used to be ──
+//!
+//! A second update checker. It fetched `http://releases.yantrikos.com/manifest.json` — plain
+//! http, hardcoded, no matter what the machine was configured with — with the channel hardcoded
+//! to `"stable"`, and read `channels[ch]["components"][<crate>]["version"]`: a shape no manifest
+//! this project has ever published. So the lookup always missed, `latest` always fell back to
+//! the local version, and `has_update` was always false. Every error path — DNS failure, refused
+//! connection, malformed JSON — did `return components.map(no_update)`, and the screen printed
+//! "All components up to date".
+//!
+//! It could not answer anything else. A screen whose only possible answer is "everything is
+//! fine" is not a check; it is a picture of one, and it was the picture shown on machines whose
+//! configured channel was not even `stable`.
+//!
+//! Meanwhile the shell already ran the real updater for its control surface (`control_update`),
+//! which reads `/opt/yantrik/update.conf`, talks to the configured host over the configured
+//! scheme, and can tell "the server did not answer" from "that channel has nothing on it".
+//!
+//! Now there is one path: this screen calls `control_update`, which runs `yantrik-update`. The
+//! script is the only thing that parses update.conf and the only thing that writes it.
+//!
+//! The COMPONENTS table stays, because it is fed: `build.rs` bakes each workspace crate's
+//! version in at compile time (`COMPONENT_*_VERSION`). It lists what is installed and claims
+//! nothing about what is available — per-component update availability is not something any
+//! manifest this project publishes could answer, and pretending otherwise is what got us here.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::mpsc;
-use std::time::Duration;
-
-use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, ModelRc, VecModel};
 
 use crate::app_context::AppContext;
+use crate::control_update::{self, CheckOutcome};
 use crate::{App, ComponentVersionData};
 
 /// A component with its embedded version info.
@@ -21,16 +41,7 @@ pub struct ComponentInfo {
     pub git_hash: &'static str,
 }
 
-/// Result of an update check for one component.
-#[derive(Clone, Debug)]
-struct UpdateInfo {
-    name: String,
-    current: String,
-    latest: String,
-    has_update: bool,
-}
-
-/// All component versions baked in at compile time.
+/// All component versions baked in at compile time by `build.rs`.
 pub fn embedded_components() -> Vec<ComponentInfo> {
     vec![
         ComponentInfo {
@@ -61,138 +72,155 @@ pub fn embedded_components() -> Vec<ComponentInfo> {
     ]
 }
 
-/// Check for updates from the release server.
-/// Returns a list of components with update availability.
-fn check_updates(components: &[ComponentInfo], channel: &str) -> Vec<UpdateInfo> {
-    let url = format!("http://releases.yantrikos.com/manifest.json");
-
-    let manifest: serde_json::Value = match ureq::get(&url).call() {
-        Ok(resp) => match resp.into_json() {
-            Ok(v) => v,
-            Err(_) => return components.iter().map(|c| no_update(c)).collect(),
-        },
-        Err(_) => return components.iter().map(|c| no_update(c)).collect(),
-    };
-
-    let channel_data = &manifest["channels"][channel];
-    let remote_components = &channel_data["components"];
-
-    components
-        .iter()
-        .map(|c| {
-            let latest = remote_components[c.name]["version"]
-                .as_str()
-                .unwrap_or(c.version);
-            UpdateInfo {
-                name: c.name.to_string(),
-                current: c.version.to_string(),
-                latest: latest.to_string(),
-                has_update: version_newer(latest, c.version),
-            }
-        })
-        .collect()
-}
-
-fn no_update(c: &ComponentInfo) -> UpdateInfo {
-    UpdateInfo {
-        name: c.name.to_string(),
-        current: c.version.to_string(),
-        latest: c.version.to_string(),
-        has_update: false,
+/// Put the outcome of a check on the screen. One function, so "up to date" and "could not
+/// check" are set from the same place and cannot drift into meaning the same thing.
+fn show_outcome(ui: &App, outcome: &CheckOutcome) {
+    ui.set_about_update_state(outcome.state().into());
+    ui.set_about_update_status(outcome.headline().into());
+    ui.set_about_update_busy(false);
+    match outcome {
+        CheckOutcome::UpToDate { installed, git } => {
+            ui.set_about_update_latest(
+                if git.is_empty() { installed.clone() } else { format!("{installed} ({git})") }
+                    .into(),
+            );
+        }
+        CheckOutcome::UpdateAvailable { to, .. } => {
+            ui.set_about_update_latest(to.clone().into());
+        }
+        // The channel has nothing to report, so the field says nothing rather than keeping
+        // whatever the last successful check left there.
+        _ => ui.set_about_update_latest("".into()),
     }
 }
 
-/// Simple semver comparison: is `remote` newer than `local`?
-fn version_newer(remote: &str, local: &str) -> bool {
-    let parse = |v: &str| -> Vec<u32> {
-        v.split('-')
-            .next()
-            .unwrap_or(v)
-            .split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect()
-    };
-    let r = parse(remote);
-    let l = parse(local);
-    r > l
+/// Read this machine's update configuration onto the screen. Called after anything that can
+/// change it, and always by re-asking the updater rather than remembering what we asked for.
+fn show_status(ui: &App, status: &control_update::UpdateStatus) {
+    ui.set_about_update_channel(status.channel.clone().into());
+    ui.set_about_update_host(
+        if status.host.is_empty() {
+            String::new()
+        } else {
+            format!("{}://{}", status.scheme, status.host)
+        }
+        .into(),
+    );
+    ui.set_about_update_installed(status.installed_label().into());
+    ui.set_about_update_can_set_channel(status.conf_writable);
 }
 
-/// Wire version info into the About screen.
+/// Run a check on a worker thread and put the answer on the screen.
+fn check_off_thread(weak: slint::Weak<App>) {
+    if let Some(ui) = weak.upgrade() {
+        ui.set_about_update_busy(true);
+        ui.set_about_update_state("checking".into());
+        ui.set_about_update_status("Checking…".into());
+    }
+    std::thread::spawn(move || {
+        // Both reads happen out here, off the UI thread: `check` makes a network request with a
+        // ten-second timeout, and a frozen desktop is the other way to make an update look
+        // broken.
+        let status = control_update::read_status().ok();
+        let outcome = control_update::check_now(None);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if let Some(s) = status {
+                show_status(&ui, &s);
+            }
+            show_outcome(&ui, &outcome);
+        });
+    });
+}
+
+/// Wire the About screen's version and update panel.
 pub fn wire(ui: &App, _ctx: &AppContext) {
-    // Populate component versions immediately
-    let components = embedded_components();
-    let items: Vec<ComponentVersionData> = components
+    // The installed component table, immediately and from nothing but this binary.
+    let items: Vec<ComponentVersionData> = embedded_components()
         .iter()
         .map(|c| ComponentVersionData {
             name: c.name.into(),
             current_version: format!("{} ({})", c.version, c.git_hash).into(),
-            latest_version: "".into(),
-            has_update: false,
-            is_checking: false,
         })
         .collect();
     ui.set_about_components(ModelRc::new(VecModel::from(items)));
 
-    // Check for updates callback
-    let ui_weak = ui.as_weak();
-    ui.on_about_check_updates(move || {
-        let Some(ui) = ui_weak.upgrade() else { return };
-
-        // Mark all as checking
-        let components = embedded_components();
-        let items: Vec<ComponentVersionData> = components
-            .iter()
-            .map(|c| ComponentVersionData {
-                name: c.name.into(),
-                current_version: format!("{} ({})", c.version, c.git_hash).into(),
-                latest_version: "checking...".into(),
-                has_update: false,
-                is_checking: true,
-            })
-            .collect();
-        ui.set_about_components(ModelRc::new(VecModel::from(items)));
-        ui.set_about_update_status("Checking for updates...".into());
-
-        let (tx, rx) = mpsc::channel::<Vec<UpdateInfo>>();
-        let comps = embedded_components();
-
-        std::thread::spawn(move || {
-            let results = check_updates(&comps, "stable");
-            let _ = tx.send(results);
-        });
-
-        let weak = ui_weak.clone();
-        let timer = Timer::default();
-        let timer_holder: Rc<RefCell<Option<Timer>>> = Rc::new(RefCell::new(None));
-        let holder = timer_holder.clone();
-
-        timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
-            if let Ok(results) = rx.try_recv() {
-                if let Some(ui) = weak.upgrade() {
-                    let update_count = results.iter().filter(|r| r.has_update).count();
-                    let items: Vec<ComponentVersionData> = results
-                        .iter()
-                        .map(|r| ComponentVersionData {
-                            name: r.name.clone().into(),
-                            current_version: r.current.clone().into(),
-                            latest_version: r.latest.clone().into(),
-                            has_update: r.has_update,
-                            is_checking: false,
-                        })
-                        .collect();
-                    ui.set_about_components(ModelRc::new(VecModel::from(items)));
-                    ui.set_about_update_count(update_count as i32);
-
-                    let status = if update_count > 0 {
-                        format!("{} update(s) available", update_count)
-                    } else {
-                        "All components up to date".to_string()
-                    };
-                    ui.set_about_update_status(status.into());
-                }
-                *holder.borrow_mut() = None;
+    // Which channel this machine is on, read at startup so the screen states it before anyone
+    // presses anything. No network: `status` only reads local files.
+    {
+        let weak = ui.as_weak();
+        std::thread::spawn(move || match control_update::read_status() {
+            Ok(status) => {
+                let _ = weak.upgrade_in_event_loop(move |ui| show_status(&ui, &status));
+            }
+            Err(e) => {
+                // Say so rather than showing an empty channel field that looks like a value.
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_about_update_channel("unknown".into());
+                    ui.set_about_update_state("failed".into());
+                    ui.set_about_update_status(format!("Could not read the update settings — {e}").into());
+                });
             }
         });
-        *timer_holder.borrow_mut() = Some(timer);
+    }
+
+    let weak = ui.as_weak();
+    ui.on_about_check_updates(move || check_off_thread(weak.clone()));
+
+    // ── Install ──
+    //
+    // The same call the control surface's `apply_update` makes: the updater, detached, because
+    // the next thing it does is stop this shell. There is no progress to show here — the shell
+    // this screen is drawn by goes away and comes back as the new build.
+    let weak = ui.as_weak();
+    ui.on_about_install_update(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        match control_update::spawn_apply(None, false) {
+            Ok(()) => {
+                ui.set_about_update_state("applying".into());
+                ui.set_about_update_status(
+                    "Installing — the desktop will restart. If the new build does not start, the \
+                     previous one is restored automatically."
+                        .into(),
+                );
+                ui.set_about_update_busy(true);
+            }
+            Err(e) => {
+                ui.set_about_update_state("failed".into());
+                ui.set_about_update_status(format!("Could not start the install — {e}").into());
+            }
+        }
+    });
+
+    // ── Channel picker ──
+    //
+    // Writes through the script, which is the single owner of update.conf, then re-reads the
+    // answer and re-runs the check. "beta is not published yet" is a result, shown in the same
+    // status line as any other — not an error dialog. It is the one failure a person fixes by
+    // picking a different item in this very control.
+    let weak = ui.as_weak();
+    ui.on_about_set_channel(move |channel| {
+        let channel = channel.to_string();
+        let weak = weak.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.set_about_update_busy(true);
+            ui.set_about_update_state("checking".into());
+            ui.set_about_update_status(format!("Switching to {channel}…").into());
+        }
+        std::thread::spawn(move || match control_update::set_channel(&channel) {
+            Ok(status) => {
+                let outcome = control_update::check_now(None);
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    show_status(&ui, &status);
+                    show_outcome(&ui, &outcome);
+                });
+            }
+            Err(e) => {
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_about_update_busy(false);
+                    ui.set_about_update_state("failed".into());
+                    ui.set_about_update_status(format!("Could not change the channel — {e}").into());
+                });
+            }
+        });
     });
 }

@@ -17,12 +17,26 @@
 #     rolled back to the backup automatically — a bad build cannot leave the machine dark.
 #
 # Usage:
-#   yantrik-update check      [--channel C]           what is installed vs what the channel has
-#   yantrik-update apply      [--channel C] [--force] [--reboot] [--no-restart]
-#   yantrik-update rollback                            restore the most recent backup
-#   yantrik-update status                              current build + available backups
+#   yantrik-update check       [--channel C] [--porcelain]  installed vs what the channel has
+#   yantrik-update apply       [--channel C] [--force] [--reboot] [--no-restart]
+#   yantrik-update rollback                                  restore the most recent backup
+#   yantrik-update status      [--porcelain]                 channel, host, build, backups
+#   yantrik-update set-channel nightly|beta|stable           change the channel, once, here
+#   yantrik-update selftest                                  offline checks of the two above
 #
-# It reads its defaults from /opt/yantrik/update.conf (CHANNEL=, HOST=) when present.
+# It reads its defaults from /opt/yantrik/update.conf (CHANNEL=, HOST=, SCHEME=) when present.
+#
+# ── The two output formats, and why there are two ──
+#
+# Everything a person reads is the coloured prose below. Everything a *program* reads comes
+# from --porcelain: one `key=value` per line, no colour, no sentences that a rewording breaks.
+# The desktop's About screen parses that, so "up to date" and "could not check" can never again
+# be the same string — see design/updates-2026-09-21.md for the checker that could only ever
+# answer "up to date" because every failure path in it returned the success value.
+#
+# check exits: 0 up to date · 10 update available · 11 channel not published · 12 server
+# unreachable · 1 anything else. The porcelain `result=` line says the same thing in words;
+# both are emitted so neither has to be inferred from the other.
 
 set -uo pipefail
 
@@ -41,6 +55,19 @@ SESSION_UNIT="${YANTRIK_SESSION_UNIT:-yantrik-session.service}"
 LOG_DIR="$PREFIX/logs"
 LOG_FILE="$LOG_DIR/yantrik-os.log"
 
+# Read a KEY from the installed BUILD marker, or empty if absent.
+#
+# Defined up here, above the channel resolution, because BUILD is one of the places the channel
+# can come from: `apply` records `channel=` into it when it installs, so a machine that has ever
+# updated itself knows which channel its software came from even if update.conf is gone.
+build_field() {
+  [ -f "$BUILD_FILE" ] || return 0
+  sed -n "s/^$1=//p" "$BUILD_FILE" | head -1
+}
+
+installed_git()     { build_field git; }
+installed_version() { build_field version; }
+
 # Config file may set CHANNEL, HOST and SCHEME. Plain KEY=value, sourced only for those.
 #
 # ── One host, and no second address ──
@@ -55,7 +82,29 @@ LOG_FILE="$LOG_DIR/yantrik-os.log"
 #
 # A machine that wants a different server, private or otherwise, sets HOST in
 # /opt/yantrik/update.conf. That is the supported way, and it is the only way.
-CHANNEL_DEFAULT="stable"
+#
+# ── One answer to "which channel is this machine on" ──
+#
+# There were three, and they disagreed. update.conf said one thing and exists only on machines
+# installed from an ISO or provisioned by cloud-init; config.yaml carried `updates.channel:
+# beta` that NO program on the machine has ever read; and this script's own default said
+# `stable`. So a machine installed from a release bundle asked the server for `stable` — a
+# channel that has never had a build published to it — and was told its channel was not
+# published, on a machine that was perfectly current.
+#
+# The order below is the single answer, most specific first. Nothing else on the machine gets
+# to hold an opinion about this, and config.yaml no longer carries one to be out of date with.
+#
+#   1. CHANNEL in update.conf   what this machine has been told to follow (set-channel writes
+#                               it; the ISO build and cloud-init lay it down at install time)
+#   2. channel= in BUILD        the channel the installed build actually came from, recorded
+#                               by `apply` when it installs
+#   3. CHANNEL_DEFAULT          below
+CHANNEL_DEFAULT="nightly"
+# nightly is the hard default because it is the only channel that has ever had a build
+# published to it: the pipeline in .github/workflows/iso.yml publishes nightly and nothing
+# else. When stable starts receiving builds, change this one line — every other reader on the
+# machine takes its answer from here rather than carrying its own copy.
 HOST_DEFAULT="releases.yantrikos.com"
 # https by default, because the manifest is what decides which bytes get installed and a
 # plaintext manifest is modifiable by anyone on the path. update.conf may set SCHEME=http for
@@ -65,7 +114,18 @@ if [ -f "$CONF" ]; then
   # shellcheck disable=SC1090
   . "$CONF"
 fi
-CHANNEL="${CHANNEL:-$CHANNEL_DEFAULT}"
+# Where the answer came from, carried so `status` can say it. "The channel is nightly" and
+# "the channel is nightly because nobody has ever said otherwise" are different facts, and the
+# second one is the one that explains a surprise.
+CHANNEL_SOURCE="update.conf"
+if [ -z "${CHANNEL:-}" ]; then
+  CHANNEL="$(build_field channel)"
+  CHANNEL_SOURCE="BUILD"
+fi
+if [ -z "${CHANNEL:-}" ]; then
+  CHANNEL="$CHANNEL_DEFAULT"
+  CHANNEL_SOURCE="default"
+fi
 HOST="${HOST:-$HOST_DEFAULT}"
 SCHEME="${SCHEME:-$SCHEME_DEFAULT}"
 # Checked here with a bare echo rather than fail(): the helpers are defined below this point.
@@ -88,20 +148,36 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "need '$1' but it is not instal
 parse_channel() {
   local prev=""
   for a in "$@"; do
-    if [ "$prev" = "--channel" ]; then CHANNEL="$a"; fi
+    if [ "$prev" = "--channel" ]; then CHANNEL="$a"; CHANNEL_SOURCE="--channel"; fi
     prev="$a"
   done
 }
 
-# The one field from the manifest we cannot do without, pulled with python for correctness
-# (the manifest is JSON and grepping JSON is how you ship the wrong build).
-manifest_field() {
-  # $1 = channel, $2 = field. HOST comes through the environment so the quoted heredoc below
-  # stays literal (expanding a shell var inside it is how you ship a malformed request).
+# Is --porcelain in the argument list? Same reasoning as parse_channel: parsed once.
+has_porcelain() {
+  for a in "$@"; do [ "$a" = "--porcelain" ] && return 0; done
+  return 1
+}
+
+# Ask the manifest about one channel, once, and distinguish the three things that can happen.
+#
+# This was `manifest_field CHANNEL FIELD`: one HTTP request per field, four of them in `apply`,
+# and every failure of any kind collapsed into exit 1. The only sentence it could produce was
+# "cannot reach the release server or channel 'X' is not published" — one message for two
+# problems that call for opposite actions. A machine that cannot reach the server has a network
+# to fix; a machine on an unpublished channel has a channel to change, and the desktop now
+# offers to change it, so the difference has to survive the trip to the UI.
+#
+# Parsed with python because the manifest is JSON, and grepping JSON is how you ship the wrong
+# build. HOST and SCHEME come through the environment so the heredoc below stays literal —
+# expanding a shell variable inside it is how you ship a malformed request.
+#
+# Prints KEY=value lines, `status=` first, and exits 0 ok / 11 not published / 12 unreachable.
+channel_probe() {
   YANTRIK_UPDATE_HOST="$HOST" YANTRIK_UPDATE_SCHEME="$SCHEME" \
-  python3 - "$1" "$2" <<'PY' 2>/dev/null
+  python3 - "$1" <<'PY'
 import sys, os, json, urllib.request
-channel, field = sys.argv[1], sys.argv[2]
+channel = sys.argv[1]
 host = os.environ.get("YANTRIK_UPDATE_HOST", "releases.yantrikos.com")
 scheme = os.environ.get("YANTRIK_UPDATE_SCHEME", "https")
 # One URL. The second entry here used to be a literal private address on the author's LAN,
@@ -109,15 +185,27 @@ scheme = os.environ.get("YANTRIK_UPDATE_SCHEME", "https")
 try:
     with urllib.request.urlopen(f"{scheme}://{host}/manifest.json", timeout=10) as r:
         m = json.load(r)
-    ch = m.get("channels", {}).get(channel, {})
-    v = ch.get(field, "")
+except Exception as e:
+    print("status=unreachable")
+    print(("detail=" + str(e).replace("\n", " "))[:200])
+    sys.exit(12)
+channels = m.get("channels") or {}
+ch = channels.get(channel)
+if not isinstance(ch, dict) or not ch:
+    print("status=not_published")
+    print("published=" + ",".join(sorted(str(k) for k in channels)))
+    sys.exit(11)
+print("status=ok")
+for f in ("version", "git", "artifact", "sha256", "date"):
+    v = ch.get(f, "")
     if v != "":
-        print(v)
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
+        print(f"{f}={str(v)}")
+sys.exit(0)
 PY
 }
+
+# One field out of a channel_probe result. $1 = the whole result, $2 = the key.
+probe_field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 
 # Keep the newest RETAIN_BACKUPS rollback copies and delete the rest.
 #
@@ -138,14 +226,8 @@ prune_backups() {
   rm -f "$UPDATES_DIR"/*.tar.* 2>/dev/null || true
 }
 
-# Read a KEY from the installed BUILD marker, or empty if absent.
-build_field() {
-  [ -f "$BUILD_FILE" ] || return 0
-  sed -n "s/^$1=//p" "$BUILD_FILE" | head -1
-}
-
-installed_git()     { build_field git; }
-installed_version() { build_field version; }
+# build_field / installed_git / installed_version are defined above the channel resolution,
+# because the channel is one of the things BUILD can answer.
 
 # Can two builds be proven to be the same build?
 #
@@ -165,33 +247,90 @@ same_build() {
 }
 
 # ── check ───────────────────────────────────────────────────────────────────────────────
+#
+# One decision, two renderings. The result is worked out once into $result/$reason and then
+# printed either as prose or as porcelain — so the About screen and the terminal cannot reach
+# different conclusions about the same machine, which is exactly what they did before: the
+# desktop had a second checker of its own that answered "up to date" on every failure.
 cmd_check() {
   need python3
   parse_channel "$@"
-  say "Checking channel '$CHANNEL' on $HOST"
-  local remote_ver remote_git local_ver local_git
-  remote_ver="$(manifest_field "$CHANNEL" version)" || fail "cannot reach the release server or channel '$CHANNEL' is not published"
-  remote_git="$(manifest_field "$CHANNEL" git)"
+
+  local probe rc pstatus remote_ver remote_git local_ver local_git published detail
+  probe="$(channel_probe "$CHANNEL")"; rc=$?
+  pstatus="$(probe_field "$probe" status)"
+  remote_ver="$(probe_field "$probe" version)"
+  remote_git="$(probe_field "$probe" git)"
+  published="$(probe_field "$probe" published)"
+  detail="$(probe_field "$probe" detail)"
   local_ver="$(installed_version)"; local_git="$(installed_git)"
 
+  local result reason code
+  case "$pstatus" in
+    unreachable)
+      result="unreachable"; code=12
+      reason="cannot reach $HOST over $SCHEME${detail:+ ($detail)}"
+      ;;
+    not_published)
+      result="not_published"; code=11
+      reason="channel '$CHANNEL' is not published — the server has nothing on it"
+      [ -n "$published" ] && reason="$reason (published: $published)"
+      ;;
+    ok)
+      if [ -z "$local_git" ]; then
+        result="update_available"; code=10
+        reason="this machine has no build marker, so it cannot prove it is current"
+      elif [ "$local_git" = "$remote_git" ] \
+           && ! same_build "$local_git" "$remote_git" "$local_ver" "$remote_ver"; then
+        # Same commit, one of the two built from a modified tree. This branch used to
+        # `return 0`, and 0 is the code every caller reads as "up to date" — so the one case
+        # the dirty-tree check exists to catch printed "update available" and reported success.
+        result="update_available"; code=10
+        reason="same commit, but one of the two was built from a modified tree"
+      elif [ "$local_git" = "$remote_git" ]; then
+        result="up_to_date"; code=0
+        reason="installed build matches channel '$CHANNEL'"
+      else
+        result="update_available"; code=10
+        reason="${local_git:-unknown} → ${remote_git:-unknown}"
+      fi
+      ;;
+    *)
+      result="error"; code=1
+      reason="the updater could not read a result from $HOST (probe exit $rc)"
+      ;;
+  esac
+
+  if has_porcelain "$@"; then
+    printf 'result=%s\n' "$result"
+    printf 'channel=%s\n' "$CHANNEL"
+    printf 'channel_source=%s\n' "$CHANNEL_SOURCE"
+    printf 'host=%s\n' "$HOST"
+    printf 'scheme=%s\n' "$SCHEME"
+    printf 'installed_version=%s\n' "$local_ver"
+    printf 'installed_git=%s\n' "$local_git"
+    printf 'channel_version=%s\n' "$remote_ver"
+    printf 'channel_git=%s\n' "$remote_git"
+    [ -n "$published" ] && printf 'published=%s\n' "$published"
+    printf 'reason=%s\n' "$reason"
+    return "$code"
+  fi
+
+  say "Checking channel '$CHANNEL' on $HOST"
+  case "$result" in
+    unreachable|not_published|error)
+      warn "$reason"
+      return "$code"
+      ;;
+  esac
   info "installed: ${local_ver:-unknown}${local_git:+ ($local_git)}"
   info "channel:   ${remote_ver:-unknown}${remote_git:+ ($remote_git)}"
-
-  if [ -n "$local_git" ] && ! same_build "$local_git" "$remote_git" "$local_ver" "$remote_ver" \
-     && [ "$local_git" = "$remote_git" ]; then
-    printf '%supdate available%s — same commit, but one of the two was built from a modified tree\n' "$c_bold" "$c_off"
-    return 0
-  fi
-  if [ -z "$local_git" ]; then
-    printf '%supdate available%s — this machine has no build marker, so it cannot prove it is current\n' "$c_bold" "$c_off"
-    return 10
-  fi
-  if [ "$local_git" = "$remote_git" ]; then
+  if [ "$result" = "up_to_date" ]; then
     printf '%sup to date%s\n' "$c_grn" "$c_off"
-    return 0
+  else
+    printf '%supdate available%s — %s\n' "$c_bold" "$c_off" "$reason"
   fi
-  printf '%supdate available%s: %s → %s\n' "$c_bold" "$c_off" "${local_git:-unknown}" "${remote_git:-unknown}"
-  return 10
+  return "$code"
 }
 
 # ── apply ───────────────────────────────────────────────────────────────────────────────
@@ -208,11 +347,21 @@ cmd_apply() {
   done
 
   say "Preparing update from channel '$CHANNEL'"
-  local remote_git remote_ver artifact remote_sha
-  remote_ver="$(manifest_field "$CHANNEL" version)" || fail "cannot reach the release server"
-  remote_git="$(manifest_field "$CHANNEL" git)"
-  artifact="$(manifest_field "$CHANNEL" artifact)"
-  remote_sha="$(manifest_field "$CHANNEL" sha256)"
+  # One request for the whole channel entry, rather than four requests for four fields of it.
+  # Four requests could also see four different manifests if the publisher was mid-upload.
+  local probe pstatus remote_git remote_ver artifact remote_sha
+  probe="$(channel_probe "$CHANNEL")"
+  pstatus="$(probe_field "$probe" status)"
+  case "$pstatus" in
+    ok) ;;
+    not_published) fail "channel '$CHANNEL' is not published — there is nothing to install \
+from it. Change it with: yantrik-update set-channel nightly" ;;
+    *) fail "cannot reach $HOST over $SCHEME — $(probe_field "$probe" detail)" ;;
+  esac
+  remote_ver="$(probe_field "$probe" version)"
+  remote_git="$(probe_field "$probe" git)"
+  artifact="$(probe_field "$probe" artifact)"
+  remote_sha="$(probe_field "$probe" sha256)"
   [ -n "$artifact" ] || fail "channel '$CHANNEL' publishes no artifact — nothing to download"
   [ -n "$remote_sha" ] || fail "channel '$CHANNEL' publishes no sha256 — refusing to install an unverifiable build"
 
@@ -578,14 +727,42 @@ cmd_rollback() {
 }
 
 # ── status ──────────────────────────────────────────────────────────────────────────────
+#
+# --porcelain exists because the About screen needs to state the channel and host this machine
+# is ACTUALLY configured for, and the only way to be sure it agrees with the updater is to ask
+# the updater. The shell has no business parsing update.conf itself: two parsers of one file is
+# how the machine got three answers to this question in the first place.
 cmd_status() {
+  local can_write="no"
+  if [ -f "$CONF" ]; then
+    [ -w "$CONF" ] && can_write="yes"
+  elif [ -w "$(dirname "$CONF")" ]; then
+    can_write="yes"
+  fi
+
+  if has_porcelain "$@"; then
+    printf 'channel=%s\n' "$CHANNEL"
+    printf 'channel_source=%s\n' "$CHANNEL_SOURCE"
+    printf 'host=%s\n' "$HOST"
+    printf 'scheme=%s\n' "$SCHEME"
+    printf 'conf=%s\n' "$CONF"
+    printf 'conf_present=%s\n' "$([ -f "$CONF" ] && echo yes || echo no)"
+    printf 'conf_writable=%s\n' "$can_write"
+    printf 'version=%s\n' "$(build_field version)"
+    printf 'git=%s\n' "$(build_field git)"
+    printf 'name=%s\n' "$(build_field name)"
+    printf 'installed=%s\n' "$(build_field installed)"
+    printf 'backups=%s\n' "$(find "$BACKUP_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+    return 0
+  fi
+
   say "Yantrik build"
   if [ -f "$BUILD_FILE" ]; then
     sed 's/^/  /' "$BUILD_FILE"
   else
     info "no build marker at $BUILD_FILE"
   fi
-  info "channel: $CHANNEL   host: $HOST"
+  info "channel: $CHANNEL (from $CHANNEL_SOURCE)   host: $HOST   scheme: $SCHEME"
   say "Backups"
   if [ -d "$BACKUP_DIR" ] && [ -n "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
     for b in "$BACKUP_DIR"/*/; do
@@ -596,6 +773,174 @@ cmd_status() {
   fi
 }
 
+# ── set-channel ─────────────────────────────────────────────────────────────────────────
+#
+# The one writer of CHANNEL. Nothing else on an installed machine writes update.conf after
+# install time, and nothing else should: a second writer is a second opinion, and this file
+# exists to end the argument. The desktop's channel picker calls this through the control
+# surface (`set_update_channel`), so the button and the command line take the same path.
+#
+# No network. `check` is what talks to the server, and the caller runs it afterwards — that
+# way changing the channel to one with nothing on it reports "not published" as a real answer
+# instead of failing the write.
+
+# The new contents of update.conf, on stdout. Only the CHANNEL line is touched: HOST, SCHEME,
+# comments and anything else somebody put in this file are theirs and pass through unchanged.
+conf_body() {
+  local new="$1"
+  if [ -f "$CONF" ]; then
+    if grep -qE '^[[:space:]]*CHANNEL=' "$CONF"; then
+      sed -E "s|^[[:space:]]*CHANNEL=.*|CHANNEL=$new|" "$CONF"
+    else
+      cat "$CONF"
+      printf 'CHANNEL=%s\n' "$new"
+    fi
+  else
+    printf '%s\n' \
+      "# Read by yantrik-update. This file is the single owner of which channel this machine" \
+      "# follows, which server it follows it on, and over which scheme. Written at install" \
+      "# time by the ISO build and by cloud-init, and changed afterwards only by" \
+      "# 'yantrik-update set-channel'." \
+      "CHANNEL=$new" \
+      "HOST=$HOST" \
+      "SCHEME=$SCHEME"
+  fi
+}
+
+cmd_set_channel() {
+  local new="${1:-}"
+  case "$new" in
+    nightly|beta|stable) ;;
+    "") fail "set-channel needs a channel name: nightly, beta or stable" ;;
+    --*) fail "set-channel takes a channel name, not an option (nightly, beta or stable)" ;;
+    *) fail "'$new' is not a channel this build knows about (nightly, beta or stable)" ;;
+  esac
+
+  local body tmp
+  body="$(conf_body "$new")" || fail "could not read $CONF"
+  tmp="$CONF.new.$$"
+
+  # temp + rename, so a machine that loses power mid-write still has a whole update.conf and
+  # not half of one. Both branches below rename; the difference is only who does the writing.
+  #
+  # Written directly first, because /opt/yantrik belongs to the desktop user on every machine
+  # this project installs — the ISO chowns the tree to uid 1000 and cloud-init chowns it to
+  # yantrik. `apply` takes the same line: it replaces binaries in $PREFIX with no privilege at
+  # all and only reaches for `sudo -n` to ask systemd for a restart. So this does too.
+  if printf '%s\n' "$body" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CONF" 2>/dev/null; then
+    :
+  elif sudo -n true 2>/dev/null \
+       && printf '%s\n' "$body" | sudo -n tee "$tmp" >/dev/null 2>&1 \
+       && sudo -n mv -f "$tmp" "$CONF" 2>/dev/null; then
+    :
+  else
+    rm -f "$tmp" 2>/dev/null; sudo -n rm -f "$tmp" 2>/dev/null
+    fail "cannot write $CONF — it is owned by $(stat -c '%U' "$CONF" 2>/dev/null || stat -c '%U' "$(dirname "$CONF")" 2>/dev/null || echo root) \
+and this is running as $(id -un). Run: sudo yantrik-update set-channel $new"
+  fi
+
+  CHANNEL="$new"
+  CHANNEL_SOURCE="update.conf"
+  say "Channel set to '$new' in $CONF"
+  info "run 'yantrik-update check' to see what that channel has"
+}
+
+# ── selftest ────────────────────────────────────────────────────────────────────────────
+#
+# No network, no /opt, no machine. It runs THIS script against a scratch $YANTRIK_PREFIX and
+# checks the two things that had three different answers between them: where the channel comes
+# from when update.conf is silent, and that set-channel rewrites only the line it owns.
+cmd_selftest() {
+  local fails=0 root
+  # Not `local`: the EXIT trap runs after this function has returned, in global scope, and
+  # under `set -u` a trap naming a variable that no longer exists is itself an error message.
+  SELFTEST_ROOT="$(mktemp -d)"
+  root="$SELFTEST_ROOT"
+  trap 'rm -rf "${SELFTEST_ROOT:-}"' EXIT
+
+  t() { # t <name> <expected substring> <actual>
+    if printf '%s' "$3" | grep -qF -- "$2"; then
+      printf '  %sok%s   %s\n' "$c_grn" "$c_off" "$1"
+    else
+      printf '  %sFAIL%s %s\n       wanted: %s\n       got:    %s\n' \
+        "$c_red" "$c_off" "$1" "$2" "$(printf '%s' "$3" | tr '\n' ' ')"
+      fails=$((fails + 1))
+    fi
+  }
+
+  say "yantrik-update selftest"
+
+  # 1. Nothing at all: the hard default, and it says so.
+  local p1="$root/empty"; mkdir -p "$p1"
+  local out
+  out="$(YANTRIK_PREFIX="$p1" "$0" status --porcelain)"
+  t "bare machine falls back to the hard default" "channel=nightly" "$out"
+  t "and says the answer came from the default"   "channel_source=default" "$out"
+
+  # 2. A BUILD marker from a bundle install: the channel the build came from wins over the
+  #    hard default. This is the case that used to ask the server for 'stable'.
+  local p2="$root/build"; mkdir -p "$p2"
+  printf 'name=yantrik-os\nversion=0.4.0\ngit=abc1234\nchannel=beta\n' > "$p2/BUILD"
+  out="$(YANTRIK_PREFIX="$p2" "$0" status --porcelain)"
+  t "BUILD's channel beats the hard default" "channel=beta" "$out"
+  t "and says it came from BUILD"            "channel_source=BUILD" "$out"
+
+  # 3. set-channel with no update.conf creates one, with HOST and SCHEME in it.
+  local p3="$root/fresh"; mkdir -p "$p3"
+  YANTRIK_PREFIX="$p3" "$0" set-channel stable >/dev/null 2>&1
+  out="$(cat "$p3/update.conf" 2>/dev/null)"
+  t "set-channel creates update.conf"        "CHANNEL=stable" "$out"
+  t "with the public host"                   "HOST=releases.yantrikos.com" "$out"
+  t "over https"                             "SCHEME=https" "$out"
+  out="$(YANTRIK_PREFIX="$p3" "$0" status --porcelain)"
+  t "and update.conf then owns the answer"   "channel_source=update.conf" "$out"
+
+  # 4. set-channel on an existing file rewrites CHANNEL and nothing else.
+  local p4="$root/existing"; mkdir -p "$p4"
+  printf '# hand-written\nCHANNEL=nightly\nHOST=mirror.example.invalid\nSCHEME=http\n' \
+    > "$p4/update.conf"
+  YANTRIK_PREFIX="$p4" "$0" set-channel beta >/dev/null 2>&1
+  out="$(cat "$p4/update.conf")"
+  t "the channel changes"          "CHANNEL=beta" "$out"
+  t "the host is preserved"        "HOST=mirror.example.invalid" "$out"
+  t "the scheme is preserved"      "SCHEME=http" "$out"
+  t "the comment is preserved"     "# hand-written" "$out"
+
+  # 5. A name that is not a channel changes nothing.
+  local rc
+  YANTRIK_PREFIX="$p4" "$0" set-channel hourly >/dev/null 2>&1
+  rc=$?
+  out="$(cat "$p4/update.conf")"
+  t "a bogus channel leaves the file alone" "CHANNEL=beta" "$out"
+  if [ "$rc" = 0 ]; then
+    printf '  %sFAIL%s a bogus channel exited 0\n' "$c_red" "$c_off"; fails=$((fails + 1))
+  else
+    printf '  %sok%s   a bogus channel is an error\n' "$c_grn" "$c_off"
+  fi
+
+  if [ "$fails" = 0 ]; then
+    printf '%sall selftest checks passed%s\n' "$c_grn" "$c_off"
+    return 0
+  fi
+  printf '%s%s selftest check(s) failed%s\n' "$c_red" "$fails" "$c_off"
+  return 1
+}
+
+usage() {
+  printf '%s\n' \
+    "yantrik-update — check for, apply and roll back Yantrik OS updates" \
+    "" \
+    "  check       [--channel C] [--porcelain]   installed vs what the channel has" \
+    "  apply       [--channel C] [--force] [--reboot] [--no-restart]" \
+    "  rollback                                  restore the most recent backup" \
+    "  status      [--porcelain]                 channel, host, build, backups" \
+    "  set-channel nightly|beta|stable           change the channel (writes $CONF)" \
+    "  selftest                                  offline checks, no network" \
+    "" \
+    "check exits 0 up to date · 10 update available · 11 channel not published ·" \
+    "12 server unreachable · 1 anything else."
+}
+
 # ── dispatch ────────────────────────────────────────────────────────────────────────────
 CMD="${1:-check}"; shift || true
 case "$CMD" in
@@ -603,7 +948,12 @@ case "$CMD" in
   apply)    cmd_apply "$@" ;;
   rollback) cmd_rollback "$@" ;;
   status)   cmd_status "$@" ;;
-  -h|--help|help)
-    sed -n '20,30p' "$0" ;;
-  *) fail "unknown command '$CMD' (check | apply | rollback | status)" ;;
+  # Both spellings, because the control surface names its action set_update_channel and a
+  # person at a terminal types the hyphen.
+  set-channel|set_channel) cmd_set_channel "$@" ;;
+  selftest) cmd_selftest ;;
+  # Printed from a function rather than `sed -n '20,30p' "$0"`, which quietly printed whatever
+  # happened to be on those lines after anyone edited the header.
+  -h|--help|help) usage ;;
+  *) fail "unknown command '$CMD' (check | apply | rollback | status | set-channel | selftest)" ;;
 esac

@@ -716,9 +716,21 @@ export component App inherits Window {
     in property <string> about-version: "0.3.0";
     in property <string> about-build-date: "";
     in property <[ComponentVersionData]> about-components: [];
-    in property <int> about-update-count: 0;
+    // Updates. Every one of these is set from what `yantrik-update` reports — see
+    // wire/version.rs and control_update.rs. `about-update-count` is gone with the checker that
+    // invented it: it counted components whose "latest" version came from a manifest field that
+    // does not exist, so it was always 0 and the screen always said everything was current.
+    in property <string> about-update-channel: "";
+    in property <string> about-update-host: "";
+    in property <string> about-update-installed: "";
+    in property <string> about-update-latest: "";
     in property <string> about-update-status: "";
+    in property <string> about-update-state: "idle";
+    in property <bool> about-update-busy: false;
+    in property <bool> about-update-can-set-channel: true;
     callback about-check-updates();
+    callback about-install-update();
+    callback about-set-channel(string);
 
     // Email Client state (screen 17)
     // Thread messages for detail view
@@ -2202,11 +2214,19 @@ export component App inherits Window {
                 version-text: root.about-version;
                 build-date: root.about-build-date;
                 components: root.about-components;
-                update-count: root.about-update-count;
+                update-channel: root.about-update-channel;
+                update-host: root.about-update-host;
+                update-installed: root.about-update-installed;
+                update-latest: root.about-update-latest;
                 update-status: root.about-update-status;
+                update-state: root.about-update-state;
+                update-busy: root.about-update-busy;
+                update-can-set-channel: root.about-update-can-set-channel;
                 ai-model-name: root.settings-llm-api-model;
                 ai-provider-status: root.companion-online ? "Connected" : "Disconnected";
                 check-updates => { root.about-check-updates(); }
+                install-update => { root.about-install-update(); }
+                set-channel(c) => { root.about-set-channel(c); }
                 open-ai-settings => {
                     root.current-screen = 7;
                     root.navigate(7);

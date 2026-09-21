@@ -607,32 +607,30 @@ $CONFIG_LEAKS"
 sudo cp "$SCRIPT_DIR/config-default.yaml" "$ROOTFS/opt/yantrik/config.yaml"
 sudo chmod 644 "$ROOTFS/opt/yantrik/config.yaml"
 
-# One answer to "which channel is this machine on".
+# One answer to "which channel is this machine on", and one file that holds it.
 #
-# Two programs ask that question and they were reading different files: yantrik-ui reads
-# `updates.channel` out of config.yaml (which says beta) and `yantrik-update` reads CHANNEL out
-# of /opt/yantrik/update.conf, which did not exist — so it fell back to its own default,
-# `stable`. The desktop would report one channel while the updater pulled from another.
-UPDATE_CHANNEL=$(sed -n 's/^[[:space:]]*channel:[[:space:]]*"\{0,1\}\([a-z]*\)"\{0,1\}.*/\1/p' \
-    "$SCRIPT_DIR/config-default.yaml" | head -1)
-[ -n "$UPDATE_CHANNEL" ] || fail "config-default.yaml names no update channel"
-
-# An image follows the channel it was published on. The default config says beta, so the first
-# public nightly was built to take its updates from beta — a channel whose newest build was six
-# months older than the image itself. The pipeline names the channel it is building for, and
-# both readers are told the same thing: update.conf below, and config.yaml for the desktop.
-if [ -n "${YANTRIK_UPDATE_CHANNEL:-}" ]; then
-    case "$YANTRIK_UPDATE_CHANNEL" in
-        nightly|beta|stable) ;;
-        *) fail "YANTRIK_UPDATE_CHANNEL must be nightly, beta or stable (got '$YANTRIK_UPDATE_CHANNEL')" ;;
-    esac
-    sudo sed -i "s/^\([[:space:]]*channel:[[:space:]]*\)\"\{0,1\}$UPDATE_CHANNEL\"\{0,1\}/\1\"$YANTRIK_UPDATE_CHANNEL\"/" \
-        "$ROOTFS/opt/yantrik/config.yaml"
-    UPDATE_CHANNEL="$YANTRIK_UPDATE_CHANNEL"
-fi
+# This used to read the channel out of config-default.yaml's `updates.channel`, which said
+# `beta`. Nothing on the machine ever read that key — not the desktop, not the updater, nothing
+# — but THIS line read it, so the first public nightly ISO was built to take its updates from
+# beta: a channel whose newest build was six months older than the image being written. The
+# config no longer carries an `updates:` section at all, so the channel is decided here, from
+# this script's own default and the pipeline's override, and written to the one file that owns
+# it: /opt/yantrik/update.conf.
+#
+# nightly, because it is the only channel that has ever had a build published to it. When
+# stable starts receiving builds, change this line and the matching CHANNEL_DEFAULT in
+# deploy/yantrik-os/yantrik-update — those two are the whole list.
+UPDATE_CHANNEL="${YANTRIK_UPDATE_CHANNEL:-nightly}"
+case "$UPDATE_CHANNEL" in
+    nightly|beta|stable) ;;
+    *) fail "YANTRIK_UPDATE_CHANNEL must be nightly, beta or stable (got '$UPDATE_CHANNEL')" ;;
+esac
 sudo tee "$ROOTFS/opt/yantrik/update.conf" > /dev/null <<UPDATECONF
-# Read by yantrik-update. Generated from config-default.yaml at image build time so the
-# desktop and the updater cannot name different channels.
+# Read by yantrik-update, and by nothing else. This file is the single owner of which channel
+# this machine follows, which server it follows it on, and over which scheme.
+#
+# Change it with: yantrik-update set-channel nightly|beta|stable
+# or from the desktop: About -> UPDATES -> the channel chips.
 CHANNEL=$UPDATE_CHANNEL
 HOST=releases.yantrikos.com
 SCHEME=https
@@ -1201,5 +1199,9 @@ echo -e "  ${BOLD}Write to USB:${NC}"
 echo -e "    sudo dd if=$OUTPUT of=/dev/sdX bs=4M status=progress"
 echo
 echo -e "  ${DIM}All packages are baked in — no internet needed for installation.${NC}"
-echo -e "  ${DIM}Updates can be checked via: yantrik-upgrade --check${NC}"
+# The command, as it is actually spelled. This said `yantrik-upgrade --check` for as long as
+# the line has existed and there has never been a program by that name — so the last thing the
+# ISO build told anyone was a command that ENOENTs.
+echo -e "  ${DIM}Check for updates with:  yantrik-update check${NC}"
+echo -e "  ${DIM}Change the channel with: yantrik-update set-channel nightly|beta|stable${NC}"
 echo

@@ -207,6 +207,34 @@ printf 'd /run/user/%s 0700 %s %s -\n' "$UID_NUM" "$USERNAME" "$USERNAME" \
 # ── 13. Update Yantrik config ──
 sed -i "s/^user_name:.*/user_name: \"$USERNAME\"/" "$M/opt/yantrik/config.yaml"
 
+# ── 13b. The update channel, stated rather than assumed ──
+#
+# The rsync above copies the live image's /opt/yantrik/update.conf onto the disk, and the ISO
+# build writes one — so in the normal case this changes nothing. It exists for the case where
+# it is missing: without update.conf the updater falls back to the channel recorded in BUILD
+# and then to its own hard default, and a machine that silently guesses which software it will
+# install is exactly the thing this whole path was untangled to stop. If it is not there, write
+# it, deriving the channel from the build that was just installed.
+#
+# Owned by the desktop user, because the About screen's channel picker writes this file through
+# `yantrik-update set-channel` as that user. A root-owned update.conf makes the picker inert —
+# it says so rather than failing, but an inert control is still a control nobody can use.
+UPDATE_CONF="$M/opt/yantrik/update.conf"
+if [ ! -f "$UPDATE_CONF" ]; then
+    INSTALL_CHANNEL=$(sed -n 's/^channel=//p' "$M/opt/yantrik/BUILD" 2>/dev/null | head -1)
+    [ -n "$INSTALL_CHANNEL" ] || INSTALL_CHANNEL="nightly"
+    printf '%s\n' \
+        "# Read by yantrik-update, and by nothing else. This file is the single owner of which" \
+        "# channel this machine follows, which server it follows it on, and over which scheme." \
+        "#" \
+        "# Change it with: yantrik-update set-channel nightly|beta|stable" \
+        "# or from the desktop: About -> UPDATES -> the channel chips." \
+        "CHANNEL=$INSTALL_CHANNEL" \
+        "HOST=releases.yantrikos.com" \
+        "SCHEME=https" > "$UPDATE_CONF"
+    ok "Update channel: $INSTALL_CHANNEL (update.conf was missing from the image)"
+fi
+
 # ── 14. OS branding ──
 # The version comes from the build that is being installed, not from a literal written here.
 # "0.3.0" was hardcoded for five months, so `cat /etc/os-release` on any installed machine
@@ -240,6 +268,12 @@ mkdir -p "$M/opt/yantrik/logs"
 chmod 755 "$M/opt/yantrik/logs"
 chown "$UID_NUM:$GID_NUM" "$M/opt/yantrik/logs"
 chown -R "$UID_NUM:$GID_NUM" "$M/opt/yantrik/data" 2>/dev/null || true
+# The installer can rename the desktop user, and a renamed user can land on a different uid
+# than the 1000 the image chowned /opt/yantrik to. update.conf and BUILD are the two files the
+# updater writes as that user — set-channel writes the first, apply writes the second — so they
+# follow the account that actually exists on this machine.
+chown "$UID_NUM:$GID_NUM" "$M/opt/yantrik/update.conf" 2>/dev/null || true
+chown "$UID_NUM:$GID_NUM" "$M/opt/yantrik/BUILD" 2>/dev/null || true
 
 umount "$M/sys" "$M/proc" "$M/dev" 2>/dev/null || true
 $IS_EFI && umount "$M/boot/efi" 2>/dev/null || true

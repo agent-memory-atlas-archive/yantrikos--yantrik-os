@@ -128,7 +128,12 @@ write_files:
       # costs nothing, and moves to the public host once it has run clean for a while.
       # Pin a dated build for a machine that must not move under you; -latest is right
       # for a box you rebuild often.
-      YANTRIK_RELEASE_URL="http://releases.yantrikos.com/nightly/yantrik-os-latest-linux-amd64.tar.zst"
+      # https. The public host serves it, and this is the file that becomes every binary on the
+      # machine — over plain http it is whatever is between this VM and the server, and there
+      # is no checksum in this path to catch it (the sha256 lives in the manifest, which the
+      # updater fetches later and separately). The scheme written into update.conf below is
+      # taken from this URL, so an http URL here also silently downgraded every future update.
+      YANTRIK_RELEASE_URL="https://releases.yantrikos.com/nightly/yantrik-os-latest-linux-amd64.tar.zst"
       # A machine built by a script has nobody sitting at it to answer questions.
       # Set to "interactive" to present onboarding on first boot instead.
       YANTRIK_ONBOARDING="seeded"
@@ -233,12 +238,28 @@ write_files:
         # update itself at all, which was true of the first one built from this file.
         # Derived from the URL that was actually installed rather than written down twice
         # and kept in sync by hand.
+        # SCHEME as well as CHANNEL and HOST. It was left out, so the updater fell back to its
+        # own default of https — right by luck, and wrong the moment anyone points
+        # YANTRIK_RELEASE_URL at a plain-http mirror. It also meant boottest.py's assertion
+        # that an installed machine is on https could only ever pass on ISO installs: the file
+        # a cloud-init machine wrote did not contain the line it looks for.
         CHANNEL_NAME="$(printf '%s' "$YANTRIK_RELEASE_URL" | sed -n 's#.*/\([^/]*\)/yantrik-os-latest.*#\1#p')"
         CHANNEL_HOST="$(printf '%s' "$YANTRIK_RELEASE_URL" | sed -n 's#^[a-z]*://\([^/]*\)/.*#\1#p')"
+        CHANNEL_SCHEME="$(printf '%s' "$YANTRIK_RELEASE_URL" | sed -n 's#^\([a-z]*\)://.*#\1#p')"
+        [ -n "$CHANNEL_SCHEME" ] || CHANNEL_SCHEME=https
         if [ -n "$CHANNEL_NAME" ] && [ -n "$CHANNEL_HOST" ]; then
-          printf 'CHANNEL=%s\nHOST=%s\n' "$CHANNEL_NAME" "$CHANNEL_HOST" > /opt/yantrik/update.conf
+          {
+            echo "# Read by yantrik-update, and by nothing else. This file is the single owner"
+            echo "# of which channel this machine follows, on which server, over which scheme."
+            echo "# Written here from the URL this machine was actually installed from."
+            echo "#"
+            echo "# Change it with: yantrik-update set-channel nightly|beta|stable"
+            echo "CHANNEL=$CHANNEL_NAME"
+            echo "HOST=$CHANNEL_HOST"
+            echo "SCHEME=$CHANNEL_SCHEME"
+          } > /opt/yantrik/update.conf
           chown yantrik:yantrik /opt/yantrik/update.conf
-          log "updates will come from $CHANNEL_NAME on $CHANNEL_HOST"
+          log "updates will come from $CHANNEL_NAME on $CHANNEL_SCHEME://$CHANNEL_HOST"
         fi
 
         # ── Onboarding ────────────────────────────────────────────────────────────────

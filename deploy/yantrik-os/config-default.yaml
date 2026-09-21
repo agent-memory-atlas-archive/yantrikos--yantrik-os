@@ -98,10 +98,25 @@ voice:
   silence_duration_ms: 800
 
 # ── Updates ────────────────────────────────────────────────────────────────────────────
-# A public hostname, over HTTPS. An image that updates itself over plain HTTP takes its next
-# build from whoever is between it and the server; the checksum in the manifest is fetched
-# over the same channel, so it settles nothing.
-updates:
-  channel: "beta"
-  server: "https://releases.yantrikos.com"
-  check_on_boot: true
+#
+# Not here. This file used to carry:
+#
+#   updates:
+#     channel: "beta"
+#     server: "https://releases.yantrikos.com"
+#     check_on_boot: true
+#
+# and NOTHING on the machine read any of those three keys — no Rust crate, no script, nothing.
+# `grep -rn 'updates\.channel\|check_on_boot' crates/` returned nothing then and returns
+# nothing now. They were a setting that looked authoritative and decided nothing, and the one
+# thing they did do was mislead: build-debian-iso.sh derived the image's real update channel
+# from `channel: "beta"` here, so the first public nightly ISO was built to take its updates
+# from a channel whose newest build was six months older than the image itself.
+#
+# The channel, the host and the scheme live in /opt/yantrik/update.conf, which is read and
+# written by exactly one program — `yantrik-update` — and displayed and changed from exactly
+# one screen — About → UPDATES. A shell script cannot sanely parse YAML, and the shell script
+# is the thing that has to read this at 3am on a machine with no desktop running, so the flat
+# KEY=value file is the one that gets to be the owner.
+#
+# See design/updates-2026-09-21.md.

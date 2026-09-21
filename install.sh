@@ -614,10 +614,6 @@ voice:
   silence_threshold: 0.01
   silence_duration_ms: 800
 
-updates:
-  channel: "beta"
-  server: "http://releases.yantrikos.com"
-  check_on_boot: true
 CONFIG
 
 ok "config.yaml generated"

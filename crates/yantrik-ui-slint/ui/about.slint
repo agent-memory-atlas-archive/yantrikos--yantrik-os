@@ -6,12 +6,55 @@ import { Icon, Icons } from "components/icon.slint";
 import { AppHeader } from "components/app_header.slint";
 import { AppColor, AppIdentity } from "components/app_color.slint";
 
+// What is installed, and nothing else.
+//
+// This carried `latest-version`, `has-update` and `is-checking` as well, filled in by a checker
+// that read `channels[c]["components"][name]["version"]` out of the release manifest — a field
+// no manifest this project publishes has ever had. The lookup always missed, so `has-update` was
+// always false and the two badges those fields drew were never once drawn. The release manifest
+// describes whole builds, not per-component versions; there is no honest source for a
+// per-component "available" and so there is no longer a field claiming one. Update availability
+// is answered once, for the machine, by the UPDATES card below.
 export struct ComponentVersionData {
     name: string,
     current-version: string,
-    latest-version: string,
-    has-update: bool,
-    is-checking: bool,
+}
+
+// One channel in the picker. Three of these, one per channel the updater knows.
+//
+// `enabled` is false when update.conf cannot be written by the user the desktop runs as: the
+// chip goes flat and stops responding rather than sending a request that will come back as a
+// permission error. The card says what to type instead.
+component ChannelChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    callback picked();
+
+    width: chip-text.preferred-width + 24px;
+    height: 26px;
+    border-radius: 13px;
+    background: root.selected ? Theme.tint-cyan
+              : (chip-ta.has-hover && root.enabled) ? Theme.hover-fill-strong
+              : Theme.hover-fill;
+    border-width: 1px;
+    border-color: root.selected ? Theme.cyan-dim : Theme.border-subtle;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    chip-text := Text {
+        text: root.label;
+        font-size: Theme.fs-micro;
+        font-weight: root.selected ? 700 : 500;
+        color: root.selected ? Theme.cyan : Theme.text-secondary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    chip-ta := TouchArea {
+        enabled: root.enabled && !root.selected;
+        mouse-cursor: self.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.picked(); }
+    }
 }
 
 export component AboutScreen inherits Rectangle {
@@ -40,10 +83,26 @@ export component AboutScreen inherits Rectangle {
     in property <string> version-text: "0.3.0";
     in property <string> build-date: "";
 
-    // Component versions
+    // Component versions — installed only.
     in property <[ComponentVersionData]> components: [];
-    in property <int> update-count: 0;
-    in property <string> update-status: "";
+
+    // ── Updates ──
+    //
+    // Every one of these comes from `yantrik-update`, which is the only program on the machine
+    // that reads /opt/yantrik/update.conf and the only one that writes it. The screen states
+    // what the updater states; it does not have a second opinion about the channel, the host,
+    // or whether this machine is current.
+    in property <string> update-channel: "";         // nightly | beta | stable
+    in property <string> update-host: "";            // https://releases.yantrikos.com
+    in property <string> update-installed: "";       // 0.4.2 (deadbee)
+    in property <string> update-latest: "";          // what the channel has, blank if unknown
+    in property <string> update-status: "";          // the updater's own sentence
+    // idle | checking | up-to-date | available | not-published | failed | applying
+    in property <string> update-state: "idle";
+    in property <bool> update-busy: false;
+    // False when update.conf is not writable by the user the desktop runs as. The picker then
+    // says what to type instead of offering a control that silently fails.
+    in property <bool> update-can-set-channel: true;
 
     // AI Readiness
     in property <string> ai-model-name: "";
@@ -53,6 +112,10 @@ export component AboutScreen inherits Rectangle {
 
     callback back-pressed();
     callback check-updates();
+    callback install-update();
+    // The channel name to switch to. Goes to `yantrik-update set-channel`, which validates it
+    // again and is the one writer of update.conf.
+    callback set-channel(string);
     callback open-ai-settings();
 
     VerticalLayout {
@@ -532,6 +595,262 @@ export component AboutScreen inherits Rectangle {
                     }
                 }
 
+                // ── UPDATES section header ──
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 3px; height: 14px;
+                        border-radius: 1.5px;
+                        background: Theme.holo-blue;
+                        drop-shadow-blur: 4px;
+                        drop-shadow-color: Theme.holo-blue.transparentize(75%);
+                    }
+                    Text {
+                        text: "UPDATES";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        letter-spacing: 2px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                // ── Updates card ──
+                //
+                // Channel, server, installed build, what the channel has, and the result — in
+                // that order, because that is the order the questions get asked in when an
+                // update does not arrive. Every field is what `yantrik-update` reports; the
+                // screen states it and does not compute it.
+                Rectangle {
+                    background: Theme.bg-card;
+                    border-radius: Theme.radius-card;
+                    border-width: 1px;
+                    border-color: Theme.separator;
+                    height: upd-col.preferred-height;
+
+                    upd-col := VerticalLayout {
+                        padding: 16px;
+                        spacing: 0px;
+
+                        // Channel row — visible AND changeable, which it was in neither sense
+                        // before: no screen in this OS stated the channel, and no screen or
+                        // command could change it short of editing update.conf by hand.
+                        Rectangle {
+                            height: 48px;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                spacing: 8px;
+                                Text {
+                                    text: "Channel";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-body;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: end;
+                                    ChannelChip {
+                                        label: "nightly";
+                                        selected: root.update-channel == "nightly";
+                                        enabled: root.update-can-set-channel && !root.update-busy;
+                                        y: (parent.height - self.height) / 2;
+                                        picked => { root.set-channel("nightly"); }
+                                    }
+                                    ChannelChip {
+                                        label: "beta";
+                                        selected: root.update-channel == "beta";
+                                        enabled: root.update-can-set-channel && !root.update-busy;
+                                        y: (parent.height - self.height) / 2;
+                                        picked => { root.set-channel("beta"); }
+                                    }
+                                    ChannelChip {
+                                        label: "stable";
+                                        selected: root.update-channel == "stable";
+                                        enabled: root.update-can-set-channel && !root.update-busy;
+                                        y: (parent.height - self.height) / 2;
+                                        picked => { root.set-channel("stable"); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Why the picker is inert, when it is. A disabled control with no
+                        // explanation is the same defect as a control that does nothing.
+                        if !root.update-can-set-channel : Rectangle {
+                            height: chan-note.preferred-height + 8px;
+                            chan-note := Text {
+                                text: "The update settings file is not writable by this desktop. "
+                                    + "From a terminal: sudo yantrik-update set-channel <name>";
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-micro;
+                                wrap: word-wrap;
+                                x: 4px;
+                                width: parent.width - 8px;
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                        // Server row
+                        Rectangle {
+                            height: 44px;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                Text {
+                                    text: "Server";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-body;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: root.update-host != "" ? root.update-host : "—";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-small;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                        // Installed row
+                        Rectangle {
+                            height: 44px;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                Text {
+                                    text: "Installed";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-body;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: root.update-installed != "" ? root.update-installed : "—";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-small;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                        // What the channel has. An em dash until a check has answered — it is
+                        // not known before then, and a blank that looks like a value is a lie
+                        // with better manners.
+                        Rectangle {
+                            height: 44px;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                Text {
+                                    text: "Channel has";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-body;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: root.update-latest != "" ? root.update-latest : "—";
+                                    color: root.update-state == "available" ? Theme.holo-blue : Theme.text-primary;
+                                    font-size: Theme.font-small;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                        // The result, in the updater's own words. "up to date", "update
+                        // available", "channel 'beta' is not published", "cannot reach
+                        // releases.yantrikos.com" — four different sentences, where this screen
+                        // used to have one.
+                        if root.update-status != "" : Rectangle {
+                            height: upd-status.preferred-height + 20px;
+                            upd-status := Text {
+                                text: root.update-status;
+                                color: root.update-state == "up-to-date" ? Theme.color-reminder
+                                     : root.update-state == "available" ? Theme.holo-blue
+                                     : root.update-state == "failed" ? Theme.color-emotional
+                                     : root.update-state == "not-published" ? Theme.amber
+                                     : Theme.text-dim;
+                                font-size: Theme.font-small;
+                                wrap: word-wrap;
+                                x: 4px;
+                                y: 10px;
+                                width: parent.width - 8px;
+                            }
+                        }
+
+                        // Buttons
+                        Rectangle {
+                            height: 44px;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                padding-right: 4px;
+                                spacing: 8px;
+                                alignment: start;
+
+                                Rectangle {
+                                    width: check-btn-text.preferred-width + 24px;
+                                    height: 30px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 15px;
+                                    background: check-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
+                                    border-width: 1px;
+                                    border-color: Theme.border-subtle;
+                                    opacity: root.update-busy ? 0.5 : 1.0;
+
+                                    check-btn-text := Text {
+                                        text: root.update-busy ? "Checking…" : "Check for updates";
+                                        font-size: Theme.fs-micro;
+                                        font-weight: 500;
+                                        color: Theme.text-secondary;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    check-ta := TouchArea {
+                                        enabled: !root.update-busy;
+                                        mouse-cursor: self.enabled ? MouseCursor.pointer : MouseCursor.default;
+                                        clicked => { root.check-updates(); }
+                                    }
+                                }
+
+                                // Only when there is something to install. A permanently
+                                // present Install button on a current machine is a control
+                                // with nothing behind it.
+                                if root.update-state == "available" : Rectangle {
+                                    width: install-btn-text.preferred-width + 24px;
+                                    height: 30px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 15px;
+                                    background: install-ta.has-hover
+                                        ? Theme.holo-blue.transparentize(70%)
+                                        : Theme.holo-blue.transparentize(85%);
+                                    border-width: 1px;
+                                    border-color: Theme.holo-blue.transparentize(50%);
+
+                                    install-btn-text := Text {
+                                        text: "Install";
+                                        font-size: Theme.fs-micro;
+                                        font-weight: 600;
+                                        color: Theme.holo-blue;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    install-ta := TouchArea {
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => { root.install-update(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── COMPONENTS section header ──
                 HorizontalLayout {
                     spacing: 8px;
@@ -550,30 +869,11 @@ export component AboutScreen inherits Rectangle {
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                     }
-
-                    // Check for updates button
-                    Rectangle {
-                        width: update-btn-text.preferred-width + 20px;
-                        height: 28px;
-                        border-radius: 14px;
-                        background: update-ta.has-hover ? Theme.hover-fill-strong : Theme.hover-fill;
-                        border-width: 1px;
-                        border-color: root.update-count > 0 ? Theme.holo-blue : Theme.border-subtle;
-
-                        update-btn-text := Text {
-                            text: root.update-count > 0
-                                ? root.update-count + " update(s)"
-                                : "Check Updates";
-                            font-size: Theme.fs-micro;
-                            color: root.update-count > 0 ? Theme.holo-blue : Theme.text-secondary;
-                            font-weight: 500;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-
-                        update-ta := TouchArea {
-                            clicked => { root.check-updates(); }
-                        }
+                    Text {
+                        text: "installed";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
                     }
                 }
 
@@ -610,37 +910,13 @@ export component AboutScreen inherits Rectangle {
                                         horizontal-stretch: 1;
                                     }
 
-                                    // Current version
+                                    // Current version. No "available" badge beside it: see the
+                                    // note on ComponentVersionData — nothing publishes
+                                    // per-component versions, so nothing here can know.
                                     Text {
                                         text: comp.current-version;
                                         color: Theme.text-secondary;
                                         font-size: Theme.font-small;
-                                        vertical-alignment: center;
-                                    }
-
-                                    // Update indicator
-                                    if comp.has-update : Rectangle {
-                                        width: upd-text.preferred-width + 12px;
-                                        height: 20px;
-                                        border-radius: 10px;
-                                        background: Theme.holo-blue.transparentize(87%);
-                                        border-width: 1px;
-                                        border-color: Theme.holo-blue.transparentize(75%);
-
-                                        upd-text := Text {
-                                            text: comp.latest-version;
-                                            font-size: Theme.fs-micro;
-                                            color: Theme.holo-blue;
-                                            font-weight: 600;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-
-                                    if comp.is-checking : Text {
-                                        text: "...";
-                                        font-size: Theme.font-small;
-                                        color: Theme.text-dim;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -655,13 +931,9 @@ export component AboutScreen inherits Rectangle {
                     }
                 }
 
-                // Update status text
-                if root.update-status != "" : Text {
-                    text: root.update-status;
-                    font-size: Theme.font-small;
-                    color: root.update-count > 0 ? Theme.holo-blue : Theme.text-dim;
-                    horizontal-alignment: center;
-                }
+                // The update status used to be repeated down here, under the component list,
+                // where it described a check of the components. It says one thing now, in the
+                // card of the thing it is about.
 
                 // Bottom spacer
                 Rectangle {

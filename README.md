@@ -143,6 +143,7 @@ yantrik-update check        # what is installed vs what the channel has
 yantrik-update apply        # download, verify, install, restart the session
 yantrik-update rollback     # restore the previous build
 yantrik-update status       # current build and available backups
+yantrik-update set-channel nightly|beta|stable   # which channel this machine follows
 ```
 
 The bundle is verified against the manifest's sha256 before a file is touched, the current
