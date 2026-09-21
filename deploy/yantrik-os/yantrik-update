@@ -609,6 +609,47 @@ start_shell() {
   fi
 }
 
+# What is still running the build that was just replaced.
+#
+# An update swaps files and restarts the shell. It does not restart the apps a person has open,
+# or the bridges a harness holds for days: the first update delivered from the public host left
+# Notes describing itself with the old build's one-word summary, and left Hermes talking to a
+# `yos-mcp` it had started three days earlier — so the mind was shown the old tool descriptions
+# and had none of the new build's behaviour, on a machine whose BUILD file said otherwise. Nothing
+# said so. A binary replaced by rename leaves its running process pointing at "… (deleted)", and
+# a script replaced the same way keeps the old text in memory, so both are findable. They are
+# named, not killed: an open note or a conversation is not this script's to end.
+stale_processes() {
+  local pid exe cmd name out="" started installed
+  installed="$(stat -c %Y "$BUILD_FILE" 2>/dev/null || echo 0)"
+  for pid in $(pgrep -u "$(id -u)" 2>/dev/null); do
+    exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" || continue
+    case "$exe" in
+      "$BIN_DIR"/*" (deleted)")
+        name="$(basename "${exe% (deleted)}")"
+        [ "$name" = yantrik-ui ] && continue
+        out="$out $name" ;;
+      *python*)
+        cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+        case "$cmd" in
+          *"$BIN_DIR/yos-mcp"*)
+            started="$(stat -c %Y "/proc/$pid" 2>/dev/null || echo 0)"
+            [ "$started" -lt "$installed" ] && out="$out yos-mcp(pid-$pid)" ;;
+        esac ;;
+    esac
+  done
+  printf '%s' "$out" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/^ *//; s/ *$//'
+}
+
+report_stale() {
+  local stale; stale="$(stale_processes)"
+  [ -n "$stale" ] || return 0
+  warn "still running the previous build until they are reopened: $stale"
+  case "$stale" in
+    *yos-mcp*) info "a harness holds that bridge; restart the harness to give the mind the new tools (Hermes: systemctl --user restart hermes-gateway)" ;;
+  esac
+}
+
 # Wait for the shell to answer its control socket. The socket existing is not enough: it is
 # created before the shell is ready to be asked anything.
 wait_for_shell() {
@@ -619,6 +660,7 @@ wait_for_shell() {
     if [ -S "$sock" ] \
        && XDG_RUNTIME_DIR="$runtime" "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
       printf '%shealthy — update complete%s\n' "$c_grn" "$c_off"
+      report_stale
       return 0
     fi
     sleep 1
@@ -711,6 +753,7 @@ sudo systemctl restart $SESSION_UNIT"
   for _ in $(seq 1 20); do
     if [ -S "$sock" ] && "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
       printf '%shealthy — update complete%s\n' "$c_grn" "$c_off"
+      report_stale
       return 0
     fi
     sleep 1
