@@ -650,6 +650,27 @@ pub fn publish(
                 ui.set_lens_open(true);
                 ui.invoke_open_lens();
 
+                // Whoever calls this is, by construction, somewhere else: Ctrl+K already works
+                // when the shell has the keyboard, so this action is what Super+K reaches for
+                // from inside another window. The first time it ran on a machine with Notes in
+                // front, it answered `lens_open: true` and was right — the Lens had opened,
+                // underneath Notes, where nobody could see it or type into it. The shell is an
+                // ordinary toplevel to the compositor, so it is asked to come forward the way
+                // the taskbar asks for any other window. Off the UI thread: wlrctl is a process.
+                std::thread::spawn(|| {
+                    match std::process::Command::new("wlrctl")
+                        .args(["toplevel", "focus", "title:Yantrik OS"])
+                        .status()
+                    {
+                        Ok(status) if status.success() => {}
+                        Ok(status) => tracing::warn!(
+                            code = status.code().unwrap_or(-1),
+                            "the Lens is open but the shell could not be brought in front of it"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "could not run wlrctl to raise the shell"),
+                    }
+                });
+
                 Ok(serde_json::json!({
                     "lens_open": ui.get_lens_open(),
                     "screen": screen_name(ui.get_current_screen()),

@@ -32,6 +32,9 @@ pub mod connect;
 
 /// The service's side: everything about a Google sign-in that is a decision rather than a socket.
 /// The flow itself lives in `oauth.rs`, which is not here because all of it opens something.
+#[path = "../../services/email-service/src/envelope.rs"]
+pub mod envelope;
+
 #[path = "../../services/email-service/src/google.rs"]
 pub mod google;
 

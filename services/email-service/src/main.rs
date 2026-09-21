@@ -29,6 +29,7 @@
 
 mod accounts;
 mod connect;
+mod envelope;
 mod google;
 mod oauth;
 
@@ -725,9 +726,7 @@ fn imap_list_messages(
             .as_ref()
             .and_then(|addrs| addrs.first())
             .map(|a| {
-                let name = a.name.as_ref().map(|n| {
-                    String::from_utf8_lossy(n).to_string()
-                });
+                let name = a.name.as_ref().map(|n| envelope::text(n));
                 let mailbox = a.mailbox.as_ref().map(|m| String::from_utf8_lossy(m).to_string()).unwrap_or_default();
                 let host = a.host.as_ref().map(|h| String::from_utf8_lossy(h).to_string()).unwrap_or_default();
                 match name {
@@ -740,13 +739,14 @@ fn imap_list_messages(
         let subject = envelope
             .subject
             .as_ref()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|s| envelope::text(s))
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "(no subject)".to_string());
 
         let date = envelope
             .date
             .as_ref()
-            .map(|d| String::from_utf8_lossy(d).to_string())
+            .map(|d| envelope::date(d))
             .unwrap_or_default();
 
         let flags = msg.flags();
@@ -1186,7 +1186,7 @@ fn imap_search(
             .as_ref()
             .and_then(|addrs| addrs.first())
             .map(|a| {
-                let name = a.name.as_ref().map(|n| String::from_utf8_lossy(n).to_string());
+                let name = a.name.as_ref().map(|n| envelope::text(n));
                 let mailbox = a.mailbox.as_ref().map(|m| String::from_utf8_lossy(m).to_string()).unwrap_or_default();
                 let host = a.host.as_ref().map(|h| String::from_utf8_lossy(h).to_string()).unwrap_or_default();
                 match name {
@@ -1199,13 +1199,13 @@ fn imap_search(
         let subject = envelope
             .subject
             .as_ref()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|s| envelope::text(s))
             .unwrap_or_default();
 
         let date = envelope
             .date
             .as_ref()
-            .map(|d| String::from_utf8_lossy(d).to_string())
+            .map(|d| envelope::date(d))
             .unwrap_or_default();
 
         let flags = msg.flags();

@@ -12,5 +12,8 @@ yantrik-ipc-contracts = { path = "../../crates/yantrik-ipc-contracts" }
 # included below is compiled against exactly what the service compiles it against.
 sha2 = "0.10"
 base64 = "0.22"
+# What `envelope.rs` needs, for the same reason.
+mailparse = "0.15"
+chrono = "0.4"
 [lib]
 path = "lib.rs"

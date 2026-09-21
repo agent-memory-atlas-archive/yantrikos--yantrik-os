@@ -91,6 +91,12 @@ export component IntentLens inherits Rectangle {
     changed is-open => {
         if (root.is-open && !root.chat-mode) {
             lens-input.focus();
+            // Whatever the field already holds — the last ask, or text `open_lens` prefilled —
+            // comes up selected. The cursor otherwise sits at position 0, so the first thing
+            // typed was spliced onto the front of the old text ("hello keyswhat is using my
+            // disk" is what the machine showed). Selected, typing replaces it and the arrow
+            // keys keep it, which is what every ask bar does.
+            lens-input.select-all();
         }
     }
 
