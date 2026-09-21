@@ -102,6 +102,20 @@ jobs:
       # These scripts build and publish the OS and update installed machines. A syntax error in
       # one of them is found at the worst possible moment otherwise — mid-release, or mid-update
       # on a machine that then has half a build on it.
+      # A script written on Windows is committed without its executable bit, and nothing
+      # notices until something runs it by path. The first ISO pipeline run got through a
+      # forty-minute release build and then stopped at `shelved-bins.sh: Permission denied`.
+      # Six tracked files were like that. Anything that starts with `#!` is meant to be run.
+      - name: Every script is executable
+        run: |
+          fail=0
+          while read -r mode _ _ f; do
+            [ "$mode" = "100644" ] || continue
+            [ "$(head -c 2 "$f" 2>/dev/null)" = "#!" ] || continue
+            echo "::error file=$f::starts with #! but is not executable in git (git update-index --chmod=+x $f)"
+            fail=1
+          done < <(git ls-files -s)
+          exit $fail
       - name: Parse every script
         run: |
           fail=0
