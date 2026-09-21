@@ -134,7 +134,9 @@ export component ApprovalCard inherits Rectangle {
 
     if root.waiting : Rectangle {
         border-radius: Theme.r-lg;
-        background: Theme.glass-card;
+        // Opaque, not glass: this card is drawn over whatever screen is up, and a question about
+        // something that cannot be undone must not have another window's words showing through it.
+        background: Theme.bg-card;
         border-width: 1px;
         // The grade colours the edge of the card rather than a badge in the corner, so the one
         // thing that changes how hard you should look is visible before you start reading.
@@ -1388,6 +1390,23 @@ export component IntentLens inherits Rectangle {
                 changed lens-open => {
                     if (self.lens-open) { chat-input.focus(); }
                 }
+                // ...and when this block is CREATED already open, which is the usual way in: the
+                // ask bar sets `is-open`, and only then does `open_lens` notice the conversation
+                // has messages and switch chat mode on. This element comes into being with
+                // `lens-open` true, a property that starts true has not changed, and the handler
+                // above never ran — the panel opened with the cursor nowhere, and a sentence
+                // typed straight after clicking the ask bar went to nothing at all. One tick
+                // later rather than in `init`, because a field cannot take focus before it has
+                // been laid out.
+                property <bool> focus-owed: true;
+                Timer {
+                    interval: 30ms;
+                    running: parent.focus-owed;
+                    triggered => {
+                        parent.focus-owed = false;
+                        if (parent.lens-open) { chat-input.focus(); }
+                    }
+                }
 
                 // Messages — fills available panel height
                 ListView {
@@ -1461,9 +1480,9 @@ export component IntentLens inherits Rectangle {
                     }
                 }
 
-                // Input bar for chat mode
+                // Input bar for chat mode. Grows with the field inside it (see `chat-input`).
                 Rectangle {
-                    height: 48px;
+                    height: max(48px, min(118px, chat-input.preferred-height + 14px) + 16px);
                     background: Theme.bg-deep;
 
                     Rectangle {
@@ -1503,7 +1522,10 @@ export component IntentLens inherits Rectangle {
                         // Chat input
                         Rectangle {
                             horizontal-stretch: 1;
-                            height: 32px;
+                            // As tall as what has been typed, up to five lines or so. It was a
+                            // fixed 32px around a field that wraps, so the second line of a
+                            // sentence pushed the first one out through the top of the box.
+                            height: max(32px, min(118px, chat-input.preferred-height + 14px));
                             border-radius: 16px;
                             background: Theme.bg-input;
                             border-width: 1px;
@@ -1516,7 +1538,11 @@ export component IntentLens inherits Rectangle {
                             chat-input := TextInput {
                                 property <string> chat-text: "";
                                 x: 12px;
-                                y: (parent.height - self.preferred-height) / 2;
+                                // Centred while it fits; past the box's limit the LAST line is
+                                // the one kept in view, because that is where the cursor is.
+                                y: self.preferred-height + 14px <= parent.height
+                                    ? (parent.height - self.preferred-height) / 2
+                                    : parent.height - self.preferred-height - 7px;
                                 width: parent.width - 24px;
                                 color: Theme.text-primary;
                                 font-size: Theme.fs-body;
@@ -1529,6 +1555,18 @@ export component IntentLens inherits Rectangle {
                                 key-pressed(event) => {
                                     if (event.text == Key.Escape) {
                                         root.close-lens();
+                                        return accept;
+                                    }
+                                    // Enter sends; Shift+Enter is a new line. A multi-line
+                                    // TextInput never fires `accepted` — Enter is a character to
+                                    // it — so the handler below had not run since this field was
+                                    // made multi-line, and the only way to send a second message
+                                    // was to reach for the mouse and press `>`.
+                                    if (event.text == Key.Return && !event.modifiers.shift) {
+                                        if (self.chat-text != "") {
+                                            root.send-message(self.chat-text);
+                                            self.chat-text = "";
+                                        }
                                         return accept;
                                     }
                                     return reject;

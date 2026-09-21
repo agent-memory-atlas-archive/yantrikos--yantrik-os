@@ -401,7 +401,12 @@ impl AppContext {
         registry.register(Box::new(features::process_sentinel::ProcessSentinel::new()));
         registry.register(Box::new(features::focus_flow::FocusFlow::new()));
         registry.register(Box::new(features::error_companion::ErrorCompanion::new()));
-        registry.register(Box::new(features::notification_relay::NotificationRelay::new()));
+        // `NotificationRelay` is not registered any more. It turned every notification into an
+        // urge, and an urge is drawn as a whisper card at the top right — so since the toasts
+        // arrived, each notification was on screen twice, and the second copy sat exactly where
+        // the approval card goes: the card asking "allow this?" came up with a grey ghost of its
+        // own notice behind it. The toast is the one place a notification is shown. A mind still
+        // learns of it: `system_context` and the activity feed read the same event.
         registry.register(Box::new(features::tool_suggester::ToolSuggester::new()));
         registry.register(Box::new(features::network_watcher::NetworkWatcher::new()));
         registry.register(Box::new(features::clipboard_intelligence::ClipboardIntelligence::new(clip_history.clone())));

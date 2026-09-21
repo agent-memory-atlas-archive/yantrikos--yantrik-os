@@ -151,9 +151,13 @@ export component MindModeMenu inherits Rectangle {
     width: 340px;
     height: body.preferred-height;
     border-radius: Theme.r-lg;
+    // Opaque. `glass-card` is for surfaces that sit over the WALLPAPER; this one opens over the
+    // desktop's own text, and at 78% the greeting, "All apps" and the Ctrl K hint read straight
+    // through the four choices a person is trying to tell apart.
+    //
     // The whole panel goes red-edged in bypass. It is the one state where a person walking past
     // the machine should be able to tell from across the room.
-    background: Theme.glass-card;
+    background: Theme.bg-card;
     border-width: 1px;
     border-color: root.mode == "bypass" ? Theme.color-danger : Theme.glass-border-strong;
     drop-shadow-blur: 18px;

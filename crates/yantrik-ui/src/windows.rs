@@ -201,6 +201,39 @@ fn display_name(app_id: &str) -> String {
         })
 }
 
+/// Bring the window called `title` to the front, restoring it first if it was minimized. Says
+/// whether the compositor had such a window.
+///
+/// A minimized window cannot take focus while it is still minimized, and wlrctl has no
+/// "unminimize" verb — `maximize` is what brings it back onto the screen. Applied only to windows
+/// that are actually minimized, so presenting a visible window does not resize it.
+///
+/// The key is given explicitly: wlrctl's matchspec treats a bare word as an app_id, our Slint
+/// windows set a title and no app_id, and a match on nothing exits as success.
+pub fn present(title: &str) -> bool {
+    let restore = std::process::Command::new("wlrctl")
+        .args(["toplevel", "maximize", &format!("title:{title}"), "state:minimized"])
+        .status();
+    if let Err(e) = restore {
+        tracing::warn!(error = %e, "wlrctl is not available; cannot restore a minimized window");
+    }
+    match std::process::Command::new("wlrctl")
+        .args(["toplevel", "focus", &format!("title:{title}")])
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not run wlrctl to focus a window");
+            false
+        }
+    }
+}
+
+/// Bring the window of one of our apps to the front, by the id the launcher knows it by.
+pub fn present_app(app_id: &str) -> bool {
+    present(&display_name(app_id))
+}
+
 /// Ask the compositor what is on screen, through `wlrctl toplevel list`.
 ///
 /// The only account of a window this process did not start — an app a person launched from a

@@ -412,6 +412,15 @@ fn resync(ui: &App) {
 fn maybe_toast(ui: &App, n: &Notification) {
     let critical = n.urgency == Urgency::Critical;
 
+    // A request for approval is stored and counted, and never popped. The card it announces is
+    // already on this screen — over every screen, or in the conversation when that is open — and
+    // the conversation's copy of the card sits in the bottom right, which is where toasts go: the
+    // notice saying "allow or deny it on the card" came up over the card's Allow and Deny.
+    // The notification is for whoever is NOT looking at this screen, and they read the centre.
+    if n.app == "Yantrik" && n.title.contains(ASKING) {
+        return;
+    }
+
     if SILENT_SCREENS.contains(&ui.get_current_screen()) {
         return;
     }
@@ -536,6 +545,7 @@ fn apply_tick(ui: &App, tick: Tick) {
     // One place, once a second, on the UI thread: the companion worker cannot read a Slint
     // property and needs to know whether the conversation is on screen. See `situation_now`.
     LENS_OPEN.store(ui.get_lens_open(), std::sync::atomic::Ordering::Relaxed);
+    withdraw_answered_questions(ui);
     match tick {
         Tick::Changed(since) => {
             let fresh = with_mirror(|m| m.apply(since)).unwrap_or_default();
@@ -672,6 +682,45 @@ fn act(method: &'static str, params: serde_json::Value) {
         });
 }
 
+/// What marks a notification as "somebody is waiting for an answer". In the title, between who
+/// and what, because the title is the one field both the sender and the withdrawal below hold.
+const ASKING: &str = " is asking to ";
+
+/// Take the question down once nobody is asking it.
+///
+/// `approval_waiting` raises its notice as `critical` so that it "stays on screen until it is
+/// answered" — and nothing ever took it down when it was. Seventeen minutes after a request had
+/// been denied, the desktop still said "Allow or deny it on the card at the top right" about a
+/// card that no longer existed, and because a critical toast does not time out it sat over the
+/// conversation's text box for as long as the session lasted.
+///
+/// Reconciled rather than signalled: every way a request can end — allowed, denied, expired,
+/// the asking program gone — ends with `approvals::pending()` empty, and this runs on the tick
+/// that already runs once a second. While another request is still pending the notices stay;
+/// they come down together when the last one is answered.
+fn withdraw_answered_questions(ui: &App) {
+    if !crate::approvals::pending().is_empty() {
+        return;
+    }
+    let stale: Vec<String> = with_mirror(|m| {
+        m.showing()
+            .iter()
+            .filter(|n| n.app == "Yantrik" && n.title.contains(ASKING))
+            .map(|n| n.id.clone())
+            .collect()
+    })
+    .unwrap_or_default();
+    if stale.is_empty() {
+        return;
+    }
+    for id in &stale {
+        act("notifications.dismiss", serde_json::json!({ "id": id }));
+        with_mirror(|m| m.dismiss_locally(id));
+        crate::wire::toast::remove(ui, id);
+    }
+    resync(ui);
+}
+
 /// A mind is waiting for an answer.
 ///
 /// Called from `control_approvals` when a request arrives. The card itself is drawn over every
@@ -683,10 +732,10 @@ fn act(method: &'static str, params: serde_json::Value) {
 /// question with a deadline is exactly what that level is for.
 pub fn approval_waiting(requester: &str, app: &str, action: &str) {
     notify::send(
-        notify::Notification::new("Yantrik", format!("{requester} is asking to {action}"))
+        notify::Notification::new("Yantrik", format!("{requester}{ASKING}{action}"))
             .body(format!(
-                "In {app}. Allow or deny it on the card at the top right — it expires on its own \
-                 if nobody answers."
+                "In {app}. Allow or deny it on the card on this machine's screen — it expires on \
+                 its own if nobody answers."
             ))
             .urgency(Urgency::Critical),
     );
@@ -932,14 +981,55 @@ fn deliver(
                 "the answering mind is not the built-in companion, so its proactive message is \
                  a notification and not part of the conversation"
             );
+            let (title, body) = headline_and_rest(text);
             notify::send(
-                notify::Notification::new("Yantrik Companion", text.chars().take(120).collect::<String>())
-                    .urgency(Urgency::Low),
+                notify::Notification::new("Yantrik Companion", title).body(body).urgency(Urgency::Low),
             );
         }
         ProactiveDelivery::Transcript { notify } => push_to_transcript(notify),
     }
     route
+}
+
+/// A message written for a conversation, cut to fit a notification: a headline and the rest.
+///
+/// The first 120 characters used to go in as the title, whatever they were. A companion writes
+/// markdown, so a toast read `Ran the check. Here's the read:\n\n**2,114 memories… | Bucket | Count`
+/// — asterisks, a table's pipes and two newlines in a one-line title. The headline is the first
+/// line that says something, with the markup taken off; what follows it is the body, flattened
+/// the same way and cut at a word.
+fn headline_and_rest(text: &str) -> (String, String) {
+    let mut lines = text.lines().map(plain_line).filter(|l| !l.is_empty());
+    let title = clip_at_word(&lines.next().unwrap_or_default(), 90);
+    let body = clip_at_word(&lines.collect::<Vec<_>>().join(" "), 220);
+    (title, body)
+}
+
+/// One line of markdown as plain words: emphasis, heading and list marks, table pipes and rules
+/// removed. Not a markdown parser — a notification has no room for one to matter.
+fn plain_line(line: &str) -> String {
+    let line = line.trim().trim_start_matches(['#', '>', '-', '*', '|', ' ']);
+    let cleaned: String = line
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .replace('|', " · ");
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = cleaned.trim_matches([' ', '·']).to_string();
+    // A table's rule line (`|---|---|`) is only punctuation once the pipes are gone.
+    if cleaned.chars().all(|c| matches!(c, '-' | ':' | '·' | ' ')) {
+        return String::new();
+    }
+    cleaned
+}
+
+fn clip_at_word(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max).collect();
+    let cut = cut.rsplit_once(' ').map(|(head, _)| head).unwrap_or(&cut);
+    format!("{}…", cut.trim_end_matches([',', ';', ':', '.', ' ']))
 }
 
 // ── For `describe shell` ────────────────────────────────────────────────────────────────────
@@ -975,6 +1065,26 @@ mod tests {
             answer_in_flight: in_flight,
             lens_open: lens,
         }
+    }
+
+    #[test]
+    fn a_markdown_message_becomes_a_headline_and_a_body() {
+        // The toast that was on screen on 21 September, verbatim.
+        let (title, body) = headline_and_rest(
+            "Ran the check. Here's the unvarnished read:\n\n**2,114 memories. About 2,091 of them \
+             are garbage.**\n\n| Bucket | Count | Verdict |\n|---|---|---|\n| Noise | 2,091 | drop |",
+        );
+        assert_eq!(title, "Ran the check. Here's the unvarnished read:");
+        assert!(body.starts_with("2,114 memories. About 2,091 of them are garbage."), "{body}");
+        assert!(!body.contains('*') && !body.contains('|') && !body.contains("---"), "{body}");
+        assert!(body.contains("Bucket · Count · Verdict"), "{body}");
+
+        let (title, body) = headline_and_rest("One line.");
+        assert_eq!((title.as_str(), body.as_str()), ("One line.", ""));
+
+        let long = "word ".repeat(60);
+        let (title, _) = headline_and_rest(&long);
+        assert!(title.chars().count() <= 91 && title.ends_with('…'), "{title}");
     }
 
     #[test]

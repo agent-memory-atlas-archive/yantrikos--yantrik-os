@@ -658,16 +658,26 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
                     Ok(status) => {
                         let lived = started.elapsed();
                         let lived_ms = lived.as_millis() as u64;
-                        // A second copy of a single-instance app exits at once, on purpose: it
-                        // has asked the window that is already open to show itself. That is a
-                        // handover, and reporting it as a failed launch put every relaunch of
-                        // notes or the terminal in `describe shell`'s failed_launches.
-                        if lived_ms < crate::running::LAUNCH_GRACE_MS
-                            && !owns_window
+                        // A second copy of a single-instance app exits at once, on purpose, and
+                        // three comments in this shell said it "asks the window that is already
+                        // open to show itself". Nothing did. The copy just exited, so clicking the
+                        // tile of an app that was open behind something — or asking `open_app`
+                        // for one — did nothing a person could see. And after a shell restart the
+                        // registry no longer knew the app was open, so the same click was also
+                        // recorded as a failed launch and raised a notice about it.
+                        //
+                        // The handover is done here, where the exit is seen: a clean exit inside
+                        // the grace period with the app's window on screen IS the handover,
+                        // whoever the registry thought owned the record.
+                        let handed_over = lived_ms < crate::running::LAUNCH_GRACE_MS
                             && status.success()
+                            && crate::windows::present_app(&id);
+                        if handed_over || (lived_ms < crate::running::LAUNCH_GRACE_MS
+                            && !owns_window
+                            && status.success())
                         {
                             tracing::info!(
-                                app = %name, lived_ms,
+                                app = %name, lived_ms, brought_forward = handed_over,
                                 "A second copy handed over to the window already open"
                             );
                         } else if lived_ms < crate::running::LAUNCH_GRACE_MS {

@@ -2802,7 +2802,14 @@ export component App inherits Window {
             overflow: root.toast-overflow;
             // Above the taskbar on the desktop screen; flush to the bottom edge everywhere
             // else, because no other screen draws one.
-            bottom-inset: root.current-screen == 1 ? Theme.taskbar-height : 0px;
+            //
+            // And above the conversation's text box while the conversation is open. The toasts
+            // and the panel share the bottom right corner, and a critical toast does not time
+            // out — so one "a mind is asking" notice sat on top of the box a person types their
+            // next sentence into, for as long as it stayed up.
+            bottom-inset: root.current-screen == 1
+                ? Theme.taskbar-height + (root.lens-open && root.lens-chat-mode ? 76px : 0px)
+                : 0px;
             toast-clicked(id) => { root.toast-clicked(id); }
             toast-dismissed(id) => { root.toast-dismissed(id); }
             toast-action(id, action) => { root.toast-action(id, action); }

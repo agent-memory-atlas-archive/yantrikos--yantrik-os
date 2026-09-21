@@ -20,30 +20,13 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         let title = title.to_string();
         tracing::info!(title = %title, "Switching to window");
 
-        // A minimized window cannot take focus while it is still minimized, and wlrctl has no
-        // "unminimize" verb — `maximize` is what brings it back onto the screen. Applied only to
-        // windows that are actually minimized, so clicking the entry for a visible window does
-        // not resize it, which would be its own bug.
-        let restore = std::process::Command::new("wlrctl")
-            .args(["toplevel", "maximize", &format!("title:{title}"), "state:minimized"])
-            .status();
-        if let Err(e) = restore {
-            tracing::warn!(error = %e, "wlrctl is not available; cannot restore a minimized window");
-        }
-
-        match std::process::Command::new("wlrctl")
-            .args(["toplevel", "focus", &format!("title:{title}")])
-            .status()
-        {
-            Ok(status) if status.success() => {}
-            // wlrctl exits non-zero when nothing matched, which is the interesting case: the
-            // taskbar is showing a window the compositor does not have under that name.
-            Ok(status) => tracing::warn!(
+        // wlrctl exits non-zero when nothing matched, which is the interesting case: the taskbar
+        // is showing a window the compositor does not have under that name.
+        if !crate::windows::present(&title) {
+            tracing::warn!(
                 title = %title,
-                code = status.code().unwrap_or(-1),
                 "no window matched that title; the taskbar and the compositor disagree"
-            ),
-            Err(e) => tracing::warn!(error = %e, "could not run wlrctl to focus a window"),
+            );
         }
     });
 }
