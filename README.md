@@ -170,6 +170,22 @@ yantrik ask "what is using the most disk?"  # ask the companion
 Actions are graded safe, standard, sensitive or dangerous, and the sensitive ones need
 approval. `yos-mcp` exposes the same surface over MCP.
 
+When a mind asks for something graded above the bridge's ceiling, the desktop asks the person:
+a card says who is asking, what it will do and with which arguments, and offers **Allow once**
+and **Deny**. Only that click grants anything — no action on any control surface can — and a
+grant is good for one call with exactly those arguments. Nothing graded above the machine's own
+ceiling (`tool_permission`) is ever asked about.
+
+Because the call waits for a person, **an MCP client must allow `os_act` up to 250 seconds**.
+A client that gives up sooner cuts the person off mid-decision. For Hermes:
+
+```yaml
+mcp_servers:
+  yantrik_os:
+    command: /opt/yantrik/bin/yos-mcp
+    timeout: 300
+```
+
 ## Configuration
 
 One YAML file at `/opt/yantrik/config.yaml`:

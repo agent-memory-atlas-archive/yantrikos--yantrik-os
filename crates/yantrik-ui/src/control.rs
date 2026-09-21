@@ -166,6 +166,11 @@ pub fn publish(
     ctx: &crate::app_context::AppContext,
     services: yantrik_shell_core::service_manager::ServiceManager,
 ) {
+    // The Allow and Deny buttons, before anything can be asked for. They are Slint callbacks
+    // and nothing else: granting is a click, never an action on this surface. See
+    // `control_approvals`.
+    crate::control_approvals::wire(ui);
+
     // The catalogue, not a copy of it. The control surface answers from the same live list
     // the launcher shows, so an app installed a moment ago is launchable by name without
     // restarting the shell — which is what `accepted: true` ought to mean.
@@ -360,6 +365,15 @@ pub fn publish(
                 .with("screen_id", screen)
                 .with("windows", serde_json::Value::Array(open))
                 .with("failed_launches", serde_json::Value::Array(failed))
+                // What is waiting on a person right now. Published so a second mind, or a
+                // test, can tell "the machine is waiting for someone to press a button" from
+                // "the machine is hung" — the two look identical from outside otherwise.
+                .with("pending_approvals", crate::control_approvals::pending_for_describe())
+                // The owner's standing policy for callers on the socket, so a bridge can read
+                // it instead of provoking a `CEILING:` refusal to find out. An approval cannot
+                // exceed this, and a question the machine will refuse to answer should never
+                // reach the person.
+                .with("tool_permission", crate::control_approvals::machine_ceiling())
                 // Which mind is answering, and what else could. An agent that can switch this
                 // has to be able to see it first, and without the list it would be guessing at
                 // ids for `use_harness`.
@@ -820,6 +834,10 @@ pub fn publish(
     let surface = crate::control_installer::actions(surface, ui);
     let surface = crate::control_update::actions(surface, ui);
     let surface = crate::control_files::actions(surface, ui);
+    // Asking the person. Three actions, all `safe`, none of which decides anything — the
+    // decision is a button in the Lens. See `control_approvals` for why that split is the
+    // whole point.
+    let surface = crate::control_approvals::actions(surface, ui);
     crate::control_editor::actions(surface, ui).serve();
 }
 

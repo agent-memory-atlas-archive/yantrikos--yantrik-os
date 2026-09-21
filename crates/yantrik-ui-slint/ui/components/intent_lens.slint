@@ -26,6 +26,230 @@ export struct LensResult {
     inline-value: string,    // For "answer" type: computed value shown prominently
 }
 
+// ── Asking the person ───────────────────────────────────────────────
+//
+// A mind found the dentist appointment, called `calendar.delete_event`, and the bridge refused
+// it: the action is graded `sensitive` and the bridge's ceiling is `standard`. The mind then
+// told the person to "approve it right here in the chat panel" — there was nothing to approve
+// with — "or raise YOS_MCP_MAX_PERMISSION in the settings". This is the card that should have
+// been there. See `crates/yantrik-ui/src/approvals.rs` and design/approvals-2026-09-21.md.
+//
+// Everything the person needs to decide is on the card: who is asking, what the action does in
+// the app's own words, every argument, and the grade. Not a summary of the arguments — the
+// arguments — because the grant is bound to exactly these, and a card that showed a paraphrase
+// would be asking them to approve something they had not read.
+export struct ApprovalRequest {
+    id: string,
+    requester: string,      // who is asking, as the person would recognise it
+    app: string,
+    action: string,
+    purpose: string,        // the action's own published description
+    grade: string,          // safe | standard | sensitive | dangerous
+    args-text: string,      // one `key: value` per line, already rendered
+    warning: string,        // "" unless there is something that cannot be undone
+    decision: string,       // "" while waiting; then allowed | denied | expired
+    record: string,         // the one line that stays in the conversation afterwards
+    age-text: string,       // "94s left", while waiting
+}
+
+// One request, or — once it has been answered — the line it leaves behind.
+//
+// Keyboard: there is deliberately NO default action. Both buttons are TouchAreas, which take no
+// keyboard focus in Slint, so Enter cannot reach either of them. A person allowing something
+// has to move the pointer and press the word Allow. That is the entire mechanism by which a
+// grant exists, and it should cost a deliberate movement.
+export component ApprovalCard inherits Rectangle {
+    in property <ApprovalRequest> data;
+    callback allow();
+    callback deny();
+
+    property <bool> waiting: root.data.decision == "";
+
+    height: self.preferred-height;
+    background: transparent;
+
+    // Decided: one line in the transcript, and nothing else. The card is gone; the record of
+    // what was decided is not, because "did I allow that?" is a question people ask afterwards.
+    if !root.waiting : HorizontalLayout {
+        padding-left: Theme.sp-4;
+        padding-right: Theme.sp-4;
+        padding-top: Theme.sp-1;
+        padding-bottom: Theme.sp-1;
+        spacing: Theme.sp-2;
+
+        Rectangle {
+            width: 3px;
+            background: root.data.decision == "allowed" ? Theme.color-success
+                : root.data.decision == "denied" ? Theme.color-danger
+                : Theme.text-dim;
+        }
+        Text {
+            text: root.data.record;
+            color: Theme.text-dim;
+            font-size: Theme.fs-caption;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+
+    if root.waiting : Rectangle {
+        border-radius: Theme.r-lg;
+        background: Theme.glass-card;
+        border-width: 1px;
+        // The grade colours the edge of the card rather than a badge in the corner, so the one
+        // thing that changes how hard you should look is visible before you start reading.
+        border-color: root.data.grade == "dangerous" ? Theme.color-danger
+            : root.data.grade == "sensitive" ? Theme.color-warning
+            : Theme.glass-border-strong;
+        drop-shadow-blur: 18px;
+        drop-shadow-color: Theme.overlay-shadow;
+        height: card-body.preferred-height;
+
+        card-body := VerticalLayout {
+            padding: Theme.sp-3;
+            spacing: Theme.sp-2;
+
+            // Who is asking, and how long they have to wait for an answer.
+            HorizontalLayout {
+                spacing: Theme.sp-2;
+
+                Rectangle {
+                    width: 6px; height: 6px;
+                    y: 5px;
+                    border-radius: 3px;
+                    background: Theme.amber;
+                }
+                Text {
+                    text: root.data.requester + " is asking to use this machine";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: root.data.age-text;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                }
+            }
+
+            // What it is. The app and action by their exact names, because those are the names
+            // in every other surface on this machine and a friendly rewording would be a third.
+            Text {
+                text: root.data.app + "." + root.data.action;
+                color: Theme.text-primary;
+                font-size: Theme.fs-body-strong;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+
+            // What it does, in the app's own sentence.
+            Text {
+                text: root.data.purpose;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+
+            // The arguments, exactly as the grant is bound to them.
+            Rectangle {
+                border-radius: Theme.r-sm;
+                background: Theme.bg-input;
+                height: args-body.preferred-height;
+
+                args-body := HorizontalLayout {
+                    padding: Theme.sp-2;
+                    Text {
+                        text: root.data.args-text;
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-mono;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+
+            if root.data.warning != "" : HorizontalLayout {
+                spacing: Theme.sp-2;
+                Rectangle {
+                    width: 3px;
+                    background: Theme.color-danger;
+                }
+                Text {
+                    text: root.data.warning;
+                    color: Theme.color-danger;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            Text {
+                text: "Graded " + root.data.grade + ". Allowing covers this one action, once.";
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                wrap: word-wrap;
+            }
+
+            // Deny first, and neither button dressed up as the obvious one.
+            //
+            // The failure this guards against is approval fatigue: a prominent, accent-filled
+            // Allow next to a grey Deny trains a person to click the bright one without
+            // reading, which is exactly how the one request that mattered gets waved through.
+            // So Deny is the ordinary filled button and Allow is an outline you have to aim at.
+            HorizontalLayout {
+                spacing: Theme.sp-2;
+                padding-top: Theme.sp-1;
+
+                Rectangle {
+                    height: Theme.h-regular;
+                    horizontal-stretch: 1;
+                    border-radius: Theme.r-md;
+                    background: deny-ta.has-hover ? Theme.hover-fill-strong : Theme.bg-elevated;
+                    border-width: 1px;
+                    border-color: Theme.border-default;
+
+                    deny-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.deny(); }
+                    }
+                    Text {
+                        text: "Deny";
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-body-strong;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    height: Theme.h-regular;
+                    horizontal-stretch: 1;
+                    border-radius: Theme.r-md;
+                    background: allow-ta.has-hover ? Theme.amber-glow : transparent;
+                    border-width: 1px;
+                    border-color: Theme.amber;
+
+                    allow-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.allow(); }
+                    }
+                    Text {
+                        text: "Allow once";
+                        color: Theme.amber-light;
+                        font-size: Theme.fs-body-strong;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component IntentLens inherits Rectangle {
     in property <bool> is-open: false;
     in property <bool> is-thinking: false;
@@ -44,7 +268,17 @@ export component IntentLens inherits Rectangle {
     in property <[MessageData]> messages: [];
     in property <bool> is-generating: false;
 
+    /// What is waiting on the person, and what they recently decided.
+    ///
+    /// Pending cards sit at the end of the list, under the records of the ones already answered,
+    /// so the thing waiting on you is closest to where your hands are. The same list is drawn at
+    /// desktop level in `app.slint` when the Lens is not showing it — a request must never sit
+    /// invisibly until it expires.
+    in property <[ApprovalRequest]> approvals: [];
+
     // Callbacks
+    callback approval-allow(string);   // request id — a click, and nothing else, creates a grant
+    callback approval-deny(string);    // request id
     callback query-changed(string);
     callback submit-query(string);
     callback result-selected(string);    // action-id
@@ -1000,6 +1234,26 @@ export component IntentLens inherits Rectangle {
 
                     for msg[idx] in root.messages : MessageBubble {
                         data: msg;
+                    }
+                }
+
+                // Approval cards and their records, between the conversation and the reply box.
+                //
+                // Here rather than interleaved in the ListView above because a request is not a
+                // message: it arrives while the person is reading, it has to stay put while they
+                // decide, and a card that scrolls away with the transcript is a card that gets
+                // missed. It reads as the newest thing in the conversation, which is what it is.
+                if root.approvals.length > 0 : VerticalLayout {
+                    spacing: Theme.sp-1;
+                    padding-top: Theme.sp-2;
+                    padding-bottom: Theme.sp-2;
+                    padding-left: Theme.sp-2;
+                    padding-right: Theme.sp-2;
+
+                    for item[idx] in root.approvals : ApprovalCard {
+                        data: item;
+                        allow => { root.approval-allow(item.id); }
+                        deny => { root.approval-deny(item.id); }
                     }
                 }
 

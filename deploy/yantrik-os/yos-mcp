@@ -20,11 +20,41 @@ Config for the mind (YM_MCP_CONFIG, default /etc/yantrik-mind/mcp.json):
 
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 
 YOS = os.environ.get("YOS_BIN", "/opt/yantrik/bin/yos")
 PROTOCOL_VERSION = "2024-11-05"
+
+# ── How long one os_act can take ────────────────────────────────────────────────────────
+#
+# An os_act above this session's ceiling now asks the person and waits for them (see
+# `guard_act`). That wait happens HERE, in this process, between the tool call arriving and
+# `yos act` being run — so raising the `"timeout"` on os_act would not have covered it and would
+# only have delayed noticing a genuinely hung desktop. The subprocess budget stays at 60s; what
+# changed is the wall clock of the whole tool call, and the number a client has to allow for it.
+#
+# A client that kills a tools/call before OS_ACT_MAX_SECONDS will cut the person off mid
+# decision, and the mind will report a timeout for a machine that was working correctly.
+ACT_TIMEOUT = 60             # the `yos act` subprocess itself, unchanged
+SHELL_CALL_TIMEOUT = 20      # one `yos act shell …` or `yos describe …`
+# Long enough for somebody to look up, read six lines and decide; short enough that a forgotten
+# card is not still live when they have moved on. The shell expires the request at 120s, so this
+# stays under it — a bridge that gave up later than the shell would report "no answer" for a
+# request the person had just allowed.
+APPROVAL_WAIT = int(os.environ.get("YOS_MCP_APPROVAL_WAIT", "110"))
+APPROVAL_POLL = 2.0
+# describe the app + describe the shell + request + poll + consume + the action itself.
+OS_ACT_MAX_SECONDS = (2 * SHELL_CALL_TIMEOUT      # action_detail, machine_ceiling
+                      + 2 * SHELL_CALL_TIMEOUT    # request_approval, consume_approval
+                      + APPROVAL_WAIT
+                      + ACT_TIMEOUT)
+
+# Who the card says is asking. A person deciding whether to allow a deletion is entitled to know
+# who wants it; "an unnamed caller" is what the shell falls back to, and it is worse.
+REQUESTER = os.environ.get("YOS_MCP_REQUESTER", "").strip() or "the mind on this desktop"
 
 # Every tool is a `yos` invocation. `argv` builds the command line from the call's
 # arguments; `timeout` is generous where the work is genuinely slow (transcription runs
@@ -82,12 +112,25 @@ TOOLS = [
         # Destructive actions are refused inside this tool by the permission guard, so what
         # it can actually reach is the routine surface. The grade still decides per call.
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        # What this description has to carry, and did not: a model that met a refusal on a
+        # `sensitive` action invented a way out of it — "approve it right here in the chat panel
+        # (a /approve prompt should appear), or raise YOS_MCP_MAX_PERMISSION in the settings" —
+        # and told the person to set an environment variable. There is a real answer now, and
+        # the only place a mind will read it is here, before it calls.
         "description": "Perform an action an app lists in os_describe, using exactly the app "
                        "name, action name and argument names it lists — never guessed ones; an "
                        "action the app does not list is refused. To open an app: app 'shell', "
                        "action 'open_app', args {\"name\": \"notes\"}. Returns whether the "
                        "action settled and what the app looks like afterwards, so the effect can "
-                       "be checked rather than assumed.",
+                       "be checked rather than assumed. An action graded `sensitive` or above "
+                       "does not fail: this ASKS the person at the machine, putting a card on "
+                       "their screen with the action, its arguments and what it does, and WAITS "
+                       "for them — up to about two minutes, so this one call can take that long. "
+                       "The answer says what happened. If they allowed it, it ran, once, with "
+                       "exactly those arguments. If they said no, it did not run and you should "
+                       "not ask again unless they raise it themselves. If they did not answer, "
+                       "say so plainly — do not retry in a loop. Never tell a person to edit a "
+                       "setting or an environment variable to get past this; the card is the way.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -107,7 +150,7 @@ TOOLS = [
             "required": ["app", "action"],
         },
         "argv": lambda a: ["act", a["app"], a["action"]] + act_pairs(a),
-        "timeout": 60,
+        "timeout": ACT_TIMEOUT,
     },
     {
         "name": "os_perception",
@@ -284,26 +327,58 @@ def act_pairs(a):
     return ["%s=%s" % (k, v if isinstance(v, str) else json.dumps(v)) for k, v in args.items()]
 
 
-def action_parameters(app, action):
-    """The parameter names one action takes, read from the OS's own description of it."""
-    import re
-    import subprocess
+def yos(args, timeout):
+    """Run `yos` and hand back the completed process, or None if it could not run at all.
 
-    if not app or not action:
-        return []
+    One place, because five callers now need the same environment: yos reaches the compositor's
+    session bus and the audio server, and without those it sees an empty desktop and reports
+    that as fact.
+    """
     env = dict(os.environ)
     env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
     try:
-        p = subprocess.run([YOS, "describe", app], capture_output=True, text=True,
-                           timeout=20, env=env)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return subprocess.run([YOS] + list(args), capture_output=True, text=True,
+                              timeout=timeout, env=env)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+
+
+def action_parameters(app, action):
+    """The parameter names one action takes, read from the OS's own description of it."""
+    if not app or not action:
         return []
-    if p.returncode != 0:
+    p = yos(["describe", app], SHELL_CALL_TIMEOUT)
+    if p is None or p.returncode != 0:
         return []
     for m in re.finditer(r"^\s*act:\s*([A-Za-z0-9_]+)\(([^)]*)\)", p.stdout, re.M):
         if m.group(1) == action:
             return [n.strip() for n in m.group(2).split(",") if n.strip()]
     return []
+
+
+def effective_args(a):
+    """The arguments as the app will actually receive them.
+
+    This matters because a grant is bound to exact values. os_act renders every value to text
+    for `yos act k=v`, and `yos` parses each one back with `json.loads` — a round trip that is
+    lossy in a specific way: "3" arrives as 3, "true" as True. Binding the approval to what the
+    model typed rather than to what the app will run with would mean the card showed one thing
+    and the machine did another, which is the whole failure this feature exists to prevent.
+    So the round trip happens once, here, and the same dict is what the card shows, what the
+    grant binds, and what the call sends.
+
+    Raises ValueError for arguments that cannot be resolved — the same error, from the same
+    helper, that building the command line would have raised a moment later.
+    """
+    out = {}
+    for pair in act_pairs(a):
+        key, value = pair.split("=", 1)
+        try:
+            out[key] = json.loads(value)
+        except ValueError:
+            out[key] = value
+    return out
 
 
 # ── Keeping private data from walking out ───────────────────────────────────────────────
@@ -369,49 +444,241 @@ LADDER = ["safe", "standard", "sensitive", "dangerous"]
 CEILING = os.environ.get("YOS_MCP_MAX_PERMISSION", "standard")
 
 
-def action_permission(app, action):
-    """Ask the OS how it grades one of its own actions.
+def action_detail(app, action):
+    """How the OS grades one of its own actions, and what the app says the action is for.
 
-    Returns None when the grade cannot be established — a missing app, a renamed action,
-    a describe that would not answer. None is not "safe": an ungradeable action is refused,
-    because the failure that matters here is running something whose cost was never read.
+    Returns `(grade, purpose)`. The grade is None when it cannot be established — a missing
+    app, a renamed action, a describe that would not answer. None is not "safe": an ungradeable
+    action is refused, because the failure that matters here is running something whose cost was
+    never read.
+
+    It returns the purpose as well as the grade because the purpose is what a person is actually
+    shown when they are asked. The app publishes it for every action ("Delete an event from the
+    calendar. It is not recoverable."), `yos describe` prints it under the signature since
+    d73760d, and a card that showed `calendar.delete_event` and six arguments without that
+    sentence would be asking somebody to authorise a name.
+
+        `  act: delete_event(id)  [sensitive, settles on return]`
+        `       Delete an event from the calendar. It is not recoverable.`
+        `         id: string — the event's id, as list_events reports it`
+
+    Two-space signature, seven-space purpose, nine-space arguments — so the purpose is the line
+    under the signature indented past it but not as far as an argument.
     """
-    import re
-    import subprocess
+    p = yos(["describe", app], SHELL_CALL_TIMEOUT)
+    if p is None or p.returncode != 0:
+        return None, ""
+    lines = (p.stdout or "").splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*act:\s*([A-Za-z0-9_]+)\([^)]*\)\s*\[([a-z]+),", line)
+        if not m or m.group(1) != action:
+            continue
+        purpose = ""
+        if i + 1 < len(lines):
+            after = lines[i + 1]
+            if after.startswith("       ") and not after.startswith("         "):
+                purpose = after.strip()
+        return m.group(2), purpose
+    return None, ""
 
-    env = dict(os.environ)
-    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
-    try:
-        p = subprocess.run([YOS, "describe", app], capture_output=True, text=True,
-                           timeout=20, env=env)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+
+def machine_ceiling():
+    """This machine's standing policy for callers on the socket, or None if it cannot be read.
+
+    Published by the shell in `describe shell` as `tool_permission` — the same value
+    `yantrik-app-runtime::control` enforces inside every `app.act`, read from the same settings
+    file, not the Settings screen's copy of it.
+
+    Read rather than guessed, and read rather than provoked. The other way to learn this limit is
+    to attempt the action and read the `CEILING:` refusal that comes back, which means doing the
+    thing we are deciding about. An approval must not be able to exceed the owner's standing
+    policy, and a person asked a question no answer of theirs could satisfy learns that the card
+    is noise.
+    """
+    p = yos(["describe", "shell"], SHELL_CALL_TIMEOUT)
+    if p is None or p.returncode != 0:
         return None
-    if p.returncode != 0:
+    m = re.search(r'"tool_permission"\s*:\s*"([a-z]+)"', p.stdout or "")
+    if not m or m.group(1) not in LADDER:
         return None
-    # `  act: open_note(title)  [standard, settles on return]`
-    for m in re.finditer(r"^\s*act:\s*([A-Za-z0-9_]+)\([^)]*\)\s*\[([a-z]+),", p.stdout, re.M):
-        if m.group(1) == action:
-            return m.group(2)
+    return m.group(1)
+
+
+def result_object(text):
+    """The `result` object out of what `yos act` printed, or None.
+
+    `yos act` prints a summary line, an `accepted:` line, a revision, and then the action's own
+    result as `json.dumps(..., indent=2)` — which starts with a bare `{` in column zero. That is
+    the anchor; everything before it is prose for a person.
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line == "{":
+            try:
+                return json.JSONDecoder().raw_decode("\n".join(lines[i:]))[0]
+            except ValueError:
+                return None
     return None
+
+
+def shell_call(action, args):
+    """One action on the shell's own control surface. Returns `(result, error)`.
+
+    Values are passed the way `yos act` expects them and `yos` parses each back with
+    `json.loads`, so `args_json` — a dict here — arrives at the shell as an object rather than
+    as a string. The shell accepts both shapes and canonicalises in one place, so a grant
+    requested through this path and consumed through it bind to the same bytes.
+    """
+    argv = ["act", "shell", action]
+    for key, value in args.items():
+        argv.append("%s=%s" % (key, value if isinstance(value, str) else json.dumps(value)))
+    p = yos(argv, SHELL_CALL_TIMEOUT)
+    if p is None:
+        return None, "the desktop did not answer within %ss" % SHELL_CALL_TIMEOUT
+    if p.returncode != 0:
+        return None, ((p.stderr or "").strip() or (p.stdout or "").strip()
+                      or "the desktop refused it and said nothing")
+    result = result_object(p.stdout or "")
+    if result is None:
+        return None, "the desktop answered but %s printed nothing that could be read" % action
+    return result, None
+
+
+def ask_the_person(app, action, grade, purpose, args):
+    """Put one action in front of the person, wait, and report exactly what happened.
+
+    Returns `(allowed, message)`. The message is the whole account the mind gets, and it is
+    written to be reported onwards as-is: a person who asked for something ordinary should hear
+    what their machine did, not a paraphrase of a status code.
+
+    The three steps are the shell's, and none of them decides anything: `request_approval` puts
+    a card up, `approval_status` reads an answer somebody else gave, `consume_approval` spends a
+    grant that only a click created. There is no action anywhere on this desktop that grants.
+    """
+    request, err = shell_call("request_approval", {
+        "app": app,
+        "action": action,
+        "grade": grade,
+        "purpose": purpose,
+        "args_json": args,
+        "requester": REQUESTER,
+    })
+    if request is None:
+        return False, (
+            "%s.%s is graded %s, above this session's %s ceiling, so it needs the person at the "
+            "machine to allow it — and they could not be asked: %s. Nothing was run and nothing "
+            "was changed. Tell them what you were trying to do and let them decide."
+            % (app, action, grade, CEILING, err))
+
+    request_id = request.get("request_id")
+    if not request_id:
+        return False, (
+            "the desktop was asked to put an approval card up for %s.%s and did not say which "
+            "request it was, so there is nothing to wait on. Nothing was run." % (app, action))
+
+    # Polled rather than pushed: this bridge has no way to be called back, and a person cannot
+    # answer inside the first poll interval anyway.
+    deadline = time.monotonic() + APPROVAL_WAIT
+    status = "pending"
+    while time.monotonic() < deadline:
+        time.sleep(APPROVAL_POLL)
+        poll, err = shell_call("approval_status", {"request_id": request_id})
+        if poll is None:
+            return False, (
+                "the person was shown a card asking them to allow %s.%s, and then the desktop "
+                "stopped answering: %s. Nothing was run here. They may have allowed it; this "
+                "bridge cannot tell, and it will not run it on a guess." % (app, action, err))
+        status = poll.get("status", "pending")
+        if status != "pending":
+            break
+
+    if status == "granted":
+        spent, err = shell_call("consume_approval", {
+            "request_id": request_id, "app": app, "action": action, "args_json": args,
+        })
+        if spent is None:
+            # The grant exists and this call could not spend it. Not running is the only safe
+            # reading: the refusal may be precisely that the arguments do not match what the
+            # person was shown.
+            return False, (
+                "the person allowed %s.%s, but the grant could not be spent: %s. Nothing was "
+                "run. Tell them it did not go through." % (app, action, err))
+        return True, (
+            "The person at the machine was asked and allowed this once, just now, for exactly "
+            "these arguments. The grant has been spent and cannot be used again — a further "
+            "call at this grade will ask them again.")
+
+    if status == "denied":
+        return False, (
+            "the person at the machine was asked to allow %s.%s and said no. Nothing was run "
+            "and nothing was changed. This is an answer, not an error: do not ask again and do "
+            "not look for another route to the same effect. Say what you were going to do and "
+            "leave it with them." % (app, action))
+
+    if status == "consumed":
+        return False, (
+            "the grant for %s.%s had already been spent, so nothing was run. A grant covers one "
+            "action once; ask again if it still needs doing." % (app, action))
+
+    # `expired`, or still `pending` when the wait ran out. From the person's side these are the
+    # same thing — they did not answer — and saying so is better than reporting a timeout that
+    # sounds like a fault.
+    return False, (
+        "the person at the machine was asked to allow %s.%s and did not answer within %ds, so "
+        "nothing was run. They were probably away from the keyboard. Tell them what you were "
+        "trying to do; they can ask you to try it again."
+        % (app, action, APPROVAL_WAIT))
 
 
 def guard_act(args):
-    """Refuse an action the OS grades above the ceiling. Returns a message, or None to allow."""
+    """Decide whether this action runs, asking the person when it is above this session's ceiling.
+
+    Returns `(refusal, note)`: a refusal to hand back instead of running, or no refusal and a
+    note to carry back beside the action's own output.
+
+    This used to be a wall. `delete_event` is graded `sensitive`, this bridge's ceiling is
+    `standard`, and somebody who typed "delete the dentist appointment from my calendar" was
+    told to raise an environment variable. The grade was right and the refusal was right; what
+    was missing was any way to ask. There is one now, and the ladder below it is unchanged —
+    what was refused is now a question, and only a person's click answers it.
+    """
     app, action = args.get("app"), args.get("action")
     if not app or not action:
-        return "os_act needs both an app and an action — see os_describe for what an app offers."
+        return ("os_act needs both an app and an action — see os_describe for what an app "
+                "offers."), None
 
-    level = action_permission(app, action)
+    level, purpose = action_detail(app, action)
     if level is None:
         return ("cannot establish how %r grades %r, so it will not be run. Check the name "
-                "with os_describe %s." % (app, action, app))
+                "with os_describe %s." % (app, action, app)), None
     if level not in LADDER:
-        return "%s.%s is graded %r, which is not a level this OS defines. Refusing." % (app, action, level)
-    if LADDER.index(level) > LADDER.index(CEILING):
-        return ("%s.%s is graded %s, above this session's %s ceiling, so it was not run. "
-                "An action at that level needs a person to authorise it directly — raise "
-                "YOS_MCP_MAX_PERMISSION if that is the intent." % (app, action, level, CEILING))
-    return None
+        return ("%s.%s is graded %r, which is not a level this OS defines. Refusing."
+                % (app, action, level)), None
+    if LADDER.index(level) <= LADDER.index(CEILING):
+        return None, None
+
+    # Above this session's ceiling, so the person gets asked — unless the machine's own standing
+    # policy already says no. That policy is the owner's, set at the keyboard in Settings, and an
+    # approval must not be able to exceed it: a card allowed here would still be refused by the
+    # app itself with a `CEILING:` message, and the person would have pressed Allow for nothing.
+    machine = machine_ceiling()
+    if machine is not None and LADDER.index(level) > LADDER.index(machine):
+        return ("%s.%s is graded %s, and this machine does not allow callers like this past %s "
+                "(`tool_permission`, on the AI page in Settings). The person was NOT asked, "
+                "because nothing they could answer would let it run — this limit is the "
+                "machine's standing policy, not this session's. Say what you were trying to do; "
+                "only someone at the keyboard can change that setting."
+                % (app, action, level, machine)), None
+
+    try:
+        bound = effective_args(args)
+    except ValueError as e:
+        return str(e), None
+
+    allowed, message = ask_the_person(app, action, level, purpose, bound)
+    if allowed:
+        return None, message
+    return message, None
 
 
 def run_tool(tool, args):
@@ -436,13 +703,18 @@ def run_tool(tool, args):
             "Say which app, e.g. {\"app\": \"shell\"} for the desktop." if "app" in missing else "",
         )).strip(), True
 
+    # What the person said, when they were asked. Carried back on the successful path too, so a
+    # mind reporting "done" also reports that somebody authorised it — the difference between
+    # "I deleted it" and "you allowed it and I deleted it" is the whole point of asking.
+    note = None
+
     if tool["name"] == "os_act":
         # os_describe lists actions as `act: new_note()`, and a model copying that sends
         # "new_note()". The name is the part before the parenthesis; refusing the call over the
         # punctuation cost a whole confirmed turn on the third live drive.
         args = dict(args)
         args["action"] = str(args["action"]).strip().split("(", 1)[0].strip()
-        refusal = guard_act(args)
+        refusal, note = guard_act(args)
         if refusal is not None:
             return "refused: " + refusal, True
 
@@ -467,8 +739,8 @@ def run_tool(tool, args):
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
-        return ("timed out after %ss — the desktop did not answer. It may be busy rather "
-                "than broken; nothing was rolled back." % timeout), True
+        return (prefix(note, "timed out after %ss — the desktop did not answer. It may be busy "
+                            "rather than broken; nothing was rolled back." % timeout)), True
     except FileNotFoundError:
         return "%s is not installed on this machine, so the desktop cannot be reached." % YOS, True
 
@@ -479,22 +751,31 @@ def run_tool(tool, args):
         # The second live drive: told the app was not running ("no socket for 'notes'"), the
         # model described it twice more and gave up. The way forward belongs in the failure
         # itself, where it is read, rather than only in a tool description read turns earlier.
-        return ("%s is not running, so it cannot be described or acted on yet. Open it first "
-                "with os_act: app \"shell\", action \"open_app\", args {\"name\": \"%s\"}; "
-                "then describe it." % (app, app)), True
+        return (prefix(note, "%s is not running, so it cannot be described or acted on yet. "
+                            "Open it first with os_act: app \"shell\", action \"open_app\", "
+                            "args {\"name\": \"%s\"}; then describe it." % (app, app))), True
     if p.returncode != 0:
-        return "failed (exit %d)%s%s" % (
+        # The note goes on a failure as well. A person who has just pressed Allow and then hears
+        # only "failed (exit 1)" has been told the wrong half of what happened — and worse, the
+        # grant is spent, so the retry will ask them again.
+        return prefix(note, "failed (exit %d)%s%s" % (
             p.returncode,
             ("\n" + out) if out else "",
             ("\n" + err) if err else "",
-        ), True
+        )), True
     if tool["name"] in PRIVATE_READS and p.returncode == 0:
         # Recorded after the call, not before: a read that failed saw nothing.
         _SAW_PRIVATE.append(tool["name"])
 
     if not out:
-        return "(the command succeeded and printed nothing)" + (("\n" + err) if err else ""), False
-    return out + (("\n" + err) if err else ""), False
+        return prefix(note, "(the command succeeded and printed nothing)"
+                      + (("\n" + err) if err else "")), False
+    return prefix(note, out + (("\n" + err) if err else "")), False
+
+
+def prefix(note, text):
+    """Put what the person decided in front of what the machine did, or leave the text alone."""
+    return text if not note else note + "\n\n" + text
 
 
 def reply(msg_id, result=None, error=None):

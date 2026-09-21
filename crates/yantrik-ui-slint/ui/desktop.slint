@@ -27,7 +27,7 @@ import { StatusBar } from "components/status_bar.slint";
 import { DockItem } from "components/app_dock.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppColor } from "components/app_color.slint";
-import { IntentLens, LensResult } from "components/intent_lens.slint";
+import { IntentLens, LensResult, ApprovalRequest } from "components/intent_lens.slint";
 import { MessageData } from "components/message_bubble.slint";
 import { UrgeCardData, GlanceCard } from "components/glance_card.slint";
 import { WhisperCardStack, WhisperCardItem } from "components/whisper_card.slint";
@@ -109,6 +109,12 @@ export component DesktopScreen inherits Rectangle {
     // Chat state (for lens chat mode)
     in property <[MessageData]> messages: [];
     in property <bool> is-generating: false;
+
+    // What a mind has asked the person to allow. Drawn in the Lens's conversation; the App
+    // draws the same list over whatever screen is up when the Lens is not showing it.
+    in property <[ApprovalRequest]> approvals: [];
+    callback approval-allow(string);
+    callback approval-deny(string);
 
     // Urges (for quiet queue)
     in property <[UrgeCardData]> urges: [];
@@ -1041,7 +1047,10 @@ export component DesktopScreen inherits Rectangle {
         is-generating: root.is-generating;
         suggestions: root.lens-suggestions;
         recents: root.lens-recents;
+        approvals: root.approvals;
 
+        approval-allow(id) => { root.approval-allow(id); }
+        approval-deny(id) => { root.approval-deny(id); }
         query-changed(text) => { root.lens-query(text); }
         submit-query(text) => { root.lens-submit(text); }
         result-selected(id) => { root.lens-result-selected(id); }

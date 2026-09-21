@@ -35,7 +35,7 @@ import { ToastBanner, ToastData } from "components/toast_banner.slint";
 import { CommandItem } from "components/command_palette.slint";
 import { ContentBlock, MessageData } from "components/message_bubble.slint";
 import { UrgeCardData } from "components/glance_card.slint";
-import { LensResult } from "components/intent_lens.slint";
+import { LensResult, ApprovalRequest, ApprovalCard } from "components/intent_lens.slint";
 import { WhisperCardItem } from "components/whisper_card.slint";
 import { BriefSection } from "components/morning_brief.slint";
 import { ClipboardEntryData } from "components/clipboard_panel.slint";
@@ -51,7 +51,7 @@ import { YMenuAction } from "components/y_context_menu.slint";
 import { Icons } from "components/icon.slint";
 import { Tr } from "translations.slint";
 
-export { HarnessData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction }
+export { HarnessData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction }
 
 export component App inherits Window {
     default-font-family: Theme.font-ui;
@@ -109,6 +109,25 @@ export component App inherits Window {
     // Chat state
     in property <[MessageData]> messages: [];
     in property <bool> is-generating: false;
+
+    /// What a mind has asked the person to allow, and what they recently decided.
+    ///
+    /// Filled by `control_approvals::publish`. Pending entries are drawn twice over: inside the
+    /// Lens's conversation when it is open in chat mode, and over whatever screen is up when it
+    /// is not — see the overlay at the foot of this file. A request the person never sees is a
+    /// request that expires unanswered, which is indistinguishable from the machine ignoring
+    /// them.
+    in property <[ApprovalRequest]> approvals: [];
+    /// The same requests, without the records of the ones already decided — what the overlay
+    /// draws. Two lists rather than one filtered at draw time because Slint has no way to skip
+    /// a row inside a `for`, and a stack of zero-height rows would leave the cards floating
+    /// below a gap the size of the session's history.
+    in property <[ApprovalRequest]> pending-approvals: [];
+    /// Pressed Allow. This callback, and the one below it, are the only way a grant comes into
+    /// existence anywhere in this OS — there is no action on the shell's control surface that
+    /// grants. See crates/yantrik-ui/src/approvals.rs.
+    callback approval-allow(string);
+    callback approval-deny(string);
 
     // Desktop state
     in property <[UrgeCardData]> urges: [];
@@ -1298,6 +1317,10 @@ export component App inherits Window {
             // Chat
             messages: root.messages;
             is-generating: root.is-generating;
+            // Approvals, in the conversation where the asking belongs
+            approvals: root.approvals;
+            approval-allow(id) => { root.approval-allow(id); }
+            approval-deny(id) => { root.approval-deny(id); }
             // Urges
             urges: root.urges;
             // Whisper Cards
@@ -2708,6 +2731,47 @@ export component App inherits Window {
             toasts: root.toast-queue;
             toast-clicked(id) => { root.toast-clicked(id); }
             toast-dismissed(id) => { root.toast-dismissed(id); }
+        }
+
+        // Approval cards, over whatever screen is up.
+        //
+        // The Lens shows these in its conversation, which is the right home for them — but the
+        // Lens lives on the desktop screen and is closed most of the time, and a request that
+        // nobody is shown expires unanswered after two minutes. From the person's side that is
+        // indistinguishable from the machine ignoring them, which is the bug this whole feature
+        // exists to fix. So the same cards are drawn here, above every screen, and the Lens's
+        // copy is suppressed when this one is up so the same question is never asked twice.
+        //
+        // Not on the lock, login, boot or onboarding screens. A card that can be allowed from a
+        // locked screen is a way to act on a machine without unlocking it; the request stays
+        // pending underneath and expires if nobody comes back, which is the honest outcome.
+        if root.pending-approvals.length > 0
+            && !(root.lens-open && root.lens-chat-mode && root.current-screen == 1)
+            && root.current-screen != 0 && root.current-screen != 2
+            && root.current-screen != 3 && root.current-screen != 32
+            : Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+
+            Rectangle {
+                x: parent.width - 420px;
+                y: Theme.status-bar-height + Theme.sp-4;
+                width: 404px;
+                height: approval-stack.preferred-height;
+                background: transparent;
+
+                approval-stack := VerticalLayout {
+                    spacing: Theme.sp-2;
+                    alignment: start;
+
+                    for item in root.pending-approvals : ApprovalCard {
+                        data: item;
+                        allow => { root.approval-allow(item.id); }
+                        deny => { root.approval-deny(item.id); }
+                    }
+                }
+            }
         }
 
             // Debug: navigate to screen from Rust

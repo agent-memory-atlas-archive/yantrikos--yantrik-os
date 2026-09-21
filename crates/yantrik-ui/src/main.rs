@@ -34,12 +34,14 @@ use yantrik_companion::CompanionConfig;
 mod activity_feed;
 mod ambient;
 mod app_context;
+mod approvals;
 // NOTE: #[allow(dead_code)] required to avoid rustc 1.93.1 ICE in check_mod_deathness.
 #[allow(dead_code)]
 mod apps;
 mod bridge;
 mod companion_rpc;
 mod control;
+mod control_approvals;
 mod control_installer;
 mod control_update;
 mod control_files;
