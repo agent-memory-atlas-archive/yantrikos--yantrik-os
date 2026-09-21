@@ -156,6 +156,19 @@ def main():
         atomic_write(os.path.join(directory, "yantrik-os-nightly-latest.iso.sha256"),
                      "%s  %s\n" % (sha, "yantrik-os-nightly-latest.iso"))
 
+    if kind == "iso":
+        # What the newest image IS, for a page that wants to say so. The website carried the
+        # version, file name and checksum of one particular image in its own source; three builds
+        # later that image was pruned, and the Download button was a 404 with a confident SHA-256
+        # under it. The names above already follow the newest build — this is the same fact in a
+        # form a browser can read, written by the only party that knows it.
+        found = re.match(r"^yantrik-os-(v[0-9][A-Za-z0-9.+-]*?)(?:-g[0-9a-f]{7,40})?\.iso$", name)
+        atomic_write(os.path.join(directory, "latest.json"), json.dumps({
+            "channel": channel, "file": name, "latest": latest, "sha256": sha, "bytes": size,
+            "version": found.group(1) if found else "",
+            "date": time.strftime("%Y-%m-%d", time.gmtime()),
+        }, indent=2) + "\n")
+
     if kind == "release":
         version, git, binaries = extra
         manifest_path = os.path.join(ROOTS[kind], "manifest.json")

@@ -69,6 +69,11 @@ with tempfile.TemporaryDirectory() as d:
     check("only the newest three ISOs remain", real == sorted(names[1:]), real)
     check("the pruned ISO's checksum file went with it",
           not (nightly / (names[0] + ".sha256")).exists())
+    told = json.loads((nightly / "latest.json").read_text())
+    check("latest.json names the newest image, its checksum and its version",
+          (told["file"], told["sha256"], told["version"], told["latest"], told["bytes"])
+          == (names[-1], sha(b"iso-4" * 1000), "v0.1.0-4", "yantrik-os-latest.iso", len(b"iso-4" * 1000)),
+          str(told))
     check("latest points at the newest",
           os.readlink(nightly / "yantrik-os-latest.iso") == names[-1])
     check("the website's old name points at the newest too",
