@@ -24,7 +24,11 @@ fn build_companion() -> CompanionService {
 
     // Create YantrikDB with embedder
     let mut db = yantrikdb_core::YantrikDB::new(":memory:", 384).expect("failed to create YantrikDB");
-    db.set_embedder(Box::new(embedder));
+    // Through the bridge, as the companion itself does. The engine's Embedder trait and
+    // yantrik-ml's are two traits with one name; handing the ML embedder straight to the
+    // engine stopped compiling when the bridge was introduced, and nobody saw, because CI had
+    // never got far enough to compile a test.
+    db.set_embedder(Box::new(yantrik_companion::embedder_bridge::EmbedderBridge::new(embedder)));
 
     // Config
     let config = CompanionConfig {
@@ -36,6 +40,7 @@ fn build_companion() -> CompanionService {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_handle_message_basic() {
     let mut companion = build_companion();
 
@@ -50,6 +55,7 @@ fn test_handle_message_basic() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_memory_round_trip() {
     let mut companion = build_companion();
 
@@ -69,6 +75,7 @@ fn test_memory_round_trip() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_conversation_history() {
     let mut companion = build_companion();
 
@@ -80,6 +87,7 @@ fn test_conversation_history() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_urge_queue() {
     let mut companion = build_companion();
 
@@ -103,6 +111,7 @@ fn test_urge_queue() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_instinct_evaluation() {
     let companion = build_companion();
     let state = companion.build_state();

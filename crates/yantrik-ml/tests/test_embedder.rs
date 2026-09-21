@@ -6,6 +6,7 @@
 use yantrik_ml::{CandleEmbedder, Embedder};
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_embedder_from_hub() {
     // Download and load model from HuggingFace Hub
     let embedder = CandleEmbedder::from_hub(
@@ -32,6 +33,7 @@ fn test_embedder_from_hub() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_semantic_similarity() {
     let embedder = CandleEmbedder::from_hub(
         "sentence-transformers/all-MiniLM-L6-v2",
@@ -63,6 +65,7 @@ fn test_semantic_similarity() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_embed_batch() {
     let embedder = CandleEmbedder::from_hub(
         "sentence-transformers/all-MiniLM-L6-v2",

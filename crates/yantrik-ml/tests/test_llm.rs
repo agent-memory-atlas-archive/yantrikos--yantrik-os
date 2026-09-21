@@ -21,6 +21,7 @@ fn load_engine() -> LLMEngine {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_llm_load_and_count_tokens() {
     let engine = load_engine();
 
@@ -36,6 +37,7 @@ fn test_llm_load_and_count_tokens() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_llm_generate_raw() {
     let engine = load_engine();
 
@@ -59,6 +61,7 @@ fn test_llm_generate_raw() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_llm_chat() {
     let engine = load_engine();
 
@@ -90,6 +93,7 @@ fn test_llm_chat() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_llm_stop_reason() {
     let engine = load_engine();
 
@@ -118,6 +122,7 @@ fn test_llm_stop_reason() {
 }
 
 #[test]
+#[ignore = "downloads a model from the Hugging Face hub and runs it; `cargo test -- --ignored` on a machine that may"]
 fn test_llm_tool_calling() {
     let engine = load_engine();
 
