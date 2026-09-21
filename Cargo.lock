@@ -9338,6 +9338,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "serde_yaml",
  "ureq 2.12.1",
  "yantrik-ipc-contracts",
  "yantrik-service-sdk",

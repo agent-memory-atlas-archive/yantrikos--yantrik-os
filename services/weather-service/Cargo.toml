@@ -13,4 +13,6 @@ yantrik-ipc-contracts = { workspace = true }
 yantrik-service-sdk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Reads the machine's place out of the shell's settings.yaml; see src/machine_place.rs.
+serde_yaml = { workspace = true }
 ureq = { workspace = true }

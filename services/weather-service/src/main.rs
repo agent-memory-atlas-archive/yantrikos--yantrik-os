@@ -9,6 +9,8 @@
 //!   weather.geocode   { query }                  → Location
 //!   weather.suggest   { query }                  → Vec<LocationSuggestion>
 
+mod machine_place;
+
 use std::sync::Mutex;
 use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
 use yantrik_ipc_contracts::weather::*;
@@ -131,12 +133,19 @@ impl ServiceHandler for WeatherHandler {
 impl WeatherHandler {
     /// The current weather for the last place asked about, or an honest "nowhere yet".
     fn describe_view(&self) -> View {
-        let place = self.last_place.lock().ok().and_then(|g| g.clone());
+        let asked = self.last_place.lock().ok().and_then(|g| g.clone());
+        // Nobody has asked about anywhere yet: report on where the machine is, which the desktop
+        // already knows. See `machine_place` for the afternoon a mind asked a person where they
+        // were while the answer sat in a file beside it.
+        let from_machine = asked.is_none();
+        let place = asked.or_else(|| {
+            machine_place::read().map(|m| LastPlace { location: m.location, fahrenheit: m.fahrenheit })
+        });
         let Some(place) = place else {
             // Never queried this session. Say so, and say how to fix it, rather than invent a
             // city — a made-up location is worse than no answer.
             return View::new(
-                "Weather — no place set yet; ask weather.current with lat/lon, or act set_location",
+                "Weather — no place set yet, and the desktop has not recorded where this machine is; act set_location with a place name, or ask weather.current with lat/lon",
             )
             .with("has_location", false);
         };
@@ -157,6 +166,12 @@ impl WeatherHandler {
                 );
                 View::new(summary)
                     .with("has_location", true)
+                    // Which place this is, so that a reader can tell "the weather where this
+                    // machine is" from "the weather somewhere somebody looked up".
+                    .with(
+                        "location_source",
+                        if from_machine { "where this machine is (desktop settings)" } else { "the last place asked about" },
+                    )
                     .with("location", place.location.name.clone())
                     .with("lat", place.location.lat)
                     .with("lon", place.location.lon)
