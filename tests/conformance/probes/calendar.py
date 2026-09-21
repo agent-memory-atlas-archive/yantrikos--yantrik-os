@@ -751,6 +751,13 @@ def run():
             probe.note("service_restored", {"asked_the_shell": restarted.get("result")
                                             or restarted.get("refused")})
 
+        # And the window, if somebody had it open. This put the service back and not the app, so
+        # a run started while Calendar was on screen closed it and then failed itself for having
+        # done so — on a machine where every check of the calendar had passed.
+        app_was_open = any(APP_BIN in line for line in probe.notes["processes_before"])
+        if app_was_open and not lib.running(APP_BIN):
+            lib.open_app(APP, expect_process=APP_BIN)
+
         leftover = lib.running(APP_BIN) + lib.running(SERVICE_BIN)
         probe.note("processes_after", leftover)
         probe.note("windows_after", lib.toplevels())
