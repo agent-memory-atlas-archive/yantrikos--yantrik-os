@@ -12,9 +12,6 @@ REMOTE_BIN="/opt/yantrik/bin"
 WSL_TARGET="/home/yantrik/target-yantrik"
 WSL_SRC="/home/yantrik/src/yantrik-os"
 WIN_SRC="/mnt/c/Users/sync/codes/yantrik-os"
-# Sibling repo supplying the yantrikdb-core path dependency.
-WSL_DB_SRC="/home/yantrik/src/yantrikdb"
-WIN_DB_SRC="/mnt/c/Users/sync/codes/yantrikdb"
 
 # Colors
 GREEN='\033[0;32m'
@@ -65,14 +62,9 @@ fi
 
 # Step 1: Build via WSL2
 if [ "${1:-}" != "--skip-build" ]; then
-    # The workspace path-depends on ../yantrikdb/crates/yantrikdb-core, which lives in
-    # a SEPARATE repo. Syncing only yantrik-os leaves that dangling and cargo fails at
-    # manifest load with "failed to read .../yantrikdb/crates/yantrikdb-core/Cargo.toml"
-    # before it compiles a single line. Only Cargo.toml/Cargo.lock/crates are copied:
-    # that repo also carries many gigabytes of dist-* artifact directories.
-    step "Syncing yantrikdb dependency..."
-    wsl.exe -d Ubuntu -- bash -lc         "mkdir -p $WSL_DB_SRC &&          rsync -a --checksum $WIN_DB_SRC/Cargo.toml $WIN_DB_SRC/Cargo.lock $WSL_DB_SRC/ &&          rsync -a --checksum --delete $WIN_DB_SRC/crates/ $WSL_DB_SRC/crates/ --exclude target"         || fail "Failed to sync yantrikdb dependency from $WIN_DB_SRC"
-
+    # The engine is a git dependency pinned in Cargo.toml now, so there is no sibling repo to
+    # sync: this step used to copy ../yantrikdb across first, because cargo could not load the
+    # manifest without it.
     step "Syncing source to native FS..."
     wsl.exe -d Ubuntu -- bash -lc \
         "rsync -a --checksum --delete $WIN_SRC/ $WSL_SRC/ \

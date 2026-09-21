@@ -89,7 +89,6 @@ jobs:
           esac
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
-          echo "yantrikdb_ref=$(tr -d '[:space:]' < .github/yantrikdb-ref)" >> "$GITHUB_OUTPUT"
           echo "### $channel build of \`$(git describe --tags --always)\` (publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Make room
@@ -100,15 +99,6 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force > /dev/null 2>&1 || true
           df -h / | tail -1
-
-      - name: Checkout yantrikdb (sibling path dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: yantrikos/yantrikdb
-          ref: ${{ steps.plan.outputs.yantrikdb_ref }}
-          path: yantrikdb-sibling
-      - name: Put it where Cargo.toml expects
-        run: mv yantrikdb-sibling ../yantrikdb
 
       - name: System dependencies
         run: |

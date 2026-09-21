@@ -32,29 +32,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # This workspace path-depends on a SIBLING checkout: Cargo.toml carries
-      # `yantrikdb-core = { path = "../yantrikdb/crates/yantrikdb-core" }`, so a clone of this
-      # repository alone cannot be built by anyone, including this workflow. Cloning it here is
-      # what lets CI run at all; whether the repository should depend on a sibling path rather
-      # than a pinned git revision is a separate question, and a real one.
-      # The engine is a path dependency, and Cargo.lock records the version it was resolved
-      # against. This step checked out the engine's main, which moved on to 0.23 while the lock
-      # file says 0.22.0 — so `--locked` refused, and every run since has been red for a reason
-      # that had nothing to do with the commit being tested. The revision is pinned in one
-      # file that this workflow and the ISO workflow both read; moving to a newer engine is a
-      # change to that file and to Cargo.lock, in one commit.
-      - name: Which engine revision
-        id: engine
-        run: echo "ref=$(tr -d '[:space:]' < .github/yantrikdb-ref)" >> "$GITHUB_OUTPUT"
-      - name: Checkout yantrikdb (sibling path dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: yantrikos/yantrikdb
-          ref: ${{ steps.engine.outputs.ref }}
-          path: yantrikdb-sibling
-
-      - name: Put it where Cargo.toml expects
-        run: mv yantrikdb-sibling ../yantrikdb
+      # The engine is a git dependency pinned by revision in Cargo.toml, so there is nothing to
+      # check out beside this repository any more. For a week this workflow cloned the engine's
+      # main next door, main moved past Cargo.lock, and every run was red for a reason that had
+      # nothing to do with the commit being tested.
 
       # The native libraries the workspace links against, found by looking for the -sys crates
       # in Cargo.lock rather than by guessing: alsa-sys, libudev-sys, openssl-sys,

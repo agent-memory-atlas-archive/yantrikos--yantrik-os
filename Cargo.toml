@@ -135,7 +135,20 @@ yantrik-brain = { path = "crates/yantrik-brain" }
 # (it was `yantrikdb-core` at 0.1.0), so the `package =` rename keeps every
 # existing `use yantrikdb_core::…` call site compiling unchanged — the same
 # approach yantrik-mind has been running on in production.
-yantrikdb-core = { path = "../yantrikdb/crates/yantrikdb-core", package = "yantrikdb" }
+# The memory engine, pinned to an exact revision of its own repository.
+#
+# This was `path = "../yantrikdb/crates/yantrikdb-core"`: a directory beside this one, on
+# whatever branch it happened to be on. So a clone of this repository could not be built by
+# anybody; CI had to check the engine out next door and spent a week red because it checked out
+# a main that had moved past Cargo.lock; and a local build silently used whichever branch was
+# checked out in the neighbouring directory — which is how a public image shipped without a
+# vault fix that had been written two weeks earlier and never left that directory's other branch.
+# A revision is one answer, recorded here and in Cargo.lock, the same for everyone.
+#
+# Working on the engine and the OS together: put this in an untracked .cargo/config.toml
+#     [patch."https://github.com/yantrikos/yantrikdb"]
+#     yantrikdb = { path = "../yantrikdb/crates/yantrikdb-core" }
+yantrikdb-core = { git = "https://github.com/yantrikos/yantrikdb", rev = "9aa589921da244ba07358674986f0bf30f87a198", package = "yantrikdb" }
 yantrik-ml = { git = "https://github.com/yantrikos/yantrik-ml.git" }
 yantrikdb-server = { path = "crates/yantrikdb-server" }
 
