@@ -334,7 +334,46 @@ cmd_check() {
 }
 
 # ── apply ───────────────────────────────────────────────────────────────────────────────
+# Everything under $PREFIX belongs to the person whose desktop it is, and this script runs as
+# them: the shell's "Install update" runs it that way, and so does a mind. Run ONCE under sudo —
+# over ssh, by someone being careful — and the directories it creates (updates/, backups/)
+# belong to root from then on, so every later update as the user fails. That is what the first
+# public update on a real machine hit: "Permission denied" writing the download, three days
+# after a sudo run nobody remembered. Two halves, so it cannot be left that way again:
+#
+#   ensure_writable_tree   before touching anything, find what this user cannot write, repair
+#                          it with `sudo -n chown` when that is allowed, and otherwise stop
+#                          with the one command that fixes it.
+#   give_back_to_owner     when this IS root, hand what it made back to whoever owns $PREFIX.
+prefix_owner() { stat -c %U "$PREFIX" 2>/dev/null || id -un; }
+
+ensure_writable_tree() {
+  local d bad=""
+  for d in "$PREFIX" "$BIN_DIR" "$SHARE_DIR" "$UPDATES_DIR" "$BACKUP_DIR"; do
+    [ -e "$d" ] || continue
+    [ -w "$d" ] || bad="$bad $d"
+  done
+  [ -n "$bad" ] || return 0
+  local me; me="$(id -un)"
+  if sudo -n true 2>/dev/null; then
+    # shellcheck disable=SC2086  # a list of directories, split on purpose
+    if sudo -n chown -R "$me" $bad; then
+      info "took back$bad (left owned by someone else, probably by an earlier run as root)"
+      return 0
+    fi
+  fi
+  fail "cannot write to:$bad. They were probably left owned by root by an earlier 'sudo yantrik-update'. Fix it once with: sudo chown -R $me$bad   Nothing was changed."
+}
+
+give_back_to_owner() {
+  [ "$(id -u)" = 0 ] || return 0
+  local owner; owner="$(prefix_owner)"
+  [ -n "$owner" ] && [ "$owner" != root ] || return 0
+  chown -R "$owner" "$UPDATES_DIR" "$BACKUP_DIR" "$BIN_DIR" "$SHARE_DIR" "$BUILD_FILE" 2>/dev/null || true
+}
+
 cmd_apply() {
+  trap give_back_to_owner EXIT
   need python3; need curl; need sha256sum; need tar
   parse_channel "$@"
   local force=0 reboot=0 restart=1
@@ -372,6 +411,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     return 0
   fi
 
+  ensure_writable_tree
   mkdir -p "$UPDATES_DIR"
   local dl="$UPDATES_DIR/$artifact"
 
@@ -380,8 +420,16 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
   # One host, and a failure is a failure. This used to fall back to a hardcoded private
   # address when $HOST did not answer — so the way to get this machine to install your
   # tarball was to make its usual server unreachable and answer at that address instead.
-  curl -fL --retry 3 --connect-timeout 15 -o "$dl" "$url" \
-    || fail "could not download the update bundle from $url"
+  local curl_rc=0
+  curl -fL --retry 3 --connect-timeout 15 -o "$dl" "$url" || curl_rc=$?
+  # curl's 23 is "could not write what I received". It was reported as "could not download the
+  # update bundle from <url>", which sent the first person to see it looking at a server that
+  # had answered perfectly.
+  case "$curl_rc" in
+    0) ;;
+    23) fail "the bundle downloaded but could not be written to $dl ($(df -h "$UPDATES_DIR" | awk 'NR==2{print $4}') free; directory owned by $(stat -c %U "$UPDATES_DIR")). Nothing was changed." ;;
+    *) fail "could not download the update bundle from $url (curl exit $curl_rc). Nothing was changed." ;;
+  esac
 
   say "Verifying"
   local got; got="$(sha256sum "$dl" | awk '{print $1}')"
