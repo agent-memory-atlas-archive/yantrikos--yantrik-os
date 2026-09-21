@@ -577,10 +577,22 @@ def action_detail(app, action):
                                            "the desktop did not answer in time")
         return None, ""
     lines = (p.stdout or "").splitlines()
-    UNGRADED_BECAUSE[(app, action)] = (
-        "%s is open and offers no action called %s. It offers: %s" % (
-            app, action,
-            ", ".join(re.findall(r"^\s*act:\s*([A-Za-z0-9_]+)\(", p.stdout or "", re.M)) or "nothing"))
+    offered = re.findall(r"^\s*act:\s*([A-Za-z0-9_]+)\(", p.stdout or "", re.M)
+    if offered:
+        UNGRADED_BECAUSE[(app, action)] = (
+            "%s is open and offers no action called %s. It offers: %s"
+            % (app, action, ", ".join(offered)))
+    else:
+        # A describe that answers and lists no actions at all is not an app with nothing to
+        # offer: it is the SERVICE of the same name answering for a window that is shut. `yos`
+        # falls through from `app-calendar` to `calendar` on purpose, so that a closed window
+        # never hides what is stored. A mind asked for `calendar add_event` that way, was told
+        # "calendar is open and offers no action called add_event. It offers: nothing" — three
+        # statements, all false — and worked out by itself that the window had to be opened.
+        # Said as what it is, it takes the same road as an app with no socket.
+        UNGRADED_BECAUSE[(app, action)] = (
+            "%s is not open: only its background service answered, which reports what is "
+            "stored and takes no actions" % app)
     for i, line in enumerate(lines):
         m = re.match(r"^\s*act:\s*([A-Za-z0-9_]+)\([^)]*\)\s*\[([a-z]+),", line)
         if not m or m.group(1) != action:
@@ -1185,6 +1197,14 @@ def run_tool(tool, args):
     if not out:
         return prefix(note, "(the command succeeded and printed nothing)"
                       + (("\n" + err) if err else "")), False
+    if (tool["name"] == "os_describe" and app and app != "shell"
+            and not re.search(r"^\s*act:\s", out, re.M)):
+        # The service answered for a window that is shut (see `action_detail`). What it says is
+        # true and worth having — what is stored — but a mind reading it has no way to tell it
+        # from the app, and goes on to call an action the service does not have.
+        out += ("\n\nThis is %s's background service: it reports what is stored and takes no "
+                "actions. The %s app itself is not open — to change anything, open it (os_act "
+                "on shell: open_app name=%s) and describe it again." % (app, app, app))
     return prefix(note, out + (("\n" + err) if err else "")), False
 
 
