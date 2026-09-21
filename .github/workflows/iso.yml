@@ -122,7 +122,8 @@ jobs:
         id: bundle
         run: |
           TARGET_DIR="$PWD/target/release" deploy/yantrik-os/build-release.sh --no-build --out "$PWD/dist"
-          bundle="$(find dist -maxdepth 1 -type f -name 'yantrik-os-*-linux-amd64.tar.zst' | head -1)"
+          # Absolute: the next step changes directory before it reads this path.
+          bundle="$(find "$PWD/dist" -maxdepth 1 -type f -name 'yantrik-os-*-linux-amd64.tar.zst' | head -1)"
           [ -f "$bundle" ] || { echo "::error::build-release.sh produced no bundle"; ls -la dist; exit 1; }
           build="$(tar --use-compress-program='zstd -d' -xOf "$bundle" --wildcards '*/BUILD' | tr -d '\r')"
           echo "$build"
