@@ -48,7 +48,23 @@ raise privilege (the machine ceiling is enforced inside the target app, from the
 published grade, whatever the card said) but it could mislead a person's judgement. The mitigation
 is that the card always shows the real `app.action` and every argument verbatim, which is what a
 person actually judges. And the requester names itself; nothing authenticates that name, because
-nothing on this socket has an identity yet (issue #43).
+nothing on this socket has an identity yet (issue #43) — so the card prints
+`self-declared name` directly under it, rather than letting a flattering label pass as a fact.
+
+### Where the name comes from
+
+The first cards read "the mind on this desktop is asking to use this machine", which is true and
+useless — the person could not tell Hermes from anything else that had opened the bridge. Three
+sources, best first, and all three are self-declared:
+
+1. `YOS_MCP_REQUESTER` — an operator setting this deliberately outranks anything inferred.
+2. The MCP client's own `clientInfo` from the `initialize` handshake. Hermes sends its name and
+   version there and the bridge was throwing it away; it is now kept, purely as a label.
+3. The shell's own `minds[]`, whichever is `answering` — the name the person already sees in the
+   status bar, for a client that sends no `clientInfo` at all.
+
+Failing all three it says `an unnamed caller`, which is worse to read and better than inventing
+something.
 
 ## What is built
 
@@ -102,6 +118,16 @@ conversation. It says, in plain words: who is asking, `app.action`, the action's
 `key: value` line, the grade, and — for `dangerous`, or for any purpose that says the action cannot
 be undone — a warning line in red. Buttons: **Deny** and **Allow once**.
 
+Only **one** card is on screen at a time even though three requests can be waiting, with a
+`N more waiting — this one first` line under it. Three stacked cards are 780px on an 800px screen,
+which puts the third one's buttons under the taskbar; and a person facing a stack reads none of
+them properly, which is the failure this design is most afraid of.
+
+Every text on the card is bounded in `approvals.rs`, so its height is arithmetic rather than a
+measurement: one line per argument (`ARG_VALUE_CHARS` = 60, each cut value naming its true
+length), at most `ARG_ROWS` = 8 arguments followed by a line saying how many more the grant still
+covers, and a purpose clipped at `PURPOSE_CHARS` = 240.
+
 It is drawn in two places:
 
 - **In the Lens**, between the transcript and the reply box, when the Lens is open in chat mode.
@@ -116,6 +142,26 @@ It is drawn in two places:
 
 After a decision the card is replaced by a one-line record that stays in the Lens's conversation:
 `Allowed once: calendar.delete_event — 12:03`.
+
+**The shell comes forward when a card goes up, and gets out of the way afterwards.** Drawing a
+card is not the same as being seen: the shell is an ordinary toplevel to labwc, so a card drawn
+while another app is focused is a card behind that app. `take_the_screen()` reads which toplevel
+is in front, then asks the compositor for the shell — the same `wlrctl toplevel focus
+title:Yantrik OS` that `open_lens` has needed since the Lens once opened underneath Notes, on a
+worker thread for the same reason. When nothing is waiting any more — a decision *or* an expiry —
+`give_the_screen_back()` refocuses the window it noted.
+
+Only a *fresh* request raises the shell. A repeat of an identical pending question hands back the
+card already on screen; raising again for it would let anything that can call a `safe` action hold
+somebody's screen by asking the same thing in a loop.
+
+"Which window was in front" is not something the shell tracks — `wlrctl toplevel list` carries no
+focus flag, and `wire::timers`' "first in the list is the foreground window" is reading an
+ordering that means nothing. So `window_in_front()` asks wlrctl's own `state:activated` matcher
+and trusts it **only when it answers with exactly one line** that is not the shell. Two lines or
+none means either nothing is activated or this wlrctl does not support the matcher and has listed
+everything; both are "not knowable", and the shell then stays in front rather than throwing the
+person into a window they were not in.
 
 **Keyboard: Enter does not allow anything.** Both buttons are `TouchArea`s, which take no keyboard
 focus in Slint, so there is no default action and no key reaches them. Allowing costs a deliberate
@@ -174,6 +220,42 @@ accommodate a 110s wait. Whatever Hermes uses to bound an MCP `tools/call` has t
 `OS_ACT_MAX_SECONDS`; if it is 40s or 60s today, a person will be cut off mid decision and the
 mind will report a timeout for a machine that was working correctly.
 
+## What the first run on a real machine found
+
+Shipped as `315663d` in `v0.1.0-241`, and the flow worked end to end — request, card, click,
+grant consumed, `delete_event` ran, event gone. Two defects, both of them about the card being
+*present* rather than about it being *right*, which is its own lesson: the tests all asked whether
+the machinery was correct and none of them asked whether a person could see it.
+
+**The card was drawn behind the focused app.** Calendar was open and focused; the card was drawn
+in the shell's window, top right, and Calendar covered it completely — only the card's orange
+border showed past the edge. The request would have expired with the person never knowing they
+had been asked. The mechanism was already written down one function away: `open_lens` in
+`control.rs` spawns `wlrctl toplevel focus` precisely because the Lens once opened underneath
+Notes. Fixed above; the consequence (the shell covers what they were using) is handled by
+recording the window in front and giving the screen back when nothing is waiting.
+
+**The top of the card was clipped off the screen.** The header, the action name and the purpose —
+the part that says what is being approved — rendered above `y = 0`, leaving the person looking at
+three arguments and two buttons.
+
+The cause was `height: self.preferred-height` on `ApprovalCard`'s root. Both of its branches are
+conditional (`if !waiting` for the record line, `if waiting` for the card), and **a Rectangle whose
+only children are conditional reports a `preferred-height` of zero** — Slint computes a non-layout
+element's preferred size from its unconditional children, and there were none. So the root's height
+resolved to zero, the enclosing `VerticalLayout` in `app.slint` sized the row at zero, and the real
+content — which sets its own height and is not clipped — spilled out of a box with no room for it.
+
+The fix is structural, not a magic number: one unconditional `VerticalLayout` holds both branches
+and the root takes *its* preferred height, because `if` inside a layout does contribute to that
+layout's preferred size. That is the same idiom `message_bubble.slint` has always used
+(`height: msg-layout.preferred-height`). The rule worth keeping: **never ask a bare Rectangle how
+tall it would like to be when everything inside it is behind an `if`.**
+
+Bounding the text (above) is the second half. Even with the height reported correctly, a card that
+can grow without limit runs off the screen and takes its buttons with it, which is why every text
+on it is now a known number of lines and only one card is shown at a time.
+
 ## What is deliberately NOT built
 
 - **Persistent "always allow".** There is no way to record a standing yes. The standing policy on
@@ -225,7 +307,41 @@ printf '%s\n' \
  | /opt/yantrik/bin/yos-mcp
 ```
 
-It will block. **A card appears on screen within a second, over whatever screen is up.**
+It will block. **A card appears on screen within a second, over whatever screen is up, and the
+shell comes to the front of whatever app was focused.** Close the card's question and the window
+you were in comes back.
+
+### The geometry to expect
+
+The card is the top-right of the shell window, and two of its numbers are exact arithmetic rather
+than measurements:
+
+| | value | for a 1280×800 screen |
+|---|---|---|
+| card top edge | `48` — `status-bar-height` (32) + `sp-4` (16) | **y = 48** |
+| card left edge | `W − 420` | x = 860 |
+| card width | `404` | x = 860…1264 |
+| Deny centre x | `W − 315` | **x = 965** |
+| Allow centre x | `W − 121` | **x = 1159** |
+
+(The button row is the card's last element: `404 − 2×12` padding = 380px split into two 186px
+buttons with 8px between them.)
+
+The vertical extent depends on how many lines the purpose wraps to, which is the one thing not
+fixed. For the calendar case — a two-line purpose, three arguments, and the "cannot be undone"
+warning — the card is about **298px tall**: 12 padding + 15 header + 8 + 15 self-declared + 8 + 19
+action name + 8 + 32 purpose + 8 + 70 arguments box + 8 + 16 warning + 8 + 15 grade line + 8 + 36
+buttons + 12 padding. So on a 1280×800 screen expect:
+
+- card **y = 48 … ≈346**
+- button row centre **y ≈ 318** (always `card bottom − 28`)
+- Allow once at **≈(1159, 318)**, Deny at **≈(965, 318)**
+
+Without the warning line (an action the app does not call unrecoverable) subtract 24px. The text
+line heights above are estimates from the font sizes; **the numbers to actually check are the two
+that are exact**: nothing of the card may be above `y = 48`, and the header
+(`Hermes Agent 0.9.2` over `self-declared name · asking to use this machine`) must be fully
+readable. That is precisely what was broken.
 
 **2. Confirm the card exists without looking at pixels**, from a second shell:
 
@@ -249,18 +365,15 @@ so pin to the corner first:
 
 ```sh
 W=$(wlr-randr | awk '/current/ {split($1,a,"x"); print a[1]; exit}')
-grim /tmp/card.png            # look at it, and read the Allow button's y off the image
+grim /tmp/card.png            # check the header is visible and read the button row's y
 wlrctl pointer move -10000 -10000        # pin the pointer to the top-left corner
-wlrctl pointer move $((W - 121)) <y>     # x is deterministic; y is not
+wlrctl pointer move $((W - 121)) 318     # x is exact; y from the table above
 wlrctl pointer click left
 ```
 
-The x is exact and does not need reading: the overlay's inner column is `404px` wide starting
-`420px` from the right edge, with `12px` padding, and the two buttons split the remaining `380px`
-with `8px` between them — so **Allow's centre is `W - 121`**. The y is not exact, because the card's
-height depends on how many lines the purpose and the arguments wrap to; the button row is the last
-thing in the card, its centre sits `28px` above the card's bottom edge, and the card's top is at
-`y = 48`. Read it off `/tmp/card.png` once; it is stable for a given action.
+See the geometry table above for where the buttons are. The x is exact; the y is a close estimate
+because the card's height depends on how many lines the purpose wraps to, so read it off
+`/tmp/card.png` once — it is stable for a given action.
 
 **Expected:** the blocked `yos-mcp` returns within a couple of seconds, and its text begins
 
@@ -283,8 +396,14 @@ is replaced, in the Lens's conversation, by `Allowed once: calendar.delete_event
   c. **Above the machine ceiling** — set `tool_permission: standard` on the AI page in Settings,
      then repeat step 1. **No card appears at all**, and the refusal names `tool_permission`. This
      is the important one: an approval must not be able to exceed the owner's standing policy.
-  d. **Flood** — fire four `delete_event` calls with four different ids at once. Three cards; the
-     fourth is refused with "already waiting".
+  d. **Flood** — fire four `delete_event` calls with four different ids at once. Three requests
+     are accepted and the fourth is refused with "already waiting"; **one** card is on screen with
+     `2 more waiting — this one first` under it, and the next appears as each is answered.
+  e. **Behind a window** — the regression that made all this necessary. Focus Calendar
+     (`wlrctl toplevel focus title:Calendar`), then fire a `delete_event`. The shell must come to
+     the front with the card fully visible. Answer it: Calendar must come back to the front. If
+     `wlrctl toplevel list state:activated` on this build prints more than one line, the shell
+     stays in front instead — that is the documented "not knowable" path, not a bug.
 
 **5. The invariant, from the outside.** Nothing on the shell's surface can grant:
 
@@ -309,9 +428,15 @@ yos act shell consume_approval request_id=appr-1 app=calendar action=delete_even
 
 | where | what |
 |---|---|
-| `crates/yantrik-ui/src/approvals.rs` | 15 tests: single use, duplicate consume authorises nothing, key order does not invalidate, any value change does, a changed app or action does, denial prevents consumption, request expiry, grant expiry, flooding refused, identical question dedupes, denial silences a repeat, unknown id is not an expiry, canonical JSON, the card shows what the grant binds, the decision leaves a record line |
+| `crates/yantrik-ui/src/approvals.rs` | 16 tests: single use, duplicate consume authorises nothing, key order does not invalidate, any value change does, a changed app or action does, denial prevents consumption, request expiry, grant expiry, flooding refused, identical question dedupes *and is not reported as fresh* (so a repeat cannot re-raise the shell), denial silences a repeat, unknown id is not an expiry, canonical JSON, the card shows what the grant binds, the card is a bounded number of lines, the decision leaves a record line |
 | `crates/yantrik-ui/src/control_approvals.rs` | 3 tests: no published action can grant (reads the source of every `control*.rs`), the three asking actions are still published (so deleting the feature cannot make the first one pass), `args_json` binds identically whether it arrives as an object or a string |
-| `deploy/yantrik-os/yos-mcp-selftest.py` | 29 checks against a fake `yos`: below-ceiling runs unasked, the five outcomes each produce their own message and only one of them runs anything, the grant binds the coerced value the app will actually receive, an argument swapped after approval spends no grant and runs nothing, and the bridge's wait is shorter than the shell's request lifetime |
+| `deploy/yantrik-os/yos-mcp-selftest.py` | 32 checks against a fake `yos`: below-ceiling runs unasked, the five outcomes each produce their own message and only one of them runs anything, the grant binds the coerced value the app will actually receive, an argument swapped after approval spends no grant and runs nothing, the three sources of the requester's name in precedence order (a real `initialize` handshake is driven through `main()`), and the bridge's wait is shorter than the shell's request lifetime |
+
+Neither of the two defects found on the machine is covered by a test, and honestly: they are both
+about rendered geometry and compositor stacking, which nothing in this repo can assert without a
+display. The release gate (`design/next-focus-2026-09.md` §2) says the same thing about window
+visibility — "today's witnesses cannot prove a mapped window is on screen". Step 3 and case (e) of
+the verification above are the substitute, and they are a person with a screenshot.
 
 ```
 cargo test --offline --profile fast -p yantrik-ui --bin yantrik-ui approvals

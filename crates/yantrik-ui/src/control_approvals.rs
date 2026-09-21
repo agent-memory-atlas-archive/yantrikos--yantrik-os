@@ -37,6 +37,7 @@
 //! asked a pointless question learns that the prompt is noise.
 
 use std::cell::RefCell;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
@@ -123,6 +124,23 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // immediately can never see a request the person has not been shown.
                 if let Some(ui) = request_ui.upgrade() {
                     sync(&ui);
+                }
+
+                // Drawn is not seen. The first time this ran on a real machine, the mind had
+                // Calendar open and focused; the card was drawn in the shell's window, top
+                // right, and the Calendar window covered it completely — only the card's orange
+                // border showed past the edge. The person would never have seen it and the
+                // request would have expired on its own. The shell is an ordinary toplevel to
+                // labwc, so it has to ask to come forward, exactly as `open_lens` does for the
+                // same reason (see its comment in control.rs — the Lens once opened underneath
+                // Notes). Off the UI thread: wlrctl is a process.
+                //
+                // Only for a question the person has not already been shown. A repeat of an
+                // identical pending request hands back the card that is already up, and raising
+                // the shell again for it would let anything that can call a `safe` action hold
+                // somebody's screen by asking the same thing in a loop.
+                if asked.fresh {
+                    take_the_screen();
                 }
 
                 Ok(serde_json::json!({
@@ -294,6 +312,105 @@ pub fn wire(ui: &App) {
     std::mem::forget(timer);
 }
 
+// ── Getting in front of the person, and getting out of the way again ────
+//
+// A card the person cannot see is the same as no card: the request expires on its own and they
+// are never told anything was asked. So the shell comes forward when a request arrives. The cost
+// is that it covers whatever they were using, which is why the window they were in is handed the
+// screen back the moment nothing is waiting.
+
+/// The toplevel to hand the screen back to, if it was knowable when the card went up.
+///
+/// `None` means either nothing is waiting, or the compositor would not say unambiguously which
+/// window was in front — in which case the shell stays where it is rather than guessing at a
+/// window to throw the person into. See [`window_in_front`].
+static RESTORE_TO: Mutex<Option<String>> = Mutex::new(None);
+
+/// Which toplevel the compositor says is activated, if exactly one is and it is not the shell.
+///
+/// The shell does not track this itself: `wlrctl toplevel list` carries no focus flag, and the
+/// one place that treats "first in the list" as the foreground window (`wire::timers`, feeding
+/// the think cycle) is reading an ordering that means nothing — the list is the launch registry
+/// merged with the compositor's, in neither case in focus order.
+///
+/// `state:activated` is wlrctl's own matcher for the focused toplevel, and this trusts it only
+/// when it answers with exactly one line. Two lines or none means either the compositor has
+/// nothing activated or this wlrctl does not support the matcher and has listed everything — and
+/// both of those are "not knowable", not "probably the first one". Handing a person's screen to
+/// the wrong window is worse than leaving the shell in front, which is at least where the thing
+/// they just answered was.
+fn window_in_front() -> Option<String> {
+    let output = std::process::Command::new("wlrctl")
+        .args(["toplevel", "list", "state:activated"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.len() != 1 {
+        return None;
+    }
+    // `wlrctl toplevel list` prints `app_id: title`, and our own windows declare no wayland
+    // app_id, so the line usually begins with the separator.
+    let line = lines[0];
+    let title = line.split_once(':').map(|(_, t)| t.trim()).unwrap_or(line).to_string();
+    if title.is_empty() || title == crate::windows::SHELL_WINDOW_TITLE {
+        // The person was already looking at the desktop. Nothing to give back.
+        return None;
+    }
+    Some(title)
+}
+
+/// Ask the compositor to bring one toplevel forward. Blocking; call it off the UI thread.
+fn focus_toplevel(title: &str) {
+    match std::process::Command::new("wlrctl")
+        .args(["toplevel", "focus", &format!("title:{title}")])
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::warn!(
+            code = status.code().unwrap_or(-1),
+            window = %title,
+            "could not bring a window forward for an approval"
+        ),
+        Err(e) => tracing::warn!(error = %e, "could not run wlrctl for an approval"),
+    }
+}
+
+/// Note what the person was using, then put the shell in front of it.
+///
+/// Both halves on one worker thread and in that order, because the reading has to happen before
+/// the raise or it reads the shell. Nothing is recorded if something is already waiting — the
+/// shell is already in front by then, so a second reading would capture the shell and the window
+/// the person actually came from would be lost.
+fn take_the_screen() {
+    std::thread::spawn(|| {
+        if let Ok(mut slot) = RESTORE_TO.lock() {
+            if slot.is_none() {
+                *slot = window_in_front();
+            }
+        }
+        focus_toplevel(crate::windows::SHELL_WINDOW_TITLE);
+    });
+}
+
+/// Nothing is waiting any more: give the screen back to whatever the person was using.
+///
+/// Called on every transition to "no pending requests", so it covers a decision and an expiry
+/// alike — the person who walked away and came back should find the window they left, not the
+/// shell they never answered.
+fn give_the_screen_back() {
+    let title = match RESTORE_TO.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(_) => None,
+    };
+    if let Some(title) = title {
+        std::thread::spawn(move || focus_toplevel(&title));
+    }
+}
+
 // ── Cards onto the screen ───────────────────────────────────────────
 
 thread_local! {
@@ -336,54 +453,82 @@ fn sync(ui: &App) {
     publish(ui, cards);
 }
 
+fn row_for(card: Card) -> crate::ApprovalRequest {
+    crate::ApprovalRequest {
+        id: card.id.into(),
+        requester: card.requester.into(),
+        app: card.app.into(),
+        action: card.action.into(),
+        grade: card.grade.into(),
+        // An action with nothing published about it is the case commit d73760d was about.
+        // Say so rather than leaving a blank line where the reason should be.
+        purpose: if card.purpose.is_empty() {
+            "(the app publishes no description for this action)".into()
+        } else {
+            card.purpose.into()
+        },
+        // One model entry per argument, one single-line `Text` per entry on the card. A
+        // newline-joined string was the first shape of this and it is what made the card's
+        // height something the layout had to discover by measuring wrapped text.
+        args: ModelRc::new(VecModel::from(
+            card.args.into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
+        )),
+        warning: card.warning.into(),
+        decision: match card.status {
+            Status::Pending => "",
+            Status::Granted | Status::Consumed => "allowed",
+            Status::Denied => "denied",
+            Status::Expired => "expired",
+        }
+        .into(),
+        record: card.record.into(),
+        age_text: if card.status == Status::Pending {
+            let left = approvals::REQUEST_TTL.as_secs().saturating_sub(card.age_secs);
+            format!("{left}s left").into()
+        } else {
+            slint::SharedString::new()
+        },
+    }
+}
+
 fn publish(ui: &App, cards: Vec<Card>) {
-    let still_waiting: Vec<bool> = cards.iter().map(|c| c.status == Status::Pending).collect();
-    let rows: Vec<crate::ApprovalRequest> = cards
-        .into_iter()
-        .map(|card| crate::ApprovalRequest {
-            id: card.id.into(),
-            requester: card.requester.into(),
-            app: card.app.into(),
-            action: card.action.into(),
-            grade: card.grade.into(),
-            // An action with nothing published about it is the case commit d73760d was about.
-            // Say so rather than leaving a blank line where the reason should be.
-            purpose: if card.purpose.is_empty() {
-                "(the app publishes no description for this action)".into()
-            } else {
-                card.purpose.into()
-            },
-            args_text: card.args_lines.into(),
-            warning: card.warning.into(),
-            decision: match card.status {
-                Status::Pending => "",
-                Status::Granted | Status::Consumed => "allowed",
-                Status::Denied => "denied",
-                Status::Expired => "expired",
-            }
-            .into(),
-            record: card.record.into(),
-            age_text: if card.status == Status::Pending {
-                let left = approvals::REQUEST_TTL.as_secs().saturating_sub(card.age_secs);
-                format!("{left}s left").into()
-            } else {
-                slint::SharedString::new()
-            },
-        })
-        .collect();
+    let waiting = cards.iter().filter(|c| c.status == Status::Pending).count();
+
+    // One card at a time, even though up to three requests can be waiting.
+    //
+    // Three cards stacked is 780px on an 800px screen: the third one's buttons land under the
+    // taskbar, unreachable. It is also the wrong thing to show — a person facing a stack reads
+    // none of them properly, which is the approval-fatigue failure the whole design is trying to
+    // avoid. So the oldest is the one on screen and the rest wait behind a count. `cards()`
+    // returns the decided records first and then the pending ones in order, so the first pending
+    // row here is the oldest.
+    let mut shown: Vec<crate::ApprovalRequest> = Vec::new();
+    let mut in_front: Vec<crate::ApprovalRequest> = Vec::new();
+    for card in cards {
+        let pending = card.status == Status::Pending;
+        if pending && !in_front.is_empty() {
+            continue;
+        }
+        let row = row_for(card);
+        if pending {
+            in_front.push(row.clone());
+        }
+        shown.push(row);
+    }
 
     // Two models from one list. The Lens draws the whole conversation — the records of what was
-    // decided as well as what is waiting — and the overlay over the other screens draws only
-    // what is waiting, because a record is a thing to read later, not a thing to put in front of
+    // decided as well as the one card waiting — and the overlay over the other screens draws
+    // only the card, because a record is a thing to read later, not a thing to put in front of
     // somebody who is doing something else.
-    let waiting: Vec<crate::ApprovalRequest> = rows
-        .iter()
-        .zip(&still_waiting)
-        .filter(|(_, pending)| **pending)
-        .map(|(row, _)| row.clone())
-        .collect();
-    ui.set_pending_approvals(ModelRc::new(VecModel::from(waiting)));
-    ui.set_approvals(ModelRc::new(VecModel::from(rows)));
+    ui.set_pending_approvals(ModelRc::new(VecModel::from(in_front)));
+    ui.set_approvals(ModelRc::new(VecModel::from(shown)));
+    ui.set_approvals_waiting(waiting.saturating_sub(1) as i32);
+
+    // Nothing is waiting any more — by a decision, or because it expired unanswered. Either way
+    // the shell was pushed in front of whatever the person was using and now owes it back.
+    if waiting == 0 {
+        give_the_screen_back();
+    }
 }
 
 // ── Arguments as they actually arrive ───────────────────────────────

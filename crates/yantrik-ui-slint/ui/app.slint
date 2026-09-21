@@ -118,11 +118,13 @@ export component App inherits Window {
     /// request that expires unanswered, which is indistinguishable from the machine ignoring
     /// them.
     in property <[ApprovalRequest]> approvals: [];
-    /// The same requests, without the records of the ones already decided — what the overlay
-    /// draws. Two lists rather than one filtered at draw time because Slint has no way to skip
-    /// a row inside a `for`, and a stack of zero-height rows would leave the cards floating
-    /// below a gap the size of the session's history.
+    /// The one request waiting on an answer, without the records of the ones already decided —
+    /// what the overlay draws. Zero or one entry. Two lists rather than one filtered at draw
+    /// time because Slint has no way to skip a row inside a `for`, and a stack of zero-height
+    /// rows would leave the card floating below a gap the size of the session's history.
     in property <[ApprovalRequest]> pending-approvals: [];
+    /// How many further requests are queued behind it. See `approvals-waiting` in intent_lens.
+    in property <int> approvals-waiting: 0;
     /// Pressed Allow. This callback, and the one below it, are the only way a grant comes into
     /// existence anywhere in this OS — there is no action on the shell's control surface that
     /// grants. See crates/yantrik-ui/src/approvals.rs.
@@ -1319,6 +1321,7 @@ export component App inherits Window {
             is-generating: root.is-generating;
             // Approvals, in the conversation where the asking belongs
             approvals: root.approvals;
+            approvals-waiting: root.approvals-waiting;
             approval-allow(id) => { root.approval-allow(id); }
             approval-deny(id) => { root.approval-deny(id); }
             // Urges
@@ -2754,6 +2757,19 @@ export component App inherits Window {
             height: 100%;
             background: transparent;
 
+            // The top edge is the anchor and the card grows downward from it.
+            //
+            // It did not, the first time. `ApprovalCard` reported a preferred height of zero
+            // (see the note at the top of that component), so this box was sized to nothing and
+            // the card spilled out of it — upward, off the top of the screen, taking the header
+            // and the action name with it. The person was left looking at three arguments and
+            // two buttons with no way to tell what they were allowing.
+            //
+            // With that fixed this box gets the card's true height, the card is a known number of
+            // lines (every text on it is bounded in approvals.rs), and only ONE card is ever here
+            // — three of them would be 780px on an 800px screen and the third one's buttons would
+            // sit under the taskbar. `min-height` is deliberately not set beside `height`: Slint
+            // refuses both on one element, and `height` is the one that has to be the layout's.
             Rectangle {
                 x: parent.width - 420px;
                 y: Theme.status-bar-height + Theme.sp-4;
@@ -2762,13 +2778,22 @@ export component App inherits Window {
                 background: transparent;
 
                 approval-stack := VerticalLayout {
-                    spacing: Theme.sp-2;
+                    spacing: Theme.sp-1;
                     alignment: start;
 
                     for item in root.pending-approvals : ApprovalCard {
                         data: item;
                         allow => { root.approval-allow(item.id); }
                         deny => { root.approval-deny(item.id); }
+                    }
+
+                    if root.approvals-waiting > 0 : Text {
+                        text: root.approvals-waiting + " more waiting — this one first";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        horizontal-alignment: center;
+                        wrap: no-wrap;
+                        overflow: elide;
                     }
                 }
             }

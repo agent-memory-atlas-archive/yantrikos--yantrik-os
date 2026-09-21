@@ -45,7 +45,7 @@ export struct ApprovalRequest {
     action: string,
     purpose: string,        // the action's own published description
     grade: string,          // safe | standard | sensitive | dangerous
-    args-text: string,      // one `key: value` per line, already rendered
+    args: [string],         // one `key: value` per entry, each already cut to fit one line
     warning: string,        // "" unless there is something that cannot be undone
     decision: string,       // "" while waiting; then allowed | denied | expired
     record: string,         // the one line that stays in the conversation afterwards
@@ -53,6 +53,25 @@ export struct ApprovalRequest {
 }
 
 // One request, or — once it has been answered — the line it leaves behind.
+//
+// ── Why the body is wrapped in a layout that does nothing else ──
+//
+// The first build of this drew the card with its top off the top of the screen: the person saw
+// the arguments and the buttons and not the header, the action name or what the action does.
+//
+// The cause was here, on the root element. Both branches below are conditional, and a Rectangle
+// whose only children are conditional reports a `preferred-height` of zero — Slint computes a
+// non-layout element's preferred size from its unconditional children, and there were none. So
+// `height: self.preferred-height` resolved to zero, the enclosing VerticalLayout in app.slint
+// sized the row at zero, and the real content — which sets its own height and is not clipped —
+// spilled out of a box that had no room for it.
+//
+// The fix is structural rather than a number: one unconditional VerticalLayout holds both
+// branches, and the root takes ITS preferred height. `if` inside a layout does contribute to
+// that layout's preferred size, which is the whole difference. This is the same idiom
+// `message_bubble.slint` uses (`height: msg-layout.preferred-height`), and the rule it teaches is
+// worth keeping: never ask a bare Rectangle how tall it would like to be when everything in it
+// is behind an `if`.
 //
 // Keyboard: there is deliberately NO default action. Both buttons are TouchAreas, which take no
 // keyboard focus in Slint, so Enter cannot reach either of them. A person allowing something
@@ -65,8 +84,10 @@ export component ApprovalCard inherits Rectangle {
 
     property <bool> waiting: root.data.decision == "";
 
-    height: self.preferred-height;
+    height: body.preferred-height;
     background: transparent;
+
+    body := VerticalLayout {
 
     // Decided: one line in the transcript, and nothing else. The card is gone; the record of
     // what was decided is not, because "did I allow that?" is a question people ask afterwards.
@@ -88,7 +109,8 @@ export component ApprovalCard inherits Rectangle {
             color: Theme.text-dim;
             font-size: Theme.fs-caption;
             vertical-alignment: center;
-            wrap: word-wrap;
+            wrap: no-wrap;
+            overflow: elide;
             horizontal-stretch: 1;
         }
     }
@@ -111,6 +133,14 @@ export component ApprovalCard inherits Rectangle {
             spacing: Theme.sp-2;
 
             // Who is asking, and how long they have to wait for an answer.
+            //
+            // Two fixed lines rather than one wrapping one, so the card's height does not depend
+            // on how long the requester's name happens to be. The name is whatever the caller
+            // said it was — Hermes declares it on the MCP handshake, and the shell's own list of
+            // minds is the fallback — and NOTHING on this machine verifies it, which is why the
+            // second line says so right underneath. It cannot raise privilege (the machine
+            // ceiling is enforced from the app's real grade, not from anything on this card) but
+            // it can flatter, and a person deciding is entitled to know which it is.
             HorizontalLayout {
                 spacing: Theme.sp-2;
 
@@ -121,11 +151,13 @@ export component ApprovalCard inherits Rectangle {
                     background: Theme.amber;
                 }
                 Text {
-                    text: root.data.requester + " is asking to use this machine";
-                    color: Theme.text-secondary;
+                    text: root.data.requester;
+                    color: Theme.text-primary;
                     font-size: Theme.fs-micro;
+                    font-weight: 600;
                     vertical-alignment: center;
-                    wrap: word-wrap;
+                    wrap: no-wrap;
+                    overflow: elide;
                     horizontal-stretch: 1;
                 }
                 Text {
@@ -134,6 +166,13 @@ export component ApprovalCard inherits Rectangle {
                     font-size: Theme.fs-micro;
                     vertical-alignment: center;
                 }
+            }
+            Text {
+                text: "self-declared name · asking to use this machine";
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                wrap: no-wrap;
+                overflow: elide;
             }
 
             // What it is. The app and action by their exact names, because those are the names
@@ -155,19 +194,27 @@ export component ApprovalCard inherits Rectangle {
             }
 
             // The arguments, exactly as the grant is bound to them.
+            //
+            // One Text per argument, `no-wrap` and elided, so the box is exactly as many lines
+            // as there are arguments and the card's height is arithmetic rather than a
+            // measurement. The values arrive already cut to fit (see `ARG_VALUE_CHARS` in
+            // approvals.rs), each cut one naming its true length, and a list longer than eight
+            // arrives with a line saying how many more the grant covers — so the bound is
+            // visible in the text rather than being a silent truncation by the layout.
             Rectangle {
                 border-radius: Theme.r-sm;
                 background: Theme.bg-input;
                 height: args-body.preferred-height;
 
-                args-body := HorizontalLayout {
+                args-body := VerticalLayout {
                     padding: Theme.sp-2;
-                    Text {
-                        text: root.data.args-text;
+
+                    for line in root.data.args : Text {
+                        text: line;
                         color: Theme.text-primary;
                         font-size: Theme.fs-mono;
-                        wrap: word-wrap;
-                        horizontal-stretch: 1;
+                        wrap: no-wrap;
+                        overflow: elide;
                     }
                 }
             }
@@ -248,6 +295,8 @@ export component ApprovalCard inherits Rectangle {
             }
         }
     }
+
+    }   // body — see the note at the top of this component about why it is here
 }
 
 export component IntentLens inherits Rectangle {
@@ -268,13 +317,19 @@ export component IntentLens inherits Rectangle {
     in property <[MessageData]> messages: [];
     in property <bool> is-generating: false;
 
-    /// What is waiting on the person, and what they recently decided.
+    /// What they recently decided, and the one request waiting on them.
     ///
-    /// Pending cards sit at the end of the list, under the records of the ones already answered,
-    /// so the thing waiting on you is closest to where your hands are. The same list is drawn at
+    /// The card sits at the end of the list, under the records of the ones already answered, so
+    /// the thing waiting on you is closest to where your hands are. The same list is drawn at
     /// desktop level in `app.slint` when the Lens is not showing it — a request must never sit
     /// invisibly until it expires.
     in property <[ApprovalRequest]> approvals: [];
+    /// How many further requests are queued behind the card on screen.
+    ///
+    /// Up to three can be waiting; only one is ever shown. Three stacked cards do not fit on an
+    /// 800px screen — the third one's buttons land under the taskbar — and a person facing a
+    /// stack reads none of them properly, which is the failure the design is most afraid of.
+    in property <int> approvals-waiting: 0;
 
     // Callbacks
     callback approval-allow(string);   // request id — a click, and nothing else, creates a grant
@@ -1254,6 +1309,15 @@ export component IntentLens inherits Rectangle {
                         data: item;
                         allow => { root.approval-allow(item.id); }
                         deny => { root.approval-deny(item.id); }
+                    }
+
+                    if root.approvals-waiting > 0 : Text {
+                        text: root.approvals-waiting + " more waiting — this one first";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        horizontal-alignment: center;
+                        wrap: no-wrap;
+                        overflow: elide;
                     }
                 }
 

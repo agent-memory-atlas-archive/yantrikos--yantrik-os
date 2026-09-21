@@ -52,9 +52,38 @@ OS_ACT_MAX_SECONDS = (2 * SHELL_CALL_TIMEOUT      # action_detail, machine_ceili
                       + APPROVAL_WAIT
                       + ACT_TIMEOUT)
 
-# Who the card says is asking. A person deciding whether to allow a deletion is entitled to know
-# who wants it; "an unnamed caller" is what the shell falls back to, and it is worse.
-REQUESTER = os.environ.get("YOS_MCP_REQUESTER", "").strip() or "the mind on this desktop"
+# ── Who the card says is asking ─────────────────────────────────────────────────────────
+#
+# The first cards read "the mind on this desktop is asking to use this machine", which is true
+# and useless: the person could not tell Hermes from anything else that might have opened this
+# bridge. Three sources, best first, and every one of them is SELF-DECLARED — the card says so
+# underneath the name, because nothing on this machine verifies any of them. It cannot raise
+# privilege (the machine ceiling is enforced from the app's own published grade, not from
+# anything a caller says about itself) but a flattering name could sway a decision.
+#
+#   1. YOS_MCP_REQUESTER — an operator setting this deliberately outranks anything guessed.
+#   2. The MCP client's own `clientInfo` from the `initialize` handshake. Hermes sends its name
+#      and version there; this is the specific thing that was being thrown away.
+#   3. The shell's own list of minds, whichever one is `answering`. A fallback for a client that
+#      sends no clientInfo at all, and it is the name the person already sees in the status bar.
+REQUESTER_OVERRIDE = os.environ.get("YOS_MCP_REQUESTER", "").strip()
+
+# Filled from the `initialize` params. Never trusted for anything but a label.
+_CLIENT = {}
+
+
+def requester_name(state=None):
+    """The name to put on the card. `state` is a `describe shell` state dict, if one is to hand."""
+    if REQUESTER_OVERRIDE:
+        return REQUESTER_OVERRIDE
+    name = str(_CLIENT.get("name") or "").strip()
+    if name:
+        version = str(_CLIENT.get("version") or "").strip()
+        return "%s %s" % (name, version) if version else name
+    for mind in (state or {}).get("minds") or []:
+        if mind.get("answering") and str(mind.get("name") or "").strip():
+            return str(mind["name"]).strip()
+    return "an unnamed caller"
 
 # Every tool is a `yos` invocation. `argv` builds the command line from the call's
 # arguments; `timeout` is generous where the work is genuinely slow (transcription runs
@@ -444,6 +473,10 @@ LADDER = ["safe", "standard", "sensitive", "dangerous"]
 CEILING = os.environ.get("YOS_MCP_MAX_PERMISSION", "standard")
 
 
+# Why the last attempt to grade (app, action) came back empty, in words for the caller.
+UNGRADED_BECAUSE = {}
+
+
 def action_detail(app, action):
     """How the OS grades one of its own actions, and what the app says the action is for.
 
@@ -467,8 +500,19 @@ def action_detail(app, action):
     """
     p = yos(["describe", app], SHELL_CALL_TIMEOUT)
     if p is None or p.returncode != 0:
+        # Why it could not be read is the useful half. The first mind to use this bridge on a
+        # real machine asked for `calendar add_event` while Calendar was closed and was told
+        # "cannot establish how 'calendar' grades 'add_event' … check the name" — the name was
+        # right, the app was shut, and it cost a minute of a small model's time to work that
+        # out. `yos` already says which it is; keep what it said.
+        UNGRADED_BECAUSE[(app, action)] = ((p.stderr or "").strip() if p is not None else
+                                           "the desktop did not answer in time")
         return None, ""
     lines = (p.stdout or "").splitlines()
+    UNGRADED_BECAUSE[(app, action)] = (
+        "%s is open and offers no action called %s. It offers: %s" % (
+            app, action,
+            ", ".join(re.findall(r"^\s*act:\s*([A-Za-z0-9_]+)\(", p.stdout or "", re.M)) or "nothing"))
     for i, line in enumerate(lines):
         m = re.match(r"^\s*act:\s*([A-Za-z0-9_]+)\([^)]*\)\s*\[([a-z]+),", line)
         if not m or m.group(1) != action:
@@ -482,7 +526,20 @@ def action_detail(app, action):
     return None, ""
 
 
-def machine_ceiling():
+def shell_state():
+    """The shell's own state object out of `yos describe shell`, or None.
+
+    One read, two answers: this machine's standing ceiling, and which mind the desktop says is
+    answering. Both used to be separate `yos describe shell` invocations; asking the same
+    question twice on the path to putting a card up is two chances for them to disagree.
+    """
+    p = yos(["describe", "shell"], SHELL_CALL_TIMEOUT)
+    if p is None or p.returncode != 0:
+        return None
+    return result_object(p.stdout or "")
+
+
+def machine_ceiling(state):
     """This machine's standing policy for callers on the socket, or None if it cannot be read.
 
     Published by the shell in `describe shell` as `tool_permission` — the same value
@@ -495,13 +552,8 @@ def machine_ceiling():
     policy, and a person asked a question no answer of theirs could satisfy learns that the card
     is noise.
     """
-    p = yos(["describe", "shell"], SHELL_CALL_TIMEOUT)
-    if p is None or p.returncode != 0:
-        return None
-    m = re.search(r'"tool_permission"\s*:\s*"([a-z]+)"', p.stdout or "")
-    if not m or m.group(1) not in LADDER:
-        return None
-    return m.group(1)
+    level = str((state or {}).get("tool_permission") or "")
+    return level if level in LADDER else None
 
 
 def result_object(text):
@@ -544,7 +596,7 @@ def shell_call(action, args):
     return result, None
 
 
-def ask_the_person(app, action, grade, purpose, args):
+def ask_the_person(app, action, grade, purpose, args, requester):
     """Put one action in front of the person, wait, and report exactly what happened.
 
     Returns `(allowed, message)`. The message is the whole account the mind gets, and it is
@@ -561,7 +613,7 @@ def ask_the_person(app, action, grade, purpose, args):
         "grade": grade,
         "purpose": purpose,
         "args_json": args,
-        "requester": REQUESTER,
+        "requester": requester,
     })
     if request is None:
         return False, (
@@ -649,8 +701,14 @@ def guard_act(args):
 
     level, purpose = action_detail(app, action)
     if level is None:
-        return ("cannot establish how %r grades %r, so it will not be run. Check the name "
-                "with os_describe %s." % (app, action, app)), None
+        why = UNGRADED_BECAUSE.get((app, action), "")
+        if "is not open" in why:
+            return ("%s is not open, so %s was not run — nothing is wrong with the request. "
+                    "Open it with os_act on shell: open_app name=%s (os_apps lists the exact "
+                    "name to open each app by), then call this again."
+                    % (app, action, app)), None
+        return ("%s.%s was not run, because how the OS grades it could not be read: %s"
+                % (app, action, why or "os_describe %s would not answer." % app)), None
     if level not in LADDER:
         return ("%s.%s is graded %r, which is not a level this OS defines. Refusing."
                 % (app, action, level)), None
@@ -661,7 +719,10 @@ def guard_act(args):
     # policy already says no. That policy is the owner's, set at the keyboard in Settings, and an
     # approval must not be able to exceed it: a card allowed here would still be refused by the
     # app itself with a `CEILING:` message, and the person would have pressed Allow for nothing.
-    machine = machine_ceiling()
+    #
+    # One read of the shell answers both this and who the card should name.
+    state = shell_state()
+    machine = machine_ceiling(state)
     if machine is not None and LADDER.index(level) > LADDER.index(machine):
         return ("%s.%s is graded %s, and this machine does not allow callers like this past %s "
                 "(`tool_permission`, on the AI page in Settings). The person was NOT asked, "
@@ -675,7 +736,8 @@ def guard_act(args):
     except ValueError as e:
         return str(e), None
 
-    allowed, message = ask_the_person(app, action, level, purpose, bound)
+    allowed, message = ask_the_person(
+        app, action, level, purpose, bound, requester_name(state))
     if allowed:
         return None, message
     return message, None
@@ -803,6 +865,14 @@ def main():
         method, msg_id = msg.get("method"), msg.get("id")
 
         if method == "initialize":
+            # The client's own account of itself, kept for the one place it is worth having: the
+            # name on an approval card, so a person is asked by "Hermes Agent 0.9.2" rather than
+            # by "the mind on this desktop". Self-declared and treated as such — it is a label,
+            # never a permission. See `requester_name`.
+            info = (msg.get("params") or {}).get("clientInfo")
+            if isinstance(info, dict):
+                _CLIENT["name"] = info.get("name")
+                _CLIENT["version"] = info.get("version")
             reply(msg_id, {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},

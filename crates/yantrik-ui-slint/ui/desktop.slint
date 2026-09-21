@@ -113,6 +113,7 @@ export component DesktopScreen inherits Rectangle {
     // What a mind has asked the person to allow. Drawn in the Lens's conversation; the App
     // draws the same list over whatever screen is up when the Lens is not showing it.
     in property <[ApprovalRequest]> approvals: [];
+    in property <int> approvals-waiting: 0;
     callback approval-allow(string);
     callback approval-deny(string);
 
@@ -1048,6 +1049,7 @@ export component DesktopScreen inherits Rectangle {
         suggestions: root.lens-suggestions;
         recents: root.lens-recents;
         approvals: root.approvals;
+        approvals-waiting: root.approvals-waiting;
 
         approval-allow(id) => { root.approval-allow(id); }
         approval-deny(id) => { root.approval-deny(id); }

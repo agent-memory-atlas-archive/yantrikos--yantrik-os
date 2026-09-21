@@ -23,6 +23,7 @@ What it is actually checking, in one line each:
 """
 
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -98,7 +99,16 @@ if argv[:1] == ["describe"]:
     if target == "shell":
         if state.get("shell_down"):
             die("shell is not open.")
-        body = {"screen": "desktop", "pending_approvals": []}
+        body = {
+            "screen": "desktop",
+            "pending_approvals": [],
+            # What the desktop says about who is answering. The last-resort source for the name
+            # on an approval card, when the MCP client sent no clientInfo.
+            "minds": [
+                {"id": "builtin", "name": "Yantrik Mind", "answering": False},
+                {"id": "hermes", "name": "Hermes Agent", "answering": True},
+            ],
+        }
         if state.get("machine_ceiling"):
             body["tool_permission"] = state["machine_ceiling"]
         print("Yantrik - desktop screen")
@@ -161,7 +171,7 @@ die("unknown command %r" % argv)
 '''
 
 
-def load_mcp(fake, state_path, ceiling="standard"):
+def load_mcp(fake, state_path, ceiling="standard", requester=""):
     """A fresh copy of the real yos-mcp, pointed at the fake desktop.
 
     Reloaded per case because the module reads its ceiling and its wait out of the environment
@@ -170,7 +180,7 @@ def load_mcp(fake, state_path, ceiling="standard"):
     os.environ["YOS_BIN"] = str(fake)
     os.environ["FAKE_YOS_STATE"] = str(state_path)
     os.environ["YOS_MCP_MAX_PERMISSION"] = ceiling
-    os.environ["YOS_MCP_REQUESTER"] = "hermes"
+    os.environ["YOS_MCP_REQUESTER"] = requester
     # Short, because two cases below wait the whole thing out. The shell's own 120s request
     # lifetime is not involved: the fake answers from a file.
     os.environ["YOS_MCP_APPROVAL_WAIT"] = "4"
@@ -197,7 +207,7 @@ def act(module, app, action, args):
 
 
 def case(tmp, name, answer="granted", machine_ceiling="sensitive", shell_down=False,
-         ceiling="standard"):
+         ceiling="standard", requester=""):
     """A scratch desktop in a known mood, and a yos-mcp pointed at it."""
     state_path = tmp / (name + ".json")
     state_path.write_text(json.dumps({
@@ -206,8 +216,27 @@ def case(tmp, name, answer="granted", machine_ceiling="sensitive", shell_down=Fa
         "shell_down": shell_down,
     }), encoding="utf-8")
     fake = tmp / "yos"
-    module = load_mcp(fake, state_path, ceiling=ceiling)
+    module = load_mcp(fake, state_path, ceiling=ceiling, requester=requester)
     return module, state_path
+
+
+def handshake(module, name, version):
+    """Drive a real MCP `initialize` through the server, as a client would.
+
+    Through `main()` rather than by poking `_CLIENT`, because the thing being tested is that the
+    handshake's `clientInfo` is read at all — that is precisely what was being thrown away.
+    """
+    message = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"clientInfo": {"name": name, "version": version}},
+    })
+    saved_in, saved_out = sys.stdin, sys.stdout
+    sys.stdin = io.StringIO(message + "\n")
+    sys.stdout = io.StringIO()
+    try:
+        module.main()
+    finally:
+        sys.stdin, sys.stdout = saved_in, saved_out
 
 
 def read(state_path):
@@ -238,7 +267,8 @@ with tempfile.TemporaryDirectory() as d:
           and req.get("grade") == "sensitive", req)
     check("the card carries the app's own sentence about the action",
           "not recoverable" in (str(req.get("purpose")) or "").lower(), req)
-    check("the card says who is asking", req.get("requester") == "hermes", req)
+    check("with no client name, the card falls back to the mind the desktop says is answering",
+          req.get("requester") == "Hermes Agent", req)
     check("the card is bound to the exact arguments",
           req.get("args_json") == {"id": "evt-3"}, req)
     check("the grant is spent exactly once", s.get("spent") == ["appr-1"], s)
@@ -319,7 +349,31 @@ with tempfile.TemporaryDirectory() as d:
     check("a swapped argument is reported as not gone through",
           is_error and "could not be spent" in text, text)
 
-    # 9. The two clocks agree: this bridge must give up before the shell drops the request,
+    # 9. The name on the card comes from the client's own handshake when it sent one.
+    #
+    # The first cards read "the mind on this desktop", which told the person nothing about who
+    # wanted their calendar changed. Hermes declares itself on `initialize`; that is the name.
+    module, state = case(tmp, "clientinfo", answer="granted")
+    handshake(module, "Hermes Agent", "0.9.2")
+    text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
+    req = (read(state).get("requests") or [{}])[0]
+    check("the card names the client that introduced itself on the MCP handshake",
+          req.get("requester") == "Hermes Agent 0.9.2", req)
+
+    # And an operator naming it explicitly outranks both.
+    module, state = case(tmp, "override", answer="granted", requester="the tour script")
+    handshake(module, "Hermes Agent", "0.9.2")
+    act(module, "calendar", "delete_event", {"id": "evt-3"})
+    req = (read(state).get("requests") or [{}])[0]
+    check("an operator's YOS_MCP_REQUESTER outranks what the client called itself",
+          req.get("requester") == "the tour script", req)
+
+    # With nothing at all to go on it says so rather than inventing a name.
+    module, _ = case(tmp, "anon", answer="granted")
+    check("with no client name and no shell, the requester is honestly unnamed",
+          module.requester_name(None) == "an unnamed caller", module.requester_name(None))
+
+    # 10. The two clocks agree: this bridge must give up before the shell drops the request,
     # or it would report "no answer" for one the person had just allowed.
     module, _ = case(tmp, "clocks")
     check("the bridge waits less than the shell holds the request open",

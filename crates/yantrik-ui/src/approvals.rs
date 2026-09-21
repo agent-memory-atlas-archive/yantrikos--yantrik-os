@@ -75,7 +75,52 @@ pub const MAX_PENDING: usize = 3;
 pub const DENIAL_QUIET: Duration = Duration::from_secs(120);
 
 /// How many decided requests are kept for the transcript record.
-const RECORD_TAIL: usize = 8;
+///
+/// Four, not eight. These render as one line each inside the Lens's conversation panel, which
+/// has to hold a transcript as well; eight of them pushed the conversation out of its own panel.
+const RECORD_TAIL: usize = 4;
+
+// ── Making a card a fixed, readable size ────────────────────────────
+//
+// The card's height has to be predictable, for two reasons that turned out to be the same bug.
+// It is drawn over whatever screen is up, so a card that grows without limit runs off the top or
+// the bottom and takes its buttons with it — and the first time this ran on a real machine the
+// header was clipped off the top of the screen entirely, so the person could see the arguments
+// and the buttons but not who was asking or what the action was.
+//
+// The fix is on both sides. The markup no longer asks a Rectangle with only conditional children
+// how tall it would like to be (it answered zero), and the text that reaches it is bounded here,
+// so every element on the card is a known number of lines. An argument is exactly one line,
+// because it is rendered as its own `Text` with `wrap: no-wrap`; a value longer than this is cut
+// with its true length named, so nothing is hidden in silence.
+
+/// How much of one argument value the card shows before cutting it.
+const ARG_VALUE_CHARS: usize = 60;
+
+/// How many arguments the card lists before summarising the rest.
+///
+/// Eight covers every action on this desktop (the widest is `add_event` at six). A ninth would
+/// be summarised rather than dropped, and the whole set is in `describe shell` regardless — and,
+/// more to the point, in the grant, which is bound to all of them whatever the card had room for.
+const ARG_ROWS: usize = 8;
+
+/// How much of the action's own description the card shows.
+///
+/// Every published purpose on this machine is one sentence. This is the bound that keeps a badly
+/// behaved one from pushing the buttons off the screen.
+const PURPOSE_CHARS: usize = 240;
+
+/// Cut to a length without splitting a character, and say that it was cut.
+///
+/// The same shape as `control::clip`, kept here rather than shared because that one is about
+/// what travels over a socket and this one is about what fits on a line a person reads.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}… ({} characters in full)", text.chars().count())
+}
 
 /// Where a request is. `Consumed` is reported rather than folded into `Granted` or `Expired`:
 /// a caller that polls after burning its grant asked a real question, and "the grant you were
@@ -153,9 +198,13 @@ pub struct Card {
     pub action: String,
     pub grade: String,
     pub purpose: String,
-    /// The arguments, one `key: value` line each, in the order a person reads them (sorted, the
+    /// The arguments, one `key: value` entry each, in the order a person reads them (sorted, the
     /// same order the grant is bound in — so what is shown and what is bound cannot drift).
-    pub args_lines: String,
+    ///
+    /// A list rather than one newline-joined string, because each entry becomes its own
+    /// single-line `Text` on the card. That is what makes the card's height a known number of
+    /// lines instead of something the layout has to discover by measuring wrapped text.
+    pub args: Vec<String>,
     /// A sentence to put in front of the buttons, or empty. See [`warning_for`].
     pub warning: String,
     pub status: Status,
@@ -193,22 +242,29 @@ pub fn canonical(value: &serde_json::Value) -> String {
     walk(value).to_string()
 }
 
-/// The arguments as lines a person can read, in the order the grant is bound in.
-pub fn args_lines(value: &serde_json::Value) -> String {
+/// The arguments as one readable line each, in the order the grant is bound in.
+///
+/// Bounded on both axes — [`ARG_VALUE_CHARS`] per line, [`ARG_ROWS`] lines — so the card is a
+/// known height. Neither bound hides anything in silence: a cut value names its true length and
+/// a cut list names how many are left.
+pub fn args_rows(value: &serde_json::Value) -> Vec<String> {
     let Some(map) = value.as_object() else {
         // Not an object. Show it rather than hiding it: a caller that sent something odd should
         // not get a card that looks empty.
         return match value {
-            serde_json::Value::Null => "(no arguments)".to_string(),
-            other => other.to_string(),
+            serde_json::Value::Null => vec!["(no arguments)".to_string()],
+            other => vec![clip(&other.to_string(), ARG_VALUE_CHARS)],
         };
     };
     if map.is_empty() {
-        return "(no arguments)".to_string();
+        return vec!["(no arguments)".to_string()];
     }
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
-    keys.iter()
+
+    let mut rows: Vec<String> = keys
+        .iter()
+        .take(ARG_ROWS)
         .map(|key| {
             let value = &map[*key];
             // A string argument reads better without its quotes; everything else is shown as
@@ -217,10 +273,17 @@ pub fn args_lines(value: &serde_json::Value) -> String {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            format!("{key}: {shown}")
+            format!("{key}: {}", clip(&shown, ARG_VALUE_CHARS))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    if keys.len() > ARG_ROWS {
+        rows.push(format!(
+            "… and {} more argument(s); all of them are in `describe shell`, and the grant is \
+             bound to all of them",
+            keys.len() - ARG_ROWS
+        ));
+    }
+    rows
 }
 
 /// The warning line, or empty.
@@ -258,6 +321,14 @@ pub struct Requested {
     /// Always `pending`. Named rather than assumed, because the caller puts it in a JSON reply
     /// and a literal there would be a second place for the truth to live.
     pub status: Status,
+    /// False when this call found an identical question already on screen and handed back its
+    /// card rather than making a second one.
+    ///
+    /// The caller needs to know, because raising a card takes the screen off whatever the person
+    /// was using. Doing that once, when the question first appears, is the point; doing it again
+    /// every time something repeats the same request is a way to hold somebody's screen hostage
+    /// with a call that is graded `safe`.
+    pub fresh: bool,
 }
 
 /// The requests this shell is holding. See the module doc for what may mutate it.
@@ -305,7 +376,11 @@ impl Store {
                 && r.action == action
                 && r.canonical == canonical
         }) {
-            return Ok(Requested { id: existing.id.clone(), status: Status::Pending });
+            return Ok(Requested {
+                id: existing.id.clone(),
+                status: Status::Pending,
+                fresh: false,
+            });
         }
 
         // Asked and answered no. Re-asking immediately is how a refusal becomes a war of
@@ -353,7 +428,7 @@ impl Store {
             decided_at: String::new(),
             state: Status::Pending,
         });
-        Ok(Requested { id, status: Status::Pending })
+        Ok(Requested { id, status: Status::Pending, fresh: true })
     }
 
     /// Where a request stands. `None` means no request by that id — which is not the same as
@@ -487,8 +562,8 @@ impl Store {
                 app: record.app.clone(),
                 action: record.action.clone(),
                 grade: record.grade.clone(),
-                purpose: record.purpose.clone(),
-                args_lines: args_lines(&record.args),
+                purpose: clip(&record.purpose, PURPOSE_CHARS),
+                args: args_rows(&record.args),
                 warning: warning_for(&record.grade, &record.purpose),
                 status,
                 record: record_line(record, status),
@@ -817,10 +892,38 @@ mod approvals_tests {
     fn approvals_the_same_question_twice_is_one_card() {
         let mut store = Store::new();
         let now = Instant::now();
-        let first = ask(&mut store, now);
-        let second = ask(&mut store, now);
-        assert_eq!(first, second, "a retry must not stack a second identical card");
+        let first = store
+            .request(
+                "hermes",
+                "calendar",
+                "delete_event",
+                serde_json::json!({"id": "evt-3"}),
+                "sensitive",
+                "Delete an event.",
+                now,
+                "12:03",
+            )
+            .unwrap();
+        let second = store
+            .request(
+                "hermes",
+                "calendar",
+                "delete_event",
+                serde_json::json!({"id": "evt-3"}),
+                "sensitive",
+                "Delete an event.",
+                now,
+                "12:03",
+            )
+            .unwrap();
+        assert_eq!(first.id, second.id, "a retry must not stack a second identical card");
         assert_eq!(store.pending(now).len(), 1);
+        assert!(first.fresh, "the first ask is what puts the card on screen");
+        assert!(
+            !second.fresh,
+            "a repeat must not read as new, or it would raise the shell over the person's work \
+             again — which is a way to hold their screen with a `safe` call"
+        );
     }
 
     #[test]
@@ -906,11 +1009,70 @@ mod approvals_tests {
         assert_eq!(card.id, id);
         assert_eq!(card.requester, "hermes");
         assert_eq!(card.grade, "sensitive");
-        // Every argument the grant is bound to is on the card, in the same order.
-        assert_eq!(card.args_lines, "confirm: true\nid: evt-3");
+        // Every argument the grant is bound to is on the card, one line each, in the same order.
+        assert_eq!(card.args, vec!["confirm: true".to_string(), "id: evt-3".to_string()]);
         assert_eq!(
             card.warning, "The app says this cannot be undone.",
             "the app's own sentence about recoverability has to reach the person"
+        );
+    }
+
+    /// The card is a known number of lines, and nothing is hidden in silence.
+    ///
+    /// This is the other half of the clipped-header bug. The markup was asking a Rectangle with
+    /// only conditional children how tall it wanted to be and getting zero — but even with that
+    /// fixed, a card whose text can grow without limit runs off the screen and takes its buttons
+    /// with it. So every element is bounded here: one line per argument, a fixed number of
+    /// arguments, a bounded purpose.
+    #[test]
+    fn approvals_the_card_is_a_bounded_number_of_lines() {
+        let long = "x".repeat(400);
+        let mut args = serde_json::Map::new();
+        for n in 0..12 {
+            args.insert(format!("arg{n:02}"), serde_json::json!(long));
+        }
+        let rows = args_rows(&serde_json::Value::Object(args));
+
+        assert_eq!(rows.len(), ARG_ROWS + 1, "eight arguments, then one line about the rest");
+        for row in &rows[..ARG_ROWS] {
+            assert!(
+                !row.contains('\n'),
+                "each argument is its own single-line Text on the card: {row}"
+            );
+            assert!(
+                row.chars().count() < ARG_VALUE_CHARS + 40,
+                "a long value is cut so the row stays one line: {} chars",
+                row.chars().count()
+            );
+            assert!(row.contains("characters in full"), "and says it was cut: {row}");
+        }
+        assert!(rows[ARG_ROWS].contains("4 more argument"), "{}", rows[ARG_ROWS]);
+        assert!(
+            rows[ARG_ROWS].contains("bound to all of them"),
+            "the person must not think the grant only covers what fitted: {}",
+            rows[ARG_ROWS]
+        );
+
+        // And the purpose, which is the line that wraps.
+        let mut store = Store::new();
+        let now = Instant::now();
+        store
+            .request(
+                "hermes",
+                "notes",
+                "write",
+                serde_json::json!({"text": "hi"}),
+                "sensitive",
+                &"long ".repeat(200),
+                now,
+                "12:03",
+            )
+            .unwrap();
+        let card = &store.pending(now)[0];
+        assert!(
+            card.purpose.chars().count() < PURPOSE_CHARS + 40,
+            "an unbounded purpose would push the buttons off the screen: {} chars",
+            card.purpose.chars().count()
         );
     }
 

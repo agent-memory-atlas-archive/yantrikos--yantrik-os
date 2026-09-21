@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 /// The title the shell's own window carries, from `title:` in yantrik-ui-slint/ui/app.slint.
 ///
 /// Kept here so the one place that has to exclude it says why, rather than a bare string buried
-/// in a filter.
-const SHELL_WINDOW_TITLE: &str = "Yantrik OS";
+/// in a filter. `pub(crate)` because `control_approvals` needs the same string for the opposite
+/// reason — it asks the compositor to bring THIS window forward when an approval card goes up,
+/// and has to recognise it to avoid recording the shell as the window to hand the screen back to.
+pub(crate) const SHELL_WINDOW_TITLE: &str = "Yantrik OS";
 
 /// A running window on the desktop.
 #[derive(Clone, Debug, PartialEq)]
