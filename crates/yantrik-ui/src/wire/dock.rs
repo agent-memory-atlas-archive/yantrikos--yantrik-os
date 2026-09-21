@@ -183,6 +183,46 @@ pub fn route(app: &str) -> Option<Launch> {
     ROUTES.iter().find(|(names, _)| names.contains(&id.as_str())).map(|(_, launch)| *launch)
 }
 
+/// The name an opened program answers to on the control surface, where that is not its
+/// `open_app` name.
+///
+/// A driver opens `sysmonitor` and then has to describe `system-monitor`; opens `downloads` and
+/// describes `download-manager`. Nothing said so anywhere a driver could read, so the second
+/// step of the most ordinary job on this desktop — open an app, look at it — was a guess. The
+/// names are the apps' own and are not changed here; they are written down.
+const SURFACES: &[(&str, &str)] = &[
+    ("sysmonitor", "system-monitor"),
+    ("downloads", "download-manager"),
+    ("images", "image-viewer"),
+];
+
+/// Everything `open_app` will open, for a caller that cannot read this file.
+///
+/// `open_app(name)` took a name and the shell's state listed none, so a mind had to guess what
+/// this desktop calls its apps — and a wrong guess reads, from outside, exactly like a model
+/// inventing things. Each entry is the name to pass, what opening it does, and, for a program,
+/// the name to `describe` it by once it is open. Shelved apps are left out: they cannot be
+/// opened, and `open_app` says why if one is asked for by name.
+pub fn openable() -> Vec<serde_json::Value> {
+    ROUTES
+        .iter()
+        .filter_map(|(names, launch)| {
+            let name = *names.first()?;
+            if SHELVED.iter().any(|shelf| shelf.ids.contains(&name)) {
+                return None;
+            }
+            Some(match launch {
+                Launch::Program { id, .. } => {
+                    let surface = SURFACES.iter().find(|(from, _)| from == id).map_or(*id, |(_, to)| *to);
+                    serde_json::json!({ "name": name, "opens": "app", "describe_as": surface })
+                }
+                Launch::Browser => serde_json::json!({ "name": name, "opens": "web browser" }),
+                _ => serde_json::json!({ "name": name, "opens": "a screen of the desktop itself", "describe_as": "shell" }),
+            })
+        })
+        .collect()
+}
+
 /// Every name the shell's own apps answer to.
 pub fn builtin_app_ids() -> impl Iterator<Item = &'static str> {
     ROUTES.iter().flat_map(|(names, _)| names.iter().copied())
@@ -956,6 +996,26 @@ mod tests {
     /// a shelved crate that is still a workspace member would be packaged simply because it
     /// compiled. The script therefore carries the same two binary names, and a shelf that grows
     /// an entry the script does not know about would ship the app it just refused to open.
+    #[test]
+    fn what_can_be_opened_is_listed_by_the_name_that_opens_it() {
+        let apps = openable();
+        let names: Vec<&str> = apps.iter().map(|a| a["name"].as_str().unwrap()).collect();
+        for name in &names {
+            assert!(route(name).is_some(), "`{name}` is listed as openable and open_app would not open it");
+        }
+        for shelf in SHELVED {
+            for id in shelf.ids {
+                assert!(!names.contains(id), "`{id}` is shelved and is listed as openable");
+            }
+        }
+        // Opened under one name, described under another: the listing has to say which.
+        let monitor = apps.iter().find(|a| a["name"] == "sysmonitor").expect("sysmonitor is openable");
+        assert_eq!(monitor["describe_as"], "system-monitor");
+        let notes = apps.iter().find(|a| a["name"] == "notes").expect("notes is openable");
+        assert_eq!(notes["describe_as"], "notes");
+        assert!(apps.iter().filter(|a| a["opens"] == "app").all(|a| a["describe_as"].is_string()));
+    }
+
     #[test]
     fn the_release_script_excludes_every_shelved_binary() {
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))

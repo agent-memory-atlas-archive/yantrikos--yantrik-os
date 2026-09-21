@@ -366,6 +366,8 @@ pub fn publish(
                 // What is on START, in order. The person's choice, so an agent can read it
                 // before proposing to change it.
                 .with("pinned", crate::wire::settings::pinned_apps())
+                // What `open_app` accepts. It took a name and this state offered none.
+                .with("apps", serde_json::Value::Array(crate::wire::dock::openable()))
                 .with(
                     "minds",
                     crate::wire::harness::host()

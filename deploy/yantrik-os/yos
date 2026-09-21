@@ -150,7 +150,10 @@ def call(name, method, params=None, timeout=40):
             die("%s.%s refused: %s" % (name, method, reply["error"].get("message", "unknown")))
         return reply["result"]
 
-    die("%s is not answering — its socket is stale (the app or service is not running)" % name)
+    # The caller asked about something that is closed. Say how to open it: "its socket is
+    # stale" is the mechanism, and the reader wanted to know what to do next.
+    die("%s is not open. If it is an app, open it first: act shell open_app name=%s — then "
+        "describe it again. (`yos ls` shows what is open and what can be opened.)" % (name, name))
 
 
 def die(message):
@@ -176,19 +179,98 @@ def parse_args(pairs):
     return out
 
 
-def cmd_ls(_):
+def _answers(path):
+    """Whether a process is behind this socket file right now."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _one_line(path):
+    """An app's own one-line summary, or nothing. Never raises: this is a listing."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2)
+    try:
+        s.connect(path)
+        s.sendall(b'{"jsonrpc":"2.0","id":1,"method":"app.describe","params":{}}\n')
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(1 << 20)
+            if not chunk:
+                break
+            buf += chunk
+        return (json.loads(buf).get("result") or {}).get("summary", "")
+    except (OSError, ValueError):
+        return ""
+    finally:
+        s.close()
+
+
+def cmd_ls(argv):
+    """What is running, and what could be.
+
+    This printed the socket directory. A socket file outlives the process that made it, so
+    the listing a mind was told is "what is running on this desktop right now" named every app
+    that had ever been opened since boot: Calendar, closed for hours, sat in it beside Notes,
+    and describing it failed. It also printed `calendar` and `app-calendar` as two entries with
+    nothing to say which was the window and which the service behind it. Each socket is now
+    asked whether anybody is there, the ones that answer are split into apps and services and
+    shown by the name to describe them by, and what `open_app` can open comes from the shell —
+    because the other half of "what can I do here" was written down nowhere at all.
+    """
+    raw = "--all" in argv
+    apps, services, stale = [], [], []
     for directory in SOCKET_DIRS:
         if not os.path.isdir(directory):
             continue
         try:
-            names = sorted(f[:-5] for f in os.listdir(directory) if f.endswith(".sock"))
+            entries = sorted(f[:-5] for f in os.listdir(directory) if f.endswith(".sock"))
         except PermissionError:
             print("  %s (not readable by this user)" % directory)
             continue
-        if names:
-            print("%s:" % directory)
-            for n in names:
-                print("   ", n)
+        for name in entries:
+            path = os.path.join(directory, name + ".sock")
+            if not _answers(path):
+                stale.append(name)
+            elif name.startswith("app-"):
+                apps.append((name[4:], _one_line(path)))
+            else:
+                services.append(name)
+
+    print("Open now (describe these by name):")
+    for name, summary in apps:
+        print("    %-18s %s" % (name, summary))
+    if not apps:
+        print("    (nothing)")
+    print("Services answering: %s" % (", ".join(services) or "(none)"))
+    print("    a service shares a name with its app (weather, calendar, email); the app is the")
+    print("    window, and `describe <name>` means the window whenever it is open.")
+
+    shell = os.path.join(SOCKET_DIRS[0], "app-shell.sock")
+    openable = []
+    if _answers(shell):
+        try:
+            openable = (call("shell", "app.describe", timeout=5).get("state") or {}).get("apps") or []
+        except SystemExit:
+            openable = []
+    running = {name for name, _ in apps}
+    closed = [a for a in openable if a.get("opens") == "app" and a.get("describe_as") not in running]
+    if closed:
+        print("Can be opened with `act shell open_app name=<name>`:")
+        print("    " + ", ".join(
+            a["name"] if a["name"] == a.get("describe_as") else "%s (then describe %s)" % (a["name"], a["describe_as"])
+            for a in closed))
+    screens = [a["name"] for a in openable if a.get("opens", "").startswith("a screen")]
+    if screens:
+        print("Screens of the desktop itself (also open_app): %s" % ", ".join(screens))
+    if raw and stale:
+        print("Closed, socket left behind: %s" % ", ".join(stale))
 
 
 def cmd_describe(argv):
@@ -200,11 +282,51 @@ def cmd_describe(argv):
         print("revision: %s" % view["revision"])
     if view.get("state"):
         print(json.dumps(view["state"], indent=2))
+    brief = "--brief" in argv
     for action in view.get("actions", []):
-        args = ", ".join(action["parameters"].get("properties", {}).keys())
-        print("  act: %s(%s)  [%s, settles %s]" % (
-            action["name"], args,
-            action.get("permission", "?"), action.get("settles", "?")))
+        print(render_action(action, brief))
+
+
+def render_action(action, brief=False):
+    """One action, with everything the app said about it.
+
+    Every app publishes, for every action, what it is for; and for every argument, its type,
+    whether it is required, and a sentence about it — `date: "YYYY-MM-DD"`, and on
+    `delete_event`, "It is not recoverable". This function printed the argument NAMES and
+    dropped the rest, so a mind was shown `add_event(all_day, date, duration_min, notes, time,
+    title)` and left to guess that `date` is ISO and `time` is 24-hour. The refusals were good
+    ("`date` should look like 2026-09-06"), which made it a wasted round trip per app rather
+    than a wall; and the things a refusal cannot teach — what an action is for, that a delete
+    is final, which of six arguments are optional — were simply never seen. A model working
+    from that and "inventing arguments" is reading what it was given.
+
+    `--brief` keeps the old one-line form for a person at a terminal.
+    """
+    params = action.get("parameters") or {}
+    props = params.get("properties") or {}
+    if brief:
+        return "  act: %s(%s)  [%s, settles %s]" % (
+            action["name"], ", ".join(props.keys()),
+            action.get("permission", "?"), action.get("settles", "?"))
+
+    required = set(params.get("required") or [])
+    # Required first, then the rest, each in the order the app declared them.
+    names = [n for n in props if n in required] + [n for n in props if n not in required]
+    lines = ["  act: %s(%s)  [%s, settles %s]" % (
+        action["name"], ", ".join(n if n in required else n + "?" for n in names),
+        action.get("permission", "?"), action.get("settles", "?"))]
+    purpose = (action.get("description") or "").strip()
+    if purpose:
+        lines.append("       %s" % purpose)
+    for n in names:
+        spec = props[n] or {}
+        kind = spec.get("type", "any")
+        if spec.get("enum"):
+            kind = "one of " + " | ".join(str(v) for v in spec["enum"])
+        about = (spec.get("description") or "").strip()
+        lines.append("         %s%s: %s%s" % (
+            n, "" if n in required else "?", kind, (" — " + about) if about else ""))
+    return "\n".join(lines)
 
 
 def cmd_act(argv):
@@ -241,6 +363,16 @@ def cmd_act(argv):
 
 def cmd_perception(argv):
     limit = int(argv[0]) if argv else 20
+    # Offered to every mind as a tool, and on a machine where the perception service is not
+    # running it answered "failed (exit 1) / no socket for 'perception' (try: yos ls)" — which
+    # reads as the caller having done something wrong, and sends it to a listing that will
+    # not show it. Nothing is wrong with the request; there is no record to read, and that is
+    # an answer.
+    if not any(_answers(path) for path in socket_candidates("perception")):
+        print("The perception service is not running on this machine, so there is no record of "
+              "recent activity to read. Nothing is wrong with the request. To see what an app is "
+              "showing right now, describe it instead.")
+        return
     page = call("perception", "perception.since", {"seq": 0})
     obs = page["observations"]
     print("%d held, next_seq %d, missed %d" % (len(obs), page["next_seq"], page["missed"]))

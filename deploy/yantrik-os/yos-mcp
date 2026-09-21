@@ -37,13 +37,21 @@ TOOLS = [
         # The first live drive: asked to open Notes, a model read this list, did not find
         # Notes in it (it was not running) and invented an app called "os" to launch it from.
         # So the description names the desktop itself and says where opening an app lives.
-        "description": "What is running on this desktop right now — the apps and services "
-                       "that can be described and acted on. The desktop itself is `shell` "
-                       "(listed as app-shell): describe it to open an app (open_app), switch "
-                       "windows, work with files or send a message. An app that is not running "
-                       "is not listed here; open it through `shell`. A service listed here is "
-                       "already running: to read it, call os_describe with its name — e.g. "
-                       "system-monitor for CPU and memory, weather for local conditions.",
+        # Rewritten when the listing stopped being the socket directory. It used to promise
+        # "what is running right now" over a list that included every app closed since boot,
+        # and it told the reader to open apps "through shell" without saying what they were
+        # called. The listing now says which apps are open, which can be opened and by what
+        # name, so this says how to read it rather than apologising for it.
+        "description": "What is on this desktop: the apps that are open right now (each with a "
+                       "one-line summary of what it is showing), the services that are "
+                       "answering, and the apps that are closed but can be opened, by the exact "
+                       "name to open them with. Start here. The desktop itself is `shell`: "
+                       "os_act on shell with open_app opens an app, and os_describe on shell "
+                       "shows windows, files and the conversation. Use the names exactly as "
+                       "listed — an app is sometimes opened under one name and described "
+                       "under another, and the listing says which. A service is read the same "
+                       "way as an app: os_describe system-monitor for CPU and memory, "
+                       "os_describe weather for local conditions.",
         "inputSchema": {"type": "object", "properties": {}},
         "argv": lambda a: ["ls"],
         "timeout": 15,
