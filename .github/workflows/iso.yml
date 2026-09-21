@@ -1,0 +1,193 @@
+name: ISO
+
+# From a commit to a download, with nobody's laptop in between.
+#
+# The first public image was built in WSL on the author's machine, boot-tested by hand, and
+# copied to the server with a key that can do anything there. It worked once. This is the same
+# sequence — build, package, assemble, boot it and make it answer for itself, publish — run by
+# something that does not get tired, with a key that can only publish.
+#
+#   push to main            -> nightly
+#   tag  v*-beta*           -> beta
+#   tag  v* (anything else) -> stable
+#   run by hand             -> the channel you pick, publishing optional
+#
+# The server keeps the newest three builds of each channel and deletes the rest; that rule
+# lives in deploy/yantrik-os/server/yantrik-publish, not here, so no client can get it wrong.
+#
+# Secret: ISO_PUBLISH_KEY — a private key whose only permitted command on the server is
+# yantrik-publish. See deploy/yantrik-os/server/README.md.
+
+on:
+  push:
+    # `iso/**` is the lever for building an image from a branch that is not main yet: push the
+    # commit to a branch of that shape and it is built, booted and published as a nightly.
+    branches: [main, "iso/**"]
+    tags: ["v*"]
+    paths-ignore:
+      - "design/**"
+      - "**.md"
+      - "tests/conformance/**"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Channel to build for"
+        type: choice
+        options: [nightly, beta, stable]
+        default: nightly
+      publish:
+        description: "Publish to iso.yantrikos.com and releases.yantrikos.com"
+        type: boolean
+        default: true
+
+# One image at a time per ref. A second push while the first is still building replaces it:
+# the newer commit is the one worth an hour and a half of a runner.
+concurrency:
+  group: iso-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  iso:
+    name: build, boot, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # `git describe` names the build; a shallow clone has no tags to describe from
+
+      - name: Which channel, and whether to publish
+        id: plan
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            channel="${{ inputs.channel }}"; publish="${{ inputs.publish }}"
+          elif [[ "$GITHUB_REF" == refs/tags/v*-beta* ]]; then
+            channel=beta; publish=true
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            channel=stable; publish=true
+          else
+            channel=nightly; publish=true
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "yantrikdb_ref=$(tr -d '[:space:]' < .github/yantrikdb-ref)" >> "$GITHUB_OUTPUT"
+          echo "### $channel build of \`$(git describe --tags --always)\` (publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Make room
+        # A hosted runner arrives with ~14 GB free. The release target directory is 13 GB, the
+        # image's rootfs another 5, the ISO 1.4. These three trees are toolchains this build
+        # does not use.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h / | tail -1
+
+      - name: Checkout yantrikdb (sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: yantrikos/yantrikdb
+          ref: ${{ steps.plan.outputs.yantrikdb_ref }}
+          path: yantrikdb-sibling
+      - name: Put it where Cargo.toml expects
+        run: mv yantrikdb-sibling ../yantrikdb
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev libssl-dev libspeechd-dev libwayland-dev \
+            libxkbcommon-dev libfontconfig1-dev libfreetype6-dev libinput-dev libgbm-dev \
+            libegl1-mesa-dev \
+            debootstrap xorriso squashfs-tools grub-pc-bin grub-efi-amd64-bin grub-common \
+            mtools dosfstools zstd \
+            qemu-system-x86 python3
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: iso-release-v1
+          cache-on-failure: true
+
+      - name: Build the workspace (release)
+        run: cargo build --release --workspace --locked
+
+      - name: Package the release bundle
+        id: bundle
+        run: |
+          TARGET_DIR="$PWD/target/release" deploy/yantrik-os/build-release.sh --no-build --out "$PWD/dist"
+          bundle="$(find dist -maxdepth 1 -type f -name 'yantrik-os-*-linux-amd64.tar.zst' | head -1)"
+          [ -f "$bundle" ] || { echo "::error::build-release.sh produced no bundle"; ls -la dist; exit 1; }
+          build="$(tar --use-compress-program='zstd -d' -xOf "$bundle" --wildcards '*/BUILD' | tr -d '\r')"
+          echo "$build"
+          {
+            echo "path=$bundle"
+            echo "version=$(printf '%s\n' "$build" | sed -n 's/^version=//p')"
+            echo "git=$(printf '%s\n' "$build" | sed -n 's/^git=//p')"
+            echo "binaries=$(printf '%s\n' "$build" | sed -n 's/^binaries=//p')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Assemble the ISO
+        id: iso
+        env:
+          YANTRIK_ISO_WITHOUT_MIND: "1"
+          YANTRIK_UPDATE_CHANNEL: ${{ steps.plan.outputs.channel }}
+          RELEASE_TARBALL: ${{ steps.bundle.outputs.path }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/iso" && cd "$RUNNER_TEMP/iso"
+          bash "$GITHUB_WORKSPACE/deploy/yantrik-os/build-debian-iso.sh"
+          iso="$(find "$RUNNER_TEMP/iso" -maxdepth 1 -type f -name 'yantrik-os-*.iso' | head -1)"
+          [ -f "$iso" ] || { echo "::error::no ISO was produced"; exit 1; }
+          case "$(basename "$iso")" in *dirty*) echo "::error::the ISO was built from a dirty tree: $iso"; exit 1 ;; esac
+          ls -la "$iso"
+          echo "path=$iso" >> "$GITHUB_OUTPUT"
+          echo "- ISO: \`$(basename "$iso")\`, $(du -h "$iso" | cut -f1), sha256 \`$(sha256sum "$iso" | cut -d' ' -f1)\`" >> "$GITHUB_STEP_SUMMARY"
+          # The rootfs tree is 5 GB and is not needed again.
+          sudo rm -rf /tmp/yantrik-debian-iso
+
+      - name: Let this user use KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          fi
+          ls -la /dev/kvm || echo "no /dev/kvm: the boot test will emulate"
+
+      - name: Boot it and make it answer for itself
+        run: |
+          python3 deploy/yantrik-os/boottest.py "${{ steps.iso.outputs.path }}" "$RUNNER_TEMP/boot" \
+            --expect-git "${{ steps.bundle.outputs.git }}"
+
+      - name: Keep what the machine said
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-test
+          path: |
+            ${{ runner.temp }}/boot/serial.log
+            ${{ runner.temp }}/boot/report.json
+            ${{ runner.temp }}/boot/screen.ppm
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Publish
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          ISO_PUBLISH_KEY: ${{ secrets.ISO_PUBLISH_KEY }}
+        run: |
+          [ -n "$ISO_PUBLISH_KEY" ] || { echo "::error::ISO_PUBLISH_KEY is not set on this repository"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$ISO_PUBLISH_KEY" > ~/.ssh/yantrik_publish
+          chmod 600 ~/.ssh/yantrik_publish
+          trap 'rm -f ~/.ssh/yantrik_publish' EXIT
+          ch="${{ steps.plan.outputs.channel }}"
+          # The bundle first: an image that says "update from nightly" should find, on that
+          # channel, a build at least as new as itself.
+          deploy/yantrik-os/publish.sh release "$ch" "${{ steps.bundle.outputs.path }}" \
+            "${{ steps.bundle.outputs.version }}" "${{ steps.bundle.outputs.git }}" "${{ steps.bundle.outputs.binaries }}"
+          deploy/yantrik-os/publish.sh iso "$ch" "${{ steps.iso.outputs.path }}"
+          echo "- Published to https://iso.yantrikos.com/$ch/ and https://releases.yantrikos.com/$ch/" >> "$GITHUB_STEP_SUMMARY"

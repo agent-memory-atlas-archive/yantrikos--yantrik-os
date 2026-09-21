@@ -1,0 +1,33 @@
+# releases.yantrikos.com — what `yantrik-update` reads.
+#
+#   /manifest.json                                   which build each channel is on, and its sha256
+#   /<channel>/yantrik-os-<version>-linux-amd64.tar.zst   the bundle, its .sha256, and a `latest` symlink
+#
+# Installed as /etc/nginx/sites-available/releases.yantrikos.com; certbot adds the 443 block.
+# The manifest must never be cached: a machine that is told yesterday's build is current does
+# not update, and the sha256 it verifies the download against comes from this file.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name releases.yantrikos.com;
+
+    root /var/www/releases.yantrikos.com;
+
+    location = /manifest.json {
+        add_header Cache-Control "no-store";
+        default_type application/json;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+        autoindex on;
+        autoindex_exact_size off;
+        autoindex_localtime on;
+    }
+
+    location ~* \.(tar\.gz|tar\.zst)$ {
+        add_header Content-Disposition "attachment";
+        sendfile on;
+        tcp_nopush on;
+    }
+}

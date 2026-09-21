@@ -616,6 +616,20 @@ sudo chmod 644 "$ROOTFS/opt/yantrik/config.yaml"
 UPDATE_CHANNEL=$(sed -n 's/^[[:space:]]*channel:[[:space:]]*"\{0,1\}\([a-z]*\)"\{0,1\}.*/\1/p' \
     "$SCRIPT_DIR/config-default.yaml" | head -1)
 [ -n "$UPDATE_CHANNEL" ] || fail "config-default.yaml names no update channel"
+
+# An image follows the channel it was published on. The default config says beta, so the first
+# public nightly was built to take its updates from beta — a channel whose newest build was six
+# months older than the image itself. The pipeline names the channel it is building for, and
+# both readers are told the same thing: update.conf below, and config.yaml for the desktop.
+if [ -n "${YANTRIK_UPDATE_CHANNEL:-}" ]; then
+    case "$YANTRIK_UPDATE_CHANNEL" in
+        nightly|beta|stable) ;;
+        *) fail "YANTRIK_UPDATE_CHANNEL must be nightly, beta or stable (got '$YANTRIK_UPDATE_CHANNEL')" ;;
+    esac
+    sudo sed -i "s/^\([[:space:]]*channel:[[:space:]]*\)\"\{0,1\}$UPDATE_CHANNEL\"\{0,1\}/\1\"$YANTRIK_UPDATE_CHANNEL\"/" \
+        "$ROOTFS/opt/yantrik/config.yaml"
+    UPDATE_CHANNEL="$YANTRIK_UPDATE_CHANNEL"
+fi
 sudo tee "$ROOTFS/opt/yantrik/update.conf" > /dev/null <<UPDATECONF
 # Read by yantrik-update. Generated from config-default.yaml at image build time so the
 # desktop and the updater cannot name different channels.

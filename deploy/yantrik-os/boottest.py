@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Boot a Yantrik OS ISO and make it answer for itself. The gate between "built" and "published".
+
+    boottest.py <iso> <outdir> [--expect-git REV]
+
+An ISO that was assembled is not an ISO that boots, and the first public image was checked by
+hand: start QEMU, log in on the serial console, ask. This is that, scripted, with the answers
+turned into assertions — so a pipeline can refuse to publish an image that reaches a login
+prompt with no desktop behind it, or one that has picked up a private address again.
+
+It talks to two unix sockets on this host — the guest's serial port and QEMU's monitor — and to
+nothing else. The guest has no network (`-net none`), which also proves the image needs none
+to reach its first screen.
+
+Exit 0: every check passed.  1: a check failed.  2: it never reached a login prompt.
+Leaves in <outdir>: serial.log (everything the machine said), screen.ppm, report.json.
+"""
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+import argparse
+
+parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument("iso")
+parser.add_argument("outdir")
+parser.add_argument("--expect-git", metavar="REV",
+                    help="fail unless the image's BUILD manifest names this revision")
+cli = parser.parse_args()
+iso, out, expect_git = cli.iso, cli.outdir, cli.expect_git
+if not os.path.isfile(iso):
+    sys.exit("boottest: no such ISO: " + iso)
+
+os.makedirs(out, exist_ok=True)
+ser, mon = os.path.join(out, "ser.sock"), os.path.join(out, "mon.sock")
+for p in (ser, mon):
+    if os.path.exists(p):
+        os.unlink(p)
+
+# KVM when the host has it (a CI runner usually does); software emulation when it does not
+# (WSL does not). Emulated, the same boot takes about four times as long, so the waits below
+# are sized for that.
+kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+cmd = ["qemu-system-x86_64", "-m", "4096", "-smp", "4", "-cdrom", iso, "-boot", "d",
+       "-display", "none", "-device", "virtio-vga",
+       "-chardev", "socket,id=ser0,path=%s,server=on,wait=off" % ser, "-serial", "chardev:ser0",
+       "-monitor", "unix:%s,server,nowait" % mon, "-net", "none"]
+if kvm:
+    cmd += ["-enable-kvm", "-cpu", "host"]
+print("qemu: %s" % ("kvm" if kvm else "tcg (no /dev/kvm)"), flush=True)
+qemu = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def connect(path, tries=120):
+    for _ in range(tries):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(path)
+            return s
+        except OSError:
+            if qemu.poll() is not None:
+                sys.exit("qemu exited: " + qemu.stderr.read().decode(errors="replace")[-600:])
+            time.sleep(0.5)
+    sys.exit("could not connect to " + path)
+
+
+s = connect(ser)
+s.settimeout(2)
+log = open(os.path.join(out, "serial.log"), "wb")
+buf = b""
+
+
+def pump(seconds):
+    global buf
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            chunk = s.recv(65536)
+            if chunk:
+                buf += chunk
+                log.write(chunk)
+                log.flush()
+        except socket.timeout:
+            pass
+
+
+def wait_for(needle, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if needle in buf:
+            return True
+        pump(2)
+    return needle in buf
+
+
+def send(line):
+    s.sendall(line.encode() + b"\n")
+
+
+def finish(code):
+    try:
+        m = connect(mon, tries=10)
+        m.settimeout(5)
+        time.sleep(1)
+        m.sendall(("screendump %s\n" % os.path.join(out, "screen.ppm")).encode())
+        time.sleep(5)
+        m.sendall(b"quit\n")
+        time.sleep(2)
+    except SystemExit:
+        pass
+    try:
+        qemu.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        qemu.kill()
+    sys.exit(code)
+
+
+t0 = time.time()
+pump(25)
+send("")  # GRUB waits on its menu; Enter takes the default entry
+if not wait_for(b"login:", 1500):
+    print("NO LOGIN PROMPT after %d s; the last of what the machine said:" % (time.time() - t0))
+    print(buf[-2000:].decode(errors="replace"))
+    finish(2)
+boot_seconds = round(time.time() - t0)
+print("login prompt after %d s" % boot_seconds, flush=True)
+
+send("yantrik")
+pump(6)
+send("yantrik")
+pump(15)
+# The session autostarts on tty1; give it time to come up before asking about it.
+pump(45 if kvm else 120)
+
+MARK = "YTEST"
+
+
+def ask(command, timeout=90):
+    global buf
+    buf = b""
+    send("echo %s-BEGIN; %s; echo %s-END" % (MARK, command, MARK))
+    wait_for(("%s-END\r" % MARK).encode(), timeout)
+    text = buf.decode(errors="replace")
+    return text.split(MARK + "-BEGIN")[-1].split(MARK + "-END")[0].strip()
+
+
+checks = []
+
+
+def check(name, ok, evidence):
+    checks.append({"name": name, "passed": bool(ok), "evidence": evidence})
+    print(("ok    " if ok else "FAIL  ") + name + ("" if ok else "\n        " + repr(evidence)[:400]),
+          flush=True)
+
+
+os_release = ask("cat /etc/os-release")
+check("the image says what it is", 'NAME="Yantrik OS"' in os_release, os_release)
+
+build = ask("cat /opt/yantrik/BUILD")
+check("it carries a BUILD manifest", "git=" in build and "version=" in build, build)
+if expect_git:
+    check("and it is the revision that was built", "git=" + expect_git[:7] in build, build)
+
+procs = ask("pgrep -af 'labwc|yantrik-ui' | cut -c1-120")
+check("the compositor is running the shipped session",
+      "labwc" in procs and "/opt/yantrik/bin/yantrik-ui" in procs, procs)
+
+socks = ask("ls /run/user/1000/yantrik/ 2>/dev/null | tr '\\n' ' '")
+wanted = ["app-shell.sock", "a11y.sock", "network.sock", "notifications.sock",
+          "system-monitor.sock", "weather.sock"]
+check("the shell and every autostart service answer on a socket",
+      all(w in socks for w in wanted), socks)
+
+shelved = ask("ls /opt/yantrik/bin | grep -c -E 'music-player|spreadsheet'")
+check("no shelved app was packaged", shelved.splitlines()[-1].strip() == "0", shelved)
+
+essentials = ask("for b in yantrik-ui yantrik yos yantrik-update yantrik-session yantrik-notes "
+                 "yantrik-email yantrik-calendar network-service email-service; do "
+                 "[ -x /opt/yantrik/bin/$b ] || echo MISSING:$b; done; echo checked")
+check("the binaries a desktop cannot do without are there",
+      "MISSING" not in essentials and "checked" in essentials, essentials)
+
+ssh_state = ask("systemctl is-enabled ssh 2>&1 | head -1")
+ssh_word = ssh_state.strip().splitlines()[-1].strip() if ssh_state.strip() else ""
+check("sshd is not enabled beside a published password",
+      ssh_word in ("disabled", "masked", "not-found") or "No such file" in ssh_state, ssh_state)
+
+private = ask("grep -rhoE '(192\\.168|10\\.[0-9]+)\\.[0-9]+\\.[0-9]+' /opt/yantrik/config.yaml "
+              "/opt/yantrik/update.conf /opt/yantrik/bin/yantrik-update 2>/dev/null | sort -u | head -5; echo scanned")
+check("no private network address ships in the config or the updater",
+      private.strip() == "scanned", private)
+
+update_conf = ask("cat /opt/yantrik/update.conf")
+check("the updater is pointed at the public host over https",
+      "HOST=releases.yantrikos.com" in update_conf and "SCHEME=https" in update_conf, update_conf)
+
+name = ask("grep -E '^user_name' /opt/yantrik/config.yaml")
+check("the config greets nobody in particular", '"User"' in name or "User" in name, name)
+
+report = {"iso": os.path.basename(iso), "kvm": kvm, "boot_seconds": boot_seconds,
+          "total_seconds": round(time.time() - t0), "checks": checks,
+          "passed": all(c["passed"] for c in checks)}
+with open(os.path.join(out, "report.json"), "w") as f:
+    json.dump(report, f, indent=2)
+failed = [c["name"] for c in checks if not c["passed"]]
+print("\n%d checks, %d failed, %d s" % (len(checks), len(failed), report["total_seconds"]))
+finish(1 if failed else 0)

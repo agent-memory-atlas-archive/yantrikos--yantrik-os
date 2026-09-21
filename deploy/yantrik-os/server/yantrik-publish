@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""yantrik-publish — the only thing the CI publishing key is allowed to run.
+
+Installed on the web server as the *forced command* of one SSH key (see README.md beside this
+file). Whatever the client asks ssh to run arrives here as SSH_ORIGINAL_COMMAND and is parsed,
+never executed, so holding that key lets you do exactly two things: put an ISO in a channel of
+iso.yantrikos.com, or put a release bundle in a channel of releases.yantrikos.com. It cannot
+read a file, open a shell, forward a port, or touch any other site on this machine. A CI secret
+leaks the day somebody prints the wrong variable; this is what it is worth when it does.
+
+    ssh publish@host  iso      <channel> <filename> <sha256>                       < file
+    ssh publish@host  release  <channel> <filename> <sha256> <version> <git> <n>   < file
+
+What it does with the bytes on stdin:
+
+  1. writes them to a dot-file in the channel directory (nginx autoindex hides nothing, but a
+     half-written file under its real name is a download somebody will start);
+  2. hashes what it wrote and compares it with the sha256 it was told — a mismatch deletes
+     the file and changes nothing else;
+  3. renames it into place, writes `<name>.sha256`, repoints the channel's `latest` symlink
+     (and, for a release, rewrites that channel's entry in manifest.json, atomically);
+  4. prunes the channel to the newest KEEP builds. The one `latest` points at is never
+     deleted, whatever its age.
+
+KEEP is 3 because the disk is shared with eighteen other sites and an ISO is 1.4 GB.
+"""
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+
+KEEP = 3
+ROOTS = {
+    "iso": "/var/www/iso.yantrikos.com",
+    "release": "/var/www/releases.yantrikos.com",
+}
+CHANNELS = ("nightly", "beta", "stable")
+MAX_BYTES = {"iso": 6 * 1024**3, "release": 1 * 1024**3}
+# Names this script will create. Anchored, no slashes, no leading dot: the filename is the
+# one piece of client text that reaches the filesystem.
+NAME = {
+    "iso": re.compile(r"^yantrik-os-[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.iso$"),
+    "release": re.compile(r"^yantrik-os-[A-Za-z0-9][A-Za-z0-9._-]{0,120}-linux-amd64\.tar\.(zst|gz)$"),
+}
+LATEST = {
+    "iso": lambda name: "yantrik-os-latest.iso",
+    "release": lambda name: "yantrik-os-latest-linux-amd64.tar." + name.rsplit(".", 1)[1],
+}
+SHA = re.compile(r"^[0-9a-f]{64}$")
+WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,80}$")
+
+
+def die(msg, code=2):
+    print("yantrik-publish: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def atomic_write(path, text):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def point(link, target):
+    """Repoint a symlink without a moment where it does not exist."""
+    tmp = link + ".new"
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    os.symlink(target, tmp)
+    os.replace(tmp, link)
+
+
+def prune(directory, pattern, keep_name):
+    # The build just published is the newest by definition, not by its mtime: the self-test
+    # found that with clocks that disagree (files touched into the future) the new build
+    # sorted last, was protected only by name, and nothing was pruned at all. So it takes the
+    # first place outright and the clock only orders the ones that were already here.
+    others = [n for n in os.listdir(directory)
+              if pattern.match(n) and n != keep_name
+              and not os.path.islink(os.path.join(directory, n))]
+    others.sort(key=lambda n: os.path.getmtime(os.path.join(directory, n)), reverse=True)
+    builds = [keep_name] + others
+    removed = []
+    for old in builds[KEEP:]:
+        for victim in (old, old + ".sha256"):
+            p = os.path.join(directory, victim)
+            if os.path.isfile(p) and not os.path.islink(p):
+                os.unlink(p)
+        removed.append(old)
+    return builds[:KEEP], removed
+
+
+def main():
+    argv = os.environ.get("SSH_ORIGINAL_COMMAND", "").split()
+    if not argv:
+        die("this key publishes builds and does nothing else; no command was given")
+    kind = argv[0]
+    if kind not in ROOTS:
+        die("unknown kind %r (iso | release)" % kind)
+    want = 4 if kind == "iso" else 7
+    if len(argv) != want:
+        die("%s takes %d arguments, got %d" % (kind, want - 1, len(argv) - 1))
+    channel, name, sha = argv[1], argv[2], argv[3].lower()
+    if channel not in CHANNELS:
+        die("unknown channel %r" % channel)
+    if not NAME[kind].match(name):
+        die("refusing the filename %r" % name)
+    if not SHA.match(sha):
+        die("that is not a sha256")
+    extra = argv[4:]
+    if any(not WORD.match(w) for w in extra):
+        die("refusing a version/git/count field")
+
+    directory = os.path.join(ROOTS[kind], channel)
+    os.makedirs(directory, exist_ok=True)
+    final = os.path.join(directory, name)
+    part = os.path.join(directory, "." + name + ".part")
+
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with open(part, "wb") as out:
+            while True:
+                chunk = sys.stdin.buffer.read(4 * 1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_BYTES[kind]:
+                    raise ValueError("larger than this script accepts for a %s" % kind)
+                digest.update(chunk)
+                out.write(chunk)
+        if size == 0:
+            raise ValueError("nothing arrived on stdin")
+        if digest.hexdigest() != sha:
+            raise ValueError("sha256 mismatch: told %s, received %s" % (sha, digest.hexdigest()))
+    except (ValueError, OSError) as e:
+        if os.path.exists(part):
+            os.unlink(part)
+        die(str(e), 3)
+
+    os.chmod(part, 0o644)
+    os.replace(part, final)
+    atomic_write(final + ".sha256", "%s  %s\n" % (sha, name))
+
+    latest = LATEST[kind](name)
+    point(os.path.join(directory, latest), name)
+    atomic_write(os.path.join(directory, latest + ".sha256"), "%s  %s\n" % (sha, latest))
+    if kind == "iso" and channel == "nightly":
+        # The name the website and the March image used. Kept pointing at the newest.
+        point(os.path.join(directory, "yantrik-os-nightly-latest.iso"), name)
+        atomic_write(os.path.join(directory, "yantrik-os-nightly-latest.iso.sha256"),
+                     "%s  %s\n" % (sha, "yantrik-os-nightly-latest.iso"))
+
+    if kind == "release":
+        version, git, binaries = extra
+        manifest_path = os.path.join(ROOTS[kind], "manifest.json")
+        manifest = {"channels": {}}
+        try:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+        except (OSError, ValueError):
+            pass  # a missing or corrupt manifest must not stop a good build being published
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        manifest.setdefault("channels", {})[channel] = {
+            "version": version, "date": today, "url": "/" + channel,
+            "notes": "Build %s (%s)" % (git, today), "git": git,
+            "artifact": name, "sha256": sha,
+            "binaries": int(binaries) if binaries.isdigit() else binaries,
+        }
+        atomic_write(manifest_path, json.dumps(manifest, indent=2) + "\n")
+
+    kept, removed = prune(directory, NAME[kind], name)
+    print("published %s/%s/%s (%d bytes)" % (kind, channel, name, size))
+    print("kept: " + ", ".join(kept))
+    if removed:
+        print("pruned: " + ", ".join(removed))
+
+
+if __name__ == "__main__":
+    main()
