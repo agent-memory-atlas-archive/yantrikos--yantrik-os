@@ -13,6 +13,6 @@ pub mod service;
 pub mod sync_client;
 
 pub use protocol::{RpcRequest, RpcResponse, RpcError, RPC_PARSE_ERROR, RPC_METHOD_NOT_FOUND, RPC_INTERNAL_ERROR};
-pub use server::{RpcServer, ServiceHandler};
+pub use server::{PeerCred, RpcServer, ServiceHandler};
 pub use client::RpcClient;
 pub use sync_client::SyncRpcClient;

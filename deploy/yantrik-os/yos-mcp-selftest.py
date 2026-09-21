@@ -24,7 +24,10 @@ What it is actually checking, in one line each:
     that `bypass` still cannot pass the machine ceiling and `plan` refuses browser writes;
   * `YOS_MCP_MAX_PERMISSION` can only make things stricter than the desktop's mode;
   * an unreadable desktop falls back to `ask` and says so, rather than assuming anything;
-  * an action nobody was asked about is reported to the shell's audit action, with its outcome.
+  * an action nobody was asked about is reported to the shell's audit action, with its outcome;
+  * and, last, that this bridge's copy of the decision table still agrees with the shell's, on
+    every combination of mode, grade, machine ceiling, session rule, browser tool and harness
+    cap — read from `mind-mode-vectors.json`, which the shell's own tests generate.
 """
 
 import importlib.util
@@ -35,6 +38,7 @@ import pathlib
 import stat
 import sys
 import tempfile
+import time
 from importlib.machinery import SourceFileLoader
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -53,8 +57,14 @@ def load():
         return json.load(fh)
 
 def save(s):
-    with open(STATE, "w") as fh:
+    # Written beside and renamed over. This was `open(STATE, "w")`, which truncates the file
+    # and THEN writes it, while the test reads the same file from another process: on a loaded
+    # machine a read landed in between and the whole selftest died on a JSONDecodeError about
+    # an empty file. It runs in CI now, where a loaded machine is the normal case.
+    tmp = STATE + ".tmp%d" % os.getpid()
+    with open(tmp, "w") as fh:
         json.dump(s, fh)
+    os.replace(tmp, STATE)
 
 def parse_args(pairs):
     out = {}
@@ -292,7 +302,15 @@ def handshake(module, name, version):
 
 
 def read(state_path):
-    return json.loads(state_path.read_text(encoding="utf-8"))
+    # The fake writes atomically now; the retry is for the filesystem, not for the fake — a
+    # rename is atomic on Linux and merely quick on a Windows-backed mount.
+    for attempt in range(20):
+        try:
+            return json.loads(state_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
 
 
 with tempfile.TemporaryDirectory() as d:
@@ -590,6 +608,58 @@ with tempfile.TemporaryDirectory() as d:
     grade, purpose = module.action_detail("calendar", "delete_event")
     check("and it still reads the purpose the card shows",
           grade == "sensitive" and "not recoverable" in purpose.lower(), (grade, purpose))
+
+    # ── 18. The table, against the shell's own copy of it ───────────────────────────────
+    #
+    # `decide` in yos-mcp and `mind_mode::Modes::decide` in the shell are the same table
+    # written twice. That is deliberate — the bridge deciding for itself costs one read of the
+    # desktop per os_act instead of two — and the design note lists it as the top open item,
+    # because two copies drift silently in the direction nobody tests.
+    #
+    # So the shell writes every combination out and this drives the bridge through all of them.
+    # Changing `decide` on the Rust side without regenerating fails
+    # `mind_mode_the_checked_in_vectors_are_what_decide_produces`; regenerating without changing
+    # this side fails here. Neither can move alone.
+    module, _ = case(tmp, "vectors")
+    vectors_path = HERE / "mind-mode-vectors.json"
+    try:
+        document = json.loads(vectors_path.read_text(encoding="utf-8"))
+        vectors = document.get("vectors") or []
+    except (OSError, ValueError) as e:
+        vectors = []
+        check("the decision-table vectors are checked in", False, e)
+
+    # A missing or emptied file must not pass by testing nothing, which is the usual way a
+    # generated fixture quietly stops being a check.
+    check("the decision-table vectors are checked in", len(vectors) > 100, len(vectors))
+    named = set(v.get("expect") for v in vectors)
+    check("every outcome they name is one this bridge can produce",
+          named and named <= set(module.OUTCOMES), sorted(named - set(module.OUTCOMES)))
+
+    drifted = []
+    for vector in vectors:
+        got = module.decide_outcome(vector)
+        if got != vector.get("expect"):
+            drifted.append("%s: the shell says %s, this bridge says %s"
+                           % (vector.get("id"), vector.get("expect"), got))
+    check("this bridge decides all %d of them the way the shell does" % len(vectors),
+          not drifted,
+          "\n     " + "\n     ".join(drifted[:12])
+          + ("\n     (and %d more)" % (len(drifted) - 12) if len(drifted) > 12 else ""))
+
+    # And the file covers what it says it covers. A vector set that had quietly lost its
+    # bypass rows would agree with anything.
+    check("the vectors cover all four modes",
+          set(v.get("mode") for v in vectors) == {"plan", "ask", "auto", "bypass"},
+          sorted(set(v.get("mode") for v in vectors)))
+    check("every grade, and one this OS does not define",
+          {"safe", "standard", "sensitive", "dangerous"} <= set(v.get("grade") for v in vectors)
+          and any(v.get("expect") == "refuse_grade" for v in vectors), None)
+    check("the browser tools and the harness cap as well as the shell's own table",
+          set(v.get("layer") for v in vectors) == {"shell", "harness_cap", "browser"},
+          sorted(set(v.get("layer") for v in vectors)))
+    check("and each of the six outcomes actually occurs somewhere in them",
+          named == set(module.OUTCOMES), sorted(set(module.OUTCOMES) - named))
 
 print()
 if failures:

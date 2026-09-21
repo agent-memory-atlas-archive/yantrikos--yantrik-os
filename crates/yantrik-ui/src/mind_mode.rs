@@ -164,12 +164,78 @@ impl Bypass {
     }
 
     fn deadline(self, now: Instant) -> Option<Instant> {
-        match self {
-            Bypass::Minutes15 => Some(now + Duration::from_secs(15 * 60)),
-            Bypass::Hour => Some(now + Duration::from_secs(60 * 60)),
-            Bypass::UntilRestart => None,
-        }
+        let real = match self {
+            Bypass::Minutes15 => 15 * 60,
+            Bypass::Hour => 60 * 60,
+            // Nothing to shorten. "Until the shell restarts" means what it says, and the test
+            // hook below deliberately cannot reach it — a bypass with no clock has no moment of
+            // lapse for a notification to be about.
+            Bypass::UntilRestart => return None,
+        };
+        Some(now + Duration::from_secs(shortened(real)))
     }
+}
+
+/// The one thing on this machine that changes how long a bypass lasts, and it is a test hook.
+///
+/// Verifying the lapse notification on a real machine otherwise means sitting in front of it for
+/// fifteen minutes, which is how a check stops being run. So the shell reads a duration out of
+/// the environment it was STARTED in — once, into a `OnceLock`, so nothing on the socket, no
+/// click and no settings file can reach it afterwards:
+///
+/// ```sh
+/// YANTRIK_BYPASS_SECONDS=20 yantrik-ui      # every timed bypass ends after 20 seconds
+/// ```
+///
+/// **It can only ever make a bypass SHORTER.** The value is clamped to the duration the person
+/// actually chose ([`shortened_by`]), because a hook that could extend one would be a way to
+/// hold a machine in "do not ask me anything" for longer than anybody agreed to — which is the
+/// single outcome this whole feature is arranged to prevent. Shortening is a tightening, and
+/// tightening is the direction everything here is allowed to move in.
+const BYPASS_SECONDS_ENV: &str = "YANTRIK_BYPASS_SECONDS";
+
+fn bypass_seconds_override() -> Option<u64> {
+    static OVERRIDE: OnceLock<Option<u64>> = OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        let raw = std::env::var(BYPASS_SECONDS_ENV).ok()?;
+        let secs: u64 = raw.trim().parse().ok()?;
+        if secs == 0 {
+            // A bypass that ends the instant it starts is not a shorter bypass, it is a broken
+            // control: the confirmation would say "15 minutes" and the chip would never appear.
+            return None;
+        }
+        tracing::warn!(
+            secs,
+            env = BYPASS_SECONDS_ENV,
+            "a test hook is shortening every timed bypass on this shell"
+        );
+        Some(secs)
+    })
+}
+
+fn shortened(real: u64) -> u64 {
+    shortened_by(bypass_seconds_override(), real)
+}
+
+/// Pure, so "the hook can only shorten" is a test rather than a promise in a comment.
+fn shortened_by(hook: Option<u64>, real: u64) -> u64 {
+    match hook {
+        Some(secs) => secs.min(real),
+        None => real,
+    }
+}
+
+/// Seconds since the epoch.
+///
+/// The audit is written with one of these, so the window a lapse counts over has to be measured
+/// with the same clock — an `Instant` cannot be compared with a line in a file somebody reads
+/// tomorrow. Both clocks are therefore carried: `Instant` decides when the bypass ends, and this
+/// one decides which audit entries were inside it.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// What [`Modes::decide`] answers.
@@ -198,6 +264,29 @@ pub struct Rule {
     pub action: String,
 }
 
+/// A bypass that ended because its clock ran out, rather than because somebody ended it.
+///
+/// The distinction is the whole of why this type exists. A person who presses `Ask` has just
+/// watched the chip change and needs telling nothing; a person who set "1 hour" and walked away
+/// has no way at all to learn that the machine went back to asking, and a person sitting in
+/// front of it discovers it by being surprised when the next card appears.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Lapse {
+    /// The mode the machine is back in — what the bypass was covering over.
+    pub back_to: Mode,
+    /// When the bypass started, seconds since the epoch. The audit entries the notification
+    /// counts carry the same clock; see [`unix_now`].
+    pub started_unix: u64,
+}
+
+/// A [`Lapse`] with the one number the person actually wants: what the bypass bought.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BypassEnded {
+    pub back_to: Mode,
+    /// How many actions ran unasked inside the window that just closed.
+    pub unasked: usize,
+}
+
 /// The mode this shell is in. See the module doc for what may mutate it.
 #[derive(Clone, Debug)]
 pub struct Modes {
@@ -207,6 +296,14 @@ pub struct Modes {
     previous: Mode,
     /// `None` while in bypass means "until the shell restarts".
     bypass_until: Option<Instant>,
+    /// When the running bypass started, on the audit's clock. Only meaningful while `mode` is
+    /// `Bypass`; it is what makes "N things ran without asking **while bypass was on**" a
+    /// countable claim rather than a guess at the whole log.
+    bypass_started_unix: u64,
+    /// A lapse that has happened and has not been reported yet. Armed by [`Modes::lapse`] and
+    /// taken exactly once by [`Modes::take_lapse`] — a one-second tick must post one
+    /// notification, not sixty a minute.
+    lapsed: Option<Lapse>,
     rules: Vec<Rule>,
 }
 
@@ -220,7 +317,18 @@ impl Modes {
     pub fn new(mode: Mode) -> Self {
         // A machine must not come up in bypass, so nothing can construct one that has.
         let mode = if mode == Mode::Bypass { Mode::Ask } else { mode };
-        Modes { mode, previous: mode, bypass_until: None, rules: Vec::new() }
+        Modes {
+            mode,
+            previous: mode,
+            bypass_until: None,
+            bypass_started_unix: 0,
+            // A freshly built `Modes` owes nobody a notification. This is what makes an
+            // "until the shell restarts" bypass silent on the next boot: it is never persisted,
+            // so the machine comes up having no memory that one was ever running, and there is
+            // no lapse to announce because nothing lapsed — the shell simply restarted.
+            lapsed: None,
+            rules: Vec::new(),
+        }
     }
 
     /// The mode in force right now.
@@ -270,9 +378,14 @@ impl Modes {
     /// The decision path does not need this — [`Modes::mode`] already derives it — but the chip
     /// in the status bar is read from stored state, and a countdown that reaches zero and then
     /// keeps saying "Bypass" is a lie about what the machine is doing.
+    ///
+    /// It also arms the one notice a lapse owes the person, because this is the only place on
+    /// the machine that can tell "the clock ran out" from "somebody chose something else". Both
+    /// end a bypass; only one of them is news.
     pub fn lapse(&mut self, now: Instant) -> bool {
         let effective = self.mode(now);
         if effective != self.mode {
+            self.lapsed = Some(Lapse { back_to: effective, started_unix: self.bypass_started_unix });
             self.mode = effective;
             self.bypass_until = None;
             return true;
@@ -280,17 +393,44 @@ impl Modes {
         false
     }
 
+    /// The lapse nobody has been told about yet, if there is one. Taken, not read.
+    ///
+    /// The tick that first crosses the deadline is the one that reports it; every tick after
+    /// that finds nothing. Without this the one-second refresh in `control_approvals::wire`
+    /// would post the same notification for as long as the shell ran.
+    pub fn take_lapse(&mut self) -> Option<Lapse> {
+        self.lapsed.take()
+    }
+
     /// A person chose a mode. **UI only** — see the module doc.
     ///
     /// `bypass` is only ever reached through this function, which is only ever reached from a
     /// click on a confirmation that says what it means. There is no other constructor for it.
-    pub(crate) fn person_set_mode(&mut self, mode: Mode, bypass: Bypass, now: Instant) {
+    ///
+    /// `started_unix` is the wall clock, carried beside `now` because the audit is written with
+    /// one and a lapse has to count the entries inside its own window. See [`unix_now`].
+    pub(crate) fn person_set_mode(
+        &mut self,
+        mode: Mode,
+        bypass: Bypass,
+        now: Instant,
+        started_unix: u64,
+    ) {
         self.lapse(now);
+        // Whatever the clock did a moment ago, the person is at the keyboard choosing a mode
+        // right now and the menu in front of them says which. Announcing "the mind is back in
+        // Ask mode" over the top of somebody who has just pressed Plan would be telling them
+        // something that is no longer true.
+        self.lapsed = None;
         if mode == Mode::Bypass {
             // Remember where to come back to, and do not let a bypass chosen twice make its own
             // previous mode `bypass` — that would strand the machine there when it lapsed.
             if self.mode != Mode::Bypass {
                 self.previous = self.mode;
+                // Only the first of two back-to-back bypasses starts the window. A person who
+                // extends one is in one bypass as far as they are concerned, and the count they
+                // are shown at the end should cover all of it.
+                self.bypass_started_unix = started_unix;
             }
             self.mode = Mode::Bypass;
             self.bypass_until = bypass.deadline(now);
@@ -328,6 +468,10 @@ impl Modes {
         self.mode = mode;
         self.previous = mode;
         self.bypass_until = None;
+        // Same reason as `person_set_mode`: something has just set the mode deliberately, so a
+        // notice saying where the clock would have put us is about a machine that no longer
+        // exists. A bypass ended from the socket is not a lapse either way.
+        self.lapsed = None;
         Ok(mode)
     }
 
@@ -487,6 +631,66 @@ pub fn lapse() -> bool {
     locked().lapse(Instant::now())
 }
 
+/// The one notice a lapsing bypass owes the person, or `None`.
+///
+/// Call it straight after [`lapse`], on the same tick. It answers `Some` exactly once per
+/// lapse — the tick that crossed the deadline takes it, and the fifty-nine after it in that
+/// minute find nothing.
+///
+/// Only a lapse. A bypass a person switched off, or one the socket lowered out of, arms nothing:
+/// they already know, because they did it. See [`Modes::lapse`].
+pub fn take_lapse_notice() -> Option<BypassEnded> {
+    let lapse = locked().take_lapse()?;
+    // The in-memory list, not the file: the file is bounded at 400 lines and a bypass window is
+    // measured in minutes, so anything inside it that the memory has already dropped was one of
+    // fifty actions in fifteen minutes and the count is the least of that person's problems.
+    let unasked = unasked_during(&recent(AUDIT_MEMORY), lapse.started_unix);
+    Some(BypassEnded { back_to: lapse.back_to, unasked })
+}
+
+/// How many actions ran unasked inside one bypass window.
+///
+/// `mode` is what the action actually ran under, as the bridge reported it. An action a session
+/// RULE covered is recorded as `rule` and is deliberately NOT counted: it would have run in
+/// `ask` mode too, and this sentence is about what the bypass itself bought.
+pub fn unasked_during(entries: &[AuditEntry], since_unix: u64) -> usize {
+    entries
+        .iter()
+        .filter(|e| e.mode == Mode::Bypass.as_str() && e.unix >= since_unix)
+        .count()
+}
+
+/// What the "Bypass ended" notification says.
+///
+/// Two things, one sentence each: where the machine is now, in its own published words so this
+/// and the mode menu can never describe `auto` differently — and what the bypass cost, which is
+/// the half nobody can see any other way.
+///
+/// Here rather than in `wire::notifications` because it is the part worth a test, and a test for
+/// a sentence should not need a notification service.
+pub fn bypass_ended_body(ended: &BypassEnded) -> String {
+    format!(
+        "The mind is back in {} mode. {} {}",
+        ended.back_to.label(),
+        ended.back_to.meaning(),
+        unasked_phrase(ended.unasked),
+    )
+}
+
+/// The count, said the way a person would say it.
+///
+/// Zero is a different sentence rather than the number nought, and one is the word rather than
+/// the digit. "It did 0 things without asking" is the shape of a machine reading a counter out
+/// loud, and this notification exists to be read by somebody who has just come back to their
+/// desk.
+fn unasked_phrase(count: usize) -> String {
+    match count {
+        0 => "Nothing ran without asking while bypass was on.".to_string(),
+        1 => "It did one thing without asking while bypass was on.".to_string(),
+        n => format!("It did {n} things without asking while bypass was on."),
+    }
+}
+
 /// The decision for one action, against this machine's own ceiling.
 pub fn decide(grade: &str, app: &str, action: &str) -> Decision {
     let ceiling = crate::control_approvals::machine_ceiling();
@@ -517,7 +721,7 @@ pub fn lower_from_socket(mode: &str) -> Result<Mode, String> {
 
 /// **UI only.** See the module doc: the single caller is the mode menu's callback.
 pub(crate) fn person_set_mode(mode: Mode, bypass: Bypass) {
-    locked().person_set_mode(mode, bypass, Instant::now());
+    locked().person_set_mode(mode, bypass, Instant::now(), unix_now());
     persist(mode);
 }
 
@@ -649,7 +853,12 @@ pub struct AuditEntry {
     /// day later.
     pub unix: u64,
     pub mode: String,
+    /// What the caller said it was. Self-declared; see `verified` beside it, and issue #43.
     pub requester: String,
+    /// What the machine established for itself about that caller — the program the kernel says
+    /// opened the socket. Written down beside the claim rather than instead of it, because a
+    /// log that kept only one of the two would be the same gap in a different file.
+    pub verified: crate::approvals::Verified,
     pub app: String,
     pub action: String,
     /// One `key: value` per entry, bounded exactly the way the card bounds them — same function,
@@ -667,6 +876,7 @@ impl AuditEntry {
             "unix": self.unix,
             "mode": self.mode,
             "requester": self.requester,
+            "verified": self.verified.to_json(),
             "app": self.app,
             "action": self.action,
             "args": self.args,
@@ -692,9 +902,11 @@ fn audit_path() -> String {
 }
 
 /// Record one unasked action. Nothing here authorises anything; it only writes down what was.
+#[allow(clippy::too_many_arguments)]
 pub fn record(
     mode: &str,
     requester: &str,
+    verified: &approvals::Verified,
     app: &str,
     action: &str,
     args: &serde_json::Value,
@@ -703,12 +915,10 @@ pub fn record(
 ) -> AuditEntry {
     let entry = AuditEntry {
         at: crate::app_context::current_time_hhmm(),
-        unix: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+        unix: unix_now(),
         mode: mode.to_string(),
         requester: requester.trim().to_string(),
+        verified: verified.clone(),
         app: app.to_string(),
         action: action.to_string(),
         args: approvals::args_rows(args),
@@ -832,9 +1042,9 @@ mod mind_mode_tests {
         for (mode, grade, want) in expect {
             let mut modes = at(Mode::Ask);
             if *mode == Mode::Bypass {
-                modes.person_set_mode(Mode::Bypass, Bypass::Hour, now);
+                modes.person_set_mode(Mode::Bypass, Bypass::Hour, now, 0);
             } else {
-                modes.person_set_mode(*mode, Bypass::Hour, now);
+                modes.person_set_mode(*mode, Bypass::Hour, now, 0);
             }
             let got = modes.decide(grade, "calendar", "delete_event", "dangerous", now);
             match (want, &got) {
@@ -866,7 +1076,7 @@ mod mind_mode_tests {
         let now = Instant::now();
         for mode in [Mode::Plan, Mode::Ask, Mode::Auto, Mode::Bypass] {
             let mut modes = at(Mode::Ask);
-            modes.person_set_mode(mode, Bypass::UntilRestart, now);
+            modes.person_set_mode(mode, Bypass::UntilRestart, now, 0);
             let got = modes.decide("dangerous", "system", "kill", "standard", now);
             let Decision::Refuse { why } = got else {
                 panic!("{mode:?} let a dangerous action past a `standard` machine ceiling");
@@ -888,7 +1098,7 @@ mod mind_mode_tests {
         let now = Instant::now();
         for mode in [Mode::Plan, Mode::Ask, Mode::Auto, Mode::Bypass] {
             let mut modes = at(Mode::Ask);
-            modes.person_set_mode(mode, Bypass::Hour, now);
+            modes.person_set_mode(mode, Bypass::Hour, now, 0);
             let got = modes.decide("spicy", "notes", "write", "dangerous", now);
             assert!(
                 matches!(got, Decision::Refuse { .. }),
@@ -901,8 +1111,8 @@ mod mind_mode_tests {
     fn mind_mode_bypass_expires_back_to_what_it_was() {
         let now = Instant::now();
         let mut modes = at(Mode::Ask);
-        modes.person_set_mode(Mode::Auto, Bypass::Hour, now);
-        modes.person_set_mode(Mode::Bypass, Bypass::Minutes15, now);
+        modes.person_set_mode(Mode::Auto, Bypass::Hour, now, 0);
+        modes.person_set_mode(Mode::Bypass, Bypass::Minutes15, now, 0);
 
         assert_eq!(modes.mode(now), Mode::Bypass);
         assert_eq!(modes.bypass_left(now).map(|d| d.as_secs()), Some(15 * 60));
@@ -925,8 +1135,8 @@ mod mind_mode_tests {
     fn mind_mode_bypass_twice_still_comes_back_to_the_real_mode() {
         let now = Instant::now();
         let mut modes = at(Mode::Ask);
-        modes.person_set_mode(Mode::Bypass, Bypass::Minutes15, now);
-        modes.person_set_mode(Mode::Bypass, Bypass::Hour, now + Duration::from_secs(60));
+        modes.person_set_mode(Mode::Bypass, Bypass::Minutes15, now, 0);
+        modes.person_set_mode(Mode::Bypass, Bypass::Hour, now + Duration::from_secs(60), 0);
         assert_eq!(modes.previous(now), Mode::Ask, "not `bypass`");
         let later = now + Duration::from_secs(60 * 60 + 61);
         assert_eq!(modes.mode(later), Mode::Ask);
@@ -936,7 +1146,7 @@ mod mind_mode_tests {
     fn mind_mode_bypass_until_restart_never_lapses_on_its_own() {
         let now = Instant::now();
         let mut modes = at(Mode::Ask);
-        modes.person_set_mode(Mode::Bypass, Bypass::UntilRestart, now);
+        modes.person_set_mode(Mode::Bypass, Bypass::UntilRestart, now, 0);
         let much_later = now + Duration::from_secs(48 * 60 * 60);
         assert_eq!(modes.mode(much_later), Mode::Bypass);
         assert!(modes.bypass_left(much_later).is_none());
@@ -1037,7 +1247,7 @@ mod mind_mode_tests {
             "a rule must not carry anything past the machine ceiling"
         );
 
-        modes.person_set_mode(Mode::Plan, Bypass::Hour, now);
+        modes.person_set_mode(Mode::Plan, Bypass::Hour, now, 0);
         let planned = modes.decide("sensitive", "files", "move", "dangerous", now);
         assert!(
             matches!(planned, Decision::Refuse { .. }),
@@ -1074,7 +1284,7 @@ mod mind_mode_tests {
     fn mind_mode_lowering_out_of_bypass_does_not_leave_it_armed() {
         let now = Instant::now();
         let mut modes = at(Mode::Auto);
-        modes.person_set_mode(Mode::Bypass, Bypass::Hour, now);
+        modes.person_set_mode(Mode::Bypass, Bypass::Hour, now, 0);
         modes.lower_to(Mode::Ask, now).expect("bypass → ask is a lowering");
         let later = now + Duration::from_secs(60 * 60 + 1);
         assert_eq!(modes.mode(later), Mode::Ask, "not back to auto an hour later");
@@ -1095,7 +1305,7 @@ mod mind_mode_tests {
     fn mind_mode_the_chip_counts_down_and_never_rounds_up() {
         let now = Instant::now();
         let mut modes = at(Mode::Ask);
-        modes.person_set_mode(Mode::Bypass, Bypass::Minutes15, now);
+        modes.person_set_mode(Mode::Bypass, Bypass::Minutes15, now, 0);
         // 59 seconds must not read as "1m": the chip answers "how long am I exposed for".
         let nearly = now + Duration::from_secs(15 * 60 - 59);
         let left = modes.bypass_left(nearly).unwrap().as_secs();
@@ -1110,6 +1320,15 @@ mod mind_mode_tests {
             unix: 1_790_000_000,
             mode: "auto".into(),
             requester: "Hermes Agent 0.9.2".into(),
+            // The claim above and the fact beside it: the log keeps both, or it is the same
+            // unverifiable string in a different file (issue #43).
+            verified: crate::approvals::Verified {
+                line: "python -m hermes_cli.main gateway (pid 696) \u{b7} the attached mind".into(),
+                exe: "/home/pranab/hermes-agent/venv/bin/python".into(),
+                pid: 696,
+                attached_mind: "Hermes Agent".into(),
+                discrepancies: Vec::new(),
+            },
             app: "files".into(),
             action: "move".into(),
             args: vec!["from: /a".into(), "to: /b".into()],
@@ -1119,9 +1338,553 @@ mod mind_mode_tests {
         assert_eq!(entry.line(), "12:03 · files.move — ok");
         let json = entry.to_json();
         for key in
-            ["at", "unix", "mode", "requester", "app", "action", "args", "grade", "outcome"]
+            ["at", "unix", "mode", "requester", "verified", "app", "action", "args", "grade", "outcome"]
         {
             assert!(json.get(key).is_some(), "the log is missing `{key}`");
         }
+        // Not folded into `requester`. A reader of the log has to be able to tell the name the
+        // caller chose from the program the kernel named, and one field cannot carry both.
+        assert_eq!(json["requester"], "Hermes Agent 0.9.2");
+        assert_eq!(json["verified"]["pid"], 696);
+        assert_eq!(json["verified"]["attached_mind"], "Hermes Agent");
+    }
+
+    // ── A bypass that ran out on its own ────────────────────────────
+
+    fn audit_entry(mode: &str, unix: u64) -> AuditEntry {
+        AuditEntry {
+            at: "12:03".into(),
+            unix,
+            mode: mode.into(),
+            requester: "Hermes Agent".into(),
+            // Nothing established: the count is about which window an entry fell in and what it
+            // ran under, and it must not start depending on who the machine thinks was calling.
+            verified: crate::approvals::Verified::default(),
+            app: "files".into(),
+            action: "move".into(),
+            args: vec![],
+            grade: "sensitive".into(),
+            outcome: "ok".into(),
+        }
+    }
+
+    /// The lapse is noticed once, by the clock, and by nothing else.
+    ///
+    /// The one-second tick in `control_approvals::wire` already folded an expired bypass back so
+    /// the chip would stop saying "Bypass"; it threw the `bool` away. This is that same tick
+    /// learning to say something — and the property that matters is that the second tick after
+    /// the deadline says nothing, or a person who walked away comes back to nine hundred
+    /// notifications.
+    #[test]
+    fn mind_mode_a_lapse_is_reported_once_and_only_once() {
+        let now = Instant::now();
+        let mut modes = at(Mode::Ask);
+        modes.person_set_mode(Mode::Auto, Bypass::Hour, now, 0);
+        modes.person_set_mode(Mode::Bypass, Bypass::Minutes15, now, 1_790_000_000);
+
+        // Still running: nothing to say.
+        let halfway = now + Duration::from_secs(7 * 60);
+        assert!(!modes.lapse(halfway));
+        assert_eq!(modes.take_lapse(), None, "a live bypass is not news");
+
+        let after = now + Duration::from_secs(15 * 60 + 1);
+        assert!(modes.lapse(after), "the clock ran out");
+        let lapse = modes.take_lapse().expect("that is the notification");
+        assert_eq!(lapse.back_to, Mode::Auto, "it says where the machine actually is now");
+        assert_eq!(lapse.started_unix, 1_790_000_000, "and the window the count covers");
+
+        // Two more ticks, a second apart, exactly as the refresh timer produces them.
+        let later = after + Duration::from_secs(1);
+        assert!(!modes.lapse(later));
+        assert_eq!(modes.take_lapse(), None, "one lapse is one notification");
+        assert!(!modes.lapse(later + Duration::from_secs(1)));
+        assert_eq!(modes.take_lapse(), None);
+    }
+
+    /// A bypass a PERSON ended announces nothing. They just did it, on a menu that says so.
+    #[test]
+    fn mind_mode_a_person_ending_bypass_announces_nothing() {
+        let now = Instant::now();
+        let mut modes = at(Mode::Ask);
+        modes.person_set_mode(Mode::Bypass, Bypass::Hour, now, 0);
+        modes.person_set_mode(Mode::Ask, Bypass::Hour, now + Duration::from_secs(60), 0);
+        assert_eq!(modes.take_lapse(), None, "they pressed Ask; they know");
+
+        // Nor does the clock later announce a bypass that was already over.
+        let much_later = now + Duration::from_secs(60 * 60 + 1);
+        assert!(!modes.lapse(much_later));
+        assert_eq!(modes.take_lapse(), None);
+
+        // And the socket lowering out of one is not a lapse either.
+        let mut modes = at(Mode::Ask);
+        modes.person_set_mode(Mode::Bypass, Bypass::Hour, now, 0);
+        modes.lower_to(Mode::Plan, now).expect("bypass → plan is a lowering");
+        assert_eq!(modes.take_lapse(), None);
+    }
+
+    /// "Until the shell restarts" never lapses, so it never announces — including on the next
+    /// boot, where the machine has no memory that one was ever running.
+    #[test]
+    fn mind_mode_until_restart_announces_nothing_ever() {
+        let now = Instant::now();
+        let mut modes = at(Mode::Ask);
+        modes.person_set_mode(Mode::Bypass, Bypass::UntilRestart, now, 0);
+        let days_later = now + Duration::from_secs(48 * 60 * 60);
+        assert!(!modes.lapse(days_later), "there was never a deadline to cross");
+        assert_eq!(modes.take_lapse(), None);
+
+        // The next boot. `bypass` is never written to the settings file (`to_store`) and is
+        // clamped on the way back in anyway, so the shell comes up in `ask` owing nobody an
+        // explanation — a notification about a bypass nobody is in would be a lie.
+        assert_ne!(to_store(Mode::Bypass, Mode::Ask), Mode::Bypass);
+        let mut booted = Modes::new(Mode::Bypass);
+        assert_eq!(booted.mode(now), Mode::Ask);
+        assert_eq!(booted.take_lapse(), None, "a fresh shell announces nothing");
+        assert!(!booted.lapse(now));
+    }
+
+    /// What the bypass bought, counted the way the notification counts it.
+    #[test]
+    fn mind_mode_the_count_is_what_the_bypass_itself_bought() {
+        let start = 1_790_000_000;
+        let entries = vec![
+            // Before the window opened. Somebody else's auto-mode afternoon.
+            audit_entry("auto", start - 600),
+            audit_entry("bypass", start - 1),
+            // Inside it.
+            audit_entry("bypass", start),
+            audit_entry("bypass", start + 30),
+            // Inside it, but covered by a session rule — it would have run in `ask` mode too,
+            // so it is not something the bypass bought.
+            audit_entry("rule", start + 40),
+            // Inside it, and asked about: `auto` never appears while a bypass is in force, but
+            // the filter is on what the action RAN under, not on when it happened.
+            audit_entry("auto", start + 50),
+        ];
+        assert_eq!(unasked_during(&entries, start), 2);
+        assert_eq!(unasked_during(&entries, start + 31), 0, "a window with nothing in it");
+        assert_eq!(unasked_during(&[], start), 0, "and no audit at all");
+    }
+
+    /// The sentence a person reads. Zero, one and several are three different sentences.
+    #[test]
+    fn mind_mode_the_lapse_notice_reads_like_a_person_wrote_it() {
+        let none = bypass_ended_body(&BypassEnded { back_to: Mode::Ask, unasked: 0 });
+        assert_eq!(
+            none,
+            "The mind is back in Ask mode. It asks you before anything that could matter. \
+             Nothing ran without asking while bypass was on."
+        );
+
+        let one = bypass_ended_body(&BypassEnded { back_to: Mode::Ask, unasked: 1 });
+        assert!(one.contains("It did one thing without asking"), "{one}");
+        assert!(!one.contains(" 1 "), "one is a word here, not a digit: {one}");
+        assert!(!one.contains("1 things"), "{one}");
+
+        let many = bypass_ended_body(&BypassEnded { back_to: Mode::Auto, unasked: 7 });
+        assert!(many.contains("It did 7 things without asking"), "{many}");
+        // The mode's own published sentence, so the notification and the menu can never
+        // describe `auto` differently.
+        assert!(many.contains(Mode::Auto.meaning()), "{many}");
+        assert!(many.starts_with("The mind is back in Auto mode."), "{many}");
+
+        for count in [0usize, 1, 2, 50] {
+            let body = bypass_ended_body(&BypassEnded { back_to: Mode::Plan, unasked: count });
+            // "It did 0 things" is the shape of a machine reading a counter out loud. (Not
+            // `!contains("0 things")`: fifty of them contains it, which is how this assertion
+            // was wrong the first time.)
+            assert!(!body.contains("did 0 things"), "{body}");
+            assert!(body.ends_with("while bypass was on."), "{body}");
+        }
+    }
+
+    /// The duration hook is a test hook and can only ever tighten.
+    #[test]
+    fn mind_mode_the_duration_hook_can_only_shorten() {
+        assert_eq!(shortened_by(None, 900), 900, "unset changes nothing");
+        assert_eq!(shortened_by(Some(20), 900), 20, "it can cut fifteen minutes to twenty seconds");
+        assert_eq!(
+            shortened_by(Some(9_000), 900),
+            900,
+            "and it can never extend one: a hook that could hold a machine in bypass for longer \
+             than the person agreed to would be the backdoor this whole feature exists to avoid"
+        );
+        assert_eq!(shortened_by(Some(9_000), 60 * 60), 60 * 60);
+        // Nothing reaches "until the shell restarts": it has no deadline to shorten.
+        assert_eq!(Bypass::UntilRestart.deadline(Instant::now()), None);
+    }
+
+    // ── The table, written out so the bridge's copy can be checked against it ──
+    //
+    // `Modes::decide` above and `decide` in `deploy/yantrik-os/yos-mcp` are the same table
+    // written twice. That is deliberate — the alternative is a second round trip per `os_act`,
+    // and the mode already arrives on a read the bridge was making anyway — and the design note
+    // lists it as the top open item, because two copies drift silently in the direction nobody
+    // tests. So this writes the table out as data and the bridge's selftest reads it back.
+    //
+    // The core of the file (mode × grade × ceiling × rule) comes straight out of production
+    // `Modes::decide`. Two thin layers are modelled here rather than there, and the file marks
+    // which so nobody reads a capped vector as something the shell decided:
+    //
+    //   * `env_cap` (`YOS_MCP_MAX_PERMISSION`) is a cap a harness puts on ITSELF. The shell has
+    //     no business enforcing it and does not, so there is no production Rust to generate it
+    //     from — see `capped`.
+    //   * the browser tools are not on the shell's surface at all — see `web_outcome`.
+
+    const OUT_RUN: &str = "run";
+    const OUT_RUN_LOGGED: &str = "run_logged";
+    const OUT_ASK: &str = "ask";
+    const OUT_REFUSE_GRADE: &str = "refuse_grade";
+    const OUT_REFUSE_CEILING: &str = "refuse_ceiling";
+    const OUT_REFUSE_MODE: &str = "refuse_mode";
+
+    /// Which outcome a `Decision` is, as one word both implementations can name.
+    ///
+    /// The three refusals are not distinguished by the type — a refusal is a sentence for a
+    /// person — so this reads the sentence, by the one marker each of them carries. It panics
+    /// when a refusal matches none or more than one, so rewording a refusal fails loudly here
+    /// instead of quietly relabelling a vector.
+    fn outcome_of(decision: &Decision) -> &'static str {
+        let why = match decision {
+            Decision::Run { unasked: false } => return OUT_RUN,
+            Decision::Run { unasked: true } => return OUT_RUN_LOGGED,
+            Decision::Ask => return OUT_ASK,
+            Decision::Refuse { why } => why,
+        };
+        let markers = [
+            ("not a level this OS defines", OUT_REFUSE_GRADE),
+            ("tool_permission", OUT_REFUSE_CEILING),
+            ("plan mode", OUT_REFUSE_MODE),
+        ];
+        let hit: Vec<&'static str> =
+            markers.iter().filter(|(m, _)| why.contains(m)).map(|(_, o)| *o).collect();
+        assert_eq!(
+            hit.len(),
+            1,
+            "a refusal has to be one of the three this table makes, and this one matched {}: \
+             {why}\n\nIf you reworded a refusal, reword the marker here with it — a vector that \
+             cannot be classified is worse than no vector.",
+            hit.len()
+        );
+        hit[0]
+    }
+
+    /// `YOS_MCP_MAX_PERMISSION`, as the design note defines it.
+    ///
+    /// A cap a harness puts on ITSELF, and it can only ever be stricter: it bounds what may run
+    /// WITHOUT a person being asked, so anything above it that the mode would have run quietly
+    /// becomes a question instead. It cannot loosen anything — a desktop in `ask` mode asks
+    /// whatever this is set to, and a desktop in `plan` mode has already refused — and a value
+    /// that is not on the ladder is not a permission to do anything, so it is treated as unset.
+    fn capped(decision: Decision, grade: &str, cap: Option<&str>) -> Decision {
+        let (Some(cap_rank), Some(rank)) =
+            (cap.and_then(grade_rank), grade_rank(grade))
+        else {
+            return decision;
+        };
+        match decision {
+            Decision::Run { .. } if rank > cap_rank => Decision::Ask,
+            other => other,
+        }
+    }
+
+    /// The plan row of the doc's table for the browser tools.
+    ///
+    /// Nothing on the shell's surface decides this — there is no browser there — so it is the
+    /// doc's own sentence written once: reading a page is looking, and putting something into
+    /// one is not. The machine ceiling and the grade ladder never enter it, because a page
+    /// element carries no grade.
+    fn web_outcome(tool: &str, mode: Mode) -> &'static str {
+        const WRITES: [&str; 3] = ["web_go", "web_click", "web_type"];
+        if WRITES.contains(&tool) && mode == Mode::Plan {
+            OUT_REFUSE_MODE
+        } else {
+            OUT_RUN
+        }
+    }
+
+    fn modes_for(mode: Mode, rules: &[(&str, &str)], now: Instant) -> Modes {
+        let mut modes = Modes::new(Mode::Ask);
+        modes.person_set_mode(mode, Bypass::Hour, now, 0);
+        // Straight into the field rather than through `person_add_rule`, because the generator
+        // has to be able to put a rule on an action the card would never offer one for — one
+        // graded `dangerous`, or one the app says cannot be undone. That is the whole point of
+        // those vectors: `decide` does not look at recoverability at all, on either side, and
+        // if one of them ever starts to, this is what catches it.
+        modes.rules =
+            rules.iter().map(|(a, b)| Rule { app: a.to_string(), action: b.to_string() }).collect();
+        modes
+    }
+
+    /// Every case both implementations have to agree about.
+    fn all_vectors() -> Vec<serde_json::Value> {
+        let now = Instant::now();
+        let mut out: Vec<serde_json::Value> = Vec::new();
+
+        let modes_all = [Mode::Plan, Mode::Ask, Mode::Auto, Mode::Bypass];
+        // The fifth is not a grade. `None` is not `safe`, and an action whose cost was never
+        // read is refused in every mode — the case most likely to be got wrong twice.
+        let grades = ["safe", "standard", "sensitive", "dangerous", "spicy"];
+        // `safe` as a machine ceiling is not a configuration anybody has; the three the AI page
+        // offers are these.
+        let ceilings = ["standard", "sensitive", "dangerous"];
+
+        // (name, app, action, recoverable, the rules the shell would be publishing)
+        let rule_cases: &[(&str, &str, &str, bool, Vec<(&str, &str)>)] = &[
+            ("none", "files", "move", true, vec![]),
+            ("same", "files", "move", true, vec![("files", "move")]),
+            // The same rule, on an action whose own published purpose says it cannot be undone.
+            // Unreachable from the card — `approvals::may_offer_session_rule` refuses to offer
+            // it — and included anyway, because neither table may start consulting it.
+            ("same_unrecoverable", "calendar", "delete_event", false,
+             vec![("calendar", "delete_event")]),
+            ("other", "files", "move", true, vec![("files", "rename")]),
+        ];
+
+        for mode in modes_all {
+            for grade in grades {
+                for ceiling in ceilings {
+                    for (rule_name, app, action, recoverable, rules) in rule_cases {
+                        let modes = modes_for(mode, rules, now);
+                        let decision = modes.decide(grade, app, action, ceiling, now);
+                        out.push(serde_json::json!({
+                            "id": format!("act/{}/{grade}/ceiling={ceiling}/rule={rule_name}",
+                                          mode.as_str()),
+                            "layer": "shell",
+                            "tool": "os_act",
+                            "app": app,
+                            "action": action,
+                            "grade": grade,
+                            "mode": mode.as_str(),
+                            "ceiling": ceiling,
+                            "rules": rules.iter()
+                                .map(|(a, b)| serde_json::json!([a, b]))
+                                .collect::<Vec<_>>(),
+                            "env_cap": serde_json::Value::Null,
+                            "recoverable": recoverable,
+                            "expect": outcome_of(&decision),
+                        }));
+                    }
+                }
+            }
+        }
+
+        // The harness's own cap. Ceiling held at `dangerous` so nothing is refused above it and
+        // the cap is the only thing moving.
+        for mode in modes_all {
+            for grade in ["safe", "standard", "sensitive", "dangerous"] {
+                for cap in ["standard", "sensitive", "dangerous"] {
+                    for (rule_name, rules) in
+                        [("none", vec![]), ("same", vec![("files", "move")])]
+                    {
+                        let modes = modes_for(mode, &rules, now);
+                        let decision = modes.decide(grade, "files", "move", "dangerous", now);
+                        let decision = capped(decision, grade, Some(cap));
+                        out.push(serde_json::json!({
+                            "id": format!("cap/{}/{grade}/cap={cap}/rule={rule_name}",
+                                          mode.as_str()),
+                            "layer": "harness_cap",
+                            "tool": "os_act",
+                            "app": "files",
+                            "action": "move",
+                            "grade": grade,
+                            "mode": mode.as_str(),
+                            "ceiling": "dangerous",
+                            "rules": rules.iter()
+                                .map(|(a, b)| serde_json::json!([a, b]))
+                                .collect::<Vec<_>>(),
+                            "env_cap": cap,
+                            "recoverable": true,
+                            "expect": outcome_of(&decision),
+                        }));
+                    }
+                }
+            }
+        }
+
+        // A cap that is not on the ladder is not a permission to do anything, so it is treated
+        // as unset rather than as whatever an index lookup would have done with it.
+        for mode in modes_all {
+            let modes = modes_for(mode, &[], now);
+            let decision = modes.decide("sensitive", "files", "move", "dangerous", now);
+            let decision = capped(decision, "sensitive", Some("nonsense"));
+            out.push(serde_json::json!({
+                "id": format!("cap/{}/sensitive/cap=nonsense", mode.as_str()),
+                "layer": "harness_cap",
+                "tool": "os_act",
+                "app": "files",
+                "action": "move",
+                "grade": "sensitive",
+                "mode": mode.as_str(),
+                "ceiling": "dangerous",
+                "rules": Vec::<serde_json::Value>::new(),
+                "env_cap": "nonsense",
+                "recoverable": true,
+                "expect": outcome_of(&decision),
+            }));
+        }
+
+        // The browser.
+        for mode in modes_all {
+            for tool in ["web_read", "web_text", "web_find", "web_go", "web_click", "web_type"] {
+                out.push(serde_json::json!({
+                    "id": format!("web/{}/{tool}", mode.as_str()),
+                    "layer": "browser",
+                    "tool": tool,
+                    "app": "the browser",
+                    "action": tool,
+                    "grade": serde_json::Value::Null,
+                    "mode": mode.as_str(),
+                    "ceiling": "dangerous",
+                    "rules": Vec::<serde_json::Value>::new(),
+                    "env_cap": serde_json::Value::Null,
+                    "recoverable": true,
+                    "expect": web_outcome(tool, mode),
+                }));
+            }
+        }
+
+        out
+    }
+
+    /// The file, exactly as it is checked in: one vector per line, so a diff reads.
+    fn vectors_document() -> String {
+        let mut text = String::new();
+        text.push_str("{\n");
+        text.push_str(
+            "  \"_\": [\n\
+             \x20   \"Generated. Do not hand-edit: YANTRIK_WRITE_VECTORS=1 cargo test --offline\",\n\
+             \x20   \"--profile fast -p yantrik-ui --bin yantrik-ui mind_mode_write_vectors\",\n\
+             \x20   \"\",\n\
+             \x20   \"mind_mode::Modes::decide in crates/yantrik-ui/src/mind_mode.rs and decide()\",\n\
+             \x20   \"in deploy/yantrik-os/yos-mcp are the same table written twice, on purpose:\",\n\
+             \x20   \"the bridge deciding for itself costs one read of the shell instead of two.\",\n\
+             \x20   \"Two copies drift. These vectors are what stops it being silent — the Rust\",\n\
+             \x20   \"side writes them and a test asserts the file still matches; the Python side\",\n\
+             \x20   \"is driven through every one of them by yos-mcp-selftest.py.\",\n\
+             \x20   \"\",\n\
+             \x20   \"layer: `shell` came straight out of Modes::decide. `harness_cap` is\",\n\
+             \x20   \"YOS_MCP_MAX_PERMISSION, which the shell does not enforce and should not —\",\n\
+             \x20   \"it is a cap a harness puts on itself — and `browser` is the plan-mode rule\",\n\
+             \x20   \"for tools that are not on the shell's surface at all. Both are modelled in\",\n\
+             \x20   \"the generator, which the generator says so about.\",\n\
+             \x20   \"\",\n\
+             \x20   \"recoverable is carried and is expected to change nothing: it decides\",\n\
+             \x20   \"whether a session rule may be MADE (approvals::may_offer_session_rule), and\",\n\
+             \x20   \"neither decision table looks at it. A vector where it starts to matter is a\",\n\
+             \x20   \"drift report.\"\n\
+             \x20 ],\n",
+        );
+        text.push_str(
+            "  \"outcomes\": {\n\
+             \x20   \"run\": \"ran; nobody was asked and nothing is written down\",\n\
+             \x20   \"run_logged\": \"ran unasked; `ask` mode would have raised a card, so it goes in the audit\",\n\
+             \x20   \"ask\": \"a card in front of the person, and a wait\",\n\
+             \x20   \"refuse_grade\": \"the grade is not one this OS defines; None is not safe\",\n\
+             \x20   \"refuse_ceiling\": \"above tool_permission; nobody is asked, in any mode\",\n\
+             \x20   \"refuse_mode\": \"plan mode: nothing was changed, say what you would do\"\n\
+             \x20 },\n",
+        );
+        text.push_str("  \"vectors\": [\n");
+        let vectors = all_vectors();
+        for (index, vector) in vectors.iter().enumerate() {
+            text.push_str("    ");
+            text.push_str(&serde_json::to_string(vector).expect("a vector is plain json"));
+            if index + 1 < vectors.len() {
+                text.push(',');
+            }
+            text.push('\n');
+        }
+        text.push_str("  ]\n}\n");
+        text
+    }
+
+    fn vectors_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("deploy")
+            .join("yantrik-os")
+            .join("mind-mode-vectors.json")
+    }
+
+    /// Write the vectors out. Gated, because a test that rewrites its own expectation is not a
+    /// test — it is a way for a change to `decide` to pass CI by regenerating what it broke.
+    ///
+    /// ```sh
+    /// YANTRIK_WRITE_VECTORS=1 cargo test --offline --profile fast \
+    ///   -p yantrik-ui --bin yantrik-ui mind_mode_write_vectors
+    /// ```
+    #[test]
+    fn mind_mode_write_vectors() {
+        if std::env::var("YANTRIK_WRITE_VECTORS").as_deref() != Ok("1") {
+            return;
+        }
+        let path = vectors_path();
+        std::fs::write(&path, vectors_document())
+            .unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+        println!("wrote {} vectors to {}", all_vectors().len(), path.display());
+    }
+
+    /// And the checked-in file is what the code produces today.
+    ///
+    /// This is the half that makes the pair worth having: changing `decide` without
+    /// regenerating fails here, and regenerating without changing the bridge fails in
+    /// `yos-mcp-selftest.py`. Neither side can move alone.
+    #[test]
+    fn mind_mode_the_checked_in_vectors_are_what_decide_produces() {
+        let path = vectors_path();
+        let checked_in = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {}: {e}\n\nGenerate it with:\n  YANTRIK_WRITE_VECTORS=1 cargo test \
+                 --offline --profile fast -p yantrik-ui --bin yantrik-ui mind_mode_write_vectors",
+                path.display()
+            )
+        });
+        let produced = vectors_document();
+        if checked_in == produced {
+            return;
+        }
+        // Say WHICH cell moved. "the file differs" over three hundred vectors is a diff nobody
+        // reads; the outcome that changed is the one line somebody has to think about.
+        let old: serde_json::Value =
+            serde_json::from_str(&checked_in).expect("the checked-in vectors are json");
+        let new: serde_json::Value =
+            serde_json::from_str(&produced).expect("what the generator made is json");
+        let empty = Vec::new();
+        let old_v = old["vectors"].as_array().unwrap_or(&empty);
+        let new_v = new["vectors"].as_array().unwrap_or(&empty);
+        let mut moved: Vec<String> = Vec::new();
+        for want in new_v {
+            let id = want["id"].as_str().unwrap_or_default();
+            match old_v.iter().find(|v| v["id"].as_str() == Some(id)) {
+                Some(had) if had["expect"] == want["expect"] => {}
+                Some(had) => moved.push(format!(
+                    "{id}: was {} and is now {}",
+                    had["expect"], want["expect"]
+                )),
+                None => moved.push(format!("{id}: new")),
+            }
+        }
+        for had in old_v {
+            let id = had["id"].as_str().unwrap_or_default();
+            if !new_v.iter().any(|v| v["id"].as_str() == Some(id)) {
+                moved.push(format!("{id}: gone"));
+            }
+        }
+        panic!(
+            "deploy/yantrik-os/mind-mode-vectors.json is not what this code decides any more.\n\
+             {}\n\n\
+             The table is written twice — here and in deploy/yantrik-os/yos-mcp. If you meant \
+             to change it, change BOTH, then regenerate:\n  \
+             YANTRIK_WRITE_VECTORS=1 cargo test --offline --profile fast -p yantrik-ui \
+             --bin yantrik-ui mind_mode_write_vectors\n  \
+             python3 deploy/yantrik-os/yos-mcp-selftest.py",
+            if moved.is_empty() {
+                "(every outcome is the same; only the file's shape changed)".to_string()
+            } else {
+                moved.join("\n")
+            }
+        );
     }
 }

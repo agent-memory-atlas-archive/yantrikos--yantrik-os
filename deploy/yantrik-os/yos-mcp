@@ -53,20 +53,28 @@ OS_ACT_MAX_SECONDS = (2 * SHELL_CALL_TIMEOUT      # action_detail, shell_state
                       + APPROVAL_WAIT
                       + ACT_TIMEOUT)
 
-# ── Who the card says is asking ─────────────────────────────────────────────────────────
+# ── The name a caller gives itself ──────────────────────────────────────────────────────
 #
 # The first cards read "the mind on this desktop is asking to use this machine", which is true
 # and useless: the person could not tell Hermes from anything else that might have opened this
-# bridge. Three sources, best first, and every one of them is SELF-DECLARED — the card says so
-# underneath the name, because nothing on this machine verifies any of them. It cannot raise
-# privilege (the machine ceiling is enforced from the app's own published grade, not from
-# anything a caller says about itself) but a flattering name could sway a decision.
+# bridge. Three sources, best first, and every one of them is SELF-DECLARED.
 #
 #   1. YOS_MCP_REQUESTER — an operator setting this deliberately outranks anything guessed.
 #   2. The MCP client's own `clientInfo` from the `initialize` handshake. Hermes sends its name
 #      and version there; this is the specific thing that was being thrown away.
 #   3. The shell's own list of minds, whichever one is `answering`. A fallback for a client that
 #      sends no clientInfo at all, and it is the name the person already sees in the status bar.
+#
+# This is a LABEL and it is no longer the only thing the card has. Identity now comes from the
+# socket rather than from an argument: the shell reads the peer's pid and uid off the connection
+# with SO_PEERCRED — which the kernel stamps and the caller cannot write — and walks /proc up
+# past this bridge to the first program a person would recognise. The card prints the two apart,
+# `says the caller` over `verified by this machine`, and says so when they disagree.
+#
+# So keep sending the name (it is still the thing a person recognises), and do not describe it
+# to a mind as anything more than what the caller called itself. Nothing here needs to change
+# for the verification to work, and nothing here CAN make it stronger: an argument this bridge
+# sends is, by construction, the half that is not checked.
 REQUESTER_OVERRIDE = os.environ.get("YOS_MCP_REQUESTER", "").strip()
 
 # Filled from the `initialize` params. Never trusted for anything but a label.
@@ -74,7 +82,14 @@ _CLIENT = {}
 
 
 def requester_name(state=None):
-    """The name to put on the card. `state` is a `describe shell` state dict, if one is to hand."""
+    """The name the caller gives itself, for the card's `says the caller` line.
+
+    Not an identity and never presented as one. What the machine establishes for itself — the
+    peer's pid and uid from the socket, resolved through /proc — is worked out in the shell,
+    from the connection this bridge's `yos` subprocess opens, and needs nothing from here.
+
+    `state` is a `describe shell` state dict, if one is to hand.
+    """
     if REQUESTER_OVERRIDE:
         return REQUESTER_OVERRIDE
     name = str(_CLIENT.get("name") or "").strip()
@@ -631,23 +646,70 @@ def mind_mode(state):
     return mode, rules
 
 
-def decide(level, app, action, mode, rules, machine):
-    """Run it, ask about it, or refuse it. Returns `("run", unasked) | ("ask", None) |
-    ("refuse", why)`.
+# Every answer the table can give, and the only vocabulary the two implementations share.
+#
+# The three refusals are NAMED rather than lumped together as one word, because this table is
+# written twice — here and in `mind_mode::Modes::decide` in the shell — and two copies drift
+# silently in the direction nobody tests. `deploy/yantrik-os/mind-mode-vectors.json` is generated
+# from the shell's copy, and `yos-mcp-selftest.py` drives this one through every vector in it;
+# that only works if both sides can name the same outcome rather than comparing two paragraphs.
+OUTCOMES = ("run", "run_logged", "ask", "refuse_grade", "refuse_ceiling", "refuse_mode")
+
+
+def decide(level, app, action, mode, rules, machine, cap=None, tool="os_act"):
+    """Run it, ask about it, or refuse it — the whole table, as one pure function.
+
+    Returns `(verdict, detail)`:
+
+        ("run", unasked)        `unasked` is True when `ask` mode would have raised a card and
+                                this mode did not — exactly the set the audit log exists for.
+                                A person who loosened the mode is owed a record of what that
+                                bought.
+        ("ask", None)           a card in front of the person, and a wait.
+        ("refuse_grade", why)   the grade is not one this OS defines. None is not `safe`.
+        ("refuse_ceiling", why) above the machine's own `tool_permission`.
+        ("refuse_mode", why)    plan mode.
+
+    `why` is written to be relayed to a person as it stands.
 
     Order is the security argument. The machine's ceiling is consulted FIRST, so no mode — not
     even bypass — reaches past the owner's standing policy, and nothing above it is ever put in
     front of a person either: a card no answer of theirs could satisfy teaches them that the card
     is noise.
 
-    `unasked` is true when `ask` mode would have raised a card and this mode did not. That is
-    exactly the set of actions the audit log exists for; a person who loosened the mode is owed a
-    record of what that bought.
+    Everything the table decides is in here, so there is one function to check against the
+    vectors and no second copy for the selftest to agree with by accident. What is deliberately
+    NOT in here is everything that needs the world: reading the desktop (`shell_state`), grading
+    the action (`action_detail`), and putting the card up (`ask_the_person`).
     """
+    # The browser tools carry no grade and never meet the machine ceiling — `yos web` refuses any
+    # control whose label reads as a commitment, which is a different question and is enforced
+    # inside the same evaluation that would have pressed it. All the mode decides here is whether
+    # putting something INTO a page counts as looking. It does not; reading one does, which is
+    # why a plan a nobody could research would be worthless. WEB_WRITES is defined below, beside
+    # the guard that calls this for them.
+    if tool != "os_act":
+        if tool in WEB_WRITES and mode == "plan":
+            return "refuse_mode", (
+                "the desktop is in plan mode, so %s was not run and nothing was changed. Reading "
+                "the page — web_read, web_text, web_find — still works. Say what you WOULD click "
+                "or type and let the person decide; they switch the mode from the chip in the "
+                "status bar." % tool)
+        return "run", False
+
+    # `None` is not `safe`. An action whose cost was never read is refused before anything else
+    # is consulted, in every mode, because running it is the failure that matters here.
+    if level not in LADDER:
+        return "refuse_grade", (
+            "%s.%s is graded %r, which is not a level this OS defines. Refusing."
+            % (app, action, level))
+
     rank = LADDER.index(level)
 
-    if machine is not None and rank > LADDER.index(machine):
-        return "refuse", (
+    # `in LADDER` rather than `is not None`: a ceiling this OS does not define is not a
+    # permission to do anything either, and it must not raise out of an index lookup.
+    if machine in LADDER and rank > LADDER.index(machine):
+        return "refuse_ceiling", (
             "%s.%s is graded %s, and this machine does not allow callers like this past %s "
             "(`tool_permission`, on the AI page in Settings). The person was NOT asked, because "
             "nothing they could answer would let it run — this limit is the machine's standing "
@@ -659,25 +721,63 @@ def decide(level, app, action, mode, rules, machine):
 
     if mode == "plan":
         if rank == 0:
-            return "run", False
-        return "refuse", (
-            "the desktop is in plan mode, so %s.%s was NOT run and nothing on this machine was "
-            "changed. This is a setting, not a failure, and not something to work around: "
-            "os_describe, os_apps, os_perception and reading the web are all still open to you. "
-            "Say what you WOULD do — the exact actions and arguments, in order — and let the "
-            "person decide. They switch the mode from the chip in the status bar."
-            % (app, action))
-
-    if mode == "bypass":
-        return "run", would_ask
-    if mode == "auto":
+            verdict, detail = "run", False
+        else:
+            return "refuse_mode", (
+                "the desktop is in plan mode, so %s.%s was NOT run and nothing on this machine "
+                "was changed. This is a setting, not a failure, and not something to work "
+                "around: os_describe, os_apps, os_perception and reading the web are all still "
+                "open to you. Say what you WOULD do — the exact actions and arguments, in order "
+                "— and let the person decide. They switch the mode from the chip in the status "
+                "bar." % (app, action))
+    elif mode == "bypass":
+        verdict, detail = "run", would_ask
+    elif mode == "auto":
         if rank >= LADDER.index("dangerous"):
-            return ("run", True) if covered else ("ask", None)
-        return "run", would_ask
-    # `ask`, and anything unrecognised, which is handled by the caller before it gets here.
-    if would_ask:
-        return ("run", True) if covered else ("ask", None)
-    return "run", False
+            verdict, detail = ("run", True) if covered else ("ask", None)
+        else:
+            verdict, detail = "run", would_ask
+    else:
+        # `ask`, and anything unrecognised, which the caller has already folded into `ask`.
+        if would_ask:
+            verdict, detail = ("run", True) if covered else ("ask", None)
+        else:
+            verdict, detail = "run", False
+
+    # YOS_MCP_MAX_PERMISSION, which a harness sets on ITS side, can only ever be STRICTER than
+    # the desktop's mode. It bounds what may run without asking; anything above it that the mode
+    # would have run quietly becomes a question instead. It can never loosen anything: a desktop
+    # in `ask` mode asks whatever this is set to, and a desktop in `plan` mode has already
+    # refused above. A value that is not on the ladder is not a permission to do anything, so it
+    # is treated as unset rather than left to whatever an index lookup would have raised.
+    #
+    # Last, because it is the one layer that is not the desktop's policy — the person's mode
+    # decides, and then the harness may hold itself back further.
+    if cap in LADDER and verdict == "run" and rank > LADDER.index(cap):
+        return "ask", None
+    return verdict, detail
+
+
+def decide_outcome(vector):
+    """The table's answer to one vector of `mind-mode-vectors.json`, as one of `OUTCOMES`.
+
+    The same `decide` `guard_act` runs. There is deliberately no second reading of the rules
+    here: a selftest that reimplemented the table would only prove that two copies of a mistake
+    agree.
+    """
+    verdict, detail = decide(
+        vector.get("grade"),
+        vector.get("app"),
+        vector.get("action"),
+        vector.get("mode"),
+        [tuple(rule) for rule in vector.get("rules") or []],
+        vector.get("ceiling"),
+        cap=vector.get("env_cap"),
+        tool=vector.get("tool") or "os_act",
+    )
+    if verdict == "run":
+        return "run_logged" if detail else "run"
+    return verdict
 
 
 def machine_ceiling(state):
@@ -762,6 +862,19 @@ def ask_the_person(app, action, grade, purpose, args, requester):
             "machine to allow it — and they could not be asked: %s. Nothing was run and nothing "
             "was changed. Tell them what you were trying to do and let them decide."
             % (app, action, grade, CEILING, err))
+
+    # The desktop decided nobody needed asking. That is not a refusal and not a failure: it
+    # happens when this bridge's OWN cap (YOS_MCP_MAX_PERMISSION) is stricter than the desktop's
+    # mode, so the bridge wanted a card for something the desktop would have run quietly. The
+    # shell will not put a question on screen that its own mode already answers — a person shown
+    # one learns that cards are noise — so it says so and the action goes ahead.
+    if request.get("status") == "not_needed":
+        return True, (
+            "This bridge would have asked about %s.%s, because YOS_MCP_MAX_PERMISSION caps it at "
+            "%s — but the desktop's current mode (%s) runs this without asking anybody, so no "
+            "card was put in front of the person and nobody was disturbed. Report it as "
+            "something you did."
+            % (app, action, CEILING, request.get("mode", "its current mode")))
 
     request_id = request.get("request_id")
     if not request_id:
@@ -852,8 +965,9 @@ def guard_act(args):
         return ("%s.%s was not run, because how the OS grades it could not be read: %s"
                 % (app, action, why or "os_describe %s would not answer." % app)), None, None
     if level not in LADDER:
-        return ("%s.%s is graded %r, which is not a level this OS defines. Refusing."
-                % (app, action, level)), None, None
+        # The table's own words, and no read of the desktop first: nothing it could say would
+        # make a grade this OS does not define into one it does.
+        return decide(level, app, action, "ask", [], None)[1], None, None
 
     # One read of the shell, before every action, answers all of it: the machine's standing
     # ceiling, the mode the person set, the rules they granted this session, and the name to put
@@ -876,17 +990,12 @@ def guard_act(args):
     except ValueError as e:
         return str(e), None, None
 
-    verdict, detail = decide(level, app, action, mode, rules, machine)
+    # One call, one table — the harness's own cap included, so there is nothing here that the
+    # vectors do not cover. See `decide`; `CEILING` is only a cap when somebody set it.
+    verdict, detail = decide(level, app, action, mode, rules, machine,
+                             cap=CEILING if CEILING_SET else None)
 
-    # YOS_MCP_MAX_PERMISSION, which a harness sets on ITS side, can only ever be STRICTER than
-    # the desktop's mode. It bounds what may run without asking; anything above it that the mode
-    # would have run quietly becomes a question instead. It can never loosen anything: a desktop
-    # in `ask` mode asks whatever this is set to, and a desktop in `plan` mode has already
-    # refused above. Only when it is set — see CEILING_SET.
-    if CEILING_SET and verdict == "run" and LADDER.index(level) > LADDER.index(CEILING):
-        verdict, detail = "ask", None
-
-    if verdict == "refuse":
+    if verdict.startswith("refuse"):
         return join(unreadable, detail), None, None
 
     if verdict == "run":
@@ -938,18 +1047,19 @@ def plan_refusal(name):
     Its own read of the shell, because these tools do not go through `guard_act`. That is one
     `yos describe shell` per browser write, which is the honest cost of the mode being a fact
     about the desktop rather than a flag this process cached and stopped checking.
+
+    The decision itself is `decide`'s, not this function's, so the browser row of the table is
+    checked by the same vectors as every other row.
     """
     if name not in WEB_WRITES:
         return None
     mode, _ = mind_mode(shell_state())
-    if mode != "plan":
-        # Unreadable shell included: fail closed is `ask`, and `ask` does not block a browser
-        # write — the taint rule and `yos web`'s own commitment check still do.
-        return None
-    return ("the desktop is in plan mode, so %s was not run and nothing was changed. Reading the "
-            "page — web_read, web_text, web_find — still works. Say what you WOULD click or type "
-            "and let the person decide; they switch the mode from the chip in the status bar."
-            % name)
+    if mode is None:
+        # Fail closed is `ask`, and `ask` does not block a browser write — the taint rule and
+        # `yos web`'s own commitment check still do.
+        mode = "ask"
+    verdict, why = decide(None, "the browser", name, mode, [], None, tool=name)
+    return why if verdict == "refuse_mode" else None
 
 
 def report_unasked(audit, outcome):

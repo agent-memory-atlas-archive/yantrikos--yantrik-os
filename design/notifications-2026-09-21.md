@@ -135,6 +135,7 @@ legacy Alpine scripts `install.sh`, `deploy-stack.sh`, `build-vbox-image.sh` and
 | calendar-service | an event starting in ten minutes | `services/calendar-service/src/reminders.rs` |
 | the shell | an update is available, once per version | `wire/notifications.rs` |
 | the shell | a mind is waiting for an answer (`critical`) | `approval_waiting`, one call for `control_approvals` |
+| the shell | a bypass ran out on its own, and what it did | `bypass_ended`, from the mode tick |
 | the shell | the mind finished while the Lens was closed | `bridge.rs` → `companion_said` |
 | the shell | screenshots (saved / failed), focus session complete | `wire/screenshot.rs`, `focus.rs` |
 
@@ -302,4 +303,77 @@ pkill -f /opt/yantrik/bin/notifications-service    # leave it down
 
 # 11. The suite.
 python3 tests/conformance/run.py --app notifications --verbose
+```
+
+---
+
+## Later the same day, 21 September 2026
+
+One new sender, and one thing the routing could not do that nobody had noticed because nothing
+had asked it to.
+
+### The shell can be the app a button belongs to
+
+"Action buttons work in both directions" above says the shell presses the button on the sender's
+behalf, by calling the named action on that app's own control surface. That worked for every
+sender it had been used by — Download Manager's "Open folder" is `open_folder` on
+`app-download-manager` — and it could not have worked for the **shell itself**.
+
+`surface_for` resolves a notification's `app` through `wire::dock::openable()`, the table of
+things this desktop can *open*. Nothing opens the desktop, so there is no `yantrik` row in it,
+so `surface_for("Yantrik")` answered `None` — and `forward_to_app` logged "a notification button
+named an app this desktop does not open" and did nothing. Every notification the shell has sent
+so far has been button-less, so this had never come up.
+
+The shell does have a control surface: `app-shell`, the one `yos act shell …` reaches. One line
+in `surface_for` now says so. A button on one of the shell's own notifications is a real call
+like everybody else's.
+
+### A bypass that ran out on its own
+
+`design/mind-modes-2026-09-21.md` listed "no notification when a bypass lapses" as open, and
+pointed at this lane. It is `wire::notifications::bypass_ended`, called from the one-second mode
+tick in `control_approvals::wire` that was already folding the expired bypass back.
+
+```
+Bypass ended
+The mind is back in Ask mode. It asks you before anything that could matter.
+It did 3 things without asking while bypass was on.
+                                                            [ See what it did ]
+```
+
+**`normal`, not `critical`.** `approval_waiting` is `critical` because a question has a deadline
+and the person loses something by not seeing it. This is the opposite: the machine has just
+become *stricter*, on its own, and nothing is waiting. A notification that survived Do Not
+Disturb and held the screen until dismissed, to say that a machine had stopped doing something,
+would be exactly the kind of thing that teaches people to dismiss notifications without reading
+them.
+
+**The button is dropped when the count is zero.** "See what it did" under "Nothing ran without
+asking while bypass was on" is a control that contradicts the sentence above it. The three
+lines that decide this live beside the sentence, in `mind_mode::bypass_ended_body`, which is also
+where the 0 / 1 / many wording is unit-tested — a test for a sentence should not need a
+notification service running.
+
+The body's middle sentence is `Mode::meaning()`, the same string the mode menu draws, so the
+notification and the chip cannot come to describe `auto` differently.
+
+### Verifying it
+
+```bash
+# The shell has to be started with the test hook, or this takes fifteen minutes.
+# It can only ever SHORTEN a bypass; see design/mind-modes-2026-09-21.md.
+YANTRIK_BYPASS_SECONDS=20 /opt/yantrik/bin/yantrik-ui
+
+# Chip → Bypass → 15 minutes, then drive a sensitive action through the bridge and wait.
+yos describe notifications | head -20     # app: Yantrik, title: "Bypass ended", urgency: normal
+#   → a toast, bottom right, with one button
+
+# The button is the same call the mode menu's own row makes.
+yos act shell show_mind_audit
+#   { "showing": "the record of unasked actions", "entries": 1, … }
+#   → the mode menu opens on its audit list
+
+# And exactly one, however long you leave it: the lapse is taken, not polled.
+yos describe notifications | grep -c "Bypass ended"     # 1
 ```

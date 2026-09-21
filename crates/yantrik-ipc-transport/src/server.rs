@@ -99,6 +99,25 @@ fn harden(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::set_permissions(dir, perms)
 }
 
+/// Who opened this connection, as the kernel says it — not as the caller says it.
+///
+/// Every other fact a service has about its caller arrives inside the request, which means the
+/// caller chose it. These three did not: `SO_PEERCRED` is filled in by the kernel at `connect`
+/// time from the peer's own process, and nothing the peer writes on the socket can change them.
+/// That is the whole reason this exists (issue #43) — an approval card that names whoever is
+/// asking was naming a string the asker supplied.
+///
+/// Best-effort and deliberately optional: a TCP connection on the Windows dev path has no peer
+/// process, and a peer that exits between `accept` and the `getsockopt` still leaves a pid that
+/// no longer resolves. A service that cannot learn this must still work; none of them may
+/// *refuse* on it, because policy belongs to the shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerCred {
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// Trait for service method dispatch. Implement this in each service.
 pub trait ServiceHandler: Send + Sync + 'static {
     /// Service identifier (e.g. "weather", "notes").
@@ -110,6 +129,22 @@ pub trait ServiceHandler: Send + Sync + 'static {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, yantrik_ipc_contracts::email::ServiceError>;
+
+    /// The same dispatch, told who is on the other end of the socket.
+    ///
+    /// Defaulted so that every existing `ServiceHandler` — fourteen apps and every service —
+    /// compiles and behaves exactly as before: the default throws the credentials away and calls
+    /// [`ServiceHandler::handle`]. Only a handler that has something honest to do with the
+    /// caller's identity overrides it.
+    fn handle_from(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        peer: Option<PeerCred>,
+    ) -> Result<serde_json::Value, yantrik_ipc_contracts::email::ServiceError> {
+        let _ = peer;
+        self.handle(method, params)
+    }
 }
 
 /// JSON-RPC server.
@@ -206,10 +241,18 @@ impl RpcServer {
 
         loop {
             let (stream, _) = listener.accept().await?;
+            // Read at accept, not when somebody asks. The peer of these sockets is routinely a
+            // short-lived process — `yos` runs one JSON-RPC call and exits — so by the time a
+            // handler wants to know who called, the pid may already be gone or, worse, reused.
+            // Asking here narrows that window to the connection's own lifetime.
+            let peer = stream
+                .peer_cred()
+                .ok()
+                .map(|c| PeerCred { pid: c.pid().unwrap_or(0), uid: c.uid(), gid: c.gid() });
             let handler = handler.clone();
             tokio::spawn(async move {
                 let (reader, writer) = stream.into_split();
-                handle_connection(BufReader::new(reader), writer, &handler).await;
+                handle_connection(BufReader::new(reader), writer, &handler, peer).await;
             });
         }
     }
@@ -226,14 +269,19 @@ impl RpcServer {
             let handler = handler.clone();
             tokio::spawn(async move {
                 let (reader, writer) = stream.into_split();
-                handle_connection(BufReader::new(reader), writer, &handler).await;
+                // TCP has no peer process to ask about. This path is the Windows dev loop only.
+                handle_connection(BufReader::new(reader), writer, &handler, None).await;
             });
         }
     }
 }
 
-async fn handle_connection<R, W>(reader: BufReader<R>, mut writer: W, handler: &Arc<dyn ServiceHandler>)
-where
+async fn handle_connection<R, W>(
+    reader: BufReader<R>,
+    mut writer: W,
+    handler: &Arc<dyn ServiceHandler>,
+    peer: Option<PeerCred>,
+) where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -247,8 +295,8 @@ where
 
         let response = match serde_json::from_str::<RpcRequest>(&line) {
             Ok(req) => {
-                tracing::debug!(method = %req.method, "RPC request");
-                dispatch(handler, req)
+                tracing::debug!(method = %req.method, peer = ?peer, "RPC request");
+                dispatch(handler, req, peer)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to parse RPC request");
@@ -268,7 +316,11 @@ where
     }
 }
 
-fn dispatch(handler: &Arc<dyn ServiceHandler>, req: RpcRequest) -> RpcResponse {
+fn dispatch(
+    handler: &Arc<dyn ServiceHandler>,
+    req: RpcRequest,
+    peer: Option<PeerCred>,
+) -> RpcResponse {
     match req.method.as_str() {
         "rpc.ping" => {
             return RpcResponse::success(req.id, serde_json::json!("pong"));
@@ -279,7 +331,7 @@ fn dispatch(handler: &Arc<dyn ServiceHandler>, req: RpcRequest) -> RpcResponse {
         _ => {}
     }
 
-    match handler.handle(&req.method, req.params) {
+    match handler.handle_from(&req.method, req.params, peer) {
         Ok(result) => RpcResponse::success(req.id, result),
         Err(e) => {
             if e.code == -1 {

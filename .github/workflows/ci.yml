@@ -146,3 +146,19 @@ jobs:
 
       - name: cloud-init parses
         run: python3 -c "import yaml,sys; yaml.safe_load(open('deploy/yantrik-os/cloud-init/user-data.yaml')); print('user-data.yaml OK')"
+
+      # Two selftests that have existed for a while and have never run anywhere but on somebody's
+      # machine, which is the same as not existing. Both are stdlib-only Python over a fake of
+      # whatever they talk to, so they need nothing installed and take a few seconds.
+      #
+      # yos-mcp's matters most: it holds the bridge's copy of the mind-mode decision table
+      # against `deploy/yantrik-os/mind-mode-vectors.json`, which the shell's own tests generate
+      # from `mind_mode::Modes::decide`. The table is written twice on purpose (see
+      # design/mind-modes-2026-09-21.md) and this is the thing that stops the two copies drifting
+      # apart silently. The Rust half — that the checked-in vectors are still what the shell
+      # decides — runs in the `cargo test` job above.
+      - name: The MCP bridge agrees with the shell about what the mind may do
+        run: python3 deploy/yantrik-os/yos-mcp-selftest.py
+
+      - name: The update server's publish path
+        run: python3 deploy/yantrik-os/server/publish_selftest.py

@@ -122,6 +122,52 @@ fn clip(text: &str, max: usize) -> String {
     format!("{head}… ({} characters in full)", text.chars().count())
 }
 
+/// What this machine established about the caller, beside what the caller said about itself.
+///
+/// Deliberately plain data, with no `/proc` knowledge in it. The walking and the judging live in
+/// `caller_identity.rs`; this is the answer, carried alongside the self-declared `requester` and
+/// never mixed with it. The card prints them as two separate lines, labelled, because the whole
+/// point is that a person can tell a claim from a fact.
+///
+/// Empty by [`Default`] for callers that have nothing to attach — the same thing a `None` pid
+/// would produce, so there is one shape to render rather than two.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Verified {
+    /// The one line the card shows. Never empty on a real request: `caller_identity` answers
+    /// "could not be identified" rather than leaving a blank where a fact should be.
+    pub line: String,
+    /// The resolved `/proc/<pid>/exe` of the program the line names, for the log and for
+    /// `describe shell`. The card shows the command line instead, which is shorter and says
+    /// more; the log keeps the path, which is what a person checks afterwards.
+    pub exe: String,
+    /// The pid the line names. `0` when nothing was established.
+    pub pid: i32,
+    /// The attached mind the caller's ancestry belongs to, if one matched.
+    pub attached_mind: String,
+    /// What does not add up about this request, one bounded sentence each.
+    ///
+    /// Two can arrive today: the claimed name names an attached mind that the ancestry
+    /// contradicts, and the claimed grade is not the one the app publishes. Both are drawn in
+    /// the same red as "cannot be undone", because they are the same kind of thing — a reason to
+    /// stop and read rather than to click — and both are one line, so the card's height stays
+    /// arithmetic however many there turn out to be later.
+    pub discrepancies: Vec<String>,
+}
+
+impl Verified {
+    /// What `describe shell` publishes beside `requester`. Three facts and no prose: a caller
+    /// reading this has to be able to compare it with `ps`, not to be reassured by it.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "line": self.line,
+            "exe": self.exe,
+            "pid": self.pid,
+            "attached_mind": self.attached_mind,
+            "discrepancies": self.discrepancies,
+        })
+    }
+}
+
 /// Where a request is. `Consumed` is reported rather than folded into `Granted` or `Expired`:
 /// a caller that polls after burning its grant asked a real question, and "the grant you were
 /// given has been used" is the true answer to it. Telling it `granted` invites a replay that
@@ -157,6 +203,10 @@ impl Status {
 struct Record {
     id: String,
     requester: String,
+    /// What the machine itself found out about whoever raised this, captured when the request
+    /// arrived rather than when somebody looks at the card. The direct peer is usually `yos`,
+    /// which has exited within milliseconds — read it late and there is nothing left to read.
+    verified: Verified,
     app: String,
     action: String,
     args: serde_json::Value,
@@ -199,6 +249,8 @@ impl Record {
 pub struct Card {
     pub id: String,
     pub requester: String,
+    /// Beside `requester`, never folded into it. See [`Verified`].
+    pub verified: Verified,
     pub app: String,
     pub action: String,
     pub grade: String,
@@ -384,9 +436,11 @@ impl Store {
     ///
     /// `now` and `at` are passed in rather than read here so the tests can move the clock. The
     /// public wrappers below supply the real ones; nothing outside this module can pick a time.
+    #[allow(clippy::too_many_arguments)]
     pub fn request(
         &mut self,
         requester: &str,
+        verified: Verified,
         app: &str,
         action: &str,
         args: serde_json::Value,
@@ -448,6 +502,7 @@ impl Store {
         self.records.push(Record {
             id: id.clone(),
             requester: requester.trim().to_string(),
+            verified,
             app: app.to_string(),
             action: action.to_string(),
             args,
@@ -611,6 +666,7 @@ impl Store {
             let card = Card {
                 id: record.id.clone(),
                 requester: record.requester.clone(),
+                verified: record.verified.clone(),
                 app: record.app.clone(),
                 action: record.action.clone(),
                 grade: record.grade.clone(),
@@ -701,13 +757,24 @@ fn hhmm() -> String {
 
 pub fn request(
     requester: &str,
+    verified: Verified,
     app: &str,
     action: &str,
     args: serde_json::Value,
     grade: &str,
     purpose: &str,
 ) -> Result<Requested, String> {
-    locked().request(requester, app, action, args, grade, purpose, Instant::now(), &hhmm())
+    locked().request(
+        requester,
+        verified,
+        app,
+        action,
+        args,
+        grade,
+        purpose,
+        Instant::now(),
+        &hhmm(),
+    )
 }
 
 pub fn status(id: &str) -> Option<Status> {
@@ -762,10 +829,24 @@ mod approvals_tests {
 
     /// A fresh store per test. Nothing here touches the process-wide one, so the tests do not
     /// have to run in any order and cannot interfere with each other.
+    /// What the machine works out for itself about a Hermes request, as `caller_identity`
+    /// would hand it over. A fixture here rather than a real walk: this module's job is to
+    /// carry it beside the claim without mixing them, and that is what these tests check.
+    fn verified() -> Verified {
+        Verified {
+            line: "python -m hermes_cli.main gateway (pid 696) \u{b7} the attached mind".into(),
+            exe: "/home/pranab/hermes-agent/venv/bin/python".into(),
+            pid: 696,
+            attached_mind: "Hermes Agent".into(),
+            discrepancies: Vec::new(),
+        }
+    }
+
     fn ask(store: &mut Store, now: Instant) -> String {
         store
             .request(
                 "hermes",
+                verified(),
                 "calendar",
                 "delete_event",
                 args(serde_json::json!({"id": "evt-3", "confirm": true})),
@@ -927,6 +1008,7 @@ mod approvals_tests {
             store
                 .request(
                     "hermes",
+                    verified(),
                     "calendar",
                     "delete_event",
                     serde_json::json!({"id": format!("evt-{n}")}),
@@ -940,6 +1022,7 @@ mod approvals_tests {
         let err = store
             .request(
                 "hermes",
+                verified(),
                 "calendar",
                 "delete_event",
                 serde_json::json!({"id": "evt-99"}),
@@ -960,6 +1043,7 @@ mod approvals_tests {
         let first = store
             .request(
                 "hermes",
+                verified(),
                 "calendar",
                 "delete_event",
                 serde_json::json!({"id": "evt-3"}),
@@ -972,6 +1056,7 @@ mod approvals_tests {
         let second = store
             .request(
                 "hermes",
+                verified(),
                 "calendar",
                 "delete_event",
                 serde_json::json!({"id": "evt-3"}),
@@ -1001,6 +1086,7 @@ mod approvals_tests {
         let err = store
             .request(
                 "hermes",
+                verified(),
                 "calendar",
                 "delete_event",
                 serde_json::json!({"id": "evt-3", "confirm": true}),
@@ -1016,6 +1102,7 @@ mod approvals_tests {
         store
             .request(
                 "hermes",
+                verified(),
                 "calendar",
                 "delete_event",
                 serde_json::json!({"id": "evt-9"}),
@@ -1030,6 +1117,7 @@ mod approvals_tests {
         store
             .request(
                 "hermes",
+                verified(),
                 "calendar",
                 "delete_event",
                 serde_json::json!({"id": "evt-3", "confirm": true}),
@@ -1061,6 +1149,61 @@ mod approvals_tests {
             canonical(&other),
             "array order is data — two recipients in the other order is a different send"
         );
+    }
+
+    #[test]
+    fn approvals_what_the_caller_says_and_what_the_machine_knows_stay_apart() {
+        // The whole of issue #43 in one assertion: the card carries two answers to "who is
+        // asking" and neither is allowed to become the other. Folding them — showing only the
+        // verified line, or letting the claim overwrite it — would put the machine's authority
+        // behind a string the caller chose, which is what the card used to do.
+        let mut store = Store::new();
+        let now = Instant::now();
+        let id = ask(&mut store, now);
+        let card = store.cards(now).into_iter().find(|c| c.id == id).expect("the card");
+
+        assert_eq!(card.requester, "hermes", "the claim is untouched");
+        assert_eq!(card.verified.pid, 696);
+        assert_eq!(card.verified.attached_mind, "Hermes Agent");
+        assert!(card.verified.line.contains("pid 696"), "{}", card.verified.line);
+        assert_ne!(card.requester, card.verified.line);
+
+        // And `describe shell` publishes them under separate keys for the same reason.
+        let json = card.verified.to_json();
+        assert_eq!(json["pid"], 696);
+        assert_eq!(json["exe"], "/home/pranab/hermes-agent/venv/bin/python");
+        assert_eq!(json["attached_mind"], "Hermes Agent");
+        assert!(json.get("requester").is_none(), "the claim does not live in here");
+    }
+
+    #[test]
+    fn approvals_an_unidentifiable_caller_carries_an_empty_fact_not_a_flattering_one() {
+        // A caller the machine could not place must not inherit the last one's identity, and
+        // must not silently fall back to believing its own name. `Default` is the whole of it;
+        // the card turns the empty line into "could not be identified" (see `row_for`).
+        let mut store = Store::new();
+        let now = Instant::now();
+        let id = store
+            .request(
+                "Your bank",
+                Verified::default(),
+                "files",
+                "delete",
+                serde_json::json!({"name": "taxes.pdf"}),
+                "dangerous",
+                "Delete a file. It is not recoverable.",
+                now,
+                "12:03",
+            )
+            .unwrap()
+            .id;
+
+        let card = store.cards(now).into_iter().find(|c| c.id == id).expect("the card");
+        assert_eq!(card.requester, "Your bank", "what it said is still shown, verbatim");
+        assert_eq!(card.verified.pid, 0);
+        assert_eq!(card.verified.exe, "");
+        assert_eq!(card.verified.attached_mind, "");
+        assert!(card.verified.discrepancies.is_empty());
     }
 
     #[test]
@@ -1124,6 +1267,7 @@ mod approvals_tests {
         store
             .request(
                 "hermes",
+                verified(),
                 "notes",
                 "write",
                 serde_json::json!({"text": "hi"}),

@@ -362,6 +362,14 @@ fn forward_to_app(ui: &App, app: &str, action: &str, args: Option<serde_json::Va
 /// is opened as `downloads` and described as `download-manager`, and only that table knows.
 fn surface_for(app: &str) -> Option<String> {
     let key = app.to_lowercase();
+    // The shell sends under its own name and is not in the dock's route table, because nothing
+    // "opens" the desktop. It does have a control surface, though, and its own notifications'
+    // buttons have to reach it: without this, "See what it did" on a lapsed bypass would be a
+    // control that does nothing, which is the exact failure the download-manager button was
+    // routed to avoid.
+    if key == "yantrik" {
+        return Some("shell".to_string());
+    }
     crate::wire::dock::openable().into_iter().find_map(|entry| {
         (entry["name"].as_str() == Some(key.as_str()))
             .then(|| entry["describe_as"].as_str().map(str::to_string))
@@ -682,6 +690,35 @@ pub fn approval_waiting(requester: &str, app: &str, action: &str) {
             ))
             .urgency(Urgency::Critical),
     );
+}
+
+/// A bypass ran out on its own.
+///
+/// Only when it LAPSED. A person who pressed `Ask` themselves has just watched the chip change
+/// and needs telling nothing; the two people this is for are the one who chose "1 hour" and
+/// walked away, and the one sitting in front of the machine when the mind suddenly starts asking
+/// again. Both otherwise discover it by being surprised — and the first of them may never learn
+/// what the hour bought at all, because the chip is the only thing that changed and they were
+/// not looking at it. `mind_mode::take_lapse_notice` is what makes sure this is said once.
+///
+/// `normal`, not `critical`: it is news, not a question. Critical stays on screen until it is
+/// dismissed and survives Do Not Disturb, and a machine that had just become STRICTER holding
+/// somebody's screen for it would be the wrong way round.
+///
+/// The button is dropped when nothing ran, because "See what it did" under "Nothing ran without
+/// asking" is a control that contradicts the sentence above it.
+pub fn bypass_ended(ended: crate::mind_mode::BypassEnded) {
+    let mut notification = notify::Notification::new("Yantrik", "Bypass ended")
+        .body(crate::mind_mode::bypass_ended_body(&ended))
+        .urgency(Urgency::Normal);
+    if ended.unasked > 0 {
+        // Routed the way Download Manager's "Open folder" is: the shell presses the named
+        // action on the sender's own control surface, and here the sender is the shell.
+        // `control_approvals` publishes `show_mind_audit` for exactly this, and
+        // `mind_mode_the_tightening_action_is_published` fails the build if it disappears.
+        notification = notification.action("show_mind_audit", "See what it did");
+    }
+    notify::send(notification);
 }
 
 /// The mind finished saying something while the Lens was closed.

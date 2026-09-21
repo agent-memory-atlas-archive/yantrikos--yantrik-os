@@ -62,6 +62,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
     let consume_ui = ui.as_weak();
     let mode_ui = ui.as_weak();
     let audit_ui = ui.as_weak();
+    let audit_view_ui = ui.as_weak();
 
     surface
         .action(
@@ -100,7 +101,10 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             .arg(
                 Param::text("requester")
                     .optional()
-                    .describe("Who is asking, as the person would recognise it, e.g. hermes"),
+                    .describe("What to call you on the card, e.g. hermes. It is shown as `says \
+                               the caller`: nothing checks it, and it grants nothing. Beside it \
+                               the card shows the program this machine worked out for itself \
+                               from the socket, which is not taken from here"),
             ),
             move |args| {
                 let app = required(args, "app")?;
@@ -116,20 +120,52 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     if given.is_empty() { "an unnamed caller".to_string() } else { given }
                 };
 
-                // A card in plan mode is a question with no useful answer: the mode refuses the
-                // action whatever the person presses, so putting it on screen would only teach
-                // them that the card is noise. The bridge already knows not to ask — this is
-                // the same rule enforced where a caller that skipped the bridge reaches it.
-                if let crate::mind_mode::Decision::Refuse { why } =
-                    crate::mind_mode::decide(&grade, &app, &action)
-                {
-                    if crate::mind_mode::current() == crate::mind_mode::Mode::Plan {
-                        return Err(why);
+                // Everything the decision table says, not only the plan-mode half of it.
+                //
+                // This used to consult `decide` and then act on the answer only when the mode
+                // was `plan`, which meant a caller that skipped the bridge could still get a
+                // card raised for an action graded ABOVE `tool_permission` — a question no
+                // answer could satisfy, because the app's own runtime refuses it whatever the
+                // person clicks. The rule in both design notes is that nothing above the machine
+                // ceiling is ever put in front of a person, and until now only the bridge kept
+                // it. The socket is reachable without the bridge, so the shell keeps it too.
+                //
+                // The grade is checked first, because the grade is the one thing the caller
+                // declares that the decision actually turns on.
+                let (grade, grade_note) = match settle_grade(&app, &action, &grade) {
+                    Ok(settled) => settled,
+                    Err(why) => return Err(why),
+                };
+                match crate::mind_mode::decide(&grade, &app, &action) {
+                    // The same sentence the bridge relays, from the same function, so a mind
+                    // that reached the shell directly and one that came through the bridge hear
+                    // one story rather than two.
+                    crate::mind_mode::Decision::Refuse { why } => return Err(why),
+                    // Nothing to ask about. Answered plainly rather than with a card: a person
+                    // shown a question the machine was going to say yes to anyway learns that
+                    // the card is noise, which is the failure this whole design is built around.
+                    crate::mind_mode::Decision::Run { .. } => {
+                        return Ok(serde_json::json!({
+                            "status": "not_needed",
+                            "app": app,
+                            "action": action,
+                            "grade": grade,
+                            "mode": crate::mind_mode::current().as_str(),
+                            "next": "nobody was asked and nobody needs to be: this desktop's \
+                                     current mode runs this without a card. Run the action. If \
+                                     it ran unasked, call record_unasked_action afterwards.",
+                        }))
                     }
+                    crate::mind_mode::Decision::Ask => {}
+                }
+
+                let mut verified = who_is_asking(&requester);
+                if !grade_note.is_empty() {
+                    verified.discrepancies.push(grade_note);
                 }
 
                 let asked = approvals::request(
-                    &requester, &app, &action, parsed, &grade, &purpose,
+                    &requester, verified, &app, &action, parsed, &grade, &purpose,
                 )?;
 
                 // Straight onto the screen. The handler is already on the UI thread — this is
@@ -312,7 +348,12 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     .optional()
                     .describe("The exact arguments it ran with, as a JSON object"),
             )
-            .arg(Param::text("requester").optional().describe("Who ran it"))
+            .arg(
+                Param::text("requester")
+                    .optional()
+                    .describe("What to call yourself in the record. Self-declared; the log also \
+                               keeps what this machine established from the socket, separately"),
+            )
             .arg(
                 Param::text("outcome")
                     .optional()
@@ -339,7 +380,8 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 };
 
                 let entry = crate::mind_mode::record(
-                    &mode, &requester, &app, &action, &parsed, &grade, &outcome,
+                    &mode, &requester, &who_is_asking(&requester), &app, &action, &parsed,
+                    &grade, &outcome,
                 );
                 if let Some(ui) = audit_ui.upgrade() {
                     publish_mode(&ui);
@@ -351,6 +393,252 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 Ok(serde_json::json!({ "recorded": entry.line() }))
             },
         )
+        .action(
+            // `safe` for the same reason `record_unasked_action` is: it shows a person something
+            // they already own. It changes no mode, mints no rule, decides nothing and reveals
+            // nothing the caller could not read from `describe shell`'s `mind_audit_recent`. It
+            // opens a list.
+            //
+            // It is published because a notification's button has to be a real call. The shell
+            // presses a button on the sender's behalf by calling the named action on that
+            // sender's own control surface — Download Manager's "Open folder" is `open_folder`
+            // on Download Manager — and the sender of "Bypass ended" is the shell. Without an
+            // action here, that button would be a control that does nothing, which is worse
+            // than no button.
+            Action::new(
+                "show_mind_audit",
+                "Put the record of actions that ran WITHOUT the person being asked on their \
+                 screen — the same list as the mode chip's \"See what it did without asking\". \
+                 It shows what is already written down; it changes nothing, allows nothing, and \
+                 does not clear anything. `describe shell` carries the same entries under \
+                 `mind_audit_recent` if you only want to read them.",
+            )
+            .risk("safe"),
+            move |_args| {
+                let Some(ui) = audit_view_ui.upgrade() else {
+                    return Err("the shell is gone".to_string());
+                };
+                // Suppressed on boot, lock, login and onboarding, which is the same list the
+                // approval card and the mode menu use and for the same reason: a list of what
+                // this machine did while nobody was watching is readable by whoever happens to
+                // be standing in front of a locked screen.
+                if [0, 2, 3, 32].contains(&ui.get_current_screen()) {
+                    return Err(
+                        "this machine is locked, so the record of unasked actions was not put on \
+                         screen. It is all still there: unlock it and open the mode chip in the \
+                         status bar, or read `mind_audit_recent` in describe shell."
+                            .to_string(),
+                    );
+                }
+                ui.set_mind_menu_confirming(false);
+                ui.set_mind_menu_audit_open(true);
+                ui.set_mind_menu_open(true);
+                publish_mode(&ui);
+                Ok(serde_json::json!({
+                    "showing": "the record of unasked actions",
+                    "entries": crate::mind_mode::recent(crate::mind_mode::AUDIT_PUBLISHED).len(),
+                    "note": "it is on the person's screen now; nothing was changed.",
+                }))
+            },
+        )
+}
+
+// ── The grade, which the caller also declares ───────────────────────
+//
+// `request_approval(app, action, grade, …)` takes the grade as an argument, which makes it the
+// same kind of thing as the requester's name: something the caller said. It cannot raise
+// privilege — the app re-reads its own grade inside `app.act` and refuses above the ceiling
+// regardless — but it decides what this shell does with the request, and an understated grade
+// turns "refuse without asking" into a card, or a card into silence. Since the shell is now
+// establishing facts about the caller, it establishes this one too.
+
+/// How long the shell will wait for another app to say what one of its actions is graded.
+///
+/// This runs on the UI thread, inside an action handler, whose own budget is `UI_ROUNDTRIP` =
+/// 3s. Half a second leaves room for the rest of the handler and is already ten times what a
+/// local `app.describe` costs; a surface slower than that is one the caller should hear about
+/// rather than wait on, and `SyncRpcClient`'s breaker makes the second attempt free.
+const GRADE_LOOKUP: Duration = Duration::from_millis(500);
+
+/// How much of the "you said X, the app says Y" sentence fits on one elided card row.
+const NOTE_CHARS: usize = 62;
+
+/// The grade to act on, and the note the card owes the person if it is not what was declared.
+///
+/// Refuses rather than guesses. An app this desktop does not have, an action it does not
+/// publish, or a surface that will not say — none of those is a reason to put a card in front of
+/// somebody, because there is nothing behind it for them to allow.
+fn settle_grade(app: &str, action: &str, claimed: &str) -> Result<(String, String), String> {
+    let published = published_grade(app, action)?;
+    let note = grade_note(claimed, &published);
+    Ok((published, note))
+}
+
+/// What the target app itself says one of its actions is graded.
+fn published_grade(app: &str, action: &str) -> Result<String, String> {
+    let Some(surface) = surface_for(app) else {
+        return Err(format!(
+            "there is no app called `{app}` on this desktop, so nothing was put in front of the \
+             person. `os_apps` lists the names this machine uses."
+        ));
+    };
+
+    // The shell asking the shell. Over the socket this would be a call the shell's own UI thread
+    // has to answer while it is blocked making it — so it is read straight out of the registry
+    // that thread already holds.
+    if surface == "shell" {
+        return yantrik_app_runtime::control::published_grade(action)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "`shell` publishes no action called `{action}`, so there is nothing to ask \
+                     about. Read `os_describe shell` for what it does publish."
+                )
+            });
+    }
+
+    let address = format!("app-{surface}");
+    if !yantrik_app_runtime::service::is_up(&address) {
+        return Err(format!(
+            "`{app}` is not running, so this machine could not check what `{action}` is graded \
+             and did not put a card in front of the person. Open it first."
+        ));
+    }
+    let reply = yantrik_ipc_transport::SyncRpcClient::for_service(&address)
+        .with_timeout(GRADE_LOOKUP)
+        .call("app.describe", serde_json::json!({}))
+        .map_err(|e| {
+            format!(
+                "`{app}` did not say what `{action}` is graded ({}), so nothing was put in front \
+                 of the person. A grade nobody published is not a grade this machine will act on.",
+                e.message
+            )
+        })?;
+
+    reply["actions"]
+        .as_array()
+        .and_then(|list| {
+            list.iter()
+                .find(|a| a["name"].as_str() == Some(action))
+                .and_then(|a| a["permission"].as_str())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| {
+            format!(
+                "`{app}` publishes no action called `{action}`, so there is nothing to ask about \
+                 and nothing was put in front of the person."
+            )
+        })
+}
+
+/// The control surface an app name answers on.
+///
+/// Three routes, because an app has up to three names. "Downloads" is opened as `downloads` and
+/// described as `download-manager`, and only the launcher's catalogue knows that; the desktop
+/// itself is `shell` and is in no catalogue because nothing opens it; and a surface can be
+/// answering under its own name without being in the launcher at all, which is not a reason to
+/// pretend it does not exist.
+fn surface_for(app: &str) -> Option<String> {
+    let key = app.trim().to_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    if key == "shell" || key == "yantrik" {
+        return Some("shell".to_string());
+    }
+    let routed = crate::wire::dock::openable().into_iter().find_map(|entry| {
+        (entry["name"].as_str() == Some(key.as_str()))
+            .then(|| entry["describe_as"].as_str().map(str::to_string))
+            .flatten()
+    });
+    routed.or_else(|| {
+        yantrik_app_runtime::control::running_apps().into_iter().find(|id| *id == key)
+    })
+}
+
+/// The sentence the card owes the person when the declared grade is not the published one.
+///
+/// Both directions are said, because either way the card is about to show a grade the caller did
+/// not name and a person comparing the two should not have to wonder. The understated direction
+/// is the one that matters — it is how a `dangerous` action would have been asked about as
+/// though it were routine — and it is why this is checked at all.
+fn grade_note(claimed: &str, published: &str) -> String {
+    let claimed = claimed.trim();
+    if claimed.eq_ignore_ascii_case(published) {
+        return String::new();
+    }
+    let note = format!("Caller said `{claimed}`; the app publishes `{published}`.");
+    if note.chars().count() <= NOTE_CHARS {
+        return note;
+    }
+    let head: String = note.chars().take(NOTE_CHARS).collect();
+    format!("{head}\u{2026}")
+}
+
+// ── The claim, and the fact beside it ───────────────────────────────
+
+/// What this machine can establish about whoever is on the socket right now.
+///
+/// **Called from inside an action handler and nowhere else.** The pid comes from a thread-local
+/// that `yantrik-app-runtime::control` installs for the duration of one dispatch, so anywhere
+/// else it is either empty or — worse — somebody else's request. It is also read *now* rather
+/// than when the card is drawn: the direct peer of an MCP-borne request is `python3 yos`, which
+/// runs one JSON-RPC call and exits, so a `/proc` walk a second later finds nothing.
+///
+/// `claimed` is only used to decide whether the two disagree. It never becomes part of the
+/// verified answer; that is the entire point of the split.
+fn who_is_asking(claimed: &str) -> approvals::Verified {
+    let Some(caller) = yantrik_app_runtime::control::caller() else {
+        // No credentials at all: a TCP connection on the Windows dev build, or a peer that was
+        // gone before `SO_PEERCRED` could be read. The card says "could not be identified"
+        // rather than falling back to believing the name, which is what it did before.
+        return approvals::Verified {
+            line: "could not be identified".to_string(),
+            ..Default::default()
+        };
+    };
+
+    // A different uid is worth saying out loud rather than quietly resolving. The socket
+    // directory is 0700 today, so this should be unreachable for anyone but root — which makes
+    // it exactly the thing to notice if it ever happens.
+    if caller.uid != own_uid() {
+        tracing::warn!(
+            pid = caller.pid,
+            uid = caller.uid,
+            "a request arrived on the control socket from another user"
+        );
+    }
+
+    // One read of the harness registry, used twice: resolving reads it to match an ancestor
+    // against an attached mind, and the mismatch check reads it to find the mind the claimed
+    // name names. `Host::list` locks and reaps, and this runs on the UI thread.
+    let minds = crate::caller_identity::attached_minds();
+    let identity = crate::caller_identity::resolve_with(caller.pid, &minds);
+
+    approvals::Verified {
+        line: identity.line(),
+        exe: identity.exe(),
+        pid: identity.pid(),
+        attached_mind: identity.attached_mind.clone().unwrap_or_default(),
+        discrepancies: {
+            let said = crate::caller_identity::mismatch(claimed, &identity, &minds);
+            if said.is_empty() { Vec::new() } else { vec![said] }
+        },
+    }
+}
+
+/// This process's own uid, for the comparison above. `libc` is not a dependency of this crate
+/// and does not need to become one: the shell's own runtime directory is owned by it.
+fn own_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(u32::MAX);
+    }
+    #[cfg(not(unix))]
+    {
+        u32::MAX
+    }
 }
 
 /// What `describe shell` publishes under `pending_approvals`.
@@ -359,6 +647,9 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
 /// not already have: seeing a request tells you what was asked, and consuming it still needs a
 /// grant that only a click creates. What it buys is worth more — a second mind, or a test, can
 /// see that the machine is waiting on a person rather than hung.
+///
+/// `requester` and `verified` are two keys and not one, in the same order the card draws them.
+/// A caller reading this has to be able to see that the first is a claim and the second is not.
 pub fn pending_for_describe() -> serde_json::Value {
     serde_json::Value::Array(
         approvals::pending()
@@ -367,6 +658,7 @@ pub fn pending_for_describe() -> serde_json::Value {
                 serde_json::json!({
                     "id": card.id,
                     "requester": card.requester,
+                    "verified": card.verified.to_json(),
                     "app": card.app,
                     "action": card.action,
                     "grade": card.grade,
@@ -529,6 +821,19 @@ pub fn wire(ui: &App) {
             // is a fact about the clock. Republished only when the label actually changes, so a
             // machine in `ask` mode rebuilds nothing on any of these ticks.
             crate::mind_mode::lapse();
+            // And say so. The chip changing is not telling anybody: the person this matters
+            // most to is the one who chose "1 hour" and left the room, and the chip is the only
+            // thing that moved while they were gone. No second timer — the lapse is noticed on
+            // the tick that was already looking, and `take_lapse_notice` answers once, so the
+            // fifty-nine ticks after it in that minute say nothing.
+            if let Some(ended) = crate::mind_mode::take_lapse_notice() {
+                tracing::info!(
+                    back_to = ended.back_to.as_str(),
+                    unasked = ended.unasked,
+                    "a bypass ran out on its own"
+                );
+                crate::wire::notifications::bypass_ended(ended);
+            }
             publish_mode_if_changed(&ui);
         }
     });
@@ -681,6 +986,23 @@ fn row_for(card: Card) -> crate::ApprovalRequest {
     crate::ApprovalRequest {
         id: card.id.into(),
         requester: card.requester.into(),
+        // Never blank. An empty line where the verified fact should be reads as "nothing to
+        // report", which is the opposite of what an unidentifiable caller means — and the card
+        // would silently lose a row, which is the height defect this design already had once.
+        verified: if card.verified.line.is_empty() {
+            "could not be identified".into()
+        } else {
+            card.verified.line.into()
+        },
+        // One model entry per sentence, one single-line `Text` per entry, for the same reason
+        // the arguments are a list: the card's height has to be arithmetic.
+        discrepancies: ModelRc::new(VecModel::from(
+            card.verified
+                .discrepancies
+                .into_iter()
+                .map(slint::SharedString::from)
+                .collect::<Vec<_>>(),
+        )),
         app: card.app.into(),
         action: card.action.into(),
         grade: card.grade.into(),
@@ -1124,12 +1446,164 @@ mod control_approvals_tests {
     #[test]
     fn mind_mode_the_tightening_action_is_published() {
         let names: Vec<String> = published_actions().into_iter().map(|(n, _)| n).collect();
-        for wanted in ["set_mind_mode", "record_unasked_action"] {
+        // `show_mind_audit` is here because it is what the "See what it did" button on the
+        // "Bypass ended" notification calls. The shell presses that button on the sender's own
+        // control surface, so deleting the action would leave a button that silently does
+        // nothing — and a dead control on a notification about permissions is worse than none.
+        for wanted in ["set_mind_mode", "record_unasked_action", "show_mind_audit"] {
             assert!(
                 names.iter().any(|n| n == wanted),
                 "`{wanted}` is not published any more. Published: {}",
                 names.join(", ")
             );
+        }
+    }
+
+    /// The card always has a verified row, and it is never empty.
+    ///
+    /// A blank here would read as "nothing to report", which is the opposite of what an
+    /// unidentifiable caller means — and the row would collapse, which is how this card lost its
+    /// header off the top of the screen the first time it ran on a real machine.
+    /// The grade a caller declares is checked against the one the app publishes.
+    #[test]
+    fn approvals_an_understated_grade_is_corrected_and_said_out_loud() {
+        use super::grade_note;
+
+        // The case this exists for: a `dangerous` action declared as something routine. The
+        // decision below runs on the published grade, and the card says the caller lied about it.
+        let said = grade_note("standard", "dangerous");
+        assert!(said.contains("standard"), "{said}");
+        assert!(said.contains("dangerous"), "{said}");
+        assert!(said.chars().count() <= super::NOTE_CHARS + 1, "{said}");
+        assert!(!said.contains('\n'), "one card row: {said}");
+
+        // Over-declaring is said too — the card is about to show a grade the caller did not name
+        // and a person comparing the two should not have to wonder which is which.
+        assert!(!grade_note("dangerous", "standard").is_empty());
+
+        // Agreement is silent, in either spelling. The bridge sends the app's own grade, so this
+        // is the ordinary path and it must add nothing to the card.
+        assert_eq!(grade_note("sensitive", "sensitive"), "");
+        assert_eq!(grade_note(" Sensitive ", "sensitive"), "");
+    }
+
+    /// `request_approval` acts on EVERY outcome of the decision table, not only plan mode.
+    ///
+    /// The gap this closes: a caller that skipped the bridge used to get a card raised for an
+    /// action graded above `tool_permission` — a question no answer could satisfy, because the
+    /// app's own runtime refuses it whatever the person clicks. The refusals here are the ones
+    /// `mind_mode::decide` makes, relayed verbatim, so a mind that came through the bridge and
+    /// one that came straight to the socket hear one story.
+    #[test]
+    fn approvals_the_shell_asks_only_what_the_decision_table_says_to_ask() {
+        use crate::mind_mode::{Decision, Mode, Modes};
+        use std::time::Instant;
+
+        // Every outcome the shared vectors name (`deploy/yantrik-os/mind-mode-vectors.json`),
+        // at least once each: what the mode decides, and what this handler does about it.
+        let cases: [(&str, Mode, &str, &str, &str); 6] = [
+            // outcome         mode         ceiling      published grade  what the shell does
+            ("run", Mode::Auto, "dangerous", "standard", "no card"),
+            // `auto` runs a `sensitive` action without asking, and `ask` mode would have raised
+            // a card for it — which is exactly what `run_logged` means and what the audit is
+            // for. Not driven through `bypass` here because `Modes::new` refuses to construct
+            // one: a machine must never come up in bypass, so only a person's click enters it.
+            ("run_logged", Mode::Auto, "dangerous", "sensitive", "no card"),
+            ("ask", Mode::Ask, "dangerous", "sensitive", "card"),
+            ("refuse_grade", Mode::Ask, "dangerous", "catastrophic", "refused"),
+            ("refuse_ceiling", Mode::Auto, "standard", "dangerous", "refused"),
+            ("refuse_mode", Mode::Plan, "dangerous", "standard", "refused"),
+        ];
+
+        for (outcome, mode, ceiling, published, expected) in cases {
+            let modes = Modes::new(mode);
+            let decision = modes.decide(published, "calendar", "delete_event", ceiling, Instant::now());
+
+            // The shape `request_approval` branches on. Kept beside the table it is derived from
+            // so a fourth outcome cannot be added to `decide` without this failing to classify.
+            let did = match &decision {
+                Decision::Refuse { .. } => "refused",
+                Decision::Run { .. } => "no card",
+                Decision::Ask => "card",
+            };
+            assert_eq!(
+                did, expected,
+                "`{outcome}` (mode {mode:?}, ceiling {ceiling}, graded {published}) must be \
+                 {expected}, and the handler branches on exactly these three variants"
+            );
+
+            // And a refusal is relayed word for word, never reworded into something a mind
+            // would read as a transport failure worth retrying.
+            if let Decision::Refuse { why } = &decision {
+                assert!(!why.is_empty());
+                assert!(
+                    why.contains("not a level this OS defines")
+                        || why.contains("tool_permission")
+                        || why.contains("plan mode"),
+                    "a refusal this handler relays has to be one of the three the table makes: \
+                     {why}"
+                );
+            }
+        }
+
+        // The whole point of looking the grade up: a `dangerous` action declared `standard` is
+        // decided as `dangerous`. Declared, it would have been run without a card in auto mode;
+        // published, the same machine refuses it outright under a `standard` ceiling.
+        let auto = Modes::new(Mode::Auto);
+        let claimed = auto.decide("standard", "files", "delete", "standard", Instant::now());
+        let published = auto.decide("dangerous", "files", "delete", "standard", Instant::now());
+        assert!(matches!(claimed, Decision::Run { .. }), "what the lie would have bought");
+        assert!(
+            matches!(&published, Decision::Refuse { why } if why.contains("tool_permission")),
+            "and what the published grade actually decides: {published:?}"
+        );
+        assert!(!super::grade_note("standard", "dangerous").is_empty(), "and the card says so");
+    }
+
+    #[test]
+    fn approvals_an_unidentified_caller_never_renders_a_blank_row() {
+        use crate::approvals::{Card, Status, Verified};
+        use slint::Model;
+
+        let card = |verified: Verified| Card {
+            id: "appr-1".into(),
+            requester: "an unnamed caller".into(),
+            verified,
+            app: "files".into(),
+            action: "delete".into(),
+            grade: "dangerous".into(),
+            purpose: "Delete a file. It is not recoverable.".into(),
+            args: vec!["name: taxes.pdf".into()],
+            warning: "The app says this cannot be undone.".into(),
+            can_session: false,
+            status: Status::Pending,
+            record: String::new(),
+            age_secs: 3,
+        };
+
+        let nothing = super::row_for(card(Verified::default()));
+        assert_eq!(nothing.verified, "could not be identified");
+        assert_eq!(nothing.discrepancies.row_count(), 0);
+
+        let known = super::row_for(card(Verified {
+            line: "hermes_cli gateway (pid 696) \u{b7} the attached mind".into(),
+            exe: "/home/pranab/hermes-agent/venv/bin/python".into(),
+            pid: 696,
+            attached_mind: "Hermes Agent".into(),
+            discrepancies: vec![
+                "\u{201c}Hermes Agent\u{201d} is attached here \u{2014} this is not it.".into(),
+                "The caller called this `standard`; the app publishes `dangerous`.".into(),
+            ],
+        }));
+        assert!(known.verified.contains("pid 696"), "{}", known.verified);
+        // Both disagreements survive. Concatenating them into one elided row would have shown
+        // the first and silently dropped the one that changes what the machine does.
+        assert_eq!(known.discrepancies.row_count(), 2);
+        // Every row is one line: the card's height is arithmetic, not a measurement.
+        assert!(!known.verified.contains('\n'));
+        for i in 0..known.discrepancies.row_count() {
+            let row = known.discrepancies.row_data(i).unwrap();
+            assert!(!row.contains('\n'), "{row}");
         }
     }
 

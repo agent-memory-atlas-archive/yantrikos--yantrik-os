@@ -40,7 +40,18 @@ export struct LensResult {
 // would be asking them to approve something they had not read.
 export struct ApprovalRequest {
     id: string,
-    requester: string,      // who is asking, as the person would recognise it
+    // What the caller CALLS itself. Nothing authenticates it; the card says so underneath.
+    requester: string,
+    // What this MACHINE knows: the program the kernel says opened the socket, resolved through
+    // /proc to the first ancestor a person would recognise. Never empty — `caller_identity`
+    // answers "could not be identified" rather than leaving a blank where a fact should be.
+    verified: string,
+    // What does not add up about this request, one already-bounded sentence per entry — the
+    // claimed name names an attached mind the ancestry contradicts, or the claimed grade is not
+    // the one the app publishes. Drawn in the same red as `warning`, because they are the same
+    // kind of thing: a reason to stop reading the name and start reading the lines under it.
+    // A list, so a third of these later costs no markup and no new height arithmetic.
+    discrepancies: [string],
     app: string,
     action: string,
     purpose: string,        // the action's own published description
@@ -138,15 +149,23 @@ export component ApprovalCard inherits Rectangle {
             padding: Theme.sp-3;
             spacing: Theme.sp-2;
 
-            // Who is asking, and how long they have to wait for an answer.
+            // Who is asking — said twice, on purpose, because the two answers are not the same
+            // kind of thing and the card must not let one pass for the other.
             //
-            // Two fixed lines rather than one wrapping one, so the card's height does not depend
-            // on how long the requester's name happens to be. The name is whatever the caller
-            // said it was — Hermes declares it on the MCP handshake, and the shell's own list of
-            // minds is the fallback — and NOTHING on this machine verifies it, which is why the
-            // second line says so right underneath. It cannot raise privilege (the machine
-            // ceiling is enforced from the app's real grade, not from anything on this card) but
-            // it can flatter, and a person deciding is entitled to know which it is.
+            // The first pair is the CLAIM: whatever the caller called itself, with the label
+            // `says the caller` under it. Hermes declares this on the MCP handshake and the
+            // bridge passes it through; anything that can open the shell's socket can put any
+            // string there. It cannot raise privilege (the machine ceiling is enforced from the
+            // app's real grade, not from anything on this card) but it can flatter.
+            //
+            // The second pair is what the MACHINE established, and it is not a rewording of the
+            // first: the kernel stamps the peer's pid on the socket at connect (SO_PEERCRED —
+            // the caller cannot write it), and `caller_identity.rs` walks /proc up from there,
+            // past our own `yos`/`yos-mcp` plumbing, to the first program a person would
+            // recognise. It says `could not be identified` rather than guessing.
+            //
+            // Four fixed single-line rows rather than anything that wraps, so the card's height
+            // stays arithmetic — see the geometry table in design/approvals-2026-09-21.md.
             HorizontalLayout {
                 spacing: Theme.sp-2;
 
@@ -174,11 +193,56 @@ export component ApprovalCard inherits Rectangle {
                 }
             }
             Text {
-                text: "self-declared name · asking to use this machine";
+                text: "says the caller · nothing on this machine checked that name";
                 color: Theme.text-dim;
                 font-size: Theme.fs-micro;
                 wrap: no-wrap;
                 overflow: elide;
+            }
+
+            // What the machine knows, in the same value-over-label shape, so the eye reads the
+            // pair rather than a sentence. Spacing 0 inside: the two belong together and the
+            // gap belongs between the pairs, not inside one.
+            VerticalLayout {
+                spacing: 0px;
+
+                Text {
+                    text: root.data.verified;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-micro;
+                    font-weight: 600;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+                Text {
+                    text: "verified by this machine · the kernel said so, not the caller";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
+
+            // What the caller said and what the machine found do not agree — the kind of
+            // disagreement a person cannot catch by reading, because the claim will look exactly
+            // right. Same red bar as "cannot be undone" below; one line each, elided, and the
+            // sentences are bounded where they are made (caller_identity.rs, control_approvals.rs)
+            // so the card's height stays arithmetic.
+            for said in root.data.discrepancies : HorizontalLayout {
+                spacing: Theme.sp-2;
+                Rectangle {
+                    width: 3px;
+                    background: Theme.color-danger;
+                }
+                Text {
+                    text: said;
+                    color: Theme.color-danger;
+                    font-size: Theme.fs-caption;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
             }
 
             // What it is. The app and action by their exact names, because those are the names

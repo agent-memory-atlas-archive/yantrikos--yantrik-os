@@ -446,8 +446,382 @@ python3 deploy/yantrik-os/yos-mcp-selftest.py     # needs Linux; the fake yos is
 ## Still open
 
 - Hermes' MCP `tools/call` timeout (see Timeouts above) — not in this repo, must allow 250s.
-- Nothing authenticates the `requester` name on a card. Issue #43.
+- ~~Nothing authenticates the `requester` name on a card. Issue #43.~~ — answered below,
+  21 September, in the sense that a *program* is now named. A name is still not authenticated and
+  cannot be; read "What is still not verified".
 - The card cannot show a diff or a preview of what the action will do — only its published purpose
   and its arguments. For `delete_event` that is enough; for something like a bulk file operation it
   would not be, and `control_files`' actions should probably grow a "what this will touch" line
   before they are routinely put in front of a person this way.
+
+---
+
+# 21 September 2026 — the card now says who, and separately who says so
+
+Issue #43, which both this note and `design/mind-modes-2026-09-21.md` left open in the same
+sentence: *nothing authenticates the requester name.* The card read
+
+```
+Hermes Agent 0.14.0
+self-declared name · asking to use this machine
+```
+
+and the second line was the whole of the honesty. The name came off the MCP `initialize`
+handshake, the bridge passed it to `request_approval(…, requester)` as an argument, and anything
+that could open `app-shell.sock` could put `Your bank` there instead. The same string went into
+`~/.local/share/yantrik/mind-audit.jsonl` for everything a mind did unasked. A person deciding
+whether to allow a `sensitive` action was judging partly by a label nobody had checked.
+
+The answer was free and was being thrown away.
+
+## What is now verified, and how
+
+**The kernel, at `connect`.** `SO_PEERCRED` on an accepted unix socket yields the peer's `(pid,
+uid, gid)`, filled in by the kernel from the peer's own process. The caller does not write it and
+cannot influence it. `yantrik-ipc-transport::server` reads it at `accept` — not when a handler
+asks, because the peer of an MCP-borne request is `python3 /opt/yantrik/bin/yos`, which runs one
+JSON-RPC call and exits; asked a second later there is nothing left to ask about.
+
+**Carried to where the handler actually runs.** Handlers execute on the UI thread, reached by
+posting a closure to the Slint event loop (`UI_ROUNDTRIP` in `yantrik-app-runtime/src/control.rs`),
+so the socket thread is *not* where a handler could read a "current caller". The credentials
+travel **with** the closure and are installed on the far side for exactly the duration of that one
+dispatch, in a thread-local guarded by a `Drop` impl:
+
+```
+accept → PeerCred{pid,uid,gid}  (transport)
+       → ServiceHandler::handle_from(method, params, peer)
+       → on_ui_thread(who, job)
+       → [UI thread] CallerScope::enter(who)  →  handler  →  scope dropped
+```
+
+A global would have been wrong and the mistake would not have shown up in testing: two
+connections can be in flight at once, and a handler would sometimes read the pid belonging to
+somebody else's request. `control::caller() -> Option<Caller{pid,uid,gid}>` is the whole public
+surface, and **the handler signature is untouched** — the fourteen apps build `|args| { … }`
+closures and not one of them changes. The runtime refuses nothing on this basis; policy is the
+shell's.
+
+`ServiceHandler` gained `handle_from` with a **default implementation** that discards the peer and
+calls `handle`, so every other service and app compiles and behaves exactly as before.
+
+**Resolved into a program, in `crates/yantrik-ui/src/caller_identity.rs`.** From the pid:
+`/proc/<pid>/exe` (the real binary), `/proc/<pid>/cmdline` (NUL-separated), `/proc/<pid>/stat`
+(parent pid and **start time**). The walk goes up at most 8 ancestors, remembers what it has seen
+so a reused pid cannot send it round forever, and stops at `systemd`/`init`. Every read is allowed
+to fail — the direct peer usually *has* exited by the time anyone looks, which is why the chain is
+captured at handler time and kept on the request.
+
+The interesting fact is **the first ancestor that is not our own plumbing**. `yos`, `yos-mcp` and
+bare shells are skipped; `bash deploy.sh` is not a bare shell and is exactly what should be named.
+For a Hermes request the chain is
+
+```
+python3 yos                             ← the peer, gone within milliseconds
+python3 yos-mcp                         ← ours
+…/hermes-agent/venv/bin/python -m hermes_cli.main gateway run   ← what a person recognises
+systemd --user                          ← stop
+```
+
+**Matched against the attached minds** (`describe shell` → `minds[]`). The harness registry records
+*no pid and no executable* — `yantrik_harness::host::Entry` is `{id, name, detail, builtin, active,
+capabilities}` — so the match is by name against the ancestry, which is weaker than it sounds and
+is written down as such in `mind_for`. Tokens shorter than four characters do not count (a mind
+called "AI" would otherwise match half the process table), and our own bridge processes are
+excluded from the search: a mind's name in the path of the program *we* wrote to talk to it proves
+nothing. **If the registry ever grows a pid, `mind_for` is the one function that has to change**,
+and the match becomes an identity rather than a coincidence of spelling.
+
+## What the card says
+
+The single self-declared line became two labelled pairs — value over label, twice — so a person
+reads a claim and a fact rather than a sentence:
+
+| | what it says | how |
+|---|---|---|
+| Hermes through `yos-mcp` | `Hermes Agent 0.14.0` / `says the caller` · `python -m hermes_cli.main gateway run (pid 696) · the attached mind` / `verified by this machine` | peer pid → /proc → skip `yos`, `yos-mcp` → name matches an attached mind |
+| a bare `yos act` typed in the Terminal app | `an unnamed caller` / `says the caller` · `yantrik-terminal (pid 812)` / `verified by this machine` | peer is `yos`, parent is a bare `bash`, the app above it is the answer |
+| a script run over ssh | whatever it sent / `says the caller` · `python3 nightly.py (pid 5500)` / `verified by this machine` | the script is above the bridge and below the `sh -c`; `sshd` is further up and not needed |
+| nothing recognisable above the peer | … · `a program started from a terminal: python3 script.py (pid 4242)` | a bare shell was skipped and nothing above it was readable |
+| `/proc` gave nothing | … · `could not be identified` | no pid at all, or every read failed |
+
+Never blank and never a guess. `could not be identified` is a sentence the card prints on purpose;
+an empty row would read as "nothing to report", which is the opposite, and would collapse the row
+— which is precisely how this card lost its header off the top of the screen on 20 September.
+
+## The grade is a claim too, and the shell now checks it
+
+Found while the shared decision vectors were being built, and it is the same bug in a second
+place. `request_approval(app, action, grade, …)` takes the **grade** as an argument, so it is
+exactly as self-declared as the name — and the shell consulted `mind_mode::decide` and then acted
+on the answer **only when the mode was `plan`**. A caller that skipped the bridge could therefore
+get a card raised for an action graded above `tool_permission`: a question no answer could
+satisfy, because `yantrik-app-runtime::control` refuses the action whatever the person clicks.
+The rule in both notes is that nothing above the machine ceiling is ever put in front of a
+person; until now only the bridge kept it, and the socket is reachable without the bridge.
+
+Two fixes, in this order, because the second depends on the first.
+
+**The grade comes from the app, not from the caller.** `settle_grade` asks the target app what it
+publishes:
+
+- the desktop itself → `yantrik_app_runtime::control::published_grade(action)`, straight out of
+  the registry the UI thread already holds. **Not over the socket**: the shell asking the shell
+  would be a call its own UI thread has to answer while it is blocked making it.
+- any other app → `app.describe` over its socket, `GRADE_LOOKUP` = **500ms** (the handler's own
+  budget is `UI_ROUNDTRIP` = 3s, and `SyncRpcClient`'s breaker makes a second attempt free), then
+  `actions[] → permission`.
+- an app this desktop does not have, an action it does not publish, or a surface that will not
+  say → **refuse**. None of those is a reason to put a card in front of somebody, because there
+  is nothing behind it for them to allow.
+
+`surface_for` resolves three names, because an app has up to three: the launcher's route table
+("Downloads" opens as `downloads`, describes as `download-manager`), `shell`/`yantrik` for the
+desktop, and — new here — anything answering under its own name in `running_apps()`, so a surface
+that is plainly up but not in the launcher is not treated as fictional.
+
+If the declared grade is not the published one, the published one decides **and the card says so**:
+
+```
+│ Caller said `standard`; the app publishes `dangerous`.
+```
+
+Both directions are said. The understated one is why this is checked at all — it is how a
+`dangerous` action would have been asked about as though it were routine, or, under a `standard`
+ceiling, asked about at all instead of refused outright.
+
+**Every outcome of the table is acted on**, not the plan-mode third of it:
+
+| `decide` says | the shell does |
+|---|---|
+| `refuse_grade` / `refuse_ceiling` / `refuse_mode` | refuses, **relaying `decide`'s own sentence verbatim** — so a mind that came through the bridge and one that came straight to the socket hear one story |
+| `run` / `run_logged` | no card. Answers `{"status": "not_needed", app, action, grade, mode, next}` — a person shown a question the machine was going to say yes to anyway learns that cards are noise |
+| `ask` | raises the card |
+
+`not_needed` has one real caller and it is worth naming: the bridge's own
+`YOS_MCP_MAX_PERMISSION` is a cap a harness puts on *itself*, and it can turn a desktop `run` into
+a bridge `ask`. Before this, that reached `request_approval` and got a card. Now the shell answers
+`not_needed` and `ask_the_person` reports it as *"this bridge would have asked, the desktop's mode
+runs it without asking anybody, so nobody was disturbed"* and lets the action go ahead — which is
+the honest reading: a self-imposed cap cannot make the desktop more cautious than its owner set it.
+
+**When the claimed name and the verified program disagree**, a red line in the same style as
+"cannot be undone":
+
+```
+│ “Hermes Agent” is attached here — this is not it.
+```
+
+Deliberately narrow. It fires only when the claimed name names a mind that is *genuinely attached
+to this desktop* and the verified ancestry belongs to something else — the case a person cannot
+possibly catch by reading, because the name will be exactly right. It stays quiet for a name no
+mind here uses (`Your bank` is not a claim this can contradict; the card already prints the
+verified program beside it) and quiet when `/proc` gave nothing, because absence of evidence is
+not disagreement. A warning that fired on every ordinary unnamed caller would train people to
+ignore the one that matters, which is the same approval-fatigue failure the rest of this design is
+built around.
+
+Both this and the grade correction go in one list — `Verified::discrepancies`, "what does not add
+up about this request" — rendered as a `for` over one-line elided rows rather than as two
+hand-written conditional blocks. Concatenating them into a single elided row would have shown the
+first and silently dropped the second, and the second is the one that changes what the machine
+does; a third of these later costs no markup and no new height arithmetic.
+
+`describe shell` gained `verified` **beside** `requester`, in `pending_approvals[]` and in
+`mind_audit_recent[]` — and in every line of `mind-audit.jsonl`:
+
+```json
+{ "id": "appr-1",
+  "requester": "Hermes Agent 0.14.0",
+  "verified": { "line": "python -m hermes_cli.main gateway run (pid 696) · the attached mind",
+                "exe": "/home/pranab/hermes-agent/venv/bin/python",
+                "pid": 696,
+                "attached_mind": "Hermes Agent",
+                "discrepancies": [] },
+  "app": "calendar", "action": "delete_event", "grade": "sensitive", "age_secs": 4 }
+```
+
+Two keys, not one. A log that kept only the claim is the same gap in a different file; a log that
+kept only the fact would lose what the caller *said*, which is the thing that turns out to be
+interesting when they disagree.
+
+### The geometry, updated
+
+Two `fs-micro` rows were added (the verified value and its label, in one `VerticalLayout` with
+`spacing: 0` so the gap belongs between the pairs rather than inside one), plus one conditional
+`fs-caption` row for the mismatch warning. Everything is one line, `no-wrap`, elided, and the text
+is bounded in Rust (`LINE_CHARS` = 66, `WARNING_CHARS` = 58 in `caller_identity.rs`), so the card's
+height stays arithmetic. All of it lives inside the one unconditional `VerticalLayout` the
+20 September fix introduced — **conditional content never becomes a bare Rectangle's only child.**
+
+| | before | now |
+|---|---|---|
+| identity block | 15 + 8 + 15 = 38 | 15 + 8 + 15 + 8 + 30 = **76** |
+| discrepancy rows | — | + 24 **each**, only when one fires (16 + 8); at most two today |
+| card height, `calendar.delete_event` | ≈298 | **≈336** (+24 per discrepancy: ≈360, ≈384) |
+| card **y** on 1280×800 | 48 … ≈346 | 48 … **≈384** (≈408 / ≈432) |
+| button row centre **y** | ≈318 | **≈356** (≈380 / ≈404) |
+| Allow once | ≈(1159, 318) | **≈(1159, 356)** |
+| Deny | ≈(965, 318) | **≈(965, 356)** |
+
+The x column is unchanged and still exact: card left `W − 420`, width `404`, Deny centre `W − 315`,
+Allow centre `W − 121`. The button row is still `card bottom − 28`. The two numbers to actually
+check on a screenshot are still the two that are exact: nothing of the card may be above `y = 48`,
+and the four identity lines must all be readable.
+
+## What the socket's permissions allow today — a finding, not a change
+
+`yantrik_ipc_transport::server::socket_dir()` hardens the directory to **0700** and re-checks it
+on every call. The socket *files* inside it are created with the default umask and come out
+`srwxr-xr-x` (0755) — mode alone would let any local user connect. The directory is what actually
+stops them: no traverse, no connect. On the VM:
+
+```
+drwx------ 2 yantrik yantrik  /run/user/1000/yantrik      (or /tmp/yantrik-1000)
+srwxr-xr-x 1 yantrik yantrik  .../app-shell.sock
+```
+
+So today a request from a different uid should be **unreachable for anyone but root**, which makes
+it exactly the thing worth noticing if it ever happens: `who_is_asking` compares the peer's uid
+with the shell's and logs `a request arrived on the control socket from another user` at WARN.
+**Nothing was changed about the permissions.** If they are ever to be tightened, the socket file's
+own mode (`0700` after bind, or a `umask(0o077)` around it) is the belt to the directory's braces,
+and that is a deliberate decision to take separately.
+
+## What is still NOT verified
+
+Worth being blunt about, because the card is now more persuasive than it was and that is only an
+improvement if the limits are written down.
+
+- **This identifies a PROGRAM, not an intent and not a person.** "The request came from
+  `hermes_cli`" says nothing about whether what `hermes_cli` is asking for is a good idea. The
+  card still shows the real `app.action` and every argument verbatim, and that is still what a
+  person actually judges.
+- **A malicious process running as this user can simply *be* the ancestor.** It can fork, exec
+  anything, name itself whatever it likes in `argv[0]`, and sit in the chain where Hermes would
+  sit. There is no defence against this at this layer and there cannot be: same uid, same
+  everything. The uid boundary is the real boundary, and it is the directory mode above.
+- **Exe paths can be replaced.** `/proc/<pid>/exe` is the file that was executed; nothing here
+  hashes it or checks a signature, and `…/venv/bin/python` is whatever that file is today.
+- **Name-matching a mind is spelling, not identity.** See `mind_for` above: the harness registry
+  holds no pid, so "this ancestry belongs to Hermes" means "something in this ancestry has
+  `hermes` in its path". A program deliberately installed under a matching path would match.
+- **The pid-reuse window is narrowed, not closed.** Each `/proc` read pair is bracketed: `stat` is
+  read before and after `exe` and `cmdline`, and if field 22 (`starttime`) moved, the facts are
+  thrown away rather than half-attributed. Within a walk no pid is visited twice. What remains is
+  the gap between the kernel stamping the pid at `connect` and the shell's walk — microseconds to
+  a few milliseconds, inside one `app.act` — during which the peer could exit and its pid be
+  reused. That produces a *wrong* program name, not a forged one, and it is why the chain is
+  captured at handler time rather than when the card is drawn.
+- **Nothing is refused on this basis.** Not in the runtime (policy belongs to the shell) and not
+  in the shell (the machine ceiling and the mind mode are the policies, and they are about grades,
+  not about callers). The verified line is information for the person, not a gate.
+
+## Verifying it on the machine
+
+As the desktop user, `XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0`.
+
+**0. The permissions, first, because everything below assumes them.**
+
+```sh
+ls -ld /run/user/1000/yantrik ; ls -l /run/user/1000/yantrik/app-shell.sock
+#   drwx------  …  — the directory is what keeps other users out
+#   srwxr-xr-x  …  — the socket's own mode would not
+```
+
+**1. Hermes, through the bridge.** Drive the same `delete_event` as step 1 of the original
+verification above. The card must show four identity lines, in this order:
+
+```
+● Hermes Agent 0.14.0                                    114s left
+  says the caller · nothing on this machine checked that name
+  python -m hermes_cli.main gateway run (pid 696) · the attached mind
+  verified by this machine · the kernel said so, not the caller
+```
+
+Check the pid against the process tree, from a second shell:
+
+```sh
+yos describe shell | python3 -c 'import json,sys; \
+  print(json.load(sys.stdin)["state"]["pending_approvals"][0]["verified"])'
+#   {'line': 'python -m hermes_cli.main gateway run (pid 696) · the attached mind',
+#    'exe': '/home/pranab/hermes-agent/venv/bin/python', 'pid': 696,
+#    'attached_mind': 'Hermes Agent'}
+ps -o pid,ppid,args -p 696
+```
+
+**2. A bare `yos` typed in the Terminal app.** Open Terminal, then in it:
+
+```sh
+yos act shell request_approval app=calendar action=delete_event grade=sensitive \
+    args_json='{"id":"evt-3"}' purpose='Delete an event. It is not recoverable.' \
+    requester='Hermes Agent'
+```
+
+The claimed line says `Hermes Agent`; the verified line must name **the terminal**, not Hermes
+(`yantrik-terminal (pid …)`), and the red mismatch line must appear. That is the whole feature in
+one command: the same self-declared string that used to be the only thing on the card is now
+contradicted by the machine, on the card, while the person is looking at it.
+
+Step 2 is also the check for the grade gate, because `request_approval` will now refuse outright
+if `calendar` is closed (no grade to read) and will correct the grade if you understate it:
+
+```sh
+yos act shell request_approval app=calendar action=delete_event grade=safe \
+    args_json='{"id":"evt-3"}' purpose='x'
+#   card appears, headed `Graded sensitive`, with
+#   │ Caller said `safe`; the app publishes `sensitive`.
+
+yos act shell request_approval app=nosuchapp action=x grade=safe
+#   refused: there is no app called `nosuchapp` on this desktop …
+
+yos act shell request_approval app=files action=delete grade=safe args_json='{"name":"x"}'
+#   with tool_permission: standard — refused, naming `tool_permission`, and NO card appears.
+#   This is the gap that was open: before, a card went up that no answer could satisfy.
+
+yos act shell request_approval app=notes action=append grade=standard args_json='{"text":"hi"}'
+#   with the desktop in `auto` — {"status": "not_needed", …}, and no card.
+```
+
+**3. Nothing recognisable.** Over ssh, with no terminal app in the chain:
+
+```sh
+ssh yantrik@vm 'XDG_RUNTIME_DIR=/run/user/1000 yos act shell request_approval \
+    app=notes action=append grade=standard args_json="{\"text\":\"hi\"}"'
+```
+
+The verified line names the `sshd` session or the `yos` peer itself — never blank, never
+`systemd`.
+
+**4. A caller with no credentials.** There is no supported way to produce one on Linux (every
+unix-socket peer has a pid), which is the point; the path is exercised by the tests, and by the
+Windows dev build where the transport is TCP and the card says `could not be identified`.
+
+**5. The audit.** With the desktop in `auto` mode, let a mind run something unasked, then:
+
+```sh
+tail -1 ~/.local/share/yantrik/mind-audit.jsonl | python3 -m json.tool
+#   "requester": "Hermes Agent 0.14.0",
+#   "verified": {"line": "…", "exe": "…", "pid": 696, "attached_mind": "Hermes Agent"},
+```
+
+Both keys, always. If `verified.pid` is `0` on a line where `requester` is a real name, the caller
+reached `record_unasked_action` without credentials — which on this machine means a bug, not a
+caller.
+
+## Tests
+
+| where | what |
+|---|---|
+| `crates/yantrik-app-runtime/src/control.rs` | 3: a caller is current only inside its own dispatch (and nested scopes restore, and nothing leaks afterwards); a panicking handler leaves no caller behind; **the caller reaches the handler across the UI hop** — a real `UnixStream` to a real served surface, asserting the handler saw `pid == std::process::id()` and the uid that owns the socket. The hop is a stand-in worker thread (`test_ui_thread`, `#[cfg(test)]`), because the real one needs a Slint event loop, which needs a window, which needs a display |
+| `crates/yantrik-ui/src/caller_identity.rs` | 17: `stat` parsed from the **last** `)` (a comm containing `(weird) name` with spaces), a truncated `stat` is `None`, `PPid` out of `status`, NUL-separated `cmdline` with its trailing NUL and its path-shortening and its bound; ancestor selection (skips `yos`/`yos-mcp`, skips bare shells but **not** `bash deploy.sh`, stops at `systemd`, names the terminal, names a script over ssh, names the peer when nothing is above it); a short mind name cannot match half the process table; our own bridge cannot stand in for a mind; mismatch fires on a borrowed name and is silent for an unknown one, for an honest one, and when `/proc` gave nothing; the warning is one bounded line; the real walk is bounded and cycle-free |
+| `crates/yantrik-app-runtime/src/control.rs` | 1 more: an app can read its own published grade without a round trip, and an action it does not publish answers `None` rather than a default |
+| `crates/yantrik-ui/src/approvals.rs` | 2 more: the claim and the fact stay apart (and `to_json` carries no claim); an unidentifiable caller carries an empty fact rather than a flattering one |
+| `crates/yantrik-ui/src/control_approvals.rs` | 3 more: an unidentified caller never renders a blank row — it renders `could not be identified`, one line, and two discrepancies stay two rows; an understated grade is corrected and said in one bounded line, and agreement is silent; **`request_approval` acts on every outcome of the decision table** — each of the six the shared vectors name (`run`, `run_logged`, `ask`, `refuse_grade`, `refuse_ceiling`, `refuse_mode`) at least once, refusals relayed verbatim, plus the case the whole lookup is for: `files.delete` declared `standard` would have *run* unasked and, on its published `dangerous`, is refused outright under a `standard` ceiling |
+
+```
+cargo test --offline --profile fast -p yantrik-app-runtime
+cargo test --offline --profile fast -p yantrik-ui --bin yantrik-ui
+cargo check --offline --profile fast --workspace     # all fourteen apps, unchanged
+python3 tests/app-lints/run.py                        # 0 new
+```

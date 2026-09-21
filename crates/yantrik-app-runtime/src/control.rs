@@ -109,7 +109,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use yantrik_ipc_contracts::email::ServiceError;
-use yantrik_ipc_transport::server::{RpcServer, ServiceHandler};
+use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
 
 /// How long the RPC thread waits for the UI thread to answer.
 ///
@@ -347,25 +347,188 @@ thread_local! {
     static REGISTRY: RefCell<Option<Registry>> = const { RefCell::new(None) };
 }
 
+// ── Who is calling ──────────────────────────────────────────────────
+//
+// An action handler used to have no way to find out. Everything it could see about its caller
+// arrived inside the request, which means the caller wrote it — and the shell was printing one
+// of those strings on an approval card under the words "asking to use this machine". Anything
+// that could open the socket could put any name there (issue #43).
+//
+// The kernel knows better and says so for free: `SO_PEERCRED` on an accepted unix socket gives
+// the peer's pid, uid and gid, filled in at `connect` time from the peer's own process. The
+// transport reads it at accept (see `yantrik_ipc_transport::server::PeerCred`); this module's
+// job is to get it to the place the handler actually runs.
+//
+// That last part is the whole difficulty, and it is why this is a thread-local rather than a
+// global. The socket is served on its own thread; handlers run on the UI thread, reached by
+// posting a closure to the Slint event loop. A "current caller" stored anywhere shared would be
+// read by a handler that belongs to a different request, because two connections can be in
+// flight at once. So the caller travels WITH the closure, and is installed on the UI thread for
+// exactly the duration of that one dispatch.
+//
+// The handler signature is untouched: fourteen apps build `|args| { ... }` closures and none of
+// them has to change. A handler that cares reads `control::caller()`; every other one never
+// learns this exists.
+
+/// Who opened the socket this request came in on, as the kernel reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caller {
+    /// The peer process at `connect` time. It may well have exited by now — `yos` runs one call
+    /// and stops — so anything that wants `/proc` facts about it must read them promptly.
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+thread_local! {
+    /// The caller of the dispatch currently running on THIS thread, or `None`.
+    static CURRENT_CALLER: RefCell<Option<Caller>> = const { RefCell::new(None) };
+}
+
+/// Who is calling, inside an action or describe handler. `None` when nothing could be
+/// established — a TCP dev connection, a peer that vanished, or a handler invoked directly.
+///
+/// Nothing in this crate refuses anything on the strength of it. Deciding what an identity is
+/// worth is the shell's business (`crates/yantrik-ui/src/caller_identity.rs`); the runtime's job
+/// is only to make the fact available where it can be read honestly.
+pub fn caller() -> Option<Caller> {
+    CURRENT_CALLER.with(|cell| *cell.borrow())
+}
+
+/// The grade THIS app publishes for one of its own actions.
+///
+/// Reads the registry installed by [`App::serve`], so it answers only on the thread that owns
+/// the window — which is where handlers run, and is the only place it is wanted. Over the socket
+/// the same fact arrives as `permission` in `app.describe`; this is the local shortcut, and the
+/// shell needs it because asking *itself* over its own socket from its own UI thread is a call
+/// that cannot be answered until the call returns.
+///
+/// `None` means "this app has no action by that name", which a caller must not read as "it is
+/// harmless": an unknown action has no grade, and the honest answer to a question about one is
+/// a refusal, not a default.
+pub fn published_grade(action: &str) -> Option<&'static str> {
+    REGISTRY.with(|cell| {
+        cell.borrow().as_ref().and_then(|reg| {
+            reg.actions.iter().find(|(a, _)| a.name == action).map(|(a, _)| a.permission)
+        })
+    })
+}
+
+/// Installs `who` for the duration of `job` and takes it back afterwards.
+///
+/// A guard rather than a set-then-clear pair, so a handler that panics cannot leave the next
+/// dispatch on this thread reading the previous caller's pid. It restores the *previous* value
+/// rather than clearing, which costs nothing and keeps a nested call honest.
+struct CallerScope(Option<Caller>);
+
+impl CallerScope {
+    fn enter(who: Option<Caller>) -> CallerScope {
+        let previous = CURRENT_CALLER.with(|cell| cell.replace(who));
+        CallerScope(previous)
+    }
+}
+
+impl Drop for CallerScope {
+    fn drop(&mut self) {
+        CURRENT_CALLER.with(|cell| *cell.borrow_mut() = self.0);
+    }
+}
+
+/// Hand one closure to the thread that owns the window.
+///
+/// Boxed rather than generic so that the test stand-in below can take it back unrun when no
+/// stand-in is installed; the box costs one allocation per RPC call, which is nothing beside
+/// the round trip it is part of.
+fn post_to_ui(job: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+    // In tests there is no Slint event loop and no window. The stand-in is a plain worker
+    // thread fed by a channel — the same shape as the real hop (the closure crosses a thread
+    // boundary, and the caller has to cross with it), which is the property under test.
+    #[cfg(test)]
+    let job = match test_ui_thread::post(job) {
+        Ok(()) => return Ok(()),
+        Err(unrun) => unrun,
+    };
+
+    slint::invoke_from_event_loop(job).map_err(|e| format!("app is not accepting requests: {e}"))
+}
+
+/// A stand-in for the thread that owns the window, for the one test that needs a real socket.
+///
+/// The property worth testing is that the caller crosses the thread hop with its own request,
+/// and that cannot be tested through a handler called directly — `Registry::act` never sees a
+/// socket. It also cannot be tested through the real hop, because `slint::invoke_from_event_loop`
+/// needs a running event loop, which needs a window, which needs a display the test machine does
+/// not have. So the hop is a channel to a worker thread: same shape, same thread boundary, same
+/// thread-local, no compositor.
+///
+/// One stand-in per test binary, because [`REGISTRY`] is a thread-local and the stand-in is the
+/// thread that holds it.
+#[cfg(test)]
+mod test_ui_thread {
+    use std::sync::mpsc::{self, Sender};
+    use std::sync::{Mutex, OnceLock};
+
+    type Job = Box<dyn FnOnce() + Send>;
+
+    static STANDIN: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
+
+    /// Start the stand-in and build the registry ON it.
+    ///
+    /// `build` rather than a `Registry`: a registry holds the app's own closures, which are not
+    /// `Send` (they capture Slint handles in a real app), so it has to be made on the thread
+    /// that will keep it. Returns only once the registry is in place, so a request that arrives
+    /// immediately cannot find an empty one.
+    pub(super) fn start(build: Box<dyn FnOnce() -> super::Registry + Send>) {
+        let (tx, rx) = mpsc::channel::<Job>();
+        let (ready, is_ready) = mpsc::channel::<()>();
+        std::thread::Builder::new()
+            .name("control-test-ui".into())
+            .spawn(move || {
+                super::REGISTRY.with(|cell| *cell.borrow_mut() = Some(build()));
+                let _ = ready.send(());
+                while let Ok(job) = rx.recv() {
+                    job();
+                }
+            })
+            .expect("stand-in UI thread");
+        is_ready.recv().expect("the stand-in installed its registry");
+        STANDIN
+            .set(Mutex::new(tx))
+            .map_err(|_| ())
+            .expect("only one stand-in per test binary");
+    }
+
+    /// Post to the stand-in, or hand the job straight back when there is none — which is every
+    /// test but the one, so nothing else in this module changes behaviour under `cfg(test)`.
+    pub(super) fn post(job: Job) -> Result<(), Job> {
+        let Some(tx) = STANDIN.get() else { return Err(job) };
+        let tx = tx.lock().unwrap_or_else(|e| e.into_inner());
+        tx.send(job).map_err(|e| e.0)
+    }
+}
+
 /// Ask the UI thread to run `job` and wait for its answer.
 ///
 /// Returns `Err` when the event loop is not running or is too busy to answer inside
 /// [`UI_ROUNDTRIP`] — both of which the caller should see as an error rather than a hang.
-fn on_ui_thread<T, F>(job: F) -> Result<T, String>
+///
+/// `who` rides along to the far side. It is installed there, not here: the handler runs on the
+/// UI thread, so the UI thread is the only place a thread-local can be read by it.
+fn on_ui_thread<T, F>(who: Option<Caller>, job: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&Registry) -> T + Send + 'static,
 {
     let (tx, rx) = mpsc::sync_channel::<Result<T, String>>(1);
-    slint::invoke_from_event_loop(move || {
+    post_to_ui(Box::new(move || {
+        let _scope = CallerScope::enter(who);
         let answer = REGISTRY.with(|cell| match cell.borrow().as_ref() {
             Some(reg) => Ok(job(reg)),
             None => Err("this app published no control surface".to_string()),
         });
         // The receiver is gone only if we already timed out; dropping the answer is correct.
         let _ = tx.send(answer);
-    })
-    .map_err(|e| format!("app is not accepting requests: {e}"))?;
+    }))?;
 
     rx.recv_timeout(UI_ROUNDTRIP)
         .map_err(|_| format!("app did not answer within {}s", UI_ROUNDTRIP.as_secs()))?
@@ -382,13 +545,39 @@ impl ServiceHandler for ControlRpc {
         &self.service_id
     }
 
+    /// The transport's older entry point. Kept so the trait is satisfied for any caller that
+    /// still uses it; it means "nobody said who was calling", which is exactly what `None` is.
     fn handle(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ServiceError> {
+        self.dispatch(method, params, None)
+    }
+
+    fn handle_from(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        peer: Option<PeerCred>,
+    ) -> Result<serde_json::Value, ServiceError> {
+        self.dispatch(
+            method,
+            params,
+            peer.map(|p| Caller { pid: p.pid, uid: p.uid, gid: p.gid }),
+        )
+    }
+}
+
+impl ControlRpc {
+    fn dispatch(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        who: Option<Caller>,
+    ) -> Result<serde_json::Value, ServiceError> {
         match method {
-            "app.describe" => on_ui_thread(|reg| reg.describe())
+            "app.describe" => on_ui_thread(who, |reg| reg.describe())
                 .map_err(|m| ServiceError { code: -32000, message: m }),
 
             "app.act" => {
@@ -417,9 +606,18 @@ impl ServiceHandler for ControlRpc {
                 // Read on this thread, enforced on the UI one: the settings file is IO and the
                 // dispatch closure is a turn of the event loop.
                 let ceiling = configured_ceiling();
-                tracing::info!(action = %action, id = %action_id, ceiling = %ceiling, "app.act");
+                tracing::info!(
+                    action = %action,
+                    id = %action_id,
+                    ceiling = %ceiling,
+                    // Logged as a pair so a line in the journal says who as well as what. The
+                    // audit log is the shell's job; this is the runtime's own record.
+                    caller_pid = who.map(|c| c.pid).unwrap_or(0),
+                    caller_uid = who.map(|c| c.uid).unwrap_or(0),
+                    "app.act"
+                );
                 let id = action_id.clone();
-                let outcome = on_ui_thread(move |reg| {
+                let outcome = on_ui_thread(who, move |reg| {
                     reg.act(&action, &args, expect.as_deref(), &id, &ceiling)
                 })
                 .map_err(|m| ServiceError { code: -32000, message: m })?;
@@ -479,8 +677,17 @@ impl App {
         let app_id = self.registry.app_id.clone();
         let action_count = self.registry.actions.len();
         REGISTRY.with(|cell| *cell.borrow_mut() = Some(self.registry));
+        serve_rpc(&app_id, action_count);
+    }
+}
 
-        let service_id = service_id_for(&app_id);
+/// Bind the socket and answer on it, on a thread of its own.
+///
+/// Split out of [`App::serve`] so the test below can put the registry on a stand-in UI thread
+/// and still bind exactly the same server. `serve` itself is byte-for-byte what it always did.
+fn serve_rpc(app_id: &str, action_count: usize) {
+    {
+        let service_id = service_id_for(app_id);
         std::thread::Builder::new()
             .name(format!("{service_id}-rpc"))
             .spawn(move || {
@@ -922,6 +1129,143 @@ mod tests {
         assert_eq!(ceiling_from("dark_mode: true\n"), DEFAULT_CEILING, "absent key");
         assert_eq!(ceiling_from(""), DEFAULT_CEILING, "empty file");
         assert_eq!(ceiling_from("tool_permission: whenever-i-feel_like_it\n"), DEFAULT_CEILING);
+    }
+
+    #[test]
+    fn an_apps_own_grade_can_be_read_without_a_round_trip() {
+        // The shell needs this to check a caller's *claimed* grade against the app's real one,
+        // and for its own actions it cannot ask over the socket: the answer would have to come
+        // from the UI thread that is making the call. `None` for an action that does not exist,
+        // because an unknown action has no grade and defaulting one would invent a permission.
+        REGISTRY.with(|cell| {
+            *cell.borrow_mut() = Some(Registry {
+                app_id: "shell".into(),
+                describe: None,
+                actions: vec![
+                    (
+                        Action::new("files_delete", "Delete a file").risk("dangerous"),
+                        Box::new(|_| Ok(serde_json::Value::Null)),
+                    ),
+                    (
+                        Action::new("open_app", "Open an app"),
+                        Box::new(|_| Ok(serde_json::Value::Null)),
+                    ),
+                ],
+            })
+        });
+
+        assert_eq!(published_grade("files_delete"), Some("dangerous"));
+        assert_eq!(published_grade("open_app"), Some("standard"), "unstated risk is standard");
+        assert_eq!(published_grade("no_such_action"), None);
+
+        REGISTRY.with(|cell| *cell.borrow_mut() = None);
+        assert_eq!(published_grade("files_delete"), None, "and nothing is served here now");
+    }
+
+    // ── Who is calling ──
+
+    #[test]
+    fn a_caller_is_current_only_while_its_own_dispatch_runs() {
+        // The reason this is a thread-local with a guard rather than a global: two connections
+        // can be in flight at once, and a handler must never read the pid of somebody else's
+        // request. Outside a scope there is no caller at all — not a stale one.
+        assert_eq!(caller(), None, "nothing is calling before anything has called");
+
+        let hermes = Caller { pid: 696, uid: 1000, gid: 1000 };
+        {
+            let _scope = CallerScope::enter(Some(hermes));
+            assert_eq!(caller(), Some(hermes));
+
+            // Nested, because `describe` inside an `act` is a real shape.
+            {
+                let _inner = CallerScope::enter(Some(Caller { pid: 4242, uid: 1000, gid: 1000 }));
+                assert_eq!(caller().map(|c| c.pid), Some(4242));
+            }
+            assert_eq!(caller(), Some(hermes), "the outer dispatch gets its own caller back");
+        }
+        assert_eq!(caller(), None, "and nothing is left behind");
+    }
+
+    #[test]
+    fn a_handler_that_panics_does_not_leave_its_caller_behind() {
+        // A leaked caller would be worse than none: the next request on this thread would be
+        // attributed to the process that crashed the previous one, and the shell would print
+        // that pid on an approval card as a verified fact.
+        let panicked = std::panic::catch_unwind(|| {
+            let _scope = CallerScope::enter(Some(Caller { pid: 7, uid: 0, gid: 0 }));
+            assert_eq!(caller().map(|c| c.pid), Some(7));
+            panic!("a handler blew up");
+        });
+        assert!(panicked.is_err(), "the panic has to actually happen for this to prove anything");
+        assert_eq!(caller(), None);
+    }
+
+    /// The one test with a real socket in it. See `test_ui_thread` for why the hop is a channel.
+    #[cfg(unix)]
+    #[test]
+    fn the_caller_reaches_the_handler_across_the_ui_hop() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::net::UnixStream;
+
+        const APP: &str = "caller-test";
+
+        test_ui_thread::start(Box::new(|| Registry {
+            app_id: APP.into(),
+            describe: Some(Box::new(|| View::new("caller-test"))),
+            actions: vec![(
+                // `safe` so the machine ceiling cannot refuse this on a developer's box that
+                // has tightened `tool_permission`; the ceiling has its own tests above.
+                Action::new("who", "Report who is calling").risk("safe"),
+                Box::new(|_| {
+                    // The handler's own view, on the thread the handler actually runs on. If
+                    // the caller had been left on the socket thread this would be null.
+                    Ok(match caller() {
+                        Some(c) => serde_json::json!({ "pid": c.pid, "uid": c.uid }),
+                        None => serde_json::Value::Null,
+                    })
+                }),
+            )],
+        }));
+        serve_rpc(APP, 1);
+
+        let address = RpcServer::default_address(&service_id_for(APP));
+        let mut socket = None;
+        for _ in 0..100 {
+            if let Ok(s) = UnixStream::connect(&address) {
+                socket = Some(s);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let mut socket = socket.unwrap_or_else(|| panic!("nothing ever bound {address}"));
+
+        socket
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"app.act\",\
+                  \"params\":{\"action\":\"who\",\"args\":{}}}\n",
+            )
+            .expect("write the request");
+        let mut line = String::new();
+        BufReader::new(socket.try_clone().expect("clone the socket"))
+            .read_line(&mut line)
+            .expect("read the reply");
+
+        let reply: serde_json::Value = serde_json::from_str(&line).expect(&line);
+        let seen = &reply["result"]["result"];
+        assert!(
+            !seen.is_null(),
+            "the handler saw no caller at all — the credentials did not cross the hop: {line}"
+        );
+        assert_eq!(
+            seen["pid"].as_u64(),
+            Some(u64::from(std::process::id())),
+            "the kernel's pid for this connection is this test process: {line}"
+        );
+        // The uid the kernel reported has to be the uid that owns the socket — this test is both
+        // ends of the connection, so anything else means the field is not the peer's.
+        let owner = std::fs::metadata(&address).expect("the socket exists").uid();
+        assert_eq!(seen["uid"].as_u64(), Some(u64::from(owner)), "{line}");
     }
 
     #[test]

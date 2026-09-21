@@ -563,11 +563,240 @@ python3 tests/app-lints/run.py
 - **The decision table is written twice** (§3). The cheap fix — a `decide` action on the shell —
   costs a round trip per `os_act`; the real fix is the bridge and the shell sharing one
   implementation, which needs the bridge to stop being a stdlib-only Python script.
+  *(Still two copies, but they can no longer drift in silence — see
+  [Later the same day](#later-the-same-day-21-september-2026).)*
 - **Nothing authenticates the requester**, so `mind_audit.jsonl`'s `requester` field is a
   self-declared label like the name on a card. Issue #43.
 - **The audit is per-machine, not per-mind.** With two minds attached, `auto` applies to both.
 - **No notification when a bypass lapses.** The chip changes; nothing tells a person who is
   looking elsewhere. That belongs to the notifications work landing beside this.
+  *(Done — see [Later the same day](#later-the-same-day-21-september-2026).)*
 - **`os_act`'s worst case grew by one shell call** (`record_unasked_action`), so
   `OS_ACT_MAX_SECONDS` is now 270s. A client's per-tool-call timeout must allow it; see the README
   and `design/approvals-2026-09-21.md`'s Timeouts section, which has the same open item.
+
+---
+
+## Later the same day, 21 September 2026
+
+Two of the items above. The bypass lapse says something now, and the two copies of the decision
+table are held against each other by a file neither of them can edit by hand.
+
+### The lapse was already noticed; nothing was said about it
+
+Worth being exact, because "add a timer" was the obvious move and would have been wrong.
+
+Expiry was noticed in **two** places, and both were already right:
+
+1. `Modes::mode(now)` derives the effective mode on every read. A bypass is over the instant its
+   deadline passes, whether or not anything looked — so no decision was ever made under a bypass
+   that had run out. That is the half that matters for safety and it needed nothing.
+2. The one-second `Timer` in `control_approvals::wire` calls `mind_mode::lapse()`, which folds the
+   expired bypass into stored state so the chip stops saying `Bypass`. **That call already
+   returned a `bool` saying the mode had just changed, and the tick threw it away.**
+
+So the moment of lapse was being observed, within a second, by a timer that was already running.
+Nothing was announced because nothing asked the question. There is no new timer: `lapse()` now
+arms a one-shot notice and the same tick takes it.
+
+Taken, not read. `Modes::take_lapse` empties the slot, so the tick that crosses the deadline is
+the one that speaks and the fifty-nine after it in that minute say nothing —
+`mind_mode_a_lapse_is_reported_once_and_only_once` drives two ticks past the deadline and asserts
+one notification, because a one-second timer that posted on every tick is the obvious way to get
+this wrong.
+
+**Only a lapse.** `person_set_mode` and `lower_to` clear the slot after folding, because in both
+of those a mode was just chosen deliberately and the notice would be about a machine that no
+longer exists. A person who pressed `Ask` has watched the chip change; telling them "the mind is
+back in Ask mode" is telling them what they just did.
+
+### What it says
+
+`app: "Yantrik"`, **normal** urgency — news, not a question. `critical` stays on screen until it
+is dismissed and survives Do Not Disturb, and a machine that has just become *stricter* holding
+somebody's screen for it would be the wrong way round.
+
+Title: **Bypass ended**. Body, in three cases:
+
+```
+nothing ran:  The mind is back in Ask mode. It asks you before anything that could
+              matter. Nothing ran without asking while bypass was on.
+one thing:    … It did one thing without asking while bypass was on.
+several:      … It did 7 things without asking while bypass was on.
+```
+
+The mode's sentence is `Mode::meaning()` — the same string the menu shows — so the notification
+and the mode chip can never describe `auto` differently. Zero and one are different sentences
+rather than a number substituted into one: "It did 0 things without asking" is the shape of a
+machine reading a counter out loud, and the person this is written for has just come back to
+their desk. `mind_mode_the_lapse_notice_reads_like_a_person_wrote_it` holds all three.
+
+**N** is the audit entries recorded with `mode == "bypass"` since the window opened. An action a
+session **rule** covered is logged as `rule` and is deliberately not counted: it would have run
+in `ask` mode too, so it is not something the bypass bought. The window opens on the *first* of
+two back-to-back bypasses, because a person who extends one is in one bypass as far as they are
+concerned. The clock is the wall clock, not the `Instant` the deadline uses — the audit is
+written with `unix` seconds, and the two cannot be compared.
+
+### A button that is a real call
+
+**"See what it did"** calls `show_mind_audit` on the shell's own control surface. That is exactly
+how Download Manager's "Open folder" works: the shell presses the button on the sender's behalf,
+because our own notifications have no `ActionInvoked` and the sender may not still be running.
+Here the sender is the shell, which is not in the dock's route table — nothing "opens" the
+desktop — so `wire::notifications::surface_for` now answers `shell` for `Yantrik`. Without that
+one line the button would have been drawn and done nothing.
+
+`show_mind_audit` is a new published action, `safe`, and it is the same argument as
+`record_unasked_action`: it shows a person something they already own, reveals nothing that
+`describe shell`'s `mind_audit_recent` does not, and decides nothing. It sets three properties
+and opens the menu on its audit view. It refuses on the lock, login, boot and onboarding screens
+— the same list the card and the menu use — because a record of what this machine did while
+nobody was watching is readable by whoever is standing in front of a locked screen.
+
+It is named in `mind_mode_the_tightening_action_is_published`, so deleting it fails the build
+rather than leaving a dead control on a notification about permissions. Its name carries none of
+`mode`, `rule`, `bypass`, `permission`, `ceiling`, so
+`mind_mode_only_a_person_can_raise_the_mode` still passes unchanged and §1's
+`describe shell --brief | grep -iE 'mode|rule|bypass|ceiling|permission'` still prints exactly
+the two lines it printed before.
+
+**No button when nothing ran.** "See what it did" sitting under "Nothing ran without asking"
+contradicts the sentence above it.
+
+### Making a bypass lapse without waiting fifteen minutes
+
+`YANTRIK_BYPASS_SECONDS`, read **once**, from the environment the shell was started in, into a
+`OnceLock`. Nothing on the socket, no click and no settings file can reach it afterwards.
+
+```sh
+YANTRIK_BYPASS_SECONDS=20 yantrik-ui      # every timed bypass ends after 20 seconds
+```
+
+It can only ever make a bypass **shorter**: the value is clamped to the duration the person
+actually chose (`shortened_by`, and `mind_mode_the_duration_hook_can_only_shorten`), so
+`YANTRIK_BYPASS_SECONDS=9000` with "15 minutes" pressed still gives fifteen minutes. A hook that
+could *extend* one would be a way to hold a machine in "do not ask me anything" for longer than
+anybody agreed to, which is the single outcome this whole feature is arranged to prevent.
+Shortening is a tightening, and tightening is the one direction everything here may move in. It
+does not reach "until the shell restarts", which has no deadline to shorten.
+
+A `cfg(test)` duration override was the alternative and was rejected for one reason: the machine
+runs the release binary, so a test-only constant cannot be exercised on the VM at all — and the
+check that matters is the one that would then never be run, a real notification drawn by the real
+toast with a button that really opens the list.
+
+### The two tables, held against each other
+
+`deploy/yantrik-os/mind-mode-vectors.json`: 364 vectors, checked in, **generated**.
+
+```sh
+# write it (only with the variable set — a test that rewrites its own expectation is not a test)
+YANTRIK_WRITE_VECTORS=1 cargo test --offline --profile fast \
+  -p yantrik-ui --bin yantrik-ui mind_mode_write_vectors
+
+# the two halves that make it worth having
+cargo test --offline --profile fast -p yantrik-ui --bin yantrik-ui mind_mode
+python3 deploy/yantrik-os/yos-mcp-selftest.py
+```
+
+Changing `Modes::decide` without regenerating fails
+`mind_mode_the_checked_in_vectors_are_what_decide_produces`, which names the cell that moved
+rather than saying "the file differs" over three hundred lines. Regenerating without changing the
+bridge fails the selftest. **Neither side can move alone.**
+
+One outcome word per case, and the words are the distinctions both implementations already made:
+
+| | |
+|---|---|
+| `run` | ran; nobody asked and nothing is written down |
+| `run_logged` | ran unasked, and `ask` mode would have raised a card — so it is in the audit |
+| `ask` | a card, and a wait |
+| `refuse_grade` | the grade is not one this OS defines. `None` is not `safe` |
+| `refuse_ceiling` | above `tool_permission`; nobody is asked, in any mode |
+| `refuse_mode` | plan mode |
+
+What is covered: every mode × every grade (plus one this OS does not define) × three machine
+ceilings × {no rule, a rule for this action, a rule for this action where the app says it cannot
+be undone, a rule for a different action} — 240 of them, straight out of production
+`Modes::decide`. Then 100 for `YOS_MCP_MAX_PERMISSION` over every mode and grade at three caps
+plus one cap that is not on the ladder, and 24 for the browser tools. The file marks each with a
+`layer`, because the last two are **not** decided by the shell:
+
+- `harness_cap` — the cap is a harness's restraint on *itself*. The shell has no business
+  enforcing it and does not, so there is no production Rust to generate it from; the rule
+  ("anything above it that the mode would have run quietly becomes a question instead") is four
+  lines in the generator.
+- `browser` — `web_go`, `web_click` and `web_type` are not on the shell's surface at all.
+
+`recoverable` is carried on every vector and is expected to change nothing. That is a finding,
+not an omission: recoverability decides whether a session rule may be **made**
+(`approvals::may_offer_session_rule`, shell-side, at the card) and **neither decision table looks
+at it**. The vectors include a rule on `calendar.delete_event`, which the card would never offer
+one for, precisely so that a table which started consulting it would be caught.
+
+### What was found between the two copies
+
+**No behavioural disagreement.** All 364 vectors passed against the bridge on the first run.
+Ceiling-before-mode, the 4×4 table, `unasked`, session rules, plan's refusal of browser writes,
+the cap's stricter-only direction and fail-closed-to-`ask` were already the same on both sides.
+
+What was wrong was *structural*, and all three are the shapes that let a table drift without
+anybody noticing:
+
+1. **The bridge's `decide` was not total.** `rank = LADDER.index(level)` raises `ValueError` for
+   a grade this OS does not define; the only thing stopping it was a guard in `guard_act`,
+   outside the function — so the table could not be driven in isolation at all. The Rust `decide`
+   refuses an undefined grade *inside* the table, and §3 calls `Modes::decide` the definition, so
+   the bridge was the side that was wrong. The check moved into `decide`, and `guard_act` asks
+   the table for the sentence instead of carrying its own copy of it.
+2. **The cap was applied after `decide`, in `guard_act`**, where nothing could reach it. It is
+   inside `decide` now, last, in the same order it ran in before.
+3. **Plan mode's refusal of browser writes was a third implementation**, in `plan_refusal`, with
+   its own reading of "is the mode plan". It calls `decide` now, with the same words.
+
+None of the three changed what the bridge does: the 65 pre-existing selftest checks passed
+unchanged, before the vectors were added.
+
+One thing found *outside* the two tables and deliberately not fixed here, because it is in the
+approval path rather than the mode path: `control_approvals::request_approval` consults
+`mind_mode::decide` but only returns the refusal when the mode is `plan`. A caller that skips the
+bridge and asks for approval of something above `tool_permission` therefore still gets a card —
+the card the ordering argument in [The four modes](#the-four-modes) says must never be drawn,
+because no answer of theirs could satisfy it. The bridge never asks in that case, so nothing on
+this machine reaches it today. It belongs to whoever owns that handler next.
+
+### CI
+
+`.github/workflows/ci.yml`, the `shell scripts` job, two new steps:
+`python3 deploy/yantrik-os/yos-mcp-selftest.py` and
+`python3 deploy/yantrik-os/server/publish_selftest.py`. Neither had ever run anywhere but on
+somebody's machine, which is the same as not existing. Both are stdlib-only Python over a fake of
+whatever they talk to; together they take a few seconds.
+
+### Verifying the lapse on the machine
+
+```sh
+# Start the shell with the hook. Say so in the log line it prints, then use the desktop normally.
+YANTRIK_BYPASS_SECONDS=20 /opt/yantrik/bin/yantrik-ui
+
+# Chip → Bypass → 15 minutes. The chip reads `Bypass 19s` and counts down.
+# Drive two sensitive actions through the bridge while it is on (see §4), then wait.
+#
+# At zero, within a second:
+#   * the chip returns to `Ask`
+#   * a toast, bottom right, normal urgency: "Bypass ended" /
+#     "The mind is back in Ask mode. It asks you before anything that could matter.
+#      It did 2 things without asking while bypass was on."  + [See what it did]
+#   * pressing the button opens the mode menu on its audit view, with both entries
+#   * and one notification, not one a second — leave it up for a minute and check:
+yos describe notifications | grep -c "Bypass ended"     # 1
+```
+
+### Tests added
+
+| where | what |
+|---|---|
+| `crates/yantrik-ui/src/mind_mode.rs` | 8 more: a lapse is reported once and only once (two ticks past the deadline post one notification); a person ending a bypass announces nothing, and neither does the socket lowering out of one; "until the shell restarts" announces nothing ever, including on the next boot; the count is what the bypass itself bought (a `rule` entry is not counted, nor is anything before the window opened); the notice reads like a person wrote it for 0 / 1 / many; the duration hook can only shorten; the vectors are written; the checked-in vectors are still what `decide` produces |
+| `crates/yantrik-ui/src/control_approvals.rs` | `show_mind_audit` added to the published-actions assertion, so the notification's button cannot become a dead control |
+| `deploy/yantrik-os/yos-mcp-selftest.py` | 72 checks (was 65). New: every one of the 364 vectors; that the file is checked in and not empty; that it still covers all four modes, every grade, a grade this OS does not define, all three layers and all six outcomes |
