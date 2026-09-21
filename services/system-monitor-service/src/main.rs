@@ -168,9 +168,62 @@ fn human_uptime(secs: u64) -> String {
 /// and it destroys work a person cannot get back, so it is graded `dangerous` — the caller's
 /// ceiling decides whether it is allowed, the service only states the risk.
 fn sysmon_actions() -> Vec<Action> {
-    vec![Action::new("kill_process", "End a running process by PID")
-        .risk("dangerous")
-        .arg(Param::number("pid").describe("The process id to end, as shown in top_processes"))]
+    vec![
+        // `top_processes` is the busiest twenty by CPU. Asked to end `yantrik-notes`, which is
+        // idle, a mind found it nowhere on this surface, reached for `terminal.run pgrep` to get
+        // a pid, and met a card for a read — twice, before giving up. Finding a process is a
+        // read; it is graded as one, and it answers with exactly what `kill_process` takes.
+        Action::new("find_process", "Find running processes by name, for a pid")
+            .risk("safe")
+            .arg(Param::text("name").describe(
+                "Part of the program's name or command line, matched without regard to case",
+            )),
+        Action::new("kill_process", "End a running process by PID")
+            .risk("dangerous")
+            .arg(Param::number("pid").describe(
+                "The process id to end, as shown in top_processes or found by find_process",
+            )),
+    ]
+}
+
+/// Every process whose name or command line contains `needle`, newest last.
+///
+/// `/proc/<pid>/comm` is truncated to fifteen characters, so `yantrik-system-monitor` is
+/// `yantrik-system-` there; the command line is read as well so a name a person would type
+/// matches. Kernel threads have no command line and are skipped: nothing on this surface can
+/// do anything about them.
+fn find_processes(needle: &str) -> Vec<serde_json::Value> {
+    let needle = needle.trim().to_lowercase();
+    let mut found = Vec::new();
+    if needle.is_empty() {
+        return found;
+    }
+    let Ok(entries) = std::fs::read_dir("/proc") else { return found };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        if cmdline.is_empty() {
+            continue;
+        }
+        let command = cmdline.trim_end_matches('\0').replace('\0', " ");
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        let comm = comm.trim().to_string();
+        if !comm.to_lowercase().contains(&needle) && !command.to_lowercase().contains(&needle) {
+            continue;
+        }
+        let uid = std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|st| {
+                st.lines()
+                    .find(|l| l.starts_with("Uid:"))
+                    .and_then(|l| l.split_whitespace().nth(1).map(str::to_string))
+            })
+            .unwrap_or_default();
+        let shown: String = command.chars().take(160).collect();
+        found.push(serde_json::json!({ "pid": pid, "name": comm, "command": shown, "uid": uid }));
+    }
+    found.sort_by_key(|p| p["pid"].as_u64().unwrap_or(0));
+    found
 }
 
 /// Dispatch `app.act`. The argument checks mirror the Slint path: an unknown action or a missing
@@ -180,6 +233,24 @@ fn act(params: &serde_json::Value) -> Result<serde_json::Value, ServiceError> {
     let args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
     let action_id = "system-monitor#act";
     match action {
+        "find_process" => {
+            let name = args["name"].as_str().unwrap_or("").trim();
+            if name.is_empty() {
+                return Err(ServiceError {
+                    code: -32602,
+                    message: "`find_process` needs argument `name`".to_string(),
+                });
+            }
+            let found = find_processes(name);
+            let view = describe_view()?;
+            Ok(act_json(
+                "system-monitor",
+                action_id,
+                true,
+                serde_json::json!({ "query": name, "count": found.len(), "processes": found }),
+                &view,
+            ))
+        }
         "kill_process" => {
             let pid = args["pid"].as_u64().ok_or_else(|| ServiceError {
                 code: -32602,
@@ -203,7 +274,7 @@ fn act(params: &serde_json::Value) -> Result<serde_json::Value, ServiceError> {
         }),
         other => Err(ServiceError {
             code: -32601,
-            message: format!("unknown action `{other}`; this service offers: kill_process"),
+            message: format!("unknown action `{other}`; this service offers: find_process, kill_process"),
         }),
     }
 }
