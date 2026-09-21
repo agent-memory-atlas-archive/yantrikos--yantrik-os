@@ -74,6 +74,19 @@ jobs:
           else
             channel=nightly; publish=true
           fi
+          # The build is named by `git describe`. The first image this pipeline published was
+          # called yantrik-os-03cc8bb: describe had found no tag and fallen back to the bare
+          # hash, quietly, because the scripts that ask send stderr to /dev/null. A name with no
+          # version in it cannot be ordered against the one before it. So the tags are fetched
+          # here by name, and a build that still cannot be described stops in its first minute
+          # and says what it could see, instead of after an hour.
+          git fetch --force --tags origin
+          described="$(git describe --tags --always)"
+          case "$described" in
+            v*) ;;
+            *) echo "::error::git describe gave '$described' — no version tag is reachable from this commit"
+               echo "tags present:"; git tag -l; git log --oneline -1; exit 1 ;;
+          esac
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "yantrikdb_ref=$(tr -d '[:space:]' < .github/yantrikdb-ref)" >> "$GITHUB_OUTPUT"
