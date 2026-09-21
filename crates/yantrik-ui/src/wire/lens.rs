@@ -176,7 +176,11 @@ fn memory_hits_to_lens(hits: &[MemoryResult]) -> Vec<LensResult> {
     hits.iter()
         .take(5)
         .map(|hit| {
-            let preview: String = hit.text.chars().take(80).collect();
+            // One line. A Lens row is one line of title over one line of subtitle, and a memory
+            // is whatever was written down — the hourly system digests are four lines each. Put
+            // in a row as they were, Slint drew all four at the row's height and every memory
+            // result was printed over the one below it.
+            let preview: String = lens::one_line(&hit.text).chars().take(80).collect();
             // Check if this memory references a file path — make it actionable
             let (icon, action, rtype) = if let Some(path) = extract_file_path(&hit.text) {
                 ("F", format!("exec:xdg-open {}", path), "find")

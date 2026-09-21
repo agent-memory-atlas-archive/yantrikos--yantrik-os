@@ -21,8 +21,9 @@ fn lr(
 ) -> LensResult {
     LensResult {
         result_type: result_type.into(),
-        title: title.into(),
-        subtitle: subtitle.into(),
+        // Rows are one line high whoever builds them; see `one_line`.
+        title: one_line(title.into().as_str()).into(),
+        subtitle: one_line(subtitle.into().as_str()).into(),
         icon_char: icon_char.into(),
         action_id: action_id.into(),
         score: 0.0,
@@ -32,6 +33,12 @@ fn lr(
 }
 
 /// Construct a divider LensResult.
+/// Text for a row that has room for one line: every run of whitespace, newlines included,
+/// becomes a single space.
+pub fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn lr_divider(title: &str) -> LensResult {
     lr("divider", title, "", "", "")
 }
