@@ -196,6 +196,33 @@ const SURFACES: &[(&str, &str)] = &[
     ("images", "image-viewer"),
 ];
 
+/// What each app is FOR, in a few words, for a reader choosing between them.
+///
+/// Three different models — a local 27B and two hosted ones — were each asked to "write a
+/// short document titled Launch Plan and save it", and each wrote a note. They were shown a
+/// list of names: `notes` was open with a summary that fitted, and `documents` was one word in
+/// a row of closed apps. A name is not a description. When every model makes the same choice,
+/// the choice was made here.
+const PURPOSES: &[(&str, &str)] = &[
+    ("terminal", "a shell: run commands"),
+    ("notes", "quick markdown notes kept in the notes library, not files you name"),
+    ("editor", "plain-text and code files, opened and saved by path"),
+    ("images", "view pictures"),
+    ("email", "read and send mail"),
+    ("calendar", "events and appointments"),
+    ("network", "this machine's connections, Wi-Fi and firewall state"),
+    ("sysmonitor", "CPU, memory, disk and processes"),
+    ("weather", "current conditions and forecast"),
+    ("downloads", "fetch a URL to a file, with progress"),
+    ("snippets", "reusable pieces of code and text"),
+    ("containers", "Docker or Podman containers"),
+    ("documents", "written documents — reports, letters, plans — saved as files in ~/Documents"),
+    ("presentation", "slide decks"),
+    ("files", "browse, move, rename and delete files"),
+    ("settings", "this desktop's settings"),
+    ("browser", "the web"),
+];
+
 /// Everything `open_app` will open, for a caller that cannot read this file.
 ///
 /// `open_app(name)` took a name and the shell's state listed none, so a mind had to guess what
@@ -211,14 +238,25 @@ pub fn openable() -> Vec<serde_json::Value> {
             if SHELVED.iter().any(|shelf| shelf.ids.contains(&name)) {
                 return None;
             }
-            Some(match launch {
+            let purpose = |id: &str| {
+                PURPOSES.iter().find(|(app, _)| *app == id || *app == name).map(|(_, what)| *what)
+            };
+            let mut entry = match launch {
                 Launch::Program { id, .. } => {
                     let surface = SURFACES.iter().find(|(from, _)| from == id).map_or(*id, |(_, to)| *to);
                     serde_json::json!({ "name": name, "opens": "app", "describe_as": surface })
                 }
                 Launch::Browser => serde_json::json!({ "name": name, "opens": "web browser" }),
                 _ => serde_json::json!({ "name": name, "opens": "a screen of the desktop itself", "describe_as": "shell" }),
-            })
+            };
+            let id = match launch {
+                Launch::Program { id, .. } => *id,
+                _ => name,
+            };
+            if let Some(what) = purpose(id) {
+                entry["for"] = serde_json::Value::String(what.to_string());
+            }
+            Some(entry)
         })
         .collect()
 }
@@ -1014,6 +1052,11 @@ mod tests {
         let notes = apps.iter().find(|a| a["name"] == "notes").expect("notes is openable");
         assert_eq!(notes["describe_as"], "notes");
         assert!(apps.iter().filter(|a| a["opens"] == "app").all(|a| a["describe_as"].is_string()));
+        // Every program says what it is for: a list of names is how three models wrote a
+        // "document" into Notes.
+        for app in apps.iter().filter(|a| a["opens"] == "app") {
+            assert!(app["for"].as_str().is_some_and(|s| s.len() > 8), "{} does not say what it is for", app["name"]);
+        }
     }
 
     #[test]
