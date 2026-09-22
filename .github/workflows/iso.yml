@@ -7,10 +7,16 @@ name: ISO
 # sequence — build, package, assemble, boot it and make it answer for itself, publish — run by
 # something that does not get tired, with a key that can only publish.
 #
-#   push to main            -> nightly
+#   06:00 UTC, daily        -> nightly, and only if main moved since the last published one
 #   tag  v*-beta*           -> beta
 #   tag  v* (anything else) -> stable
+#   push to an iso/** branch-> nightly, for trying an image before the change is on main
 #   run by hand             -> the channel you pick, publishing optional
+#
+# It used to build on every push to main. A merged pull request is not a release: fifteen of
+# them in one night meant fifteen hours of runner, each build cancelling the one before it, and
+# a download page that changed under anyone reading it. A nightly is a thing you can point at
+# once a day, and the daily build's announcement lists everything that landed since the last.
 #
 # The server keeps the newest three builds of each channel and deletes the rest; that rule
 # lives in deploy/yantrik-os/server/yantrik-publish, not here, so no client can get it wrong.
@@ -19,10 +25,15 @@ name: ISO
 # yantrik-publish. See deploy/yantrik-os/server/README.md.
 
 on:
+  schedule:
+    # 06:00 UTC. Late enough that a day's merges are in, early enough that the image is there
+    # before anyone asks for it. GitHub runs scheduled workflows late under load; that is fine
+    # for a nightly and is why nothing downstream reads the clock.
+    - cron: "0 6 * * *"
   push:
     # `iso/**` is the lever for building an image from a branch that is not main yet: push the
     # commit to a branch of that shape and it is built, booted and published as a nightly.
-    branches: [main, "iso/**"]
+    branches: ["iso/**"]
     tags: ["v*"]
     # No path filter. There was one, to skip documentation-only pushes, and with it the first
     # push of this workflow started nothing at all: GitHub evaluates path filters over at most
@@ -53,10 +64,17 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  iso:
-    name: build, boot, publish
+  # Cheap, and first: an hour of runner should not start before something has decided it is
+  # worth spending. The daily build stops here when the last published nightly is already this
+  # commit — a day where nothing was merged does not need a second identical image.
+  decide:
+    name: is there anything to build
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    outputs:
+      channel: ${{ steps.plan.outputs.channel }}
+      publish: ${{ steps.plan.outputs.publish }}
+      build: ${{ steps.plan.outputs.build }}
+      previous: ${{ steps.plan.outputs.previous }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,6 +85,8 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             channel="${{ inputs.channel }}"; publish="${{ inputs.publish }}"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            channel=nightly; publish=true
           elif [[ "$GITHUB_REF" == refs/tags/v*-beta* ]]; then
             channel=beta; publish=true
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -87,9 +107,36 @@ jobs:
             *) echo "::error::git describe gave '$described' — no version tag is reachable from this commit"
                echo "tags present:"; git tag -l; git log --oneline -1; exit 1 ;;
           esac
+          # What that channel holds now. Read here rather than after publishing, because the
+          # announcement lists what changed since it and publishing replaces it.
+          previous_file="$(curl -fsS -m 20 "https://iso.yantrikos.com/$channel/latest.json"             | python3 -c 'import sys,json; print(json.load(sys.stdin).get("file",""))' 2>/dev/null || true)"
+          previous="$(printf '%s' "$previous_file" | sed -n 's/.*-g\([0-9a-f]\{7,\}\)\.iso$/\1/p')"
+
+          # A day with no merges does not need a second identical image. Only the daily run
+          # stops for this: a tag, a branch push and a hand-started run are all somebody asking.
+          build=true
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -n "$previous" ]              && git merge-base --is-ancestor HEAD "$previous" 2>/dev/null; then
+            build=false
+            echo "### nothing new since \`$previous\` — no image built" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          [ "$build" = true ] || exit 0
           echo "### $channel build of \`$(git describe --tags --always)\` (publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
+
+  iso:
+    name: build, boot, publish
+    needs: decide
+    if: needs.decide.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Make room
         # A hosted runner arrives with ~14 GB free. The release target directory is 13 GB, the
@@ -141,7 +188,7 @@ jobs:
         id: iso
         env:
           YANTRIK_ISO_WITHOUT_MIND: "1"
-          YANTRIK_UPDATE_CHANNEL: ${{ steps.plan.outputs.channel }}
+          YANTRIK_UPDATE_CHANNEL: ${{ needs.decide.outputs.channel }}
           RELEASE_TARBALL: ${{ steps.bundle.outputs.path }}
         run: |
           mkdir -p "$RUNNER_TEMP/iso" && cd "$RUNNER_TEMP/iso"
@@ -180,20 +227,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # Read before publishing replaces it: the announcement lists what changed since the build
-      # this channel held until now, and after the publish step that build is gone from latest.json.
-      - name: What the channel held before this build
-        id: previous
-        if: steps.plan.outputs.publish == 'true'
-        continue-on-error: true
-        run: |
-          file=$(curl -fsS -m 20 "https://iso.yantrikos.com/${{ steps.plan.outputs.channel }}/latest.json" \
-                 | python3 -c 'import sys,json; print(json.load(sys.stdin).get("file",""))' || true)
-          git=$(printf '%s' "$file" | sed -n 's/.*-g\([0-9a-f]\{7,\}\)\.iso$/\1/p')
-          echo "git=$git" >> "$GITHUB_OUTPUT"
-
       - name: Publish
-        if: steps.plan.outputs.publish == 'true'
+        if: needs.decide.outputs.publish == 'true'
         env:
           ISO_PUBLISH_KEY: ${{ secrets.ISO_PUBLISH_KEY }}
         run: |
@@ -202,7 +237,7 @@ jobs:
           printf '%s\n' "$ISO_PUBLISH_KEY" > ~/.ssh/yantrik_publish
           chmod 600 ~/.ssh/yantrik_publish
           trap 'rm -f ~/.ssh/yantrik_publish' EXIT
-          ch="${{ steps.plan.outputs.channel }}"
+          ch="${{ needs.decide.outputs.channel }}"
           # The bundle first: an image that says "update from nightly" should find, on that
           # channel, a build at least as new as itself.
           deploy/yantrik-os/publish.sh release "$ch" "${{ steps.bundle.outputs.path }}" \
@@ -213,10 +248,10 @@ jobs:
       # The community server's #nightly channel. Never fails the build: a nightly that published
       # and could not say so is still published. Only the nightly channel is announced there.
       - name: Tell Discord
-        if: steps.plan.outputs.publish == 'true' && steps.plan.outputs.channel == 'nightly'
+        if: needs.decide.outputs.publish == 'true' && needs.decide.outputs.channel == 'nightly'
         continue-on-error: true
         env:
           DISCORD_NIGHTLY_WEBHOOK: ${{ secrets.DISCORD_NIGHTLY_WEBHOOK }}
         run: |
           python3 deploy/yantrik-os/announce-nightly.py nightly "${{ steps.iso.outputs.path }}" \
-            "${{ steps.bundle.outputs.version }}" "${{ steps.previous.outputs.git }}"
+            "${{ steps.bundle.outputs.version }}" "${{ needs.decide.outputs.previous }}"
