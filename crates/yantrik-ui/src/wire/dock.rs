@@ -390,10 +390,13 @@ pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
         Some(Launch::Blender) => match find_program("blender") {
             None => Availability::Missing("blender".to_string()),
             Some(_) => match blender_bootstrap() {
-                Some(_) => Availability::Ready,
                 None => Availability::Missing(
                     "the Yantrik addon for Blender (share/blender/bootstrap.py)".to_string(),
                 ),
+                Some(_) => match blender_display(std::env::var("DISPLAY").ok().as_deref()) {
+                    Ok(()) => Availability::Ready,
+                    Err(why) => Availability::Missing(why),
+                },
             },
         },
         Some(Launch::Screen(_) | Launch::SettingsSection(_) | Launch::Editor | Launch::Launchpad) => {
@@ -521,6 +524,35 @@ pub fn blender_bootstrap() -> Option<PathBuf> {
         candidates.push(root.join("share/blender/bootstrap.py"));
     }
     candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Whether Blender has a display it can open a window on, given the session's `DISPLAY`.
+///
+/// Debian's `blender` package is built with the X11 GHOST back-end only. On this desktop the
+/// session is Wayland, so the window Blender opens is an X11 window served by Xwayland, and the
+/// only thing that tells a client where that server is, is `DISPLAY`. labwc sets it for every
+/// child it starts — when Xwayland is installed. When it is not, `DISPLAY` is absent, and
+/// Blender's whole contribution is:
+///
+///     GHOST: failed to initialize display for back-end(s): ['X11']
+///     GHOST: unable to initialize, exiting!
+///
+/// after `open_app` has already answered "launching" (#96). The addon still works headless —
+/// the control surface comes up and renders — but the person sees nothing, which defeats the
+/// point of an app whose value is that the mind and the person look at the same screen.
+///
+/// The check reads only the variable, on purpose. Whether the server behind it is alive is
+/// Xwayland's business (labwc starts it on the first connection); whether this Blender was built
+/// with a Wayland back-end instead is not knowable without running it. An absent `DISPLAY` is
+/// the one case that is certain, and it is the case the ISO produces when the package is missing.
+pub fn blender_display(display: Option<&str>) -> Result<(), String> {
+    match display {
+        Some(d) if !d.trim().is_empty() => Ok(()),
+        _ => Err(
+            "an X display for Blender's window: this Blender speaks X11 only, and no DISPLAY is              set, so Xwayland is not running in this session (is the xwayland package installed?)"
+                .to_string(),
+        ),
+    }
 }
 
 /// Where a program is, if it is anywhere it could be run from.
@@ -654,6 +686,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             // the refusal below says so rather than quietly opening the lesser thing.
             Launch::Blender => match (find_program("blender"), blender_bootstrap()) {
                 (Some(bin), Some(bootstrap)) => {
+                    // Third check, same reason as the other two: a launch that dies in under a
+                    // second is a launch the shell reported and nobody saw. Debian's Blender
+                    // speaks X11 only, so without an X display it prints one GHOST line and
+                    // exits, and `open_app` had already answered "launching".
+                    if let Err(why) = blender_display(std::env::var("DISPLAY").ok().as_deref()) {
+                        tracing::error!("Cannot open Blender: {why}");
+                        return;
+                    }
                     let bin = bin.to_string_lossy().into_owned();
                     let bootstrap = bootstrap.to_string_lossy().into_owned();
                     spawn_app_with_args("blender", &bin, &["--python", &bootstrap]);
@@ -1126,6 +1166,23 @@ mod tests {
     }
 
     /// A shell app whose program is not on the disk is known, and not launchable.
+    /// Blender needs three things, and the third is a display. The first two were checked;
+    /// the third was discovered by watching `open_app name=blender` answer "launching" and
+    /// then nothing, on a session without Xwayland (#96).
+    #[test]
+    fn blender_without_an_x_display_is_refused_before_it_is_started() {
+        assert!(blender_display(Some(":0")).is_ok());
+        assert!(blender_display(Some(":1")).is_ok());
+        let why = blender_display(None).unwrap_err();
+        assert!(why.contains("DISPLAY"), "{why}");
+        assert!(why.contains("X11"), "the refusal should say why this Blender needs X: {why}");
+        assert!(why.contains("xwayland"), "and what would fix it: {why}");
+        // An empty DISPLAY is what a script that copied a compositor's own environment exports.
+        // It is not a display.
+        assert!(blender_display(Some("")).is_err());
+        assert!(blender_display(Some("   ")).is_err());
+    }
+
     #[test]
     fn a_missing_program_is_known_but_does_not_open() {
         let there = PathBuf::from("/definitely/not/here/yantrik-notes");
