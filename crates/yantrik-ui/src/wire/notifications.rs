@@ -358,8 +358,13 @@ fn forward_to_app(ui: &App, app: &str, action: &str, args: Option<serde_json::Va
         });
 }
 
-/// The name an app's control surface answers to, from the shell's own catalogue — "Downloads"
+/// The name an app's control surface answers to, from the shell's own route table — "Downloads"
 /// is opened as `downloads` and described as `download-manager`, and only that table knows.
+///
+/// It used to read the published `openable()` listing, which names each app once, so only the
+/// first spelling of an app resolved: a notification whose `app` was `container-manager` — the
+/// name that app carries everywhere but on its socket — lost its buttons to "an app this desktop
+/// does not open".
 fn surface_for(app: &str) -> Option<String> {
     let key = app.to_lowercase();
     // The shell sends under its own name and is not in the dock's route table, because nothing
@@ -370,11 +375,7 @@ fn surface_for(app: &str) -> Option<String> {
     if key == "yantrik" {
         return Some("shell".to_string());
     }
-    crate::wire::dock::openable().into_iter().find_map(|entry| {
-        (entry["name"].as_str() == Some(key.as_str()))
-            .then(|| entry["describe_as"].as_str().map(str::to_string))
-            .flatten()
-    })
+    crate::wire::dock::surface_for(&key).map(str::to_string)
 }
 
 /// The name `launch_app` takes for this sender, if the shell can open it at all.

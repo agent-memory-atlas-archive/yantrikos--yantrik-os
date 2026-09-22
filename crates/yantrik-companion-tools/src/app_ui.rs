@@ -42,6 +42,11 @@ fn client(app: &str, timeout: Duration) -> SyncRpcClient {
 ///
 /// A socket file survives a crash, so this lists candidates. Anything that fails to answer is
 /// simply left out rather than reported as an error — a stale socket is not news.
+///
+/// One app, one entry: an app answers to every name it is known by (`containers` is also
+/// `container-manager`) and the other names are symlinks to its socket, so listing them would
+/// offer one open window twice under two names — and a survey that names the same thing twice is
+/// read as two things.
 #[cfg(unix)]
 fn app_sockets() -> Vec<String> {
     let dir = yantrik_ipc_transport::server::socket_dir();
@@ -50,6 +55,7 @@ fn app_sockets() -> Vec<String> {
     };
     let mut ids: Vec<String> = entries
         .filter_map(|e| e.ok())
+        .filter(|e| !e.file_type().is_ok_and(|kind| kind.is_symlink()))
         .filter_map(|e| e.file_name().into_string().ok())
         .filter_map(|name| {
             name.strip_suffix(".sock")

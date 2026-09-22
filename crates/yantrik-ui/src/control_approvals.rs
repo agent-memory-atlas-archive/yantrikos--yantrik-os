@@ -589,11 +589,10 @@ fn surface_for(app: &str) -> Option<String> {
     if key == "shell" || key == "yantrik" {
         return Some("shell".to_string());
     }
-    let routed = crate::wire::dock::openable().into_iter().find_map(|entry| {
-        (entry["name"].as_str() == Some(key.as_str()))
-            .then(|| entry["describe_as"].as_str().map(str::to_string))
-            .flatten()
-    });
+    // Any spelling the launcher knows, not only the one the listing prints: an approval asked
+    // for `container-manager` — the app's name everywhere but on its socket — was refused as
+    // "there is no app called that on this desktop" while the app was open.
+    let routed = crate::wire::dock::surface_for(&key).map(str::to_string);
     routed.or_else(|| {
         yantrik_app_runtime::control::running_apps().into_iter().find(|id| *id == key)
     })

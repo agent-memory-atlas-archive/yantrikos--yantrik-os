@@ -38,7 +38,8 @@ Two conventions worth knowing:
 
   * `describe` and `act` take a short name. `shell` means `app-shell`, `notes` means
     `app-notes`; anything else is used as given, so `yos describe weather` reaches the
-    weather service directly.
+    weather service directly. An app answers to every name it is known by — `containers`
+    and `container-manager` are the same window — and `yos ls` shows them together.
 
   * `act` prints the whole reply rather than a success line, because the reply is not a
     boolean. `settled: false` means the work was accepted and has not finished — a
@@ -82,6 +83,13 @@ def socket_candidates(name):
     (`app-weather`) preferred over the service (`weather`) may have been closed, leaving a
     stale socket file that refuses connections. The caller tries them in order and falls
     through a dead one, so a killed window never hides a live service.
+
+    The separator a caller arrived with is not part of the name either. One app is
+    `container-manager` in /opt/yantrik/bin, `container_manager` in the launcher's route table
+    and "Container Manager" when somebody types the words, and all three are the one window;
+    the app links every name it answers to at its socket (`control::SURFACES`), spelled with
+    hyphens, so the folded spellings are tried too. After the literal one, so nothing that
+    resolved before resolves differently now.
     """
     key = name.lower()
     names = [ALIASES.get(key, key)]
@@ -90,6 +98,9 @@ def socket_candidates(name):
         # asking about Notes usually means the window they can see — but only *before*, so
         # a closed window falls through to the service rather than dead-ending on it.
         names.insert(0, "app-" + key)
+    folded = name.strip().lower().replace("_", "-").replace(" ", "-")
+    if folded and folded != key:
+        names.extend(n for n in ("app-" + folded, folded) if n not in names)
 
     found = []
     seen = set()
@@ -226,9 +237,14 @@ def cmd_ls(argv):
     asked whether anybody is there, the ones that answer are split into apps and services and
     shown by the name to describe them by, and what `open_app` can open comes from the shell —
     because the other half of "what can I do here" was written down nowhere at all.
+
+    An app answers to more than one name — Container Manager publishes `containers` and is
+    `container-manager` in the launcher, in `/opt/yantrik/bin` and in `open_app` — and the other
+    names are symlinks to the one socket. So they are collected and shown beside the app rather
+    than listed as apps of their own: one window, one line, and every name it answers to on it.
     """
     raw = "--all" in argv
-    apps, services, stale = [], [], []
+    apps, services, stale, also = [], [], [], {}
     for directory in SOCKET_DIRS:
         if not os.path.isdir(directory):
             continue
@@ -239,6 +255,15 @@ def cmd_ls(argv):
             continue
         for name in entries:
             path = os.path.join(directory, name + ".sock")
+            if os.path.islink(path):
+                # The same surface under another of its names. A dangling one means the app is
+                # closed, and the socket it points at is already reported as stale. Anything
+                # else that happens to be a symlink is listed the way it always was.
+                target = os.path.basename(os.readlink(path))
+                if target.startswith("app-") and target.endswith(".sock"):
+                    also.setdefault(target[4:-5], []).append(
+                        name[4:] if name.startswith("app-") else name)
+                    continue
             if not _answers(path):
                 stale.append(name)
             elif name.startswith("app-"):
@@ -248,7 +273,8 @@ def cmd_ls(argv):
 
     print("Open now (describe these by name):")
     for name, summary in apps:
-        print("    %-18s %s" % (name, summary))
+        names = ", ".join(sorted(also.get(name, [])))
+        print("    %-18s %s%s" % (name, summary, ("  (also %s)" % names) if names else ""))
     if not apps:
         print("    (nothing)")
     print("Services answering: %s" % (", ".join(services) or "(none)"))
