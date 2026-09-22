@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 YOS = os.environ.get("YOS_BIN", "/opt/yantrik/bin/yos")
@@ -38,6 +39,10 @@ PROTOCOL_VERSION = "2024-11-05"
 #
 # A client that kills a tools/call before OS_ACT_MAX_SECONDS will cut the person off mid
 # decision, and the mind will report a timeout for a machine that was working correctly.
+#
+# What the wait must NOT do is make the whole bridge unanswerable while it lasts — see `main`.
+# On 22 September 2026 it did, and a client that pings for liveness killed the server out from
+# under a card that was still on the person's screen.
 ACT_TIMEOUT = 60             # the `yos act` subprocess itself, unchanged
 SHELL_CALL_TIMEOUT = 20      # one `yos act shell …` or `yos describe …`
 # Long enough for somebody to look up, read six lines and decide; short enough that a forgotten
@@ -79,6 +84,19 @@ REQUESTER_OVERRIDE = os.environ.get("YOS_MCP_REQUESTER", "").strip()
 
 # Filled from the `initialize` params. Never trusted for anything but a label.
 _CLIENT = {}
+
+
+def log(message):
+    """One line to stderr, for a person reading afterwards to find out why.
+
+    stderr is the only channel here that is not the protocol — stdout carries JSON-RPC and
+    nothing else — and a harness keeps it: Hermes writes it to `~/.hermes/logs/mcp-stderr.log`.
+    Used sparingly, for the things that are invisible otherwise. A poll of a live approval card
+    that fails is the first of them: the person is looking at a card, the shell logs the polls it
+    RECEIVES, and until now a poll that never arrived left no trace anywhere.
+    """
+    sys.stderr.write("yos-mcp: %s\n" % message)
+    sys.stderr.flush()
 
 
 def requester_name(state=None):
@@ -411,8 +429,12 @@ def yos(args, timeout):
     env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
     env.setdefault("WAYLAND_DISPLAY", "wayland-0")
     try:
+        # stdin is closed to the child on purpose. This process's own stdin is the client's
+        # JSON-RPC stream, and a `yos` that inherited it could read a request meant for the
+        # bridge — bytes that are then simply gone. Nothing `yos` does today reads stdin; this
+        # is so that nothing it does later can.
         return subprocess.run([YOS] + list(args), capture_output=True, text=True,
-                              timeout=timeout, env=env)
+                              timeout=timeout, env=env, stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
 
@@ -536,7 +558,21 @@ if not CEILING_SET:
 
 
 # Why the last attempt to grade (app, action) came back empty, in words for the caller.
-UNGRADED_BECAUSE = {}
+#
+# Per thread, because this bridge answers several calls at once now (see `main`): two tool calls
+# asking about the same shut app would otherwise write each other's reason, and the explanation a
+# mind is given would be the one belonging to somebody else's call.
+_LOCAL = threading.local()
+
+
+def ungraded_because(app, action, why=None):
+    """Remember, or recall, why grading one action came back empty — for THIS call."""
+    seen = getattr(_LOCAL, "ungraded", None)
+    if seen is None:
+        seen = _LOCAL.ungraded = {}
+    if why is not None:
+        seen[(app, action)] = why
+    return seen.get((app, action), "")
 
 
 def action_detail(app, action):
@@ -573,15 +609,15 @@ def action_detail(app, action):
         # "cannot establish how 'calendar' grades 'add_event' … check the name" — the name was
         # right, the app was shut, and it cost a minute of a small model's time to work that
         # out. `yos` already says which it is; keep what it said.
-        UNGRADED_BECAUSE[(app, action)] = ((p.stderr or "").strip() if p is not None else
-                                           "the desktop did not answer in time")
+        ungraded_because(app, action, (p.stderr or "").strip() if p is not None else
+                         "the desktop did not answer in time")
         return None, ""
     lines = (p.stdout or "").splitlines()
     offered = re.findall(r"^\s*act:\s*([A-Za-z0-9_]+)\(", p.stdout or "", re.M)
     if offered:
-        UNGRADED_BECAUSE[(app, action)] = (
-            "%s is open and offers no action called %s. It offers: %s"
-            % (app, action, ", ".join(offered)))
+        ungraded_because(app, action,
+                         "%s is open and offers no action called %s. It offers: %s"
+                         % (app, action, ", ".join(offered)))
     else:
         # A describe that answers and lists no actions at all is not an app with nothing to
         # offer: it is the SERVICE of the same name answering for a window that is shut. `yos`
@@ -590,9 +626,9 @@ def action_detail(app, action):
         # "calendar is open and offers no action called add_event. It offers: nothing" — three
         # statements, all false — and worked out by itself that the window had to be opened.
         # Said as what it is, it takes the same road as an app with no socket.
-        UNGRADED_BECAUSE[(app, action)] = (
-            "%s is not open: only its background service answered, which reports what is "
-            "stored and takes no actions" % app)
+        ungraded_because(app, action,
+                         "%s is not open: only its background service answered, which "
+                         "reports what is stored and takes no actions" % app)
     for i, line in enumerate(lines):
         m = re.match(r"^\s*act:\s*([A-Za-z0-9_]+)\([^)]*\)\s*\[([a-z]+),", line)
         if not m or m.group(1) != action:
@@ -889,20 +925,26 @@ def result_object(text):
     return None
 
 
-def shell_call(action, args):
+def shell_call(action, args, timeout=None):
     """One action on the shell's own control surface. Returns `(result, error)`.
 
     Values are passed the way `yos act` expects them and `yos` parses each back with
     `json.loads`, so `args_json` — a dict here — arrives at the shell as an object rather than
     as a string. The shell accepts both shapes and canonicalises in one place, so a grant
     requested through this path and consumed through it bind to the same bytes.
+
+    `timeout` is SHELL_CALL_TIMEOUT unless the caller has less than that to spend. The approval
+    poll does: it is working to a deadline the mind was promised, and a poll that took the full
+    20s would carry the whole call past it.
     """
+    if timeout is None:
+        timeout = SHELL_CALL_TIMEOUT
     argv = ["act", "shell", action]
     for key, value in args.items():
         argv.append("%s=%s" % (key, value if isinstance(value, str) else json.dumps(value)))
-    p = yos(argv, SHELL_CALL_TIMEOUT)
+    p = yos(argv, timeout)
     if p is None:
-        return None, "the desktop did not answer within %ss" % SHELL_CALL_TIMEOUT
+        return None, "the desktop did not answer within %ss" % round(timeout, 1)
     if p.returncode != 0:
         return None, ((p.stderr or "").strip() or (p.stdout or "").strip()
                       or "the desktop refused it and said nothing")
@@ -959,16 +1001,46 @@ def ask_the_person(app, action, grade, purpose, args, requester):
 
     # Polled rather than pushed: this bridge has no way to be called back, and a person cannot
     # answer inside the first poll interval anyway.
+    #
+    # Two things about this loop are the 22 September defect, and both are about a card that is
+    # ALREADY on somebody's screen:
+    #
+    #   * A poll that fails no longer ends the wait. It used to return "the desktop stopped
+    #     answering" on the first failure — while the card was still up and the person could
+    #     still press Allow, leaving a grant nobody would ever spend. One `yos` that took too
+    #     long, one transient non-zero exit, and a live question was abandoned. Now it is asked
+    #     again, until the wait is up, and each failure is written to stderr with why.
+    #   * Every poll is inside the budget. The wait is a promise to the mind — and to whatever
+    #     is counting seconds on the other end of it — so the sleep and the poll's own subprocess
+    #     timeout are both cut to what is left of it. The whole wait ends within APPROVAL_WAIT
+    #     plus the spawn of one last `yos`, whatever the desktop does.
+    #
+    # Nothing in here may raise. A wait that ends in an exception is a card in front of a person
+    # with nobody left waiting for their answer, so the poll is wrapped and the reason is kept.
     deadline = time.monotonic() + APPROVAL_WAIT
     status = "pending"
-    while time.monotonic() < deadline:
-        time.sleep(APPROVAL_POLL)
-        poll, err = shell_call("approval_status", {"request_id": request_id})
+    heard = False            # did the desktop answer a poll at all?
+    silence = "it stopped answering"
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(APPROVAL_POLL, remaining))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            poll, err = shell_call("approval_status", {"request_id": request_id},
+                                   timeout=min(SHELL_CALL_TIMEOUT, remaining))
+        except Exception as e:
+            poll, err = None, "%s: %s" % (type(e).__name__, e)
         if poll is None:
-            return False, (
-                "the person was shown a card asking them to allow %s.%s, and then the desktop "
-                "stopped answering: %s. Nothing was run here. They may have allowed it; this "
-                "bridge cannot tell, and it will not run it on a guess." % (app, action, err))
+            silence = err
+            log("approval poll failed for %s.%s (%s), %ds of %ds left: %s"
+                % (app, action, request_id, max(0, deadline - time.monotonic()),
+                   APPROVAL_WAIT, err))
+            continue
+        heard = True
         status = poll.get("status", "pending")
         if status != "pending":
             break
@@ -1001,6 +1073,18 @@ def ask_the_person(app, action, grade, purpose, args, requester):
             "the grant for %s.%s had already been spent, so nothing was run. A grant covers one "
             "action once; ask again if it still needs doing." % (app, action))
 
+    if not heard:
+        # The card went up and then not one poll came back, for the whole wait. This is the only
+        # ending that is genuinely a fault, and it is NOT "they did not answer": nobody here
+        # knows whether they answered. Reported after the full wait rather than on the first
+        # failure, so a desktop that is merely slow gets every chance to speak.
+        return False, (
+            "the person was shown a card asking them to allow %s.%s, and then the desktop "
+            "stopped answering: %s. It was asked again every %gs for %ds and never replied. "
+            "Nothing was run here. They may have allowed it; this bridge cannot tell, and it "
+            "will not run it on a guess."
+            % (app, action, silence, APPROVAL_POLL, APPROVAL_WAIT))
+
     # `expired`, or still `pending` when the wait ran out. From the person's side these are the
     # same thing — they did not answer — and saying so is better than reporting a timeout that
     # sounds like a fault.
@@ -1031,7 +1115,7 @@ def guard_act(args):
 
     level, purpose = action_detail(app, action)
     if level is None:
-        why = UNGRADED_BECAUSE.get((app, action), "")
+        why = ungraded_because(app, action)
         if "is not open" in why:
             return ("%s is not open, so %s was not run — nothing is wrong with the request. "
                     "Open it with os_act on shell: open_app name=%s (os_apps lists the exact "
@@ -1260,7 +1344,10 @@ def run_tool(tool, args):
     env.setdefault("WAYLAND_DISPLAY", "wayland-0")
 
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+        # stdin closed to the child, for the reason in `yos`: this process's stdin belongs to
+        # the client's JSON-RPC stream and nothing else may read from it.
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,
+                           stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         note = join(note, report_unasked(audit, "timed out"))
         return (prefix(note, "timed out after %ss — the desktop did not answer. It may be busy "
@@ -1349,6 +1436,11 @@ def prefix(note, text):
     return text if not note else note + "\n\n" + text
 
 
+# Several calls can be in flight at once now, and they all answer down one pipe. Two threads
+# writing a line each would interleave halfway through and hand the client two broken messages.
+_WRITING = threading.Lock()
+
+
 def reply(msg_id, result=None, error=None):
     m = {"jsonrpc": "2.0", "id": msg_id}
     if error is not None:
@@ -1357,11 +1449,43 @@ def reply(msg_id, result=None, error=None):
         m["result"] = result
     # One message per line, no embedded newlines — the transport is line-delimited, and a
     # transcript full of newlines is exactly the payload that would break it.
-    sys.stdout.write(json.dumps(m) + "\n")
-    sys.stdout.flush()
+    with _WRITING:
+        sys.stdout.write(json.dumps(m) + "\n")
+        sys.stdout.flush()
 
 
+def serve_call(msg_id, tool, arguments):
+    """Run one tools/call and answer it. The body of a worker thread; must not raise."""
+    try:
+        text, is_error = run_tool(tool, arguments)
+    except Exception as e:  # a malformed argument must not take the server down
+        text, is_error = "could not run %s: %s" % (tool["name"], e), True
+    reply(msg_id, {"content": [{"type": "text", "text": text}], "isError": is_error})
+
+
+# ── Reading the next request while the last one is still working ───────────────────────
+#
+# This loop used to run each request to completion before reading the next line, which is fine
+# for a bridge whose calls are a `yos` invocation and back — and wrong the moment one of them
+# waits for a PERSON. An os_act that raises an approval card sits here for up to APPROVAL_WAIT,
+# and for that whole time nothing else on this pipe was being read: not another tool call, and
+# not the client's own liveness check.
+#
+# On 22 September 2026 that cost somebody four minutes. A card went up at 06:48:18Z; 59 seconds
+# into the wait Hermes' keepalive gave up on a server that was simply busy ("keepalive failed,
+# triggering reconnect"), replaced the process two seconds later, and the os_act died with it —
+# unanswered, so Hermes waited out its own 300s timeout before reporting a machine that had been
+# working correctly the entire time. The card was still on the screen; nobody was left waiting
+# for the answer.
+#
+# So the read loop now does nothing but read. `initialize`, `ping` and `tools/list` are answered
+# here because they are instant and cannot block; every tools/call goes to a thread of its own.
+# JSON-RPC ids are what pair a reply to its request, so answering out of order is what the
+# protocol is for. Threads are not pooled or capped: the concurrency is whatever the client asks
+# for, which for a stdio client is the tool calls of one turn, and a cap would only rebuild the
+# queue this exists to remove.
 def main():
+    workers = []
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -1387,6 +1511,13 @@ def main():
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "yantrik-os", "version": "1.0.0"},
             })
+        elif method == "ping":
+            # "Are you still there?", and the one question this server must always be able to
+            # answer. MCP defines it as an empty result; it used to fall through to "unknown
+            # method" and come back as a JSON-RPC error, which is a strange thing for a healthy
+            # server to say about itself. What a client does with a keepalive it does not like
+            # is kill the process — see above.
+            reply(msg_id, {})
         elif method == "tools/list":
             # annotations tell a client what a tool does to the world, so it can run reads
             # freely and gate the rest. A client that has to guess from the name gets it
@@ -1403,14 +1534,21 @@ def main():
                 reply(msg_id, error={"code": -32602,
                                      "message": "no such tool: %s" % params.get("name")})
                 continue
-            try:
-                text, is_error = run_tool(tool, params.get("arguments") or {})
-            except Exception as e:  # a malformed argument must not take the server down
-                text, is_error = "could not run %s: %s" % (tool["name"], e), True
-            reply(msg_id, {"content": [{"type": "text", "text": text}], "isError": is_error})
+            worker = threading.Thread(
+                target=serve_call, args=(msg_id, tool, params.get("arguments") or {}),
+                name="tools/call %s" % tool["name"], daemon=True)
+            workers = [w for w in workers if w.is_alive()]
+            workers.append(worker)
+            worker.start()
         elif msg_id is not None:
             reply(msg_id, error={"code": -32601, "message": "unknown method: %s" % method})
         # Notifications (no id) get no reply, per JSON-RPC.
+
+    # End of stdin: the client has gone. Anything still running is finished off rather than cut
+    # short — an os_act that is mid-`yos act` has already changed the machine, and the audit line
+    # saying what it did is written after it, not before.
+    for worker in workers:
+        worker.join()
 
 
 if __name__ == "__main__":

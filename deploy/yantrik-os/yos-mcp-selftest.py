@@ -27,6 +27,9 @@ What it is actually checking, in one line each:
   * `YOS_MCP_MAX_PERMISSION` can only make things stricter than the desktop's mode;
   * an unreadable desktop falls back to `ask` and says so, rather than assuming anything;
   * an action nobody was asked about is reported to the shell's audit action, with its outcome;
+  * a card on the person's screen does not stop the bridge answering anything else — the whole
+    of the 22 September hang — and a poll that fails is retried, logged, and never throws away a
+    question somebody is still looking at;
   * and, last, that this bridge's copy of the decision table still agrees with the shell's, on
     every combination of mode, grade, machine ceiling, session rule, browser tool and harness
     cap — read from `mind-mode-vectors.json`, which the shell's own tests generate.
@@ -40,6 +43,7 @@ import pathlib
 import stat
 import sys
 import tempfile
+import threading
 import time
 from importlib.machinery import SourceFileLoader
 
@@ -50,7 +54,7 @@ SOURCE = HERE / "yos-mcp"
 # back to the raw text) and its printing (`result` as indent-2 JSON after the header), because
 # those two details are exactly what yos-mcp reads back.
 FAKE_YOS = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 
 STATE = os.environ["FAKE_YOS_STATE"]
 
@@ -189,6 +193,17 @@ if argv[:1] == ["act"]:
 
     if target == "shell" and action == "approval_status":
         rid = args["request_id"]
+        # A desktop that is briefly unwell, which a card already on somebody's screen has to
+        # survive. `poll_fails` refuses the next few polls; `poll_hang` makes every poll outlast
+        # whatever the bridge gives it. Both are what the live failure looked like from here.
+        state["polls"] = state.get("polls", 0) + 1
+        if state.get("poll_fails", 0) > 0:
+            state["poll_fails"] -= 1
+            save(state)
+            die("shell.app.act refused: the desktop is busy")
+        save(state)
+        if state.get("poll_hang"):
+            time.sleep(state["poll_hang"])
         answer = state.get("answer", "pending")
         if rid in state.get("spent", []):
             answer = "consumed"
@@ -230,7 +245,7 @@ die("unknown command %r" % argv)
 '''
 
 
-def load_mcp(fake, state_path, ceiling="standard", requester="", follow=False):
+def load_mcp(fake, state_path, ceiling="standard", requester="", follow=False, wait=4):
     """A fresh copy of the real yos-mcp, pointed at the fake desktop.
 
     Reloaded per case because the module reads its ceiling and its wait out of the environment
@@ -249,9 +264,9 @@ def load_mcp(fake, state_path, ceiling="standard", requester="", follow=False):
     # Off for every case but its own: bringing an app forward is one more `act` on the fake
     # desktop, and the cases below count exactly what ran.
     os.environ["YOS_MCP_FOLLOW"] = "1" if follow else "0"
-    # Short, because two cases below wait the whole thing out. The shell's own 120s request
+    # Short, because several cases below wait the whole thing out. The shell's own 120s request
     # lifetime is not involved: the fake answers from a file.
-    os.environ["YOS_MCP_APPROVAL_WAIT"] = "4"
+    os.environ["YOS_MCP_APPROVAL_WAIT"] = str(wait)
     loader = SourceFileLoader("yosmcp_under_test", str(SOURCE))
     spec = importlib.util.spec_from_loader("yosmcp_under_test", loader)
     module = importlib.util.module_from_spec(spec)
@@ -275,11 +290,15 @@ def act(module, app, action, args):
 
 
 def case(tmp, name, answer="granted", machine_ceiling="sensitive", shell_down=False,
-         ceiling="standard", requester="", mode="ask", rules=None, no_mode=False):
+         ceiling="standard", requester="", mode="ask", rules=None, no_mode=False,
+         poll_fails=0, poll_hang=0, wait=4):
     """A scratch desktop in a known mood, and a yos-mcp pointed at it.
 
     `no_mode` publishes a shell that says nothing about its mode — an older desktop, or one
     answering from a version that predates them. The bridge has to fall back to `ask`.
+
+    `poll_fails` and `poll_hang` are how the desktop misbehaves once a card is UP: the first few
+    approval polls refused, or every one of them slower than the bridge's budget for it.
     """
     state_path = tmp / (name + ".json")
     body = {
@@ -287,12 +306,14 @@ def case(tmp, name, answer="granted", machine_ceiling="sensitive", shell_down=Fa
         "machine_ceiling": machine_ceiling,
         "shell_down": shell_down,
         "rules": rules or [],
+        "poll_fails": poll_fails,
+        "poll_hang": poll_hang,
     }
     if not no_mode:
         body["mode"] = mode
     fake = tmp / "yos"
     state_path.write_text(json.dumps(body), encoding="utf-8")
-    module = load_mcp(fake, state_path, ceiling=ceiling, requester=requester)
+    module = load_mcp(fake, state_path, ceiling=ceiling, requester=requester, wait=wait)
     return module, state_path
 
 
@@ -313,6 +334,92 @@ def handshake(module, name, version):
         module.main()
     finally:
         sys.stdin, sys.stdout = saved_in, saved_out
+
+
+class Client:
+    """A client on the other end of the bridge's stdio, for the questions about WHEN.
+
+    `handshake` drives `main()` over a StringIO, which is enough to ask what a reply says. This
+    asks when it arrives, over real pipes and in real time: a server that will not read its next
+    request until the last one is answered looks exactly like one that will, right up until
+    something is kept waiting. That is the whole of the 22 September defect — a card on the
+    person's screen made the bridge deaf, and the client killed it for being dead.
+
+    The process's own streams are swapped for the pipes while this is up, so nothing may print
+    between `Client(...)` and `close()`; collect what you learned and check it afterwards.
+    """
+
+    def __init__(self, module):
+        self.replies = []
+        self.handed = 0
+        self.arrived = threading.Event()
+        self.noise = io.StringIO()
+        client_read, server_write = os.pipe()
+        server_read, client_write = os.pipe()
+        self.to_server = os.fdopen(client_write, "w")
+        self.from_server = os.fdopen(client_read, "r")
+        self.server_in = os.fdopen(server_read, "r")
+        self.server_out = os.fdopen(server_write, "w")
+        self.saved = (sys.stdin, sys.stdout, sys.stderr)
+        sys.stdin, sys.stdout, sys.stderr = self.server_in, self.server_out, self.noise
+        self.server = threading.Thread(target=module.main, daemon=True)
+        self.server.start()
+        self.reader = threading.Thread(target=self._drain, daemon=True)
+        self.reader.start()
+
+    def _drain(self):
+        for line in self.from_server:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self.replies.append(json.loads(line))
+            except ValueError:
+                continue
+            self.arrived.set()
+
+    def send(self, msg_id, method, **params):
+        self.to_server.write(json.dumps({"jsonrpc": "2.0", "id": msg_id, "method": method,
+                                         "params": params}) + "\n")
+        self.to_server.flush()
+
+    def take(self, timeout):
+        """The next reply the server has not handed over yet, or None if it does not come."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if len(self.replies) > self.handed:
+                self.handed += 1
+                return self.replies[self.handed - 1]
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            self.arrived.clear()
+            self.arrived.wait(left)
+
+    def close(self):
+        """Close the client's end, let the server finish, and put the streams back."""
+        self.to_server.close()
+        self.server.join(60)
+        sys.stdin, sys.stdout, sys.stderr = self.saved
+        self.server_out.close()
+        self.reader.join(5)
+        return self.noise.getvalue()
+
+
+def act_aloud(module, app, action, args):
+    """`act`, with whatever the bridge said to stderr while it ran. Returns (text, error, log)."""
+    saved = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        text, is_error = act(module, app, action, args)
+        return text, is_error, sys.stderr.getvalue()
+    finally:
+        sys.stderr = saved
+
+
+def poll_failures(noise):
+    """The bridge's own account of the polls that did not come back."""
+    return [line for line in noise.splitlines() if "approval poll failed" in line]
 
 
 def read(state_path):
@@ -422,10 +529,10 @@ with tempfile.TemporaryDirectory() as d:
     module, state = case(tmp, "swap", answer="granted")
     original = module.shell_call
 
-    def swapped(action, args):
+    def swapped(action, args, timeout=None):
         if action == "consume_approval":
             args = dict(args, args_json={"id": "evt-99"})
-        return original(action, args)
+        return original(action, args, timeout)
 
     module.shell_call = swapped
     text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
@@ -790,6 +897,95 @@ with tempfile.TemporaryDirectory() as d:
     by_undo = {bool(v.get("unrecoverable")): v.get("expect") for v in auto_sensitive}
     check("auto runs a recoverable sensitive action and asks about one that cannot be undone",
           by_undo == {False: "run_logged", True: "ask"}, by_undo)
+
+    # ── 19. A card on the screen does not make the bridge deaf ──────────────────────────
+    #
+    # 22 September 2026, and the whole of it. A `terminal.run` card went up at 06:48:18Z; the
+    # bridge polled it every two seconds and, because it answered one request at a time, read
+    # nothing else off its stdin while it did. 59 seconds in, Hermes' keepalive gave up on a
+    # server that was merely busy, replaced the process, and the os_act died with it — so the
+    # call never returned and Hermes waited out its own 300s timeout. The card was still on the
+    # person's screen and nobody was left waiting for their answer.
+    #
+    # Driven through the real `main()` over real pipes, because nothing smaller can tell a server
+    # that answers in order from one that answers at all.
+    module, state = case(tmp, "concurrent", answer="pending", wait=4)
+    client = Client(module)
+    client.send(1, "tools/call", name="os_act",
+                arguments={"app": "calendar", "action": "delete_event", "args": {"id": "evt-3"}})
+    # Wait until the card is genuinely up, so the ping lands in the middle of the wait rather
+    # than in front of it.
+    card_up = False
+    for _ in range(100):
+        if read(state).get("requests"):
+            card_up = True
+            break
+        time.sleep(0.05)
+    client.send(2, "ping")
+    ping = client.take(2.0)
+    acted = client.take(20.0)
+    noise = client.close()
+    s = read(state)
+
+    check("a card goes up before the ping is sent", card_up, s)
+    check("the bridge answers a ping while it is waiting on a card",
+          ping is not None and ping.get("id") == 2, ping)
+    check("and a ping is answered as MCP defines it, not as an unknown method",
+          ping is not None and ping.get("result") == {} and "error" not in ping, ping)
+    check("the waiting call is still answered, after the ping",
+          acted is not None and acted.get("id") == 1, acted)
+    check("and it is the unanswered-card sentence, not a fault",
+          acted is not None
+          and "did not answer" in acted["result"]["content"][0]["text"], acted)
+    check("nothing ran while nobody had answered", not s.get("acted"), s)
+
+    # ── 20. A poll that fails does not throw the card away ──────────────────────────────
+    #
+    # The card is on somebody's screen and they are reaching for the mouse. One `yos` that takes
+    # too long, one transient refusal, and the bridge used to return "the desktop stopped
+    # answering" — abandoning a live question, and leaving behind a grant that nobody would ever
+    # spend if they went on to press Allow.
+    module, state = case(tmp, "poll-blips", answer="granted", poll_fails=3)
+    text, is_error, noise = act_aloud(module, "calendar", "delete_event", {"id": "evt-3"})
+    s = read(state)
+    check("three failed polls do not abandon a card that is still up",
+          not is_error and [a["action"] for a in s.get("acted", [])] == ["delete_event"], text)
+    check("the grant is still spent exactly once", s.get("spent") == ["appr-1"], s)
+    check("and the mind is told the person allowed it", "allowed this once" in text, text)
+    check("every failed poll is written to stderr, with why",
+          len(poll_failures(noise)) == 3 and "the desktop is busy" in noise,
+          noise or "(nothing was logged)")
+
+    # 20b. And a card nobody answers is still reported as unanswered, not as a desktop that
+    # went away, when a poll failed somewhere in the middle of the wait.
+    module, state = case(tmp, "poll-blip-silent", answer="pending", poll_fails=2, wait=2)
+    started = time.monotonic()
+    text, is_error, noise = act_aloud(module, "calendar", "delete_event", {"id": "evt-3"})
+    elapsed = time.monotonic() - started
+    check("a blip in the middle does not change what an unanswered card is called",
+          "did not answer" in text and "stopped answering" not in text, text)
+    check("and the wait still ends when it said it would (%.1fs of 2s)" % elapsed,
+          elapsed < 2 + 1.5, elapsed)
+
+    # ── 21. A desktop that never answers a poll at all ──────────────────────────────────
+    #
+    # Every poll slower than the budget the bridge has for it. Two things have to hold: the wait
+    # ends when the mind was told it would — the poll's own subprocess timeout is cut to what is
+    # left, or one slow poll carries the whole call past the deadline — and the ending says what
+    # actually happened, which is NOT that the person did not answer. Nobody here knows that.
+    module, state = case(tmp, "poll-silent", answer="granted", poll_hang=6, wait=2)
+    module.SHELL_CALL_TIMEOUT = 6
+    started = time.monotonic()
+    text, is_error, noise = act_aloud(module, "calendar", "delete_event", {"id": "evt-3"})
+    elapsed = time.monotonic() - started
+    s = read(state)
+    check("a wait nothing answers still ends on time (%.1fs of 2s)" % elapsed,
+          elapsed < 2 + 1.5, elapsed)
+    check("nothing runs on a guess", not s.get("acted") and not s.get("spent"), s)
+    check("and the mind is told the desktop stopped answering, not that the person did not",
+          text.startswith("REFUSED") and "stopped answering" in text and "never replied" in text
+          and "away from the keyboard" not in text, text)
+    check("with the reason on stderr", poll_failures(noise), noise or "(nothing was logged)")
 
     # The person can see what the mind is doing: one raise per change of app, never per action,
     # never for the shell, and never in the way of the action it follows.

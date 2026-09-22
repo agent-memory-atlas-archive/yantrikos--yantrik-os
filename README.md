@@ -200,7 +200,9 @@ the mode menu ("See what it did without asking") and in `~/.local/share/yantrik/
 Leave it unset and the desktop's mode is the whole policy.
 
 Because a call may wait for a person, **an MCP client must allow `os_act` up to 270 seconds**.
-A client that gives up sooner cuts the person off mid-decision. For Hermes:
+A client that gives up sooner cuts the person off mid-decision. The wait does not make the
+bridge deaf: pings, `tools/list` and other tool calls are all answered while a card is up, so a
+client's liveness check has no reason to declare the server dead and restart it. For Hermes:
 
 ```yaml
 mcp_servers:
