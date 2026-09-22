@@ -134,14 +134,30 @@ export component StatusBar inherits Rectangle {
                               : root.companion-status == "listening" ? Theme.accent-light
                               : Theme.text-dim;
 
+                    // The dot breathes while a mind is working. This is what that cost.
+                    //
+                    // It was an `animate ai-pulse-opacity { duration: 2000ms; }` with a 2000ms
+                    // Timer flipping that same opacity between 0.5 and 1.0. Each tick restarted
+                    // the animation exactly as it finished, so it was never not animating — and
+                    // a window with an animation in flight redraws at the display's rate, which
+                    // on this shell is a full-screen repaint costing ~96ms of CPU. For a 6px dot.
+                    //
+                    // Measured headless on this markup, a mind thinking and the Intent Lens
+                    // CLOSED: 236 frames a second before, 5 after. On the machine that was
+                    // `yantrik-ui` at 83% of a core with labwc at 20% beside it, for as long as a
+                    // job took, against 2.0% four minutes later with the mind idle (#68).
+                    //
+                    // Stepping the phase draws the same breath: ten steps through a two-second
+                    // cycle, five frames a second, and nothing in flight between them.
                     opacity: root.companion-status == "thinking" ? ai-pulse-opacity : 1.0;
-                    property <float> ai-pulse-opacity: 0.6;
-                    animate ai-pulse-opacity { duration: 2000ms; }
+                    property <float> ai-pulse-phase: 0;
+                    property <float> ai-pulse-opacity: 0.55
+                        + 0.45 * sin(ai-pulse-phase * 6.2832 * 1rad);
                     Timer {
-                        interval: 2000ms;
+                        interval: 200ms;
                         running: root.companion-status == "thinking";
                         triggered => {
-                            parent.ai-pulse-opacity = parent.ai-pulse-opacity > 0.8 ? 0.5 : 1.0;
+                            parent.ai-pulse-phase = mod(parent.ai-pulse-phase + 0.1, 1.0);
                         }
                     }
 

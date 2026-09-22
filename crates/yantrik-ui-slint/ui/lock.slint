@@ -15,14 +15,32 @@ export component LockScreen inherits Rectangle {
     property <bool> show-password: false;
     property <float> bg-phase: 0;
 
+    /// What the shell may spend on decoration, in milliseconds a frame — 0 when it may spend
+    /// nothing. The same budget the desktop hands its orb and particle field; `render_backend.rs`
+    /// works it out from the renderer, and it is 0 on the software rasteriser, where one
+    /// full-screen frame costs about 96 ms.
+    in property <int> ambient-interval-ms: 0;
+    property <float> tick-scale: max(100, ambient-interval-ms) / 16.0;
+
     callback try-unlock(string);
 
-    // Animated background phase
+    // The two glows behind the clock, breathing.
+    //
+    // This was `interval: 16ms; running: true;` — sixty full-screen repaints a second, for as
+    // long as the machine was locked, to drift two radial gradients through a 27-second cycle
+    // that moves imperceptibly between one frame and the next. The lock screen is what is on
+    // screen whenever the machine is idle, so this WAS the idle cost of the desktop (#53's
+    // 52.7 %, and the shape #68 found again in the Lens).
+    //
+    // Now it spends the renderer's budget instead of the display's: nothing at all where a frame
+    // is expensive, and a step every 100 ms where it is not — 270 steps through the cycle, which
+    // is more than a 27-second breath can show. `tick-scale` keeps that cycle the same length
+    // whatever the budget turns out to be.
     Timer {
-        interval: 16ms;
-        running: true;
+        interval: max(100, root.ambient-interval-ms) * 1ms;
+        running: root.ambient-interval-ms > 0;
         triggered => {
-            bg-phase = mod(bg-phase + 0.0006, 1.0);
+            bg-phase = mod(bg-phase + 0.0006 * root.tick-scale, 1.0);
         }
     }
 
