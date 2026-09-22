@@ -171,6 +171,11 @@ pub fn service_id_for(app_id: &str) -> String {
 /// spelling without a name here fails that test rather than shipping another refusal.
 const SURFACES: &[(&str, &[&str])] = &[
     ("arcade", &[]),
+    // Not one of ours: Blender is a program this desktop opens, and its surface is served by a
+    // Python addon inside it (apps/blender/addon), a port of this module's dispatch rather than
+    // a user of this runtime. It belongs in the table for the same reason as any other row —
+    // the table is the complete answer to "is this a surface of this desktop".
+    ("blender", &[]),
     ("calendar", &[]),
     ("containers", &["container-manager"]),
     ("documents", &["document-editor"]),
