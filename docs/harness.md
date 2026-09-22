@@ -183,11 +183,21 @@ and answers one yes/no question; every word that reaches an app is still the gen
 things that shape carries with it:
 
 - **A decision model can only choose an option it was given**, so the option list has to be
-  complete or not offered at all. Before `os_apps` has answered there is nothing to choose
-  between; an `os_describe` answer that was too long to keep whole is a partial action list, and
-  a partial list is worse than none, because it does not make the answer uncertain — it makes it
-  confidently wrong. `none of these` is always among the apps, which is what turns "nothing here
-  applies" into an answer rather than a wrong app.
+  complete or not offered at all. An `os_describe` answer that was too long to keep whole is a
+  partial action list, and a partial list is worse than none, because it does not make the
+  answer uncertain — it makes it confidently wrong. `none of these` is always among the apps,
+  which is what turns "nothing here applies" into an answer rather than a wrong app.
+- **The cheap half cannot depend on the expensive half's habits.** Attached to a live desktop,
+  Kev answered nothing at all on the first real question put to it: the system prompt asks the
+  model to start with `os_apps`, and a model that already knows this desktop went straight to
+  `os_describe` — a good answer that left the decider with no list of apps and nothing it could
+  be asked. So the harness reads `os_apps` itself at the start of a question, once, when the
+  conversation does not already hold a listing. It shows in the trail like any other tool call,
+  because a tool call the person cannot see is worse than a line they did not need.
+- **Standing aside has to be as loud as falling back.** The first version of this returned
+  quietly when there was nothing to ask, and the failure above was invisible in the journal —
+  indistinguishable from a decider that was asked and disagreed. Every step the decider is not
+  asked now says so and why.
 - **Questions in one request cannot read each other, and the id is not sent to the model.** So
   each question's instructions carry their whole meaning, and the speculative ones say so —
   "suppose the next step is taken with `calendar`, whether or not another app would be a better

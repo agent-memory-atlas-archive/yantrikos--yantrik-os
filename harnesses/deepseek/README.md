@@ -129,13 +129,21 @@ sentence. It chooses between things this desktop already published — an app in
 action in `os_describe` — and answers one yes/no question about whether the work is done. Every
 word that reaches an app is still the chat model's.
 
-It also does not pick every step. These are the cases it stands aside for, and the generator
-takes the step as it always did:
+**The harness reads `os_apps` itself**, once at the start of a question and only when the
+conversation does not already hold a listing. A decision model can only choose an option it was
+given, so without a list of apps there is nothing it can be asked — and the system prompt asking
+the chat model to start with `os_apps` is not the same as it doing so. Measured with Kev-4B
+attached to a live desktop: "what is on my calendar on 25 September?" was answered correctly
+straight out of `os_describe calendar`, and the decider was never asked a single question,
+because whether the cheap half of the loop ran at all depended on the generator's habits. The
+read is `safe`, it shows in the trail as `⚙️ os_apps` like any other tool call, and it goes into
+the conversation as an ordinary tool result — so the chat model sees it too and does not have to
+ask for it again.
 
-- **Before the desktop has been looked at.** Until `os_apps` has answered there is no list of
-  apps, and a decision model can only choose an option it was given. The first `os_apps` of a
-  conversation is always the generator's. (The list is then kept across later questions, so this
-  is a once-per-conversation cost, not a once-per-question one.)
+It still does not pick every step. These are the cases it stands aside for — each one a line in
+the log, so "never asked" can be told from "asked and fell back" — and the generator takes the
+step as it always did:
+
 - **When an app has been chosen but not described.** There is no action list to pin to, and the
   `os_describe` that would produce one is the generator's next step anyway.
 - **When an `os_describe` answer was too long to keep whole.** A partial action list does not
@@ -145,6 +153,8 @@ takes the step as it always did:
   do is look for another route to the same thing. That judgement is in the system prompt, where
   the generator reads it; the decider is not shown it, so it is stood down for the rest of that
   question rather than asked to re-derive the rule.
+- **When the app listing itself could not be read** — the bridge is down, or this desktop
+  publishes no `os_apps`. The log says `no app catalogue yet`.
 - **Whenever the decider cannot be reached, refuses the questions, or answers something this
   harness cannot read.** It is an optimisation and never a dependency: a decider that is down
   costs a log line.
@@ -194,17 +204,26 @@ is what goes there.
 
 ### In the log
 
-One line per step, and nothing else:
+One line per step, and nothing else. A step it decided:
 
 ```
-decider step 1: act calendar.add_event p=0.97 (done? no 0.96, app calendar 0.98, action add_event 0.97) 131ms · gate 0.90 held · the generator filled in the arguments
-decider step 2: would have acted on calendar.delete_event p=0.62 (done? no 0.88, app calendar 0.91, action delete_event 0.62) 118ms · gate 0.90 not held · the generator picked os_describe calendar
-decider step 3: answer — no app (done? yes 0.96) 104ms · gate 0.90 held · the generator wrote the reply
+decider step 1: act calendar.add_event p=0.97 · (done? no 0.96, app calendar 0.98, action add_event 0.97) · 131ms · gate 0.90 held · the generator filled in the arguments
+decider step 2: would have acted on calendar.delete_event p=0.62 · (done? no 0.88, app calendar 0.91, action delete_event 0.62) · 118ms · gate 0.90 not held · the generator picked os_describe calendar
+decider step 3: answer — no app · (done? yes 0.96) · 104ms · gate 0.90 held · the generator wrote the reply
 ```
 
-The last field is the only measurement of the two against each other this harness can make on a
-real desktop: on every step the gate did not hold, both of them picked, and the line says what
-each of them said. Neither key ever appears in it.
+A step it was not asked about, with the reason:
+
+```
+decider step 2 stands aside: a refusal is standing, and routing around one is not its judgement to make
+decider step 1 stands aside: no app catalogue yet
+```
+
+The last field of a decided line is the only measurement of the two against each other this
+harness can make on a real desktop: on every step the gate did not hold, both of them picked,
+and the line says what each of them said. And a step that was never asked about says so, because
+the thing a person reading the journal has to be able to tell apart is a decider that fell back
+from a decider that was silent. Neither key ever appears in any of it.
 
 ## What is sent to the provider
 

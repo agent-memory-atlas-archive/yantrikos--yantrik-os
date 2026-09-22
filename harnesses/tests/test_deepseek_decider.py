@@ -68,8 +68,14 @@ class DesktopTools:
     def __init__(self, refuse=False):
         self.calls = []
         self.refuse = refuse
+        # A desktop whose `os_apps` answers nothing a listing can be read out of, and one that
+        # publishes no tools at all: the two ways the catalogue can stay empty.
+        self.empty = False
+        self.schemas = None
 
     def as_openai_tools(self):
+        if self.schemas is not None:
+            return self.schemas
         return [
             {"type": "function", "function": {
                 "name": "os_apps", "description": "What is on this desktop.",
@@ -92,6 +98,8 @@ class DesktopTools:
     def call(self, name, arguments, timeout=None):
         self.calls.append((name, arguments))
         if name == "os_apps":
+            if self.empty:
+                return ("the desktop's app listing is not answering", True)
             return (LISTING, False)
         if name == "os_describe":
             return (DESCRIBE, False)
@@ -193,17 +201,60 @@ class DeciderLoopTests(unittest.TestCase):
         self.assertIn("Added it.", said(recorder))
         self.assertEqual(self.log(), "")
 
-    def test_nothing_is_asked_before_the_desktop_has_been_looked_at(self):
-        # The first os_apps of a fresh conversation is the generator's: there is no list of apps
-        # yet, so there is nothing for a decision model to choose between.
+    def test_the_harness_reads_the_app_list_itself_so_the_first_step_can_be_decided(self):
+        # Measured live: the model answered "what is on my calendar?" with os_describe and never
+        # called os_apps, so the decider had no candidates and was never asked. Whether the
+        # cheap half of the loop runs cannot depend on the generator's habits.
         mind = self.mind("tools", seeded=False, max_steps=1)
+        turn, recorder = recording_turn("what is on my calendar on 25 September?")
+        mind.answer(turn)
+        self.assertEqual(mind.tools.calls[0], ("os_apps", {}))
+        self.assertEqual(self.catalogue_reads(mind), 1)
+        self.assertEqual(len(self.decisions()), 1, "the first step was decided, not skipped")
+        # It goes into the conversation as an ordinary call and its answer, so the generator
+        # sees it too and does not have to ask again.
+        self.assertEqual([m["role"] for m in mind.messages[:3]], ["user", "assistant", "tool"])
+        self.assertIn("Open now", mind.messages[2]["content"])
+        self.assertIn("⚙️ os_apps", said(recorder), "a tool call the person cannot see is worse")
+
+    def test_the_app_list_is_read_once_and_not_again_when_it_is_already_known(self):
+        mind = self.mind("tools")  # seeded: os_apps is already in the conversation
         turn, _ = recording_turn("add dentist to my calendar")
         mind.answer(turn)
-        self.assertEqual(self.decisions(), [])
-        self.assertEqual(self.log(), "")
-        sent = self.chat_requests("tools")[0]
-        self.assertEqual(len(sent["tools"]), 3)
-        self.assertNotIn("tool_choice", sent)
+        self.assertEqual(self.catalogue_reads(mind), 0, "the catalogue was already there")
+
+    @staticmethod
+    def catalogue_reads(mind):
+        """How many times the harness read the app list on its own behalf."""
+        return sum(1 for m in mind.messages
+                   if str(m.get("tool_call_id") or "").startswith("catalogue_"))
+
+    def test_the_live_turn_that_found_this_is_decided_from_end_to_end(self):
+        """"What is on my calendar on 25 September?", against a model that skips os_apps.
+
+        The journal this leaves is the whole point: the app list read once, a first step that
+        says what it could not pin and why, and a second step where the decider ends the loop
+        because the app has been read and the question is answered.
+        """
+        mind = self.mind("describe-first", scenario="reading", seeded=False)
+        turn, recorder = recording_turn("what is on my calendar on 25 September?")
+        mind.answer(turn)
+        self.assertEqual([name for name, _ in mind.tools.calls], ["os_apps", "os_describe"])
+        self.assertEqual(len(self.decisions()), 2, "both steps were decided")
+        self.assertIn("nothing to pin on calendar: it has not been described yet",
+                      self.logged[0])
+        self.assertIn("the generator picked os_describe calendar", self.logged[0])
+        self.assertIn("answer — no app", self.logged[1])
+        self.assertIn("done? yes 0.96", self.logged[1])
+        # The last step was the decider's: no tools were offered, so the model wrote the reply.
+        self.assertNotIn("tools", self.chat_requests("describe-first")[1])
+        self.assertIn("Nothing on the 25th.", said(recorder))
+
+    def test_nothing_is_read_for_a_loop_that_has_no_decider(self):
+        mind = self.mind("plain", kind=None, seeded=False)
+        turn, _ = recording_turn("hello")
+        mind.answer(turn)
+        self.assertEqual(mind.tools.calls, [])
 
     # ── the decider picks, the generator fills ──────────────────────────
 
@@ -335,8 +386,34 @@ class DeciderLoopTests(unittest.TestCase):
         mind.answer(turn)
         self.assertEqual(len(self.decisions()), 1,
                          "asked on the first step, and not again after the refusal")
-        self.assertIn("decider step 1", self.log())
-        self.assertNotIn("decider step 2", self.log())
+        self.assertIn("decider step 2 stands aside: a refusal is standing", self.log())
+
+    # ── standing aside is said out loud ─────────────────────────────────
+
+    def test_a_step_that_was_never_asked_says_so_with_its_reason(self):
+        # The difference a person reading the journal has to be able to see: "asked and fell
+        # back" is one thing, "never asked at all" is another, and a quiet return is neither.
+        mind = self.mind("plain", seeded=False)
+        mind.tools.empty = True  # the read was tried and the desktop had nothing to say
+        turn, _ = recording_turn("hello")
+        mind.answer(turn)
+        self.assertEqual(mind.tools.calls, [("os_apps", {})])
+        self.assertIn("decider step 1 stands aside: no app catalogue yet", self.log())
+        self.assertEqual(self.decisions(), [])
+
+    def test_a_desktop_with_no_tools_at_all_says_that_is_why(self):
+        mind = self.mind("plain")
+        mind.tools.schemas = []
+        turn, _ = recording_turn("hello")
+        mind.answer(turn)
+        self.assertIn("decider step 1 stands aside: the desktop's tools are unavailable",
+                      self.log())
+
+    def test_an_app_with_no_action_list_says_which_of_the_three_reasons_it_is(self):
+        mind = self.mind("tools", scenario="other")  # picks `terminal`, which is not described
+        turn, _ = recording_turn("show me the log")
+        mind.answer(turn)
+        self.assertIn("nothing to pin on terminal: it has not been described yet", self.log())
 
     # ── the keys ────────────────────────────────────────────────────────
 
@@ -589,7 +666,20 @@ class GateTests(unittest.TestCase):
     def test_an_app_whose_actions_have_not_been_read_has_nothing_to_pin(self):
         decision = self.read(done=Pick(False, 0.95), app=Pick("notes", 0.99))
         self.assertEqual(decision.route, "generate")
-        self.assertIn("no action list for notes yet", decision.line(2))
+        self.assertIn("nothing to pin on notes", decision.line(2))
+
+    def test_the_three_ways_an_app_has_no_action_list_are_told_apart(self):
+        # They all end at the same fallback, and a journal that calls all three the same thing
+        # cannot be read.
+        world = World("x", [], [("a", "", "open")],
+                      {"cut": [("one", ""), ("two", "")], "thin": [("only", "")]},
+                      incomplete=["cut"])
+        self.assertIn("cut short", world.why_no_actions("cut"))
+        self.assertIn("only one action", world.why_no_actions("thin"))
+        self.assertIn("not been described", world.why_no_actions("unknown"))
+        self.assertEqual(world.why_no_actions("fine"), "it has not been described yet")
+        picked = read_picks({"app": Pick("cut", 0.99)}, 0.9, 1, world)
+        self.assertIn("nothing to pin on cut: its describe was cut short", picked.line(1))
 
     def test_no_answer_at_all_is_a_fallback_and_not_a_guess(self):
         decision = self.read()

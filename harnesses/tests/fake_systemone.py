@@ -10,6 +10,8 @@ with no model in it cannot be confident on request, and a test that wants an uns
 should say so in one place rather than by wording a question differently.
 
     confident   picks `calendar` and `add_event`, and says the request is not finished
+    reading     `calendar` throughout, and "not finished" until the second request — the shape
+                of a question that is answered by reading one app
     unsure      the same picks, under the gate
     done        says the request is finished
     none        picks "none of these", confidently
@@ -45,6 +47,9 @@ class Decisions(BaseHTTPRequestHandler):
         with self.server.lock:
             self.server.requests.append((self.path, body))
             scenario = self.server.scenario
+            if scenario == "reading":
+                # Not finished while the app has not been read, finished once it has.
+                scenario = "confident" if len(self.server.requests) < 2 else "done"
 
         if scenario == "refuse":
             # A 422 body that quotes the request back is how a System One endpoint says a

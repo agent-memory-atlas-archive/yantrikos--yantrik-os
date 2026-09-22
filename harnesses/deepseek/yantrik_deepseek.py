@@ -738,6 +738,22 @@ class World:
             return []
         return self.actions.get(app, [])[:MAX_ACTIONS_PER_APP]
 
+    def why_no_actions(self, app: str) -> str:
+        """Why this app cannot be offered an action question, in words, or "" when it can.
+
+        Three different things end up at the same fallback — an app nobody has described, one
+        whose describe was too long to keep whole, and one that publishes a single action — and
+        a journal that calls all three "no action list" cannot be read.
+        """
+        if app in self.incomplete:
+            return "its describe was cut short, so its action list is not all of it"
+        found = self.actions.get(app) or []
+        if not found:
+            return "it has not been described yet"
+        if len(found) < 2:
+            return "it publishes only one action, which is not a choice"
+        return ""
+
     def described(self) -> List[str]:
         """The apps we could read a whole action list for, in the order of the listing."""
         order = [name for name, _, _ in self.apps]
@@ -845,25 +861,35 @@ def world_from_messages(messages: Sequence[Dict[str, Any]]) -> World:
     return World(ask, steps, apps, actions, incomplete, refused)
 
 
-def questions_for(world: World) -> List[Ask]:
-    """The questions one step is worth asking, all of them in one request.
+def standing_aside(world: World) -> str:
+    """Why there is nothing to ask a decision model this step, in words, or "" when there is.
 
-    Three shapes, from the issue: is this done, which app, and — for each app whose actions we
-    can see — which of that app's actions. Empty means there is nothing here a decision model
-    can answer, and the generator decides the step on its own:
+    Two cases, and both are said out loud in the log rather than being a quiet `return`:
 
-    - Nothing is known about the apps yet, so there is nothing to choose between. The first
-      `os_apps` of a fresh conversation is always the generator's.
+    - Nothing is known about the apps, so there is nothing to choose between. `_seed_catalogue`
+      exists so that this is a broken bridge rather than an ordinary Tuesday.
     - Something on this turn came back REFUSED. The desktop declined that action, and the one
       thing a mind must not do then is look for another route to the same thing. That judgement
       is in the system prompt, where the generator reads it; the decider is not shown it, so it
       is stood down for the rest of the turn rather than asked to re-derive it.
     """
-    if not world.apps or world.refused:
+    if world.refused:
+        return "a refusal is standing, and routing around one is not its judgement to make"
+    if not world.apps or not world.app_options():
+        return "no app catalogue yet"
+    return ""
+
+
+def questions_for(world: World) -> List[Ask]:
+    """The questions one step is worth asking, all of them in one request.
+
+    Three shapes, from the issue: is this done, which app, and — for each app whose actions we
+    can see — which of that app's actions. Empty means `standing_aside` had a reason, and the
+    generator decides the step on its own.
+    """
+    if standing_aside(world):
         return []
     options = world.app_options()
-    if not options:
-        return []
     asks = [
         Ask("done", "noul",
             "Above is a computer, what its owner asked it to do, and everything that has been "
@@ -883,9 +909,10 @@ def questions_for(world: World) -> List[Ask]:
     ]
     for app in world.described():
         actions = world.known_actions(app)
-        if len(actions) < 2:
+        if world.why_no_actions(app):
             # One action is not a choice, and a question with one option comes back certain by
-            # arithmetic rather than by judgement.
+            # arithmetic rather than by judgement. `why_no_actions` is the same rule the log
+            # line reads, so the two can never say different things.
             continue
         asks.append(Ask(
             "action:" + app, "choice",
@@ -941,10 +968,14 @@ class Decision:
         elif self.route == "act":
             parts.append("act %s.%s p=%.2f" % (self.app, self.action,
                                                min(self._p(self.app_pick), self._p(self.action_pick))))
-        elif self.app:
+        elif self.app and self.action_pick is not None:
             parts.append("would have acted on %s.%s p=%.2f" % (
-                self.app, self.action or "?",
+                self.app, self.action,
                 min(self._p(self.app_pick), self._p(self.action_pick))))
+        elif self.app:
+            # No action was asked for, so there is no pair to report a probability for — and
+            # `p=0.00` for a question nobody asked reads as a confident nothing.
+            parts.append("got as far as %s p=%.2f" % (self.app, self._p(self.app_pick)))
         else:
             parts.append("no pick")
         detail = []
@@ -971,7 +1002,8 @@ class Decision:
         return pick.probability if pick is not None else 0.0
 
 
-def read_picks(picks: Dict[str, Pick], gate: float, latency_ms: int = 0) -> Decision:
+def read_picks(picks: Dict[str, Pick], gate: float, latency_ms: int = 0,
+               world: Optional[World] = None) -> Decision:
     """The gate: what the decider's answers mean for this step.
 
     Two routes can be taken, and each has to clear the gate on its own answers:
@@ -998,9 +1030,13 @@ def read_picks(picks: Dict[str, Pick], gate: float, latency_ms: int = 0) -> Deci
     action_pick = picks.get("action:" + app)
     common["action_pick"] = action_pick
     if action_pick is None:
-        # The app is picked but its actions have not been read yet, so there is nothing to pin.
-        # The generator's next step is the `os_describe` that would fix that.
-        return Decision("generate", app=app, why="no action list for %s yet" % app, **common)
+        # The app is picked but there was no action question for it, so there is nothing to
+        # pin. Usually the generator's next step is the `os_describe` that would fix it —
+        # `world` is here so the line says which of the three reasons this was.
+        why = (world.why_no_actions(app) if world is not None else "") or \
+            "its actions have not been read"
+        return Decision("generate", app=app, why="nothing to pin on %s: %s" % (app, why),
+                        **common)
     action = str(action_pick.value)
     if app_pick.probability < gate or action_pick.probability < gate:
         return Decision("generate", app=app, action=action, **common)
@@ -1110,6 +1146,8 @@ class DeepSeekMind(Handler):
             self.log("the desktop's tools are unavailable: %s" % exc)
             turn.emit("(the desktop's tool bridge is not answering, so this is a plain answer)\n\n")
 
+        self._seed_catalogue(turn, schemas)
+
         for step in range(self.config.max_steps):
             if turn.cancelled.is_set():
                 turn.emit(("\n\n" if turn.said_anything else "") + "(stopped.)")
@@ -1143,6 +1181,49 @@ class DeepSeekMind(Handler):
 
     # ── who picks this step ─────────────────────────────────────────────
 
+    def _seed_catalogue(self, turn: Turn, schemas: List[Dict[str, Any]]) -> None:
+        """Read `os_apps` before the first step, so the decider has candidates from step one.
+
+        Without this the decider is silent on the most ordinary shape of a turn. The system
+        prompt asks the model to start with `os_apps`, and a model that already knows this
+        desktop skips it and goes straight to `os_describe` — which is a good answer and leaves
+        the decider with no list of apps and nothing it can be asked. Measured on a live desktop
+        with Kev-4B attached: "what is on my calendar on 25 September?" was answered correctly
+        and the decider never got a question, because the generator's habits decided whether the
+        cheap half of the loop ran at all.
+
+        So the harness reads the list itself, once per turn and only when the conversation does
+        not already hold one. It is a read, it is graded `safe`, and it goes in as an ordinary
+        tool result — which means the generator sees it too and does not have to ask again. It
+        also shows in the trail like any other tool call: something read this desktop, and a
+        tool call the person cannot see is worse than a line they did not need.
+        """
+        if self.decider is None or turn.cancelled.is_set():
+            return
+        if not any((s.get("function") or {}).get("name") == "os_apps" for s in schemas):
+            return  # this bridge does not publish it; the stand-aside below says so
+        if world_from_messages(self.messages).apps:
+            return
+        call_id = "catalogue_%d" % len(self.messages)
+        turn.tool("os_apps", {})
+        text, is_error = self.tools.call("os_apps", {})
+        # Written into the conversation as a call and its answer, because that is the one shape
+        # both readers of this history already understand. The mind did not ask for this one;
+        # the trail line and the README are where that is said.
+        self.messages.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": call_id, "type": "function",
+             "function": {"name": "os_apps", "arguments": "{}"}}]})
+        self.messages.append(self._result(call_id, "os_apps", text, is_error))
+
+    def _aside(self, step: int, why: str) -> None:
+        """One line saying the decider was not asked, and why.
+
+        Said every step it happens, because the thing a person reading the journal has to be
+        able to tell apart is "asked and fell back" from "never asked at all" — and the second
+        of those is invisible unless it says so.
+        """
+        self.log("decider step %d stands aside: %s" % (step + 1, why))
+
     def _pick(self, step: int, schemas: List[Dict[str, Any]]) -> Tuple[Optional[Decision],
                                                                        List[Dict[str, Any]],
                                                                        Optional[Dict[str, Any]]]:
@@ -1151,14 +1232,23 @@ class DeepSeekMind(Handler):
         Three shapes come out of it: the tools taken away so the generator writes the reply, one
         narrowed `os_act` with `tool_choice` on it so the generator only fills in the arguments,
         or the tool list untouched. The last of those is also what happens when there is no
-        decider, when there is nothing for it to decide, and when it cannot be reached.
+        decider, when there is nothing for it to decide, and when it cannot be reached — and
+        every one of those says so in the log rather than being silent.
         """
         decider, config = self.decider, self.config.decider
-        if decider is None or config is None or not schemas:
+        if decider is None or config is None:
+            return None, schemas, None
+        if not schemas:
+            self._aside(step, "the desktop's tools are unavailable")
             return None, schemas, None
         world = world_from_messages(self.messages)
+        aside = standing_aside(world)
+        if aside:
+            self._aside(step, aside)
+            return None, schemas, None
         asks = questions_for(world)
         if not asks:
+            self._aside(step, "there is nothing here it can be asked")
             return None, schemas, None
         catalogue, situation = world.state()
         started = time.monotonic()
@@ -1170,7 +1260,8 @@ class DeepSeekMind(Handler):
             # cheap half has stopped answering.
             self.log("decider step %d: %s — the generator picks this step" % (step + 1, exc))
             return None, schemas, None
-        decision = read_picks(picks, config.gate, int((time.monotonic() - started) * 1000))
+        decision = read_picks(picks, config.gate, int((time.monotonic() - started) * 1000),
+                              world)
         if decision.route == "answer":
             # No tools at all rather than `tool_choice: "none"`: the same meaning, and every
             # OpenAI-compatible server understands a request with no `tools` in it.
@@ -1255,14 +1346,16 @@ class DeepSeekMind(Handler):
                 })
                 continue
             text, is_error = self.tools.call(call["name"], args)
-            text = redact(text, self.config.secrets)
-            if len(text) > TOOL_RESULT_CAP:
-                text = text[:TOOL_RESULT_CAP] + "\n%s%d more characters)" % (
-                    CUT_MARKER, len(text) - TOOL_RESULT_CAP)
-            self.messages.append({
-                "role": "tool", "tool_call_id": call["id"], "name": call["name"],
-                "content": ("failed: " + text) if is_error else text,
-            })
+            self.messages.append(self._result(call["id"], call["name"], text, is_error))
+
+    def _result(self, call_id: str, name: str, text: str, is_error: bool) -> Dict[str, Any]:
+        """One tool result as the conversation stores it: redacted, capped, marked if it failed."""
+        text = redact(text, self.config.secrets)
+        if len(text) > TOOL_RESULT_CAP:
+            text = text[:TOOL_RESULT_CAP] + "\n%s%d more characters)" % (
+                CUT_MARKER, len(text) - TOOL_RESULT_CAP)
+        return {"role": "tool", "tool_call_id": call_id, "name": name,
+                "content": ("failed: " + text) if is_error else text}
 
     # ── one request ─────────────────────────────────────────────────────
 

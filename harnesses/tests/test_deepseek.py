@@ -73,6 +73,19 @@ class _Chat(BaseHTTPRequestHandler):
             ]
         if model == "echo-key":
             return [frame({"content": "your header was %s" % auth}), DONE]
+        if model == "describe-first":
+            # What a model that already knows this desktop does with "what is on my calendar on
+            # the 25th": no os_apps at all, straight to the app it knows the answer is in. It is
+            # a good answer, and it is the shape that left the decider with nothing to be asked
+            # until the harness started reading the app list itself. See test_deepseek_decider.
+            if nth == 1:
+                return [
+                    frame({"tool_calls": [{"index": 0, "id": "call_d", "type": "function",
+                                           "function": {"name": "os_describe",
+                                                        "arguments": '{"app": "calendar"}'}}]}),
+                    DONE,
+                ]
+            return [frame({"content": "Nothing on the 25th."}), DONE]
         if model == "fills":
             # A model asked for the arguments of one action, which writes the arguments and
             # also writes an app and an action of its own — what a provider that reads the
