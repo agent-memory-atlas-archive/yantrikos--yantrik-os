@@ -1,141 +1,183 @@
-# Hardware Requirements
+# Hardware requirements
 
-## Minimum Requirements
+Yantrik OS is a **Debian 13 (trixie)** live image for **x86-64**. There is no ARM build and
+no 32-bit build.
 
-| Component | Requirement |
-|-----------|-------------|
-| **CPU** | x86_64, 2 cores |
-| **RAM** | 4 GB |
-| **Disk** | 4 GB free space |
-| **GPU** | Not required (software rendering works) |
-| **Display** | 1024x768 minimum |
-| **OS** | Alpine Linux 3.18+ |
+Every number on this page is one of three things, and each is labelled: **measured** (someone
+ran the command and this is what it said), **configured** (a value written in a file in this
+repository, which you can go and read), or **not measured** (nobody has checked, so no figure
+is given). A requirements page whose numbers came from nowhere is how this OS spent months
+telling people to install Alpine Linux.
 
-With minimum specs, the system runs with software rendering. The bundled Qwen 3.5 4B model provides reliable reasoning and structured output, but **a GPU is strongly recommended** for interactive AI responses. On CPU-only, inference is too slow (~1 TPS) for practical use — the companion becomes a background assistant rather than an interactive one.
+---
 
-## Recommended Specs
+## The image
 
-| Component | Recommendation |
-|-----------|----------------|
-| **CPU** | 4+ cores, modern x86_64 |
-| **RAM** | 8+ GB |
-| **Disk** | 5+ GB free (10+ GB if hosting LLM models locally) |
-| **GPU** | **NVIDIA or AMD strongly recommended** for usable AI response times |
-| **Display** | 1920x1080 |
-| **OS** | Alpine Linux 3.23 |
+| | |
+|---|---|
+| Size | **1,411,915,776 bytes — about 1.31 GiB** (measured: `bytes` in `https://iso.yantrikos.com/nightly/latest.json`, build `v0.1.0-304`, 2026-09-22) |
+| Format | Hybrid BIOS + EFI ISO, `grub-mkrescue`. Write it to a USB stick or attach it to a VM |
+| Channel | **nightly only.** `beta` and `stable` are names the updater knows; nothing has ever been published to either |
 
-> **GPU is essential for interactive AI.** Without GPU acceleration, even the smallest models produce ~1 token/second on CPU, making real-time conversation impractical. With a GPU (via Ollama), the 4B model runs at 70+ TPS — fully interactive. If you don't have a local GPU, point Yantrik to a remote Ollama server on your LAN that does.
+The size moves slightly from build to build. `latest.json` is always the current answer —
+that is what it is for.
 
-## Supported Platforms
+---
 
-### Bare Metal
+## What it has actually been run on
 
-Best performance. Works with any x86_64 machine that can run Alpine Linux. GPU acceleration is automatic when drivers are available.
+### The automated boot test — the one thing every published image has passed
 
-### VirtualBox
+[`.github/workflows/iso.yml`](../.github/workflows/iso.yml) boots each image before it is
+published, and refuses to publish one that does not come up. It uses
+(configured, [`boottest.py`](../deploy/yantrik-os/boottest.py)):
 
-Fully supported. The installer auto-detects VirtualBox and:
-- Installs Guest Additions
-- Enables software rendering (`SLINT_BACKEND=winit-software`)
-- Disables hardware cursors
+| | |
+|---|---|
+| RAM | **4096 MB** |
+| CPUs | **4** |
+| Display | `-device virtio-vga`, headless (`-display none`), read over the serial console |
+| Firmware | BIOS (QEMU's default) |
+| Acceleration | KVM when the runner has `/dev/kvm`, plain emulation when it does not — both are exercised |
+| Disk | none. The test never installs; it boots the live image |
 
-**Recommended VM settings:**
-- 2+ CPU cores
-- 2048+ MB RAM
-- 32 MB video memory
-- VBoxVGA or VBoxSVGA display adapter
-- Enable 3D acceleration if available
+So: **4 GB of RAM, 4 CPUs, no GPU, no disk** is a configuration the current image is known to
+boot in, because it did.
 
-### QEMU/KVM
+### The project's test machine
 
-Fully supported. The installer configures:
-- `WLR_DRM_DEVICES=/dev/dri/card0`
-- `SLINT_BACKEND=winit`
+The VM this is developed and demonstrated against (measured, 2026-09-22, over SSH):
 
-**Recommended QEMU flags:**
+| | |
+|---|---|
+| Platform | QEMU/KVM — `Standard PC (Q35 + ICH9, 2009)`, SeaBIOS |
+| CPU | 4 cores (`nproc`) |
+| RAM | 7.8 GiB total (`free -h`) — provisioned as 8 GB |
+| GPU | none. `Red Hat, Inc. Virtio 1.0 GPU` — software rendering through Mesa's llvmpipe |
+| Disk | 32 GB, of which 17 GB used |
+| Kernel | `6.12.107+deb13-amd64` |
+| Firmware | BIOS. `/sys/firmware/efi` does not exist on it |
+
+That is the whole of what this OS is known to run well on. It is a VM with no GPU, and the
+desktop is fully usable on it.
+
+### Everything else
+
+**Not measured.** Specifically:
+
+- **Real hardware of any kind.** No published image has been booted on a physical machine by
+  this project.
+- **The UEFI boot path.** It is built into every image and CI boots the BIOS path.
+- **Any GPU other than QEMU's virtio-vga.** NVIDIA, AMD and Intel hardware acceleration are
+  untested here.
+- **Wi-Fi on real adapters.**
+- **VirtualBox.** It should work — the image is an ordinary Debian live ISO — but nobody has
+  checked it against a current build.
+
+---
+
+## What to give a VM
+
+Start from what is known to work rather than from a guess:
+
+| | Known-good | Minimum anyone has booted |
+|---|---|---|
+| CPU | 4 vCPU | 4 vCPU (CI) |
+| RAM | 8 GB | 4 GB (CI) |
+| Disk | 32 GB | none, if you only boot live |
+| GPU | none needed | none needed |
+| Firmware | BIOS | BIOS |
+
+Below 4 GB is **not measured** — it may well work, and no one has tried it, so this page is
+not going to print a number.
+
 ```bash
-qemu-system-x86_64 \
-  -enable-kvm \
-  -m 2048 \
-  -smp 2 \
-  -display gtk,gl=on \
-  -device virtio-vga-gl
+qemu-system-x86_64 -enable-kvm -m 4096 -smp 4 \
+  -cdrom yantrik-os-<version>.iso -boot d \
+  -device virtio-vga -display gtk
 ```
 
-### Proxmox LXC/VM
+---
 
-Works in both LXC containers and full VMs. For LXC, pass through `/dev/dri` for GPU access.
+## Disk, if you install it
 
-## GPU Support
+The image copies its own live filesystem onto the disk, so an installed machine is roughly a
+Debian 13 system plus `/opt/yantrik`.
 
-### No GPU (CPU Only)
+`/opt/yantrik` on the test machine, measured 2026-09-22 with `du -sh`:
 
-The UI works fine with software rendering via Mesa's llvmpipe. However, **AI inference on CPU-only is extremely slow** (~1 TPS for even the smallest models). The companion still functions but responses take 30-60+ seconds. For usable AI, point to a remote Ollama server with GPU access on your LAN, or use a cloud backend (Claude CLI, OpenAI API).
+| Directory | Size | |
+|---|---|---|
+| `bin/` | **757 MB** | the shell, the apps, the services, `yos`, `yantrik-update`, `yantrik-install`. Includes ~112 MB of duplicate binaries left by hand-deploys on this particular machine — a fresh install is smaller |
+| `models/` | **354 MB** | whisper 147 MB (speech to text), tts 120 MB (the voice), embedder 88 MB (memory search). `llm/` is empty — **no language model ships** |
+| `data/` | **64 MB** | the memory database. Grows with use |
+| `logs/` | 9.3 MB | |
+| `share/` | 616 KB | compositor config, window theme, typeface, the `.desktop` entries |
+| `skills/`, `i18n/`, config | ~370 KB | |
+| | **≈ 1.2 GB** | for those directories together, on this machine |
 
-### NVIDIA
+Two things that machine also has and a fresh install does not: `backups/` (2.0 GB — three
+rollback copies from three updates; `yantrik-update` prunes to the newest two at the start of
+the next one) and `ui-deployments/` (6.5 GB of development artefacts). Its whole
+`/opt/yantrik` is 9.6 GB; that number describes a development machine, not an install.
 
-For GPU-accelerated AI inference:
-1. Install NVIDIA drivers on the host (not in the VM)
-2. Run Ollama on the host with GPU access
-3. Point Yantrik's LLM config to the Ollama server
+**A fresh installed footprint has not been measured.** From the image size and the directory
+breakdown above, `/opt/yantrik` should land somewhere around 1 GB, plus the Debian base. The
+32 GB the test machine has is comfortable. `yantrik-update` refuses to start an update with
+less than **1,500,000 KB — about 1.4 GiB — free** on `/opt/yantrik` (configured, `need_kb` in
+`yantrik-update`), because it writes a full backup of `bin/` and `share/` before it replaces
+anything, and keeps two.
 
-The Yantrik UI itself runs on Wayland via labwc and doesn't need NVIDIA drivers for rendering.
+---
 
-### AMD / Intel
+## GPU
 
-Mesa drivers are installed automatically. Hardware-accelerated rendering works out of the box on most AMD and Intel GPUs.
+The desktop does not need one. The shell renders through Slint's software rasteriser and the
+compositor through Mesa's llvmpipe; that is how the test machine and the CI boot test both
+run, and it is a deliberate trade rather than a fallback.
 
-## AI Model & Backend Options
+Where a GPU matters is **inference**, and only if you choose to run the model on this machine.
+See below.
 
-The installer bundles Qwen 3.5 4B Q4_K_M (~2.5 GB) for offline capability. For interactive use, a GPU backend is required:
+---
 
-| Setup | Model | Speed | Quality |
-|-------|-------|-------|---------|
-| **Ollama with GPU (recommended)** | Qwen 3.5 4B–27B+ | 50-130 TPS | Strong to excellent |
-| **Remote Ollama on LAN** | Any model | Depends on server | Best flexibility |
-| **Cloud backend** | Claude, GPT, etc. | Network-bound | Excellent |
-| **CPU-only (bundled model)** | Qwen 3.5 4B Q4 | ~1 TPS | Strong quality, but too slow for interactive use |
+## The model, and what this machine needs for it
 
-All small models run with thinking disabled (`think: false`) to maximize output quality. The model-adaptive intelligence system automatically adjusts tool exposure, prompt strategy, and agent behavior based on the detected model size.
+**The image ships no language model and no mind.** This is the fact that changes what hardware
+you need more than any other, and it is easy to miss.
 
-### Model quality benchmarks (Qwen 3.5 family)
+- If you point the desktop at **a model on another machine** (Ollama on your LAN) or at **a
+  provider**, this machine does no inference at all and the requirements above are the whole
+  story.
+- If you want to run a model **on this machine**, its requirements are the model's, not this
+  OS's, and they are additional to everything above. A GPU makes the difference between a
+  conversation and a wait.
 
-| Model | Reasoning | Structured Output | Format Following | Speed (GPU) |
-|-------|-----------|-------------------|-------------------|-------------|
-| 0.8B | Fails | CSV/JSON work | Slide format errors | ~105 TPS |
-| 2B | Fails | Good | Good | ~81 TPS |
-| **4B** | **Correct** | **Perfect** | **Good** | **~71 TPS** |
-| 9B | Correct | Perfect | Best | ~55 TPS |
+This page deliberately prints no tokens-per-second table. The one that used to be here gave
+four models, four speeds and four quality grades with no statement of what hardware produced
+any of them, and there is no measurement in this repository behind those numbers.
 
-The 4B model is the minimum viable size — it's the smallest that handles multi-step reasoning (scheduling, math) correctly.
+---
 
-## Disk Space Breakdown
+## Network
 
-| Component | Size |
-|-----------|------|
-| Yantrik binaries (`yantrik-ui` + `yantrik`) | ~50 MB |
-| MiniLM embedder model | ~87 MB |
-| Whisper voice model | ~146 MB |
-| System packages (labwc, mesa, fonts, etc.) | ~200 MB |
-| Offline LLM (Qwen 3.5 4B Q4, included) | ~2.5 GB |
-| Memory database (grows over time) | starts at ~1 MB |
-| **Total** | **~3 GB** |
+- **Downloading the image** needs internet. About 1.31 GiB.
+- **Running it** does not, in itself. Nothing in the OS calls out on its own.
+- **Whatever mind you attach** needs whatever it needs: nothing for a local model, LAN access
+  for an Ollama box, internet for a provider.
+- **Updating** needs to reach `releases.yantrikos.com` over HTTPS.
+- Weather, email and calendar reach the services you configure them against.
 
-If using a remote Ollama server or cloud LLM, you can skip the offline LLM model — saving ~2.5 GB.
+---
 
-## Network Requirements
+## Memory at runtime
 
-- **Installation**: Internet access required for downloading packages and models
-- **Runtime**: Internet optional — depends on your LLM backend choice:
-  - Cloud backends (Claude CLI, OpenAI API): Requires internet
-  - Local Ollama: Requires LAN access to Ollama host (or localhost)
-  - Built-in fallback: No network needed (fully offline)
+Measured 2026-09-06 (WSL2, software renderer, shell plus three autostarted services):
+**about 186 MB PSS** for the whole desktop, of which the shell is 181 MB RSS — 87 MB of that
+is the embedder's weights.
 
-The companion's email, weather, and calendar features naturally require network access.
+[footprint.md](footprint.md) has the full measurement, how it was taken, and the two traps in
+taking it. Note the warning there: **never quote a memory figure from a `fast` build** — it is
+about a third too high.
 
-## Performance Notes
-
-- **UI rendering**: ~60 FPS on bare metal with GPU, ~30 FPS in VirtualBox with software rendering
-- **LLM inference**: Depends entirely on your backend. CPU-only: ~1 TPS (not interactive). Ollama with GPU: 50-130+ TPS (fully interactive). Cloud: depends on network latency.
-- **Memory footprint**: ~150 MB RSS at idle, ~500 MB–1.5 GB during active AI inference (with built-in 4B model)
-- **Startup time**: ~3-5 seconds to desktop on SSD, ~10 seconds on HDD
+Inference memory is the model's, not the desktop's, and is not included in that figure.

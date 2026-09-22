@@ -11,7 +11,12 @@ Yantrik OS is an AI-native desktop OS where the AI IS the shell. Single Rust bin
 Slint UI + CompanionService + multi-backend LLM + YantrikDB. Supports local and remote
 LLM backends with automatic fallback.
 
-Stack: Alpine Linux → labwc (Wayland compositor) → yantrik-ui (fullscreen Slint shell)
+Stack: Debian 13 (trixie) → labwc (Wayland compositor) → yantrik-ui (fullscreen Slint shell)
+
+It ships as a live ISO, not as something you install onto a distribution you already have.
+This line said "Alpine Linux" until September 2026; the base has been Debian since spring, and
+`apk`, OpenRC and `/bin/ash` are not on the machine. Anything in this tree still reaching for
+them is dead code.
 
 ---
 

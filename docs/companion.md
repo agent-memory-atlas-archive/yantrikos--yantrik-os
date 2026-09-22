@@ -153,8 +153,8 @@ The companion has 116+ tools for interacting with the system and the world:
 - **bluetooth** — Bluetooth device management
 - **firewall** — Firewall rules
 - **display** — Screen resolution, brightness
-- **package** — Package management (apk)
-- **service** — Service management (OpenRC)
+- **package** — Package management (Debian: `apt-get`)
+- **service** — Service management (systemd)
 - **docker** — Docker container management
 
 ### Communication

@@ -1,307 +1,348 @@
-# Getting Started with Yantrik OS
+# Getting started
 
-This guide walks you through installing Yantrik OS, configuring your companion, and getting productive.
+Yantrik OS is a **live ISO**. You download an image, boot it, and the desktop runs from the
+image without touching any disk. When you decide you want it on a disk, the installer is
+inside the running desktop.
 
-## Prerequisites
+There is nothing to add to a Linux system you already have. An older version of this page
+told people to install Alpine Linux first and pipe an installer into a shell; that has not
+been how this works for months, and the domain that installer fetched from no longer
+resolves.
 
-- **Alpine Linux 3.18+** installed on your target machine (bare metal, VirtualBox, QEMU/KVM, or Proxmox LXC)
-- **Root access** (the installer needs to install packages and create system users)
-- **Internet connection** (for downloading packages, binaries, and AI models)
-- **4 GB RAM minimum** (8+ GB recommended)
-- **4 GB free disk space** (includes offline AI model; 10+ GB recommended if hosting additional models)
+Before anything else, what you are getting into: this is early software published on a
+**nightly** channel and nothing else. Things break. The audits of what does not work — app by
+app, screen by screen — are in [`design/`](../design/) in this repository, written down at
+the time rather than after somebody complained. Read
+[`design/shelved-2026-09-20.md`](../design/shelved-2026-09-20.md) for two apps that were
+taken out of the build for being drawings of apps.
 
-If you don't have Alpine Linux yet, download it from [alpinelinux.org](https://alpinelinux.org/downloads/) and run `setup-alpine` to do a basic installation.
+---
 
-## Installation
+## 1. Download the image
 
-### Option 1: One-Line Install
-
-```bash
-curl -fsSL https://get.yantrikos.com/install.sh | sh
-```
-
-### Option 2: Download and Run
-
-```bash
-wget https://releases.yantrikos.com/stable/install.sh
-chmod +x install.sh
-./install.sh
-```
-
-### Option 3: From Local Binaries
-
-If you've built Yantrik from source or have binaries on hand, copy them to `/tmp/` before running the installer:
+The current image and its checksum are published at
+**<https://iso.yantrikos.com/nightly/>**, with `latest.json` naming the current file, its
+sha256, its size and its version. Four lines, and you can see every step:
 
 ```bash
-cp yantrik-ui /tmp/
-cp yantrik /tmp/
-./install.sh
+curl -fsSL https://iso.yantrikos.com/nightly/latest.json          # what the current file is called
+curl -fL -O https://iso.yantrikos.com/nightly/<that file>
+curl -fL -O https://iso.yantrikos.com/nightly/<that file>.sha256
+sha256sum -c <that file>.sha256
 ```
 
-The installer will detect and use local binaries automatically.
-
-## What the Installer Does
-
-The installer is fully automated and walks you through each step:
-
-### Step 1: Hardware Detection
-
-Automatically detects your CPU, RAM, GPU, disk space, and whether you're running in a hypervisor (VirtualBox, QEMU, or bare metal). This info is used to configure the display backend and compositor settings.
-
-### Step 2: User Configuration
-
-You'll be asked for:
-
-- **Your name** — the companion uses this to address you
-- **Companion name** — what you want to call your AI companion (default: "Yantrik")
-- **LLM backend** — choose between:
-  - **Ollama API** — Point to a local or remote Ollama server with GPU (recommended)
-  - **Claude CLI** — Cloud quality, requires Claude Code CLI installed
-  - **OpenAI API** — Any OpenAI-compatible endpoint (OpenRouter, Together, etc.)
-  - **Offline only** — Use the bundled Qwen 3.5 4B model (GPU strongly recommended for usable speed)
-
-### Step 3: System Dependencies
-
-Installs required packages via `apk`:
-- **labwc** — Wayland compositor (lightweight, wlroots-based)
-- **foot** — Terminal emulator
-- **mako** — Notification daemon
-- **mesa** — OpenGL drivers
-- **fonts, audio, networking tools**, and more
-
-For VirtualBox guests, it also installs Guest Additions automatically.
-
-### Step 4: User & Directory Setup
-
-Creates the `yantrik` system user and the directory structure:
-
-```
-/opt/yantrik/
-├── bin/              # yantrik-ui, yantrik binaries
-├── data/             # Memory database (memory.db)
-├── models/
-│   ├── embedder/     # MiniLM sentence embeddings (~87MB)
-│   ├── llm/          # Fallback LLM model (optional)
-│   └── whisper/      # Voice input model (~146MB)
-├── logs/             # yantrik-os.log
-├── skills/           # YAML plugin directory
-├── i18n/             # Translation files
-└── config.yaml       # Main configuration
-```
-
-### Step 5: Binary Download
-
-Binaries are fetched from (in order of priority):
-1. `/tmp/` (local copies — fastest)
-2. `releases.yantrikos.com` (official release server)
-3. GitHub Releases
-
-### Step 6: AI Models
-
-Downloads three models automatically:
-- **MiniLM embedder** (~87MB) — sentence embeddings for memory search. Always needed.
-- **Whisper tiny** (~146MB) — speech-to-text for voice input. Optional but recommended.
-- **Qwen 3.5 4B Q4_K_M** (~2.5GB) — offline LLM for the companion. Provides reasoning, structured output (CSV, JSON, slides), and instruction following. **Note:** This model requires GPU acceleration (via Ollama) for interactive response times. On CPU-only it serves as an emergency fallback but responses will be very slow.
-
-If you're on a LAN with a model cache server, downloads are instant.
-
-### Step 7: Configuration
-
-Generates `/opt/yantrik/config.yaml` based on your choices. You can edit this file anytime — see the [Configuration](#configuration) section below.
-
-### Step 8: Desktop Environment
-
-Configures the labwc Wayland compositor:
-- Hypervisor-aware display settings (software rendering for VirtualBox, hardware for bare metal)
-- Keyboard shortcuts (Alt+Tab, Win+T for terminal, Print Screen for screenshots)
-- Auto-maximize Yantrik OS window
-- Foot terminal with dark color scheme
-
-### Step 9: Auto-Login
-
-Sets up automatic login as the `yantrik` user — the system boots directly into the Yantrik OS desktop. No login screen, no display manager overhead.
-
-### Step 10: Upgrade Script
-
-Installs `yantrik-upgrade` at `/usr/local/bin/` for future updates.
-
-## First Boot
-
-After installation, reboot:
+`install.sh` in this repository does the same thing for you and is also served from
+`https://get.yantrikos.com/install.sh`:
 
 ```bash
-reboot
+sh install.sh               # prints the url, size and sha256 of the current image, and stops
+sh install.sh --download    # also fetches it here and checks its sha256
 ```
 
-You'll see:
+Piped straight into a shell with no flag it explains and does nothing else — it writes no
+file, installs nothing and wants no privilege. That is deliberate: an installer that runs the
+moment it is piped into `sh` is asking you to trust bytes you have not read.
 
-1. **Boot animation** — Yantrik OS splash screen
-2. **Onboarding** — First-time setup wizard (if not already completed during install)
-3. **Desktop** — The main desktop with your companion, app dock, and system tray
+The image is about **1.3 GiB**. There is also `yantrik-os-nightly-latest.iso`, which always
+points at the newest one — convenient for a script, less good for a person, because the file
+you tested is not the file that name will mean tomorrow.
 
-### The Desktop
+**Verify the checksum before you boot it.** The point is not that someone is attacking you;
+it is that a 1.3 GiB download that ends at 98% gives you an image that boots halfway and
+fails in a way you will spend an afternoon on.
 
-The desktop has:
-- **Companion chat** — The Intent Lens at the bottom where you talk to your companion
-- **App dock** — Quick-launch bar for all built-in apps
-- **System tray** — Battery, WiFi, time, notifications
-- **Whisper cards** — Proactive notifications from the companion (right side)
+Only the **nightly** channel has builds. `beta` and `stable` exist as names in the updater
+and in the publishing pipeline, and nothing has ever been published to either —
+`https://iso.yantrikos.com/stable/latest.json` is a 404. If you see a stable channel
+mentioned anywhere, it is aspirational.
 
-### Talking to Your Companion
+### Where the image comes from
 
-Type in the Intent Lens or use voice input to:
-- Ask questions: *"What's using the most CPU?"*
-- Give commands: *"Open my spreadsheet"*
-- Request analysis: *"Summarize my recent emails"*
-- Get help: *"How do I connect to WiFi?"*
+It is built by [`.github/workflows/iso.yml`](../.github/workflows/iso.yml) on a GitHub
+runner: the whole workspace is compiled in release, packaged by
+[`build-release.sh`](../deploy/yantrik-os/build-release.sh), assembled into a Debian 13
+(trixie) live image by
+[`build-debian-iso.sh`](../deploy/yantrik-os/build-debian-iso.sh), and then **booted** under
+QEMU by [`boottest.py`](../deploy/yantrik-os/boottest.py), which waits for the machine to
+reach its login on the serial console and answer for itself. An image that does not boot is
+not published. Nobody's laptop is in that path.
 
-The companion has access to 116+ tools including file management, git, email, browser automation, and system commands.
+That test is a BIOS boot under QEMU with a virtio display. The UEFI path is built and is not
+booted by CI; real hardware of any kind is not tested at all.
 
-## Configuration
+---
 
-The main config file is at `/opt/yantrik/config.yaml`. Key sections:
+## 2. Try it in a VM first
 
-### LLM Backend
+This is the recommended way to meet it, and it is what the project develops against.
 
-```yaml
-llm:
-  backend: "api"                    # "api", "claude-cli", or "llamacpp"
-  api_url: "http://192.168.1.100:11434"  # Ollama server address
-  api_model: "qwen3:8b"            # Model name
-  max_tokens: 512
-  temperature: 0.7
-```
+**Settings that are known to work** — the project's own test machine, as it reports itself:
 
-To switch backends, edit the `backend` field and restart. The system also has an automatic fallback — if your primary LLM is unreachable, the built-in offline model (Qwen 3.5 4B) activates automatically via the llama-server running on the device.
+| | |
+|---|---|
+| Platform | QEMU/KVM, `Standard PC (Q35 + ICH9)` |
+| CPU | 4 vCPU (no passthrough, no host CPU features assumed) |
+| RAM | 8 GB |
+| Disk | 32 GB |
+| GPU | none — virtio-gpu, software rendering through Mesa's llvmpipe |
+| Firmware | BIOS (SeaBIOS). The UEFI path is built into the image and is untested |
 
-### Instincts (Proactive Behavior)
+CI's automated boot test is smaller and still works: QEMU with **4 GB of RAM, 4 CPUs** and
+`-device virtio-vga`, KVM when the runner has `/dev/kvm` and plain emulation when it does
+not.
 
-```yaml
-instincts:
-  check_in_enabled: true          # Morning/evening check-ins
-  check_in_hours: 8.0             # Hours between check-ins
-  emotional_awareness_enabled: true
-  follow_up_enabled: true         # Follow up on open conversations
-  reminder_enabled: true          # Commitment/deadline tracking
-  pattern_surfacing_enabled: true # Surface observed patterns
-  conflict_alerting_enabled: true # Alert on contradictions
-```
-
-### Tools & Permissions
-
-```yaml
-tools:
-  enabled: true
-  max_tool_rounds: 3              # Max tool calls per conversation turn
-  max_permission: "sensitive"     # Cap: safe, standard, sensitive, dangerous
-```
-
-Permission levels control what the companion can do:
-- **Safe** — Read-only operations (list files, check system status)
-- **Standard** — Reversible writes (create files, save notes)
-- **Sensitive** — System changes (install packages, modify config)
-- **Dangerous** — Destructive operations (delete files, send emails) — requires explicit approval
-
-### Updates
-
-```yaml
-updates:
-  channel: "beta"                 # "stable", "beta", or "nightly"
-  server: "http://releases.yantrikos.com"
-  check_on_boot: true
-```
-
-## Updating Yantrik OS
-
-### Automatic Updates
-
-If `check_on_boot: true` is set, Yantrik checks for updates on every startup and shows a notification if one is available.
-
-### Manual Updates
+A minimal QEMU invocation to try it yourself:
 
 ```bash
-# Check what's available
-yantrik-upgrade check
-
-# Update to latest in your channel
-yantrik-upgrade stable    # or beta, or nightly
-
-# Force re-download
-yantrik-upgrade stable --force
+qemu-system-x86_64 -enable-kvm -m 4096 -smp 4 \
+  -cdrom yantrik-os-<version>.iso -boot d \
+  -device virtio-vga -display gtk
 ```
 
-Updates are verified with SHA256 checksums. If a new version fails to start within 30 seconds, the system automatically rolls back to the previous version.
+VirtualBox ought to work — this is an ordinary Debian live ISO — but nobody here has checked
+it against a current build, so it is not on the list above. If you try it, say how it went.
 
-## Keyboard Shortcuts
+## 3. …or write it to a USB stick
 
-| Shortcut | Action |
-|----------|--------|
-| Alt + Tab | Switch windows |
-| Alt + F4 | Close window |
-| Win + T | Open terminal |
-| Win + Left/Right | Snap window to edge |
-| Win + Up | Maximize window |
-| Print Screen | Screenshot (saved to ~/Pictures/Screenshots/) |
+```bash
+# Linux and macOS. /dev/sdX is the DEVICE, not a partition. Getting it wrong overwrites
+# the wrong disk. `lsblk` on Linux, `diskutil list` on macOS (where it is /dev/rdiskN and
+# the stick must be unmounted first with `diskutil unmountDisk`).
+sudo dd if=yantrik-os-<version>.iso of=/dev/sdX bs=4M status=progress conv=fsync
+```
+
+On Windows use **Rufus** (<https://rufus.ie>) or **balenaEtcher**
+(<https://etcher.balena.io>). On macOS without `dd`, balenaEtcher does the same job. All of
+them take the `.iso` exactly as downloaded — do not unpack it.
+
+---
+
+## 4. Boot it
+
+The boot menu has four entries:
+
+| Entry | What it does |
+|---|---|
+| **Install Yantrik OS** | Boots live *and* puts first-run setup into installer mode, so it offers to write to a disk at the end |
+| **Try Yantrik OS (live, no install)** | Boots live. Nothing offers to touch a disk |
+| **Install Yantrik OS (Safe Mode)** | The same as the first, with `nomodeset` — use this if the screen stays black |
+| **Try Yantrik OS (verbose, serial console)** | No `quiet`, so the kernel and systemd say what they are doing. This is the entry to boot from when you are filing a bug |
+
+Either way the machine boots to a live desktop first. Nothing is written to any disk until
+you tell the installer to erase one.
+
+Two things about the live session that are true and worth knowing before you put it on a
+network:
+
+- The live user is `yantrik` with the password `yantrik` and passwordless sudo. On a live
+  image, anyone with physical access is root anyway. The disk installer asks you for a real
+  password.
+- SSH is installed and **disabled**. It is not turned on by any boot entry.
+
+### What you see first
+
+First-run setup, as a sequence of full-screen questions: your name, what you are interested
+in, a hardware scan, how the assistant should behave, and then **the AI provider**, which is
+the one that matters — see below. If you booted an "Install" entry, the last screen also
+offers to install to disk.
+
+Behind it is the shell: a status bar, a dock, and the Lens at the bottom, which is where you
+type to the mind.
+
+The keys are the ones Windows, GNOME and Ubuntu agree on, so they are probably already in your
+fingers. The full set is in [`config/labwc/rc.xml`](../config/labwc/rc.xml); these are the ones
+worth knowing on the first day:
+
+| | |
+|---|---|
+| `Ctrl`+`Alt`+`T` | Terminal |
+| `Super`+`K` | The Lens, from inside any window |
+| `Super`+`E` | Files |
+| `Super`+`I` | Settings |
+| `Super`+`D` | Desktop |
+| `Super`+`L` | Lock |
+| `Alt`+`Tab` / `Alt`+`F4` | Cycle windows / close |
+| `Super`+`←`/`→`/`↑`/`↓` | Snap, maximize, minimize |
+| `Print` / `Super`+`Shift`+`S` | Screenshot: whole screen / a region, into `~/Pictures` |
+
+---
+
+## 5. Attach a mind
+
+**The image ships no language model and no mind.** That is deliberate and it is the thing
+people are most surprised by. The desktop is the desktop; what answers in it is something you
+point it at.
+
+The default configuration (`/opt/yantrik/config.yaml`) expects an OpenAI-compatible endpoint
+on `http://127.0.0.1:8341/v1` — loopback, because an address baked into a public image is an
+address every copy of that image would talk to. First-run setup is where you change it, and
+you have three shapes of answer:
+
+1. **A model you run yourself.** Ollama or llama.cpp on the same machine or elsewhere on
+   your LAN. Nothing leaves your network.
+2. **A provider you choose.** Any OpenAI-compatible endpoint, or the Claude CLI. What you
+   type goes to that provider, as it would from any other client.
+3. **A separate agent that attaches to the desktop.** Yantrik Mind, Hermes, Pi, DeepSeek and
+   OpenClaw all do this; the last four ship as source in [`harnesses/`](../harnesses/). The
+   OS never holds your endpoint, model name or key — the harness dials in and keeps its own
+   configuration. See **[harness.md](harness.md)** for the protocol and how to write one.
+
+Whichever you pick, the status bar says which mind is answering and whether it is local or
+cloud, with the provider or model named. That chip is not decoration: it is there so that
+"where is what I am typing going" is never a question you have to go and look up.
+
+### How much it may do without asking
+
+Also in the status bar, to the left of the mind chip, is the **mode**:
+
+| mode | the mind may… |
+|---|---|
+| `plan` | read only — every change is refused and it has to tell you what it *would* do |
+| `ask` | routine things run; sensitive ones put a card in front of you (the default) |
+| `auto` | sensitive things run; you are still asked about destructive ones |
+| `bypass` | nothing is asked. Time-boxed, and never written to disk, so no machine boots into it |
+
+Everything that ran without you being asked is written down in
+`~/.local/share/yantrik/mind-audit.jsonl` and readable from the mode menu.
+
+---
+
+## 6. Install it to a disk
+
+**This erases the disk you point it at.** Use a machine, or a VM, you can afford to wipe. The
+disk installer has not been through the boot test that the image itself has — treat it as the
+least-proven part of this.
+
+Two ways in, and they do the same work:
+
+- **The graphical installer.** Boot the "Install Yantrik OS" entry and first-run setup ends
+  with the install screen — username, password, hostname, disk.
+- **The text installer.** In a terminal in the live session:
+
+  ```bash
+  sudo /opt/yantrik/bin/yantrik-install
+  ```
+
+  The full path is not an affectation. `yantrik-session` puts `/opt/yantrik/bin` on your
+  `PATH`, so plain `yantrik-install`, `yantrik-update` and `yos` all work — but `sudo` on
+  Debian replaces `PATH` with its own `secure_path`, which does not include that directory, so
+  `sudo yantrik-install` is "command not found". Anything you run through `sudo` here wants
+  the full path.
+
+  It is [`deploy/yantrik-os/yantrik-install.sh`](../deploy/yantrik-os/yantrik-install.sh) in
+  this repository, installed into the image as `/opt/yantrik/bin/yantrik-install`.
+
+It asks for your name, a username, a password, a hostname and a timezone (guessed from the
+network, one keystroke to accept), then shows you every answer and the disk together and
+waits for you to type `yes`. Then it partitions (GPT, EFI or BIOS depending on how you
+booted), copies the live filesystem to the disk, removes the live-boot packages, creates your
+account, installs GRUB and reboots.
+
+After that the machine boots straight to the desktop with no login screen and no display
+manager, and onboarding does not run again.
+
+---
+
+## 7. Update it
+
+An installed machine updates itself with **`yantrik-update`**:
+
+```bash
+yantrik-update check        # what is installed, versus what the channel has
+yantrik-update apply        # download, verify, install, restart the session
+yantrik-update rollback     # restore the previous build
+yantrik-update status       # channel, host, current build, backups on disk
+yantrik-update set-channel nightly|beta|stable
+```
+
+`apply` takes `--force` (reinstall the same build), `--reboot` (instead of restarting the
+session) and `--no-restart`. `check` and `status` take `--porcelain`, which is what the
+desktop's About screen reads.
+
+What it does for you: the bundle is verified against the manifest's sha256 before a single
+file is replaced, the current binaries and shared files are backed up first, and if the new
+shell does not answer its control socket after the restart the update rolls itself back. The
+restart goes through the session unit rather than respawning the shell by hand, so the
+desktop comes back exactly as it does on boot.
+
+Again: `nightly` is the only channel with builds on it. `set-channel stable` will succeed and
+then `check` will tell you the channel is not published, which is the honest answer rather
+than an error.
+
+`yantrik-update` is not an app updater. Software you install with `apt` is yours to update
+with `apt`.
+
+---
+
+## 8. Driving it from a terminal, or from an agent
+
+Every app and the shell itself publish a control surface — what they are showing and what can
+be done to them:
+
+```bash
+yos describe shell                          # where you are, what is open, what is wrong
+yos act shell open_app name=notes           # launch or focus an app
+yos describe notes                          # any running app answers for itself
+yos ls                                      # which surfaces are live right now
+```
+
+`yos-mcp` exposes the same surface over MCP, so an agent that speaks MCP can drive the
+desktop through the same path a person uses. See [app-control.md](app-control.md).
+
+---
 
 ## Troubleshooting
 
 ### Black screen after boot
 
-The Wayland compositor may need different settings for your GPU:
+Boot the **Safe Mode** entry, which adds `nomodeset`. If you have installed to disk already,
+the renderer settings are in `~/.config/labwc/environment` —
+`WLR_RENDERER=pixman`, `LIBGL_ALWAYS_SOFTWARE=1` and `SLINT_BACKEND=winit` are what a machine
+with no usable GPU wants.
+
+### Nothing answers when I type
+
+Check the endpoint you gave it during setup is actually reachable from the machine:
 
 ```bash
-# SSH into the machine, then edit:
-vi /home/yantrik/.config/labwc/environment
-
-# Try changing SLINT_BACKEND:
-# SLINT_BACKEND=winit          (default, hardware accelerated)
-# SLINT_BACKEND=winit-software (software rendering, always works)
-```
-
-### Companion not responding
-
-Check the LLM backend is reachable:
-
-```bash
-# For Ollama:
-curl http://your-ollama-host:11434/api/tags
-
-# Check logs:
+curl http://<your-host>:11434/api/tags      # Ollama
 tail -f /opt/yantrik/logs/yantrik-os.log
 ```
 
-### No sound
+If you attached a harness rather than configuring a provider, the harness has to be running
+and polling — the desktop never connects out to it.
+
+### Answers take forever
+
+Small models on a CPU with no GPU produce a token or two a second, which is not a
+conversation. Point the machine at something with a GPU on your LAN, or at a provider.
+
+### An app I expected is not there
+
+Music and ySheets are **shelved** — deliberately not in this build, because there was nothing
+behind their screens. The shell says so when you ask for one, with the reason and what would
+bring it back. [`design/shelved-2026-09-20.md`](../design/shelved-2026-09-20.md) is the full
+account.
+
+### Reading the logs
 
 ```bash
-# Check ALSA
-alsamixer     # Unmute channels with 'm', adjust volume
-speaker-test  # Test audio output
-```
-
-### Slow AI responses
-
-CPU-only inference is extremely slow (~1 TPS) and not practical for interactive use. To get usable response times:
-- **Point to an Ollama server with GPU acceleration** — even a modest GPU gives 50+ TPS
-- **Use a remote Ollama on your LAN** — run Ollama on a machine with a GPU and point Yantrik's config to it
-- **Use a cloud backend** (Claude CLI or OpenAI API) — works over the internet
-
-### Checking logs
-
-```bash
-# Live log
 tail -f /opt/yantrik/logs/yantrik-os.log
-
-# Last 100 lines
-tail -100 /opt/yantrik/logs/yantrik-os.log
-
-# Search for errors
 grep -i error /opt/yantrik/logs/yantrik-os.log
+cat /opt/yantrik/BUILD          # exactly which build this machine is running
 ```
 
-## Next Steps
+`/opt/yantrik/BUILD` is the answer to "what version is this" — the file the updater reads and
+writes. Quote it in a bug report.
 
-- **Customize your theme** — see `~/.config/yantrik/theme-override.yaml`
-- **Add custom tools** — create YAML plugins in `~/.config/yantrik/plugins/`
-- **Connect email** — configure IMAP in Settings → Email
-- **Explore apps** — try ySheets, yPresent, yDocs from the app dock
-- **Read the architecture** — see [architecture.md](architecture.md) for the system design
+---
+
+## Next
+
+- **[hardware-requirements.md](hardware-requirements.md)** — what it runs on, with the
+  numbers that were actually measured
+- **[harness.md](harness.md)** — attaching a different mind
+- **[app-control.md](app-control.md)** — how apps publish state and accept actions
+- **[architecture.md](architecture.md)** — the system design
+- **[footprint.md](footprint.md)** — what it costs to run, measured
+- **Issues**: <https://github.com/yantrikos/yantrik-os/issues>
