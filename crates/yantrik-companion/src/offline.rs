@@ -73,8 +73,12 @@ impl OfflineResponder {
         }
 
         // Pattern: Network / wifi
+        //
+        // The shell labels this line "Network:" — it knows the connection's
+        // name and not whether it is wireless, and calling it "WiFi" is what
+        // had the desktop claiming wireless on a machine with no radio (#50).
         if lower.contains("network") || lower.contains("wifi") || lower.contains("internet") {
-            if let Some(val) = extract_field(system_context, "WiFi:") {
+            if let Some(val) = extract_field(system_context, "Network:") {
                 return format!("{}.", val);
             }
         }
@@ -160,13 +164,21 @@ fn try_extract_remember(lower: &str, original: &str) -> Option<String> {
 
 /// Extract a field value from the system context string.
 ///
-/// System context format: "Battery: 72% (charging) | WiFi: connected | ..."
+/// The shell writes one field per line ("Battery: 72% (charging)\nNetwork:
+/// ...") and this took everything from the field to the end of the string,
+/// because it looked only for the pipe separator named in the comment that
+/// used to stand here. So "how much battery" answered with the battery, the
+/// network, the CPU and the running apps in one sentence. A field ends at a
+/// newline or a pipe, whichever comes first.
 fn extract_field<'a>(context: &'a str, field: &str) -> Option<&'a str> {
     let start = context.find(field)?;
     let after = &context[start + field.len()..];
-    let after = after.trim_start();
-    // Take until next pipe separator or end of string
-    let end = after.find('|').unwrap_or(after.len());
+    // Spaces and tabs only: a `trim_start` here would eat the newline that
+    // ends an empty field, and the answer would be the next field's value.
+    let after = after.trim_start_matches(|c: char| c == ' ' || c == '\t');
+    let end = after
+        .find(|c: char| c == '|' || c == '\n')
+        .unwrap_or(after.len());
     let value = after[..end].trim();
     if value.is_empty() {
         None
@@ -196,4 +208,37 @@ fn format_memory_response(memories: &[RecallResult], is_fallback: bool) -> Strin
     };
 
     format!("{}\n{}{}", prefix, items.join("\n"), suffix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_field;
+
+    /// The shell's own context string, one field per line, as
+    /// `yantrik_ui::system_context::format_system_context` writes it.
+    const CONTEXT: &str = "Battery: 72% (charging)\nNetwork: Wired connection 1\nCPU: 22%\nRAM: 1700/7900MB (21%)";
+
+    #[test]
+    fn a_field_ends_at_its_own_line() {
+        // Every one of these used to come back with the rest of the machine's
+        // state stuck to it, because the separator looked for was a pipe.
+        assert_eq!(extract_field(CONTEXT, "Battery:"), Some("72% (charging)"));
+        assert_eq!(extract_field(CONTEXT, "Network:"), Some("Wired connection 1"));
+        assert_eq!(extract_field(CONTEXT, "CPU:"), Some("22%"));
+        // The last field has no line after it.
+        assert_eq!(extract_field(CONTEXT, "RAM:"), Some("1700/7900MB (21%)"));
+    }
+
+    #[test]
+    fn a_pipe_separated_context_still_works() {
+        let piped = "Battery: 72% (charging) | Network: Wombat | CPU: 22%";
+        assert_eq!(extract_field(piped, "Battery:"), Some("72% (charging)"));
+        assert_eq!(extract_field(piped, "Network:"), Some("Wombat"));
+    }
+
+    #[test]
+    fn a_field_that_is_not_there_is_none() {
+        assert_eq!(extract_field(CONTEXT, "Uptime:"), None);
+        assert_eq!(extract_field("Network:\nCPU: 22%", "Network:"), None);
+    }
 }

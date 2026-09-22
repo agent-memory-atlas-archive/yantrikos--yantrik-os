@@ -162,9 +162,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                     // labels rendered with nothing beside them until an
                     // observer event happened to arrive.
                     super::system_poll::update_memory_readouts(&ui, &snap);
-                    ui.set_sys_wifi_ssid(snap.network_ssid.clone().unwrap_or_default().into());
-                    ui.set_sys_wifi_signal(snap.network_signal.unwrap_or(0) as i32);
-                    ui.set_sys_uptime_text(format_uptime().into());
+                    // The network row is fed from the network service on the
+                    // system poll's own cadence, on every screen — there is
+                    // nothing about it to populate on entry.
+                    //
+                    // Uptime is the About screen's reader, not a second copy
+                    // of it: this path had its own formatter that printed
+                    // "3d 1h" where About printed "3d 1h 2m".
+                    ui.set_sys_uptime_text(super::about::read_uptime().into());
 
                     let procs: Vec<ProcessData> = snap
                         .running_processes
@@ -199,24 +204,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     });
 }
 
-/// Read /proc/uptime and format as human-readable text.
-fn format_uptime() -> String {
-    std::fs::read_to_string("/proc/uptime")
-        .ok()
-        .and_then(|content| content.split_whitespace().next().map(String::from))
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|secs| {
-            let total = secs as u64;
-            let days = total / 86400;
-            let hours = (total % 86400) / 3600;
-            let mins = (total % 3600) / 60;
-            if days > 0 {
-                format!("{}d {}h", days, hours)
-            } else if hours > 0 {
-                format!("{}h {}m", hours, mins)
-            } else {
-                format!("{}m", mins)
-            }
-        })
-        .unwrap_or_else(|| "—".to_string())
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_system_screen_states_the_about_screen_s_uptime() {
+        // This screen used to read /proc/uptime through a formatter of its
+        // own that stopped at hours. Two screens, one boot, two answers:
+        // About said "3d 1h 2m" and System said "3d 1h" for 262922 seconds,
+        // the reading taken off the live machine.
+        assert_eq!(crate::wire::about::format_uptime(262922), "3d 1h 2m");
+    }
 }

@@ -145,7 +145,9 @@ export component BondScreen inherits Rectangle {
                             VerticalLayout {
                                 horizontal-stretch: 1;
                                 Text {
-                                    text: data.current-streak + " days";
+                                    // "1 days" stood here beside "0 days
+                                    // together" in the audit that became #50.
+                                    text: data.current-streak + (data.current-streak == 1 ? " day" : " days");
                                     color: Theme.text-primary;
                                     font-size: Theme.fs-display;
                                     font-weight: 600;

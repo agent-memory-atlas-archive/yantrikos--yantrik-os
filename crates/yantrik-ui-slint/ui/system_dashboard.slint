@@ -37,7 +37,8 @@ export component SystemDashboard inherits Rectangle {
     in property <float> memory-cached-percent: 0.0;
     in property <string> memory-used-text: "";
     in property <string> memory-cached-text: "";
-    in property <string> memory-total-text: "";
+    // The row beside this is labelled "Free", and it was bound to the total.
+    in property <string> memory-free-text: "";
     // Swap
     in property <float> swap-usage: 0.0;
     in property <string> swap-text: "";
@@ -45,9 +46,16 @@ export component SystemDashboard inherits Rectangle {
     in property <bool> battery-available: false;
     in property <int> battery-level: 100;
     in property <bool> battery-charging: false;
-    in property <bool> wifi-connected: false;
-    in property <string> wifi-ssid: "";
-    in property <int> wifi-signal: 0;
+    // ── The network row ──
+    //
+    // Three properties and not `wifi-connected`. This row was the word "WiFi"
+    // typed into the file, with NetworkManager's "Wired connection 1" beside
+    // it, on a machine whose only interface is `ens18`. What the network
+    // service reports is the medium — the label — and the connection, and
+    // whether anything is up at all, which is true of a wired machine.
+    in property <bool> network-online: false;
+    in property <string> network-label: "Network";
+    in property <string> network-detail: "";
     in property <string> uptime-text: "";
     in property <[ProcessData]> top-processes: [];
 
@@ -243,7 +251,7 @@ export component SystemDashboard inherits Rectangle {
                                         border-color: Theme.text-dim;
                                     }
                                     Text {
-                                        text: "Free: " + root.memory-total-text;
+                                        text: "Free: " + root.memory-free-text;
                                         color: Theme.text-dim;
                                         font-size: Theme.fs-micro;
                                     }
@@ -384,10 +392,10 @@ export component SystemDashboard inherits Rectangle {
 
                         Rectangle { height: 1px; background: Theme.bg-elevated; }
 
-                        // WiFi
+                        // Network
                         HorizontalLayout {
                             Text {
-                                text: "WiFi";
+                                text: root.network-label;
                                 color: Theme.text-secondary;
                                 font-size: Theme.font-body;
                                 horizontal-stretch: 1;
@@ -402,14 +410,13 @@ export component SystemDashboard inherits Rectangle {
                                     height: 8px;
                                     y: (parent.height - 8px) / 2;
                                     border-radius: 4px;
-                                    background: root.wifi-connected ? Theme.cyan : Theme.color-emotional;
+                                    background: root.network-online ? Theme.cyan : Theme.color-emotional;
                                 }
 
                                 Text {
-                                    text: root.wifi-connected ?
-                                          (root.wifi-ssid != "" ? root.wifi-ssid : "Connected") :
-                                          "Disconnected";
-                                    color: root.wifi-connected ? Theme.text-primary : Theme.text-dim;
+                                    text: root.network-detail != "" ? root.network-detail :
+                                          (root.network-online ? "Connected" : "Disconnected");
+                                    color: root.network-online ? Theme.text-primary : Theme.text-dim;
                                     font-size: Theme.font-body;
                                 }
                             }
