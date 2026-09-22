@@ -30,6 +30,76 @@ const COLLECTIBLE_KINDS: [&str; 4] = ["berry", "coin", "crystal", "star"];
 const HAZARD_KINDS: [&str; 3] = ["chaser", "wanderer", "patrol"];
 const MUSIC_MOODS: [&str; 4] = ["calm", "bouncy", "tense", "playful"];
 
+/// Every enumerated field a spec can carry, and the words it accepts — read off the same
+/// constants the validator checks against, so the two cannot drift.
+///
+/// This exists because the grammar used to be unreadable. `describe` said only "the validator
+/// refuses with a sentence naming the field", which is true and is not documentation: the only
+/// way to learn that `expression` is one of four words was to guess wrong and be told. Four
+/// specs were refused before one was accepted, each refusal correct, each costing a round trip
+/// (#94). Every other surface on this desktop states its enums inline — `direction: left | right`
+/// — and Arcade's live in a JSON document, so they have to be published deliberately.
+///
+/// `character` and `game` are separate because the two actions take different documents; a game's
+/// `player.character` may inline a whole character, so a caller writing one needs both lists.
+pub fn vocabularies() -> serde_json::Value {
+    serde_json::json!({
+        "character": {
+            "archetype": ARCHETYPES,
+            "ears": EAR_SHAPES,
+            "tail": TAIL_SHAPES,
+            "expression": EXPRESSIONS,
+            "stance": STANCES,
+        },
+        "game": {
+            "arena.theme": THEMES,
+            "collectible.kind": COLLECTIBLE_KINDS,
+            "hazards[].kind": HAZARD_KINDS,
+            "music": MUSIC_MOODS,
+        },
+    })
+}
+
+/// The numeric fields and the range each is held to, in the same shape as [`vocabularies`].
+///
+/// The other half of what a caller has to guess. `proportions` is the one that catches people:
+/// the keys are not the words anyone reaches for first, and a value outside the range is refused
+/// just as firmly as a misspelled enum.
+pub fn ranges() -> serde_json::Value {
+    serde_json::json!({
+        "character": {
+            "proportions.head_body": [0.5, 1.6],
+            "proportions.limb_length": [0.4, 1.4],
+            "proportions.width": [0.7, 1.4],
+        },
+        "game": {
+            "arena.size": [12.0, 40.0],
+            "player.speed": [4.0, 12.0],
+            "hazards[].speed": [0.5, 12.0],
+        },
+    })
+}
+
+/// One line naming every enumerated field and its words, for an action's argument text.
+///
+/// The argument description is what a mind reads before its first call, so the words go there
+/// rather than only into `describe`'s state — a caller should not have to make two reads to find
+/// out what one of them will accept.
+pub fn vocabulary_line(document: &str) -> String {
+    let all = vocabularies();
+    let Some(fields) = all.get(document).and_then(|v| v.as_object()) else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for (field, words) in fields {
+        let words: Vec<&str> = words.as_array().map_or_else(Vec::new, |a| {
+            a.iter().filter_map(|w| w.as_str()).collect()
+        });
+        parts.push(format!("{field}: {}", words.join(" | ")));
+    }
+    parts.join("; ")
+}
+
 fn check_vocab(field: &str, value: Option<&Value>, allowed: &[&str]) -> Result<(), String> {
     if let Some(found) = value.and_then(|v| v.as_str()) {
         if !allowed.contains(&found) {
@@ -604,6 +674,114 @@ mod tests {
             "lives": 3,
             "music": "bouncy"
         })
+    }
+
+    /// The published grammar is the enforced grammar, field by field.
+    ///
+    /// Not "the lists match the constants" — that would only prove one file agrees with itself.
+    /// For every field `vocabularies()` advertises, this pokes a word that is certainly not in
+    /// it into a real spec and requires the refusal to name that field and to list exactly the
+    /// words the grammar published. If someone adds a vocabulary to the validator and forgets
+    /// the grammar, or renames a field on one side, this fails.
+    #[test]
+    fn every_field_the_grammar_publishes_is_a_field_the_validator_enforces() {
+        fn set(doc: &mut serde_json::Value, path: &str, word: &str) {
+            // The three shapes of path the grammar uses: `music`, `arena.theme`, `hazards[].kind`.
+            if let Some((head, tail)) = path.split_once("[].") {
+                doc[head][0][tail] = serde_json::json!(word);
+            } else if let Some((head, tail)) = path.split_once('.') {
+                doc[head][tail] = serde_json::json!(word);
+            } else {
+                doc[path] = serde_json::json!(word);
+            }
+        }
+
+        let all = vocabularies();
+        let mut checked = 0;
+        for (document, fields) in all.as_object().expect("the grammar is an object") {
+            for (field, words) in fields.as_object().expect("each document lists its fields") {
+                let published: Vec<&str> =
+                    words.as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+                assert!(!published.is_empty(), "{document}.{field} publishes no words");
+
+                let mut doc = if document == "character" { character_json() } else { game_json() };
+                set(&mut doc, field, "definitely-not-a-word");
+                let err = if document == "character" {
+                    parse_character(&doc.to_string()).unwrap_err()
+                } else {
+                    parse_game(&doc.to_string()).unwrap_err()
+                };
+
+                let as_refused = field.replace("[]", "[0]");
+                assert!(
+                    err.contains(&as_refused),
+                    "the grammar publishes `{document}.{field}`, but refusing a bad value for it                      said: {err}"
+                );
+                for word in &published {
+                    assert!(
+                        err.contains(word),
+                        "the grammar says `{field}` accepts `{word}`, and the validator's own                          refusal does not mention it: {err}"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 9, "nine enumerated fields were published; the count moved");
+    }
+
+    /// Every range the grammar publishes is one the validator holds a value to.
+    #[test]
+    fn every_range_the_grammar_publishes_is_a_range_the_validator_enforces() {
+        fn set(doc: &mut serde_json::Value, path: &str, value: f64) {
+            if let Some((head, tail)) = path.split_once("[].") {
+                doc[head][0][tail] = serde_json::json!(value);
+            } else if let Some((head, tail)) = path.split_once('.') {
+                doc[head][tail] = serde_json::json!(value);
+            } else {
+                doc[path] = serde_json::json!(value);
+            }
+        }
+
+        let all = ranges();
+        let mut checked = 0;
+        for (document, fields) in all.as_object().expect("the ranges are an object") {
+            for (field, bounds) in fields.as_object().expect("each document lists its fields") {
+                let pair = bounds.as_array().expect("a range is [min, max]");
+                let max = pair[1].as_f64().expect("the max is a number");
+
+                let mut doc = if document == "character" { character_json() } else { game_json() };
+                set(&mut doc, field, max + 1_000.0);
+                let err = if document == "character" {
+                    parse_character(&doc.to_string()).unwrap_err()
+                } else {
+                    parse_game(&doc.to_string()).unwrap_err()
+                };
+                let as_refused = field.replace("[]", "[0]");
+                assert!(
+                    err.contains(&as_refused),
+                    "the grammar publishes the range for `{document}.{field}`, but a value far                      above its maximum was refused with: {err}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 6, "six ranged fields were published; the count moved");
+    }
+
+    /// The one-liner the argument text is built from names every field and every word.
+    #[test]
+    fn the_argument_line_carries_the_whole_vocabulary() {
+        for document in ["character", "game"] {
+            let line = vocabulary_line(document);
+            let fields = vocabularies();
+            for (field, words) in fields[document].as_object().unwrap() {
+                assert!(line.contains(field), "`{document}` line omits {field}: {line}");
+                for word in words.as_array().unwrap() {
+                    let word = word.as_str().unwrap();
+                    assert!(line.contains(word), "`{document}` line omits {word}: {line}");
+                }
+            }
+        }
+        assert_eq!(vocabulary_line("nonsense"), "", "an unknown document is empty, not a panic");
     }
 
     #[test]
