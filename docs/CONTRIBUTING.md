@@ -173,15 +173,28 @@ cargo check -p yantrik-os
 cargo check -p yantrik
 ```
 
-### Run in QEMU
+### Run it in QEMU
+
+The quickest way to see a change running is to boot the published image and deploy your
+binaries onto it, rather than to build an image yourself — a full ISO build is about an hour.
 
 ```bash
-# Deploy Alpine VM
-bash deploy/yantrik-os/setup-alpine-vm.sh
+# The current nightly image, with its checksum
+sh install.sh --download
 
-# Boot desktop
-bash deploy/yantrik-os/boot-desktop.sh
+# Boot it live. 4 GB and 4 CPUs is what CI boots every published image with.
+qemu-system-x86_64 -enable-kvm -m 4096 -smp 4 \
+  -cdrom yantrik-os-<version>.iso -boot d \
+  -device virtio-vga -display gtk
 ```
+
+To build an image from your own tree, `deploy/yantrik-os/build-debian-iso.sh` is what CI
+runs; `deploy/yantrik-os/boottest.py <iso> <outdir>` is the boot check it has to pass.
+
+`deploy/yantrik-os/setup-alpine-vm.sh`, `build-iso.sh`, `setup-vbox.sh`,
+`build-vbox-image.sh`, `deploy-vbox.sh` and `deploy-stack.sh` still target Alpine Linux, which
+this OS has not been built on since spring. They are left in place as history and none of them
+is part of any current path — do not start from one.
 
 ### Known Issues
 

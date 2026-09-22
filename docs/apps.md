@@ -1,31 +1,37 @@
 # Built-in Apps
 
-Yantrik OS ships with a full suite of productivity and system apps. All apps are accessible from the app dock on the desktop.
+Yantrik OS ships a suite of productivity and system apps, launched from the dock or the
+Apps screen.
 
 Every app has AI integration — you can ask the companion to help with tasks directly inside each app, or use the dedicated AI panels built into the office apps.
 
+> **Two apps are shelved and are not in this build: ySheets and Music.** They are described
+> below, marked, rather than quietly deleted, so that a page promising them cannot outlive the
+> decision. The account is [`design/shelved-2026-09-20.md`](../design/shelved-2026-09-20.md)
+> and the list the shell actually reads is `SHELVED` in
+> `crates/yantrik-ui/src/wire/dock.rs`.
+
 ## Productivity Apps
 
-### ySheets (Spreadsheet)
+### ySheets (Spreadsheet) — SHELVED, not in this build
 
-A full spreadsheet with formula engine, formatting, and AI-powered data generation.
+**Shelved on 20 September 2026.** Asking the shell to open it gets a refusal naming the
+reason, not an error; it is not in the launcher, not in the Lens, not offered to a mind, and
+not shipped in the release bundle or the ISO.
 
-**Features:**
-- Formula engine with standard spreadsheet functions (`=SUM()`, `=AVERAGE()`, `=IF()`, etc.)
-- Multi-sheet tabs
-- Cell formatting: bold, italic, text color, background color, number formats
-- Column resizing, row/column headers
-- Find & replace
-- AI panel:
-  - **Analyze** — AI analyzes selected data and provides insights
-  - **Generate** — Create entire datasets from a description (e.g., "quarterly sales data for a SaaS company")
-  - **Formula help** — Explain or suggest formulas
-- Real-time cell preview — typing in the formula bar immediately reflects in the active cell
-- Auto-persist — clicking another cell automatically commits the current value (no Enter required, like Excel)
-- Undo/redo support
+**Why:** there is no cell model behind the grid, so nothing can be typed into it, by mouse or
+by mind. The screen drew a perfect 50×26 grid over 1249 lines of Slint and 156 lines of Rust
+in which `cell-grid` was never written, `row-count` and `col-count` were always 0, and every
+handler that touches a cell took an early return. There is no formula engine — `is_formula`
+tested whether text *starts with* `=`, and nothing evaluated one. Save and Load were log
+lines.
 
-**AI Generate example:**
-Type "Employee directory with departments and salaries" in the AI panel and click Generate. The companion creates a realistic CSV dataset and populates the sheet.
+**What brings it back:** a cell model, CSV load and save, and arithmetic with references plus
+`SUM`/`AVG`/`MIN`/`MAX`/`COUNT`.
+
+The crate stays in the tree and stays a workspace member, so it keeps compiling. What changed
+is that a person cannot reach it and a mind is not told it exists. Nothing in the desktop
+routes `.csv`, `.xlsx` or `.ods` at it — `.csv` opens in the text editor.
 
 ### yPresent (Presentations)
 
@@ -98,15 +104,24 @@ Event management with schedule awareness.
 
 ## Media Apps
 
-### Music Player
+### Music — SHELVED, not in this build
 
-Audio playback with playlist management.
+**Shelved on 20 September 2026**, the same way and for the same kind of reason as ySheets:
+refused by name with the reason, absent from the launcher, the Lens and the release bundle.
 
-**Features:**
-- Play local audio files
-- Playlist creation and management
-- Playback controls (play, pause, skip, volume)
-- Now playing display
+**Why:** nothing plays audio yet — there is no playback engine, no scanner and no library
+behind the screen. 2168 lines of Slint were driven by 312 of Rust, of which 23 of 34 handlers
+did nothing, including every one that would make a sound. Double-clicking a song logged
+`"Play track index N (stub)"`. The only way a track ever appeared on that screen was
+`YANTRIK_MUSIC_DEMO=1`, which fills the library with twelve invented tracks and is honestly
+labelled a design fixture.
+
+**What brings it back:** mpv driven over its JSON IPC socket, a folder scan filling a small
+library store, and play/pause/next/queue and `open <file>` working.
+
+**Audio does still play on this machine** — that is a different claim, and worth separating.
+The shell's own media screen (below) drives a real `mpv` over a real IPC socket, and every
+audio file type the desktop classifies routes to it. It never routed to the Music app.
 
 ### Image Viewer
 
@@ -138,7 +153,7 @@ A file browser with AI-assisted organization.
 A built-in terminal emulator.
 
 **Features:**
-- Shell access (`/bin/ash` on Alpine)
+- Shell access (`$SHELL`, falling back to `/bin/bash` — this is Debian 13)
 - Full terminal emulation
 - The companion can help with terminal commands — ask *"How do I find large files?"*
 
@@ -170,7 +185,7 @@ System package management.
 **Features:**
 - Browse installed packages
 - Search for available packages
-- Install and remove packages (uses Alpine's `apk`)
+- Install and remove packages (Debian: `apt-get`, through `sudo`)
 
 ### Weather
 

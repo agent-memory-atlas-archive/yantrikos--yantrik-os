@@ -1,22 +1,25 @@
 # Yantrik OS
 
-An AI-native desktop operating system where the AI **is** the shell. Built in Rust, local-first
-— your data stays on your machine, your model runs on your hardware.
+An AI-native desktop operating system where the AI **is** the shell. Built in Rust, on Debian
+13, shipped as a live ISO you boot and try before you install anything.
 
 Yantrik OS replaces the traditional desktop metaphor with an agent that watches the system,
-learns your patterns and helps without being asked, alongside a full suite of built-in apps.
+learns your patterns and helps without being asked, alongside a suite of built-in apps.
 
 ## What makes it different
 
 - **The AI is the shell, not an add-on.** The companion is woven through file management, email
-  triage, presentations, spreadsheet formulas and system monitoring rather than sitting in a
-  chat window beside them.
+  triage, presentations and system monitoring rather than sitting in a chat window beside them.
 - **Every screen is drivable by an agent.** The shell and every app publish their state and
   accept actions over a unix socket — `yos describe shell`, `yos act shell open_app name=notes`.
   Anything a person can do from the keyboard, an agent can do through the same path. See
   [docs/app-control.md](docs/app-control.md).
-- **Local-first.** Runs on-device with quantized open models. No cloud dependency, works
-  offline, and conversations and memories never leave the machine.
+- **Any mind, and the desktop says which one.** A local model through Ollama or llama.cpp, a
+  cloud provider, or a separate agent that attaches — all equally first-class. **The OS itself
+  sends nothing anywhere**: no telemetry, no phone-home, no call it makes on its own. But it is
+  built to be driven by whatever mind you give it, and a mind you point at a provider talks to
+  that provider. The status bar carries a chip naming which mind is answering and whether it is
+  local or cloud, so that is never something you have to go and check.
 - **Proactive, not reactive.** A four-stage pipeline (Detect → Generate → Score → Deliver)
   decides *when* to speak and *what* to say, so it helps without nagging.
 - **Rust throughout.** Slint UI, agent, memory database and system observer. No Electron, no
@@ -24,7 +27,9 @@ learns your patterns and helps without being asked, alongside a full suite of bu
 
 ## Built-in apps
 
-Sixteen application binaries, each its own window, each drivable by the agent.
+**Fifteen** application binaries ship, each its own window, each drivable by the agent. Two
+more exist in the tree and are **shelved** — deliberately not in this build, and listed below
+so that this page cannot promise them.
 
 | App | What it is |
 |-----|-----------|
@@ -35,15 +40,28 @@ Sixteen application binaries, each its own window, each drivable by the agent.
 | **Terminal** | Terminal emulator with AI command assist and split panes |
 | **Editor** | Text editor with tabs, find and replace, go-to-line |
 | **yDoc** | Document editor — rich text, comments, change tracking |
-| **ySheets** | Spreadsheet — formula engine, charts, multi-sheet |
 | **yPresent** | Presentations — AI deck generation, templates, speaker notes |
-| **Music** | Library, playlists, equalizer, folder watch |
 | **Images** | Viewer with zoom, rotate, crop, slideshow, batch operations |
 | **Downloads** | Resumable transfers with checksum verification |
 | **Snippets** | Code snippets by language and collection |
 | **Containers** | Docker/Podman containers, images and volumes |
 | **Network** | WiFi, ethernet and bluetooth |
 | **System Monitor** | CPU, memory, disk, network, processes |
+| **Arcade** | Builds a playable game from two small JSON specs, verified headlessly |
+
+**Shelved — not in this build:**
+
+| App | Why | What brings it back |
+|-----|-----|---------------------|
+| **ySheets** | No cell model behind the grid, so nothing could be typed into it, by mouse or by mind. No formula engine at all | A cell model, CSV load and save, and arithmetic with references plus `SUM`/`AVG`/`MIN`/`MAX`/`COUNT` |
+| **Music** | Nothing plays audio — no playback engine, no scanner and no library behind the screen | mpv driven over its JSON IPC socket, a folder scan filling a library store, and play/pause/next/queue and `open <file>` working |
+
+Both crates stay in the tree and keep compiling; what changed is that a person cannot reach
+them and a mind is not told they exist. Asking for one gets a refusal that says why, not
+"unknown app". The account is
+[design/shelved-2026-09-20.md](design/shelved-2026-09-20.md) and the list every surface reads
+is `SHELVED` in `crates/yantrik-ui/src/wire/dock.rs`. (Audio does play — the shell's own media
+screen drives a real mpv. That was never the Music app.)
 
 The shell itself provides Files, Settings, Memories, Notifications, Bond, Personality,
 Permissions, Devices, Packages, Skills and About as screens rather than separate windows.
@@ -80,13 +98,14 @@ Not a chatbot. A proactive agent with:
 │   yantrik-os          yantrikdb                            │
 │    (system)            (memory)                            │
 │                                                            │
-│   16 app binaries · 10 services · one control surface      │
+│   15 app binaries · 10 services · one control surface      │
 │                                                            │
 │   Debian 13 → labwc (Wayland) → Slint                      │
 └────────────────────────────────────────────────────────────┘
 ```
 
-23 crates, 16 apps and 10 services. The ones worth knowing:
+23 crates, 15 shipped apps (17 in the tree, two shelved) and 10 services. The ones worth
+knowing:
 
 | Crate | Purpose |
 |-------|---------|
@@ -106,37 +125,62 @@ companion worker (inference, memory, tools).
 
 ### Install
 
-Yantrik OS is built on **Debian 13 (trixie)**. The usual path is a cloud-init provisioned VM:
+Yantrik OS is a **Debian 13 (trixie) live ISO**, built and boot-tested by CI. Download it,
+check the checksum, boot it; the disk installer is inside the running image.
+
+Images are at **<https://iso.yantrikos.com/nightly/>**, where `latest.json` names the current
+file, its sha256, its size and its version.
 
 ```bash
-# Proxmox, libvirt, or anything that takes a cloud-init user-data file
-deploy/yantrik-os/cloud-init/user-data.yaml
+sh install.sh               # prints url, size and sha256 of the current image, and stops
+sh install.sh --download    # also fetches it here and verifies the sha256
 ```
 
-It fetches the release payload, installs the session and boots straight to the desktop.
+With no flag it installs nothing, writes nothing and wants no privilege — including when it is
+piped into a shell, which is the way it is most often run.
+
+**Only the nightly channel has ever had a build published to it.** `beta` and `stable` are
+names the updater knows and nothing has been published to either.
+
+Once it is booted, `yantrik-install` in the live session writes it to a disk.
+[docs/getting-started.md](docs/getting-started.md) is the whole path.
+
+There is also `deploy/yantrik-os/cloud-init/user-data.yaml` for Proxmox, libvirt or anything
+that takes a cloud-init file. That is how the project's own test machines are made, not how a
+person installs this.
 
 ### Hardware
 
-| | Minimum | Recommended |
-|--|---------|-------------|
-| **CPU** | x86_64, 2 cores | 4+ cores |
-| **RAM** | 4 GB | 8+ GB |
-| **Disk** | 6 GB free | 24+ GB |
-| **GPU** | Not required — the UI renders in software | Any, for interactive inference |
-| **OS** | Debian 13 | Debian 13 |
-| **Platform** | QEMU/KVM, Proxmox, VirtualBox | Bare metal |
+The image is about **1.31 GiB**. What it has actually been booted on:
+
+| | CI's boot test, every published image | The project's test machine |
+|--|---------------------------------------|----------------------------|
+| **CPU** | 4 | 4 |
+| **RAM** | 4 GB | 8 GB |
+| **GPU** | none (virtio-vga, software rendering) | none (virtio-gpu, software rendering) |
+| **Disk** | none — boots live | 32 GB |
+| **Firmware** | BIOS | BIOS |
+
+Real hardware, the UEFI path and any GPU other than QEMU's are **not measured** — nobody has
+checked. [docs/hardware-requirements.md](docs/hardware-requirements.md) says exactly which
+numbers are measured and which are not.
 
 Without a GPU the desktop is fully usable and inference is slow. That trade is deliberate: the
 shell renders through Slint's software rasteriser and idles at around 2% of a core.
 
 ### LLM backends
 
-| Backend | Setup | Notes |
-|---------|-------|-------|
-| **Ollama** | Point at a local or remote Ollama server | Any model it serves |
-| **OpenAI-compatible** | Any endpoint speaking the API | Cloud latency |
-| **Claude CLI** | Install the Claude Code CLI | Cloud latency |
-| **llama.cpp** | Built in, GGUF on disk | Fully offline |
+The image ships **no model and no mind**. You point it at one during first-run setup.
+
+| Backend | Setup | Where what you type goes |
+|---------|-------|--------------------------|
+| **Ollama** | Point at a local or remote Ollama server | That machine. Nothing leaves your network |
+| **llama.cpp** | Built in, GGUF on disk | Nowhere. Stays on this machine |
+| **OpenAI-compatible** | Any endpoint speaking the API | That endpoint's operator |
+| **Claude CLI** | Install the Claude Code CLI | Anthropic |
+
+Or attach a separate agent, which keeps its own endpoint and credentials and dials in to the
+desktop — see [docs/harness.md](docs/harness.md).
 
 ## Updating
 
@@ -155,9 +199,13 @@ respawning the shell, so it comes back exactly as it does on boot.
 
 | Channel | What it is |
 |---------|-----------|
-| `stable` | Tested releases |
-| `beta` | Promoted from nightly |
-| `nightly` | Latest builds |
+| `nightly` | Latest builds. **The only channel anything has ever been published to** |
+| `beta` | Intended for builds promoted from nightly. Empty |
+| `stable` | Intended for tested releases. Empty |
+
+`set-channel stable` will succeed and then `check` will report that the channel is not
+published, which is the honest answer rather than an error. Machines default to `nightly`
+because it is the only one with builds on it.
 
 ## Driving it from a terminal or an agent
 
@@ -288,7 +336,7 @@ yantrik-os/
 │   ├── yantrik-ml/            inference
 │   ├── yantrik-os/            system observer
 │   └── yantrik-harness/       the pluggable-mind protocol
-├── apps/                      16 application binaries
+├── apps/                      17 application binaries, 15 of which ship
 │   └── desktop-files/         their freedesktop entries
 ├── harnesses/                 minds that attach: hermes, pi, deepseek, openclaw, and the half they share
 ├── services/                  10 background services
@@ -296,6 +344,8 @@ yantrik-os/
 ├── deploy/yantrik-os/         cloud-init, session, release and update scripts
 ├── scripts/                   probes and the screen survey
 └── docs/
+    ├── getting-started.md     download, verify, boot, attach a mind, install, update
+    ├── hardware-requirements.md  what it has actually been run on, and what is unmeasured
     ├── architecture.md        system design
     ├── app-sdk.md             how to write an app, and why the frame is not yours
     ├── app-control.md         how apps publish state and accept actions
@@ -306,8 +356,23 @@ yantrik-os/
 
 ## Privacy and security
 
-- **Local-first.** Inference runs on your machine. No telemetry, no phone-home, no cloud calls
-  unless you choose a cloud backend.
+- **The OS itself sends nothing anywhere.** No telemetry, no phone-home, no analytics, no call
+  it makes on its own behalf. The image ships pointed at loopback and at nothing else, because
+  an endpoint baked into a public image is an endpoint every copy of it talks to. The two
+  places it does reach out are ones you asked for: the update check against
+  `releases.yantrikos.com`, and whatever your weather, mail and calendar are configured
+  against.
+- **The mind is a separate question, and it is yours to answer.** This OS is built to be
+  driven by any mind, cloud models included; that is the point of the harness protocol, and
+  the token-efficiency comparison this project publishes was itself measured against a cloud
+  model. Point it at Ollama or llama.cpp and nothing you type leaves your machine. Point it at
+  a provider and what you type goes to that provider, exactly as it would from any other
+  client. The OS never holds your key — an attached mind manages its own credentials and the
+  protocol has nowhere to put one.
+- **The desktop says which.** A chip in the status bar names the mind that is answering and
+  whether it is local or cloud, with the provider or model on it. It is shown the moment
+  something other than the built-in companion is answering, because at that point it is the
+  most important thing in the bar.
 - **The memory is yours.** It lives at `/opt/yantrik/data/` as plain SQLite you can read,
   export or delete.
 - **Graded permissions.** Tools are safe, standard, sensitive or dangerous; the last two need
@@ -323,5 +388,7 @@ GPL-3.0. See [LICENSE](LICENSE).
 
 ## Links
 
-- **Releases**: https://releases.yantrikos.com
+- **Images (nightly)**: https://iso.yantrikos.com/nightly/
+- **Release bundles**: https://releases.yantrikos.com
 - **Issues**: https://github.com/yantrikos/yantrik-os/issues
+- **Community**: https://discord.gg/7cDw3jd3Xf
