@@ -35,6 +35,7 @@ members = [
     "services/a11y-service",
     "crates/yantrik-app-runtime",
     "apps/notes",
+    "apps/arcade",
     "apps/container-manager",
     "apps/download-manager",
     "apps/snippet-manager",

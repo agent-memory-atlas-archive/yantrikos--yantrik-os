@@ -1,0 +1,34 @@
+[package]
+name = "yantrik-arcade"
+version = "0.1.0"
+edition = "2021"
+description = "Yantrik Arcade - a game construction kit: a spec goes in, one playable HTML file comes out"
+
+[[bin]]
+name = "yantrik-arcade"
+path = "src/main.rs"
+
+[dependencies]
+yantrik-app-runtime = { path = "../../crates/yantrik-app-runtime" }
+yantrik-ipc-contracts = { workspace = true }
+yantrik-ipc-transport = { workspace = true }
+yantrik-design-tokens = { workspace = true }
+yantrik-ui-kit = { workspace = true }
+slint = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+# Human-readable build times, and the DeletionDate a freedesktop Trash info file wants.
+chrono = { workspace = true }
+# The verifier drives a headless Chromium over the DevTools protocol: HTTP for
+# target discovery, one websocket for the commands.
+tungstenite = { workspace = true }
+ureq = { workspace = true }
+base64 = { workspace = true }
+# Decoding the screenshot the verifier takes, to check a frame actually rendered.
+png = "0.18"
+
+libc = "0.2"
+
+[build-dependencies]
+slint-build = "1.17"
