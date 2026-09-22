@@ -396,18 +396,21 @@ export component SettingsScreen inherits Rectangle {
         : Theme.bg-elevated
     }
 
-    // Drives the indeterminate bar on a row that is installing or starting. 60ms rather than a
+    // Drives the indeterminate bar on a row that is installing or starting. 100ms rather than a
     // frame, and only while this page is open with something actually running: a settings screen
     // that repaints sixty times a second in the background is how an idle desktop gets warm.
+    // It was 60ms, which is the same idea and still four repaints for every one the bar needs;
+    // 100ms is the floor the scan in yantrik-ui-kit now holds every repeating timer to, and the
+    // sweep keeps its two-second period because the step grew with the interval.
     property <float> harness-phase: 0;
     // A triangle rather than a saw: the bar comes back the way it went instead of jumping to
     // the left edge every two seconds.
     property <float> harness-sweep: root.harness-phase < 0.5
         ? root.harness-phase * 2 : (1.0 - root.harness-phase) * 2;
     Timer {
-        interval: 60ms;
+        interval: 100ms;
         running: root.active-category == 8 && root.harness-busy;
-        triggered => { harness-phase = mod(root.harness-phase + 0.03, 1.0); }
+        triggered => { harness-phase = mod(root.harness-phase + 0.05, 1.0); }
     }
 
     // Active settings category (sidebar).

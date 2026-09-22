@@ -116,7 +116,7 @@ mod app_header_is_mandatory {
     }
 }
 
-// ── What an app costs while nobody is using it ──────────────────────────────
+// ── What a window costs while nobody is looking at it ───────────────────────
 //
 // An open Terminal showing nothing but a prompt burned about one and a half cores, for hours,
 // on a desktop where nobody had typed anything (#29, and most of #53's idle total). Nothing was
@@ -132,12 +132,40 @@ mod app_header_is_mandatory {
 //
 // No functional test sees this. Every screenshot is right, every key works, every action
 // answers — the app is simply expensive. So the check has to read the markup, and it has to
-// cover every app rather than the one that was caught, because the mistake is a single property
-// that anyone can type again. The two ways a Slint window asks to be redrawn for ever are an
-// animation with a negative iteration count and a Timer that is always running; both are
-// refused here for every screen an app window actually compiles.
+// cover every window rather than the one that was caught, because the mistake is a single
+// property that anyone can type again.
+//
+// The first version of this check read only `apps/*/ui/app.slint`, and the shell walked straight
+// through the hole that left. #68: with the Intent Lens CLOSED and a mind thinking on a
+// delegated job, `yantrik-ui` sat at 83% of a core for minutes at a time — 75.4% of it on the UI
+// thread, with labwc paying 20% more to composite what it produced. The whole of that came from
+// one 6px dot on the status bar, which pulses while a mind is working:
+//
+//     opacity: root.companion-status == "thinking" ? ai-pulse-opacity : 1.0;
+//     animate ai-pulse-opacity { duration: 2000ms; }
+//     Timer { interval: 2000ms; triggered => { ai-pulse-opacity = … > 0.8 ? 0.5 : 1.0; } }
+//
+// The timer restarted the animation exactly as often as the animation lasted, so it was never
+// not animating, and a window with an animation in flight redraws at the display's rate. On the
+// shell that is a full-screen repaint — 96ms of CPU on the software rasteriser — for a dot.
+// Measured headless on this markup with the Lens closed: 236 frames a second before, 5 after.
+//
+// The refusals, in the order a window gets expensive:
+//
+//   * an `animate` with a negative iteration count — it never finishes;
+//   * a `Timer` that is always running, including one that names no `running` at all, since
+//     Slint's default is true;
+//   * a `Timer` that restarts an `animate` whose duration is as long as the gap between ticks —
+//     the dot above;
+//   * a `Timer` that repeats faster than 100ms. Below that is the display's frame rate, which
+//     means a full repaint of whatever is on screen, and a file scan cannot prove the thing
+//     being animated is visible. So the rate is what gets held to: a pulse, a progress bar and a
+//     sweep all read fine at 100–250ms, and 60Hz is left to the ambient decoration, which takes
+//     its interval from the renderer's own measured budget and is switched off entirely where a
+//     frame is expensive (`ambient_interval_ms` in crates/yantrik-ui/src/render_backend.rs). A
+//     timer that stops itself on its first tick is not repeating at all, and is allowed.
 #[cfg(test)]
-mod an_idle_app_stops_drawing {
+mod an_idle_window_stops_drawing {
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
@@ -224,14 +252,20 @@ mod an_idle_app_stops_drawing {
             .join("\n")
     }
 
-    /// What a `Timer` body gives its `running` property, if it sets one.
+    /// The fastest a `Timer` may repeat. Below this it is asking for frames at the display's rate.
+    const PULSE_FLOOR_MS: f64 = 100.0;
+
+    /// What a `Timer` body gives one of its properties — `running`, `interval` — if it sets it.
     ///
-    /// Read by hand rather than with a search for `"running"`, because a Timer's `triggered =>`
-    /// handler is part of the same body and may well mention a name that ends in `running`.
-    fn running_gate(body: &str) -> Option<String> {
+    /// Read by hand rather than with a plain search for the name, because a Timer's `triggered =>`
+    /// handler is part of the same body and may well mention something that merely ENDS in the
+    /// name (`root.ambient-interval-ms` contains `interval`; a handler may touch `is-running`).
+    /// Both neighbours are checked: the character before must not be part of a word, and what
+    /// follows must be the `:` that makes it a property and not a longer identifier.
+    fn setting(body: &str, name: &str) -> Option<String> {
         let mut at = 0;
-        while let Some(offset) = body[at..].find("running").map(|i| at + i) {
-            at = offset + "running".len();
+        while let Some(offset) = body[at..].find(name).map(|i| at + i) {
+            at = offset + name.len();
             let before = body[..offset].chars().next_back();
             let own_word = !before.is_some_and(|c| c.is_alphanumeric() || c == '-' || c == '_');
             if own_word {
@@ -241,6 +275,123 @@ mod an_idle_app_stops_drawing {
             }
         }
         None
+    }
+
+    /// The shortest interval an expression can produce, in milliseconds.
+    ///
+    /// Slint writes an interval either as a duration literal — `160ms` — or as a number of
+    /// milliseconds scaled into one, which is how the ambient layers take the renderer's budget:
+    ///
+    ///     interval: max(100, root.ambient-interval-ms) * 1ms;
+    ///
+    /// Both shapes leave the millisecond values in the expression as plain numbers; the `1ms`
+    /// that does the scaling is a unit and not one of them, so it is dropped. The `max` is what
+    /// makes the floor readable at all, which is the reason to write it that way.
+    ///
+    /// `None` means the expression holds no number: nothing in it says how fast this can go, and
+    /// the caller treats that as a finding rather than as permission.
+    fn fastest_interval_ms(expression: &str) -> Option<f64> {
+        let bytes = expression.as_bytes();
+        let mut fastest: Option<f64> = None;
+        let mut at = 0;
+        while at < bytes.len() {
+            if !bytes[at].is_ascii_digit() {
+                at += 1;
+                continue;
+            }
+            // A digit inside an identifier (`phase2`) is not a number.
+            let inside_a_name = expression[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphabetic() || c == '_');
+            let start = at;
+            while at < bytes.len() && (bytes[at].is_ascii_digit() || bytes[at] == b'.') {
+                at += 1;
+            }
+            if inside_a_name {
+                continue;
+            }
+            let Ok(value) = expression[start..at].parse::<f64>() else {
+                continue;
+            };
+            // `* 1ms` is the unit the bare numbers are counted in, not an interval of one
+            // millisecond.
+            if expression[at..].starts_with("ms") && value == 1.0 {
+                continue;
+            }
+            fastest = Some(fastest.map_or(value, |seen: f64| seen.min(value)));
+        }
+        fastest
+    }
+
+    /// The properties a `Timer`'s handler writes to.
+    ///
+    /// The name only, with any `root.` / `parent.` / `self.` in front of it dropped, because that
+    /// is how the `animate` for it will be spelled. Comparisons (`==`, `!=`, `<=`, `>=`) and
+    /// Slint's callback arrow (`=>`) are not assignments; `+=` and friends are.
+    fn properties_assigned(body: &str) -> BTreeSet<String> {
+        let bytes = body.as_bytes();
+        let mut found = BTreeSet::new();
+        for (at, byte) in bytes.iter().enumerate() {
+            if *byte != b'=' {
+                continue;
+            }
+            let previous = at.checked_sub(1).map(|i| bytes[i]).unwrap_or(b' ');
+            let next = bytes.get(at + 1).copied().unwrap_or(b' ');
+            if next == b'=' || next == b'>' || matches!(previous, b'=' | b'!' | b'<' | b'>') {
+                continue;
+            }
+            let left = body[..at].trim_end_matches(['+', '-', '*', '/']).trim_end();
+            let starts = left
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_' || c == '.'))
+                .map_or(0, |cut| cut + 1);
+            let name = left[starts..].rsplit('.').next().unwrap_or("");
+            if !name.is_empty() {
+                found.insert(name.to_string());
+            }
+        }
+        found
+    }
+
+    /// Every `animate` block in a file: the properties it covers, and how long it says it runs.
+    ///
+    /// `None` for a duration that is not a plain number (`Theme.dur-normal`) — this cannot follow
+    /// a token into another file, and a missed finding is better than an invented one.
+    fn animations(source: &str) -> Vec<(BTreeSet<String>, Option<f64>)> {
+        let mut found = Vec::new();
+        let mut at = 0;
+        while let Some(offset) = source[at..].find("animate ").map(|i| at + i) {
+            at = offset + "animate ".len();
+            let Some(open) = source[at..].find('{').map(|i| at + i) else {
+                break;
+            };
+            let names = source[at..open]
+                .split(',')
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect::<BTreeSet<_>>();
+            let close = source[open..].find('}').map_or(source.len(), |i| open + i);
+            let duration = setting(&source[open..close], "duration")
+                .and_then(|value| fastest_interval_ms(&value));
+            found.push((names, duration));
+            at = close;
+        }
+        found
+    }
+
+    /// Whether a `Timer` turns itself off on its first tick.
+    ///
+    /// One of these is not an animation and costs one frame: the Lens uses a 30ms one to put the
+    /// cursor in the reply box a tick after the panel is laid out, because a field cannot take
+    /// focus before it has a size. It is recognised by the handler clearing the very property the
+    /// `running` gate reads.
+    fn stops_itself(gate: &str, body: &str) -> bool {
+        let property = gate.rsplit('.').next().unwrap_or(gate).trim();
+        let is_a_name = !property.is_empty()
+            && property
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+        is_a_name && body.contains(&format!("{property} = false"))
     }
 
     /// The body of every `Timer { … }` in one file, with the line it starts on.
@@ -275,10 +426,17 @@ mod an_idle_app_stops_drawing {
         found
     }
 
-    #[test]
-    fn no_app_window_asks_to_be_redrawn_for_ever() {
-        let repo = repo();
-        let includes = include_paths(&repo);
+    /// Every window this checkout ships: each app, and the shell itself.
+    ///
+    /// The shell is the one that matters most and was the one left out. It is a single window
+    /// holding the desktop, the Lens, the lock screen and the login screen, it is up from boot to
+    /// shutdown, and what it spends is what the machine feels like — 83% of a core while a mind
+    /// was thinking behind a closed panel (#68).
+    fn windows(repo: &Path) -> Vec<(String, PathBuf)> {
+        let mut found = vec![(
+            "shell".to_string(),
+            repo.join("crates/yantrik-ui-slint/ui/app.slint"),
+        )];
         let mut apps: Vec<PathBuf> = std::fs::read_dir(repo.join("apps"))
             .expect("the apps we ship live in apps/")
             .filter_map(|entry| entry.ok())
@@ -286,20 +444,38 @@ mod an_idle_app_stops_drawing {
             .filter(|dir| dir.join("ui/app.slint").is_file())
             .collect();
         apps.sort();
+        found.extend(apps.into_iter().map(|app| {
+            let name = app
+                .file_name()
+                .expect("an app has a directory name")
+                .to_string_lossy()
+                .into_owned();
+            (name, app.join("ui/app.slint"))
+        }));
+        found
+    }
+
+    #[test]
+    fn no_window_asks_to_be_redrawn_for_ever() {
+        let repo = repo();
+        let includes = include_paths(&repo);
+        let windows = windows(&repo);
         // A path mistake here would make the whole check pass by reading nothing, so it says out
-        // loud that it found the apps — and the one this came from by name.
+        // loud what it found: the shell, and the app this came from by name.
         assert!(
-            apps.iter().any(|app| app.ends_with("terminal")),
-            "no app windows found under {}/apps; this check reads every app's ui/app.slint and \
-             found {} of them",
+            windows.iter().any(|(name, _)| name == "terminal")
+                && windows
+                    .iter()
+                    .any(|(name, entry)| name == "shell" && entry.is_file()),
+            "the windows this check reads are the shell's own ui/app.slint and every app's; \
+             under {} it found {} of them and not the pair it expects",
             repo.display(),
-            apps.len()
+            windows.len()
         );
 
         let mut never_still = Vec::new();
-        for app in &apps {
-            let name = app.file_name().expect("an app has a directory name").to_string_lossy();
-            for file in markup_reachable_from(&app.join("ui/app.slint"), &includes) {
+        for (name, entry) in &windows {
+            for file in markup_reachable_from(entry, &includes) {
                 let source = without_comments(
                     &std::fs::read_to_string(&file)
                         .unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display())),
@@ -325,14 +501,67 @@ mod an_idle_app_stops_drawing {
                     }
                 }
                 for (line, body) in timer_bodies(&source) {
-                    match running_gate(&body) {
-                        // Gated on state: it ticks only while something is happening.
-                        Some(gate) if gate != "true" => {}
-                        Some(_) => never_still
-                            .push(format!("{} — Timer {{ running: true }}", where_(line))),
+                    let Some(gate) = setting(&body, "running") else {
                         // Slint's Timer runs by default, so saying nothing says true.
-                        None => never_still.push(format!(
+                        never_still.push(format!(
                             "{} — Timer with no `running`, which defaults to true",
+                            where_(line)
+                        ));
+                        continue;
+                    };
+                    if gate == "true" {
+                        never_still
+                            .push(format!("{} — Timer {{ running: true }}", where_(line)));
+                        continue;
+                    }
+                    // Gated on state, so it ticks only while something is happening. How often
+                    // does it ask for a frame while that something is going on?
+                    let interval = setting(&body, "interval").unwrap_or_default();
+                    let every = fastest_interval_ms(&interval);
+                    // One tick and it is done; the rate of a thing that happens once is nothing,
+                    // and an animation it starts gets to finish.
+                    if stops_itself(&gate, &body) {
+                        continue;
+                    }
+                    // An animation this timer restarts before it has finished never finishes, and
+                    // an animation in flight is a window at the display's frame rate. This is what
+                    // the status bar's thinking dot was, and it is the one that actually cost #68
+                    // its core: a 2000ms `animate` on the opacity, and a 2000ms Timer flipping
+                    // that same opacity, so the shell redrew continuously for as long as a mind
+                    // was working — with the Lens closed, with nothing else on screen moving.
+                    for property in properties_assigned(&body) {
+                        for (animated, duration) in animations(&source) {
+                            let (Some(every), Some(duration)) = (every, duration) else {
+                                continue;
+                            };
+                            if animated.contains(&property) && duration >= every {
+                                never_still.push(format!(
+                                    "{} — Timer {{ interval: {every}ms }} restarts `animate \
+                                     {property} {{ duration: {duration}ms }}`, which therefore \
+                                     never finishes",
+                                    where_(line)
+                                ));
+                            }
+                        }
+                    }
+                    // The ambient decoration — orb, particle field, the breathing lock screen —
+                    // takes both its rate and its on/off from the renderer's measured budget,
+                    // which is 0 wherever a frame is expensive. That is the one 60Hz in this
+                    // tree that was paid for on purpose; see render_backend.rs.
+                    if interval.contains("ambient-interval-ms")
+                        && gate.contains("ambient-interval-ms")
+                    {
+                        continue;
+                    }
+                    match every {
+                        Some(ms) if ms >= PULSE_FLOOR_MS => {}
+                        Some(ms) => never_still.push(format!(
+                            "{} — Timer {{ interval: {ms}ms; running: {gate} }}",
+                            where_(line)
+                        )),
+                        None => never_still.push(format!(
+                            "{} — Timer whose interval says no number, so how fast it repeats \
+                             cannot be read here: `{interval}`",
                             where_(line)
                         )),
                     }
@@ -344,17 +573,28 @@ mod an_idle_app_stops_drawing {
 
         assert!(
             never_still.is_empty(),
-            "these app windows never stop redrawing, so they cost CPU while nobody is using \
-             them:\n  {}\n\n\
-             An animation with a negative iteration count, and a Timer that is always running, \
-             both hold the window at the display's frame rate for as long as it is open — the \
-             app pays, and the compositor pays again to composite each frame. Measured on the \
-             terminal, one such animation was 110% of a core at an empty prompt.\n\n\
-             Drive the effect from state instead: gate the Timer on the thing that is happening \
-             (`running: root.is-loading`), and let an animation run to its end rather than \
-             repeat for ever. An app that is doing nothing has to ask for no frames at all — \
-             apps/terminal's `real_window_shell_tabs_search_clipboard_resize_and_idle` asserts \
-             exactly that for one app, by counting the frames the renderer requests.",
+            "these windows ask to be redrawn far more often than anything on them changes, so \
+             they cost CPU while nobody is looking at them:\n  {}\n\n\
+             Each of these holds the window at the display's frame rate: an animation with a \
+             negative iteration count; a Timer that is always running; a Timer that repeats \
+             faster than {PULSE_FLOOR_MS}ms, for as long as its condition holds — and a condition \
+             like `is-thinking` holds for minutes; and a Timer that restarts an animation before \
+             that animation can finish, which is the same thing said in two places. The window \
+             pays and the compositor pays again to composite every frame: 110% of a core for one \
+             such animation on the terminal (#29), and 236 frames a second — 75% of the shell's \
+             main thread, 20% more in labwc — while a mind was thinking and nothing on screen was \
+             moving but a 6px dot (#68).\n\n\
+             Drive the effect from state and at the rate the effect needs. Gate the Timer on \
+             everything that has to be true for the thing to be ON SCREEN, not just on the state \
+             it reports (`running: root.is-open && root.is-thinking`), and give a pulse, a \
+             shimmer or a progress bar 100-250ms a step — nobody can see the difference, and it \
+             is a tenth of the frames. An animation has to be shorter than the gap between the \
+             ticks that start it, or it never ends. Ambient decoration is the exception, and \
+             takes its rate and its on/off from the renderer's budget (`ambient-interval-ms`), \
+             which is zero where a frame is expensive. A window that is doing nothing has to ask \
+             for no frames at all — apps/terminal's \
+             `real_window_shell_tabs_search_clipboard_resize_and_idle` asserts exactly that for \
+             one app, by counting the frames the renderer requests.",
             never_still.join("\n  ")
         );
     }

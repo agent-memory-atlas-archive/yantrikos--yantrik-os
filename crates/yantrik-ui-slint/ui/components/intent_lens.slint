@@ -689,13 +689,24 @@ export component IntentLens inherits Rectangle {
         }
     }
 
-    // Holographic scan phase
-    property <float> lens-glow-phase: 0;
+    // The pulse under the SUGGESTED rows' ambient dot, and nothing else.
+    //
+    // It used to be called the holographic scan phase and run at 16 ms for as long as the panel
+    // was open, which read as "the panel glows". It does not: the only property that has ever
+    // read this phase is the 5px dot on a suggestion row (search this file for
+    // `suggestion-dot-phase` — one use). Those rows are on screen in one state, and a sixty-a-
+    // second repaint of the whole desktop for a dot that is not being drawn is the shape of #68.
+    //
+    // So the gate is the condition the rows themselves are behind, spelled out once here, and the
+    // rate is what a pulse needs. 160 ms a step at 0.03 keeps the 5.3 s cycle the dot always had.
+    property <bool> suggestion-dots-visible: root.is-open && !root.chat-mode
+        && root.results.length == 0 && root.input-text == "" && root.suggestions.length > 0;
+    property <float> suggestion-dot-phase: 0;
     Timer {
-        interval: 16ms;
-        running: root.is-open;
+        interval: 160ms;
+        running: root.suggestion-dots-visible;
         triggered => {
-            lens-glow-phase = mod(lens-glow-phase + 0.003, 1.0);
+            suggestion-dot-phase = mod(suggestion-dot-phase + 0.03, 1.0);
         }
     }
 
@@ -1027,28 +1038,42 @@ export component IntentLens inherits Rectangle {
             }
 
             // ── Thinking indicator bar ──
-            if root.is-thinking : Rectangle {
+            //
+            // This cost the machine three quarters of a core for as long as a mind was working,
+            // with the panel closed (#68: `yantrik-ui` at 83 % against 2.0 % four minutes later,
+            // from /proc task stat deltas). Two mistakes, and the second is the expensive one.
+            //
+            // It was gated on `is-thinking` alone. The panel it lives in is `visible: root.is-open`
+            // — visible, not conditional — so with the Lens closed this element still existed, its
+            // timer still ticked, and every tick wrote a property the scene depends on. Slint does
+            // not care that the item is invisible: a changed property is a dirty scene and a frame
+            // is requested. Thinking is minutes for a real job, and a mind at work is exactly when
+            // the person is doing something else on this machine.
+            //
+            // And it swept at 16 ms — sixty full-screen repaints a second, the compositor paying
+            // again for each, to move a 2px gradient. A pulse says the same thing. 160 ms a step
+            // at 0.08 keeps the 2 s cycle the sweep had, at a tenth of the frames.
+            if root.is-open && root.is-thinking : Rectangle {
                 height: 2px;
                 width: 100%;
 
-                // Scanning gradient
-                property <float> scan-phase: 0;
+                property <float> pulse-phase: 0;
                 Timer {
-                    interval: 16ms;
-                    running: root.is-thinking;
-                    triggered => { parent.scan-phase = mod(parent.scan-phase + 0.008, 1.0); }
+                    interval: 160ms;
+                    running: root.is-open && root.is-thinking;
+                    triggered => { parent.pulse-phase = mod(parent.pulse-phase + 0.08, 1.0); }
                 }
 
                 Rectangle {
-                    x: parent.width * scan-phase - parent.width * 0.3;
-                    width: parent.width * 0.3;
+                    width: 100%;
                     height: 2px;
                     background: @linear-gradient(90deg,
                         transparent 0%,
-                        Theme.amber 50%,
-                        Theme.cyan 100%
+                        Theme.amber 35%,
+                        Theme.cyan 75%,
+                        transparent 100%
                     );
-                    opacity: 0.8;
+                    opacity: 0.35 + 0.45 * (0.5 + 0.5 * sin(pulse-phase * 6.2832 * 1rad));
                 }
             }
 
@@ -1071,12 +1096,15 @@ export component IntentLens inherits Rectangle {
                         height: Theme.lens-result-height;
                         border-radius: 8px;
 
+                        // Same two corrections as the thinking bar above: a skeleton row behind a
+                        // closed panel is a row nobody can see, and a shimmer is a pulse. 160 ms
+                        // at 0.1 keeps the 1.6 s cycle.
                         property <float> shimmer-phase: 0;
                         Timer {
-                            interval: 16ms;
-                            running: result.is-loading;
+                            interval: 160ms;
+                            running: root.is-open && result.is-loading;
                             triggered => {
-                                parent.shimmer-phase = mod(parent.shimmer-phase + 0.01, 1.0);
+                                parent.shimmer-phase = mod(parent.shimmer-phase + 0.1, 1.0);
                             }
                         }
 
@@ -1423,7 +1451,7 @@ export component IntentLens inherits Rectangle {
                                             height: 5px;
                                             border-radius: 2.5px;
                                             background: Theme.color-context;
-                                            opacity: 0.5 + 0.5 * sin(root.lens-glow-phase * 6.2832 * 1rad);
+                                            opacity: 0.5 + 0.5 * sin(root.suggestion-dot-phase * 6.2832 * 1rad);
                                         }
 
                                         Text {
@@ -1640,17 +1668,22 @@ export component IntentLens inherits Rectangle {
                 }
 
                 // Typing indicator
-                if root.is-generating : HorizontalLayout {
+                //
+                // Generating runs as long as thinking does, and this had the same gate and the
+                // same 16 ms as the bar above — three 5px dots holding the display at its frame
+                // rate whether or not the conversation was on screen. 160 ms at 0.05 keeps the
+                // 3.2 s cycle, and the offsets between the dots are unchanged.
+                if root.is-open && root.is-generating : HorizontalLayout {
                     padding-left: 20px;
                     padding-bottom: 8px;
                     spacing: 6px;
 
                     property <float> dot-phase: 0;
                     Timer {
-                        interval: 16ms;
-                        running: root.is-generating;
+                        interval: 160ms;
+                        running: root.is-open && root.is-generating;
                         triggered => {
-                            parent.dot-phase = mod(parent.dot-phase + 0.005, 1.0);
+                            parent.dot-phase = mod(parent.dot-phase + 0.05, 1.0);
                         }
                     }
 

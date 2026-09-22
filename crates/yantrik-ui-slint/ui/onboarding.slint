@@ -258,6 +258,12 @@ export component OnboardingScreen inherits Rectangle {
 
     in-out property <string> companion-name: "Yantrik";
 
+    /// What the shell may spend on decoration, in milliseconds a frame — 0 when it may spend
+    /// nothing. The particle field and the orb below both default to 16 when nobody tells them,
+    /// which is how a first-boot screen ended up drawing a full-screen particle field sixty times
+    /// a second on a machine whose renderer had already decided it could not afford one.
+    in property <int> ambient-interval-ms: 0;
+
     background: Theme.bg-deep;
     clip: true;
 
@@ -322,17 +328,23 @@ export component OnboardingScreen inherits Rectangle {
     property <float> hw-scan-progress: 0;
     property <int> hw-scan-step: 0;
 
+    // The clock the first three phases, the hardware scan and the install page run on.
+    //
+    // Nothing here is an animation: it waits half a second, then two, then four, fills a progress
+    // bar over two seconds, and watches for the installer to reach 100. It asked for a frame every
+    // 16 ms to do that — sixty full-screen repaints a second of a screen with a particle field on
+    // it, to move a number. A tenth of that keeps every threshold below exactly where it was.
     Timer {
-        interval: 16ms;
+        interval: 100ms;
         running: phase < 3 || phase == 6 || phase == 11;
         triggered => {
-            timer-elapsed += 0.016;
+            timer-elapsed += 0.1;
             if timer-elapsed > 0.5 && phase == 0 { phase = 1; }
             if timer-elapsed > 2.0 && phase == 1 { phase = 2; }
             if timer-elapsed > 4.0 && phase == 2 { phase = 3; }
             // Hardware scan animation — advance steps every 400ms
             if phase == 6 {
-                hw-scan-progress = min(1.0, hw-scan-progress + 0.008);
+                hw-scan-progress = min(1.0, hw-scan-progress + 0.05);
                 if hw-scan-progress > 0.15 && hw-scan-step < 1 { hw-scan-step = 1; }
                 if hw-scan-progress > 0.30 && hw-scan-step < 2 { hw-scan-step = 2; }
                 if hw-scan-progress > 0.45 && hw-scan-step < 3 { hw-scan-step = 3; }
@@ -352,6 +364,7 @@ export component OnboardingScreen inherits Rectangle {
     ParticleField {
         width: 100%; height: 100%;
         active: true;
+        ambient-interval-ms: root.ambient-interval-ms;
         intensity: phase >= 1 ? 0.4 : 0.1;
         animate intensity { duration: 2000ms; }
     }
@@ -383,6 +396,7 @@ export component OnboardingScreen inherits Rectangle {
                     width: phase >= 4 ? 60px : 120px;
                     height: phase >= 4 ? 60px : 120px;
                     size-px: phase >= 4 ? 60 : 120;
+                    ambient-interval-ms: root.ambient-interval-ms;
                     opacity: phase >= 1 ? 1.0 : 0;
                     animate opacity { duration: 2000ms; easing: ease-out; }
                     animate width { duration: 600ms; easing: ease-out; }

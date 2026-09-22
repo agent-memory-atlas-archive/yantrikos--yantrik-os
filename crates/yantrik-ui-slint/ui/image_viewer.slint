@@ -165,11 +165,15 @@ export component ImageViewer inherits Rectangle {
     }
 
     // ── Slideshow timer ──
+    //
+    // 100ms, not 50: the only thing a tick moves is a progress bar that takes four seconds to
+    // cross, and every tick is a repaint of a full-screen photograph. Forty frames per slide
+    // instead of eighty draws the same bar.
     Timer {
-        interval: 50ms;
+        interval: 100ms;
         running: root.viewer-slideshow-active && !root.viewer-slideshow-paused;
         triggered => {
-            root.viewer-slideshow-progress += 0.0125;  // 50ms / 4000ms = 0.0125
+            root.viewer-slideshow-progress += 0.025;  // 100ms / 4000ms = 0.025
             if (root.viewer-slideshow-progress >= 1.0) {
                 root.viewer-slideshow-progress = 0.0;
                 root.reset-zoom();
