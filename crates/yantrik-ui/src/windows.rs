@@ -201,29 +201,111 @@ fn display_name(app_id: &str) -> String {
         })
 }
 
-/// Bring the window called `title` to the front, restoring it first if it was minimized. Says
-/// whether the compositor had such a window.
+// ── Asking the compositor to move a window ──────────────────────────
+//
+// Everything below builds a `wlrctl toplevel …` command line and runs it. The shell owns none of
+// this: labwc decides what is in front, what is minimized and what closes, and the only thing we
+// can do is ask. So every function here reports whether the asking worked rather than assuming it.
+
+/// How long a caller waits for `wlrctl` before answering without it.
+///
+/// Action handlers run on the UI thread — that is the only thread allowed to touch a Slint window
+/// — and `wlrctl` is a process, so a wait here is a frozen desktop for as long as it lasts. On the
+/// test machine `wlrctl toplevel list` answers in about two milliseconds; 1.2 seconds is far
+/// outside that and still well inside the three seconds the control surface gives an action.
+const COMPOSITOR_REPLY_LIMIT: Duration = Duration::from_millis(1200);
+
+/// The `wlrctl toplevel <verb>` command line for one window, named by title.
+///
+/// Two things about wlrctl's matchspec, both learned the hard way and both load-bearing:
+///
+/// The key is spelled out, because a bare word "is assumed to be an app_id". Our Slint windows
+/// declare a title and no wayland app_id at all, and a match on nothing exits as SUCCESS — which
+/// is how every click on a taskbar entry used to do nothing at all, silently.
+///
+/// The title has to be the window's title EXACTLY. `title:` is an exact, case-sensitive
+/// comparison in wlrctl 0.2.2: `wlrctl toplevel find title:editor` misses a window called
+/// `Editor`, and `title:Yantrik` misses `Yantrik OS`. So every caller resolves what a person
+/// typed against the open windows first (see [`window_named`]) and passes the title it found,
+/// never the one it was given.
+fn toplevel_args(verb: &str, title: &str) -> Vec<String> {
+    vec!["toplevel".to_string(), verb.to_string(), format!("title:{title}")]
+}
+
+/// The command line that brings a MINIMIZED window back onto the screen.
 ///
 /// A minimized window cannot take focus while it is still minimized, and wlrctl has no
-/// "unminimize" verb — `maximize` is what brings it back onto the screen. Applied only to windows
+/// "unminimize" verb — `maximize` is what brings it back. `state:minimized` narrows it to windows
 /// that are actually minimized, so presenting a visible window does not resize it.
+fn restore_args(title: &str) -> Vec<String> {
+    let mut args = toplevel_args("maximize", title);
+    args.push("state:minimized".to_string());
+    args
+}
+
+/// Run one `wlrctl` command and say, in words a caller can act on, what happened.
 ///
-/// The key is given explicitly: wlrctl's matchspec treats a bare word as an app_id, our Slint
-/// windows set a title and no app_id, and a match on nothing exits as success.
-pub fn present(title: &str) -> bool {
-    let restore = std::process::Command::new("wlrctl")
-        .args(["toplevel", "maximize", &format!("title:{title}"), "state:minimized"])
-        .status();
-    if let Err(e) = restore {
-        tracing::warn!(error = %e, "wlrctl is not available; cannot restore a minimized window");
+/// A non-zero exit means the compositor matched no window, which is the interesting failure: it
+/// says the shell and the compositor disagree about what is open. A missing binary is a different
+/// answer and gets a different sentence, because nothing on the machine will fix itself.
+fn run_wlrctl(args: &[String]) -> Result<(), String> {
+    match std::process::Command::new("wlrctl").args(args).status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!(
+            "the compositor matched no window: `wlrctl {}` exited {}",
+            args.join(" "),
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "on a signal".to_string())
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
+            "wlrctl is not installed on this machine, so nothing here can move a window"
+                .to_string(),
+        ),
+        Err(e) => Err(format!("could not run wlrctl: {e}")),
     }
-    match std::process::Command::new("wlrctl")
-        .args(["toplevel", "focus", &format!("title:{title}")])
-        .status()
+}
+
+/// Ask the compositor for something from the UI thread, and wait a moment for the answer.
+///
+/// The work goes to a worker because `wlrctl` is a process; the wait is bounded because the caller
+/// is the thread that paints the desktop. A timeout comes back as a timeout and not as success —
+/// a caller told "done" by a shell that does not know is exactly the complaint this fixes.
+fn ask_compositor(args: Vec<String>) -> Result<(), String> {
+    let spelled = format!("wlrctl {}", args.join(" "));
+    let (answer, wait) = std::sync::mpsc::channel();
+    if std::thread::Builder::new()
+        .name("yos-wlrctl".to_string())
+        .spawn(move || {
+            let _ = answer.send(run_wlrctl(&args));
+        })
+        .is_err()
     {
-        Ok(status) => status.success(),
-        Err(e) => {
-            tracing::warn!(error = %e, "could not run wlrctl to focus a window");
+        return Err("could not start a thread to talk to the compositor".to_string());
+    }
+    match wait.recv_timeout(COMPOSITOR_REPLY_LIMIT) {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "`{spelled}` had not answered after {} ms, so what the compositor did with it is \
+             not known here",
+            COMPOSITOR_REPLY_LIMIT.as_millis()
+        )),
+    }
+}
+
+/// Bring the window called `title` to the front, restoring it first if it was minimized. Says
+/// whether the compositor had such a window.
+pub fn present(title: &str) -> bool {
+    if let Err(why) = run_wlrctl(&restore_args(title)) {
+        // Not a warning: the usual reason is that the window was never minimized, and the
+        // matchspec simply matched nothing.
+        tracing::debug!(window = %title, reason = %why, "nothing to un-minimize before focusing");
+    }
+    match run_wlrctl(&toplevel_args("focus", title)) {
+        Ok(()) => true,
+        Err(why) => {
+            tracing::warn!(window = %title, reason = %why, "could not bring a window forward");
             false
         }
     }
@@ -232,6 +314,138 @@ pub fn present(title: &str) -> bool {
 /// Bring the window of one of our apps to the front, by the id the launcher knows it by.
 pub fn present_app(app_id: &str) -> bool {
     present(&display_name(app_id))
+}
+
+/// Bring the shell's own window to the front. `Err` says why it is still behind something.
+///
+/// The shell is an ordinary toplevel to labwc — see the `<margin>` note in config/labwc/rc.xml,
+/// which exists because the status bar and dock are a fullscreen window rather than a layer-shell
+/// panel — so it gets in front the same way any other window does, and it cannot raise itself
+/// under Wayland. Every surface that puts something in front of a person needs this:
+/// `control_approvals` already asks for it when a card goes up, `open_lens` when the ask bar
+/// opens, and `show_screen` because a screen nobody can see has not been shown.
+pub fn raise_shell() -> Result<(), String> {
+    ask_compositor(toplevel_args("focus", SHELL_WINDOW_TITLE))
+}
+
+/// Ask the window called `title` to close, the way pressing its × does.
+///
+/// The compositor's close request, deliberately, and not a signal to a process: an app holding
+/// unsaved work is entitled to put up its own dialog and stay open, and the shell has no standing
+/// to overrule it. So `Ok` here means the request was delivered, never that the window went.
+pub fn close(title: &str) -> Result<(), String> {
+    ask_compositor(toplevel_args("close", title))
+}
+
+/// Put the window called `title` out of the way, leaving it running.
+///
+/// wlrctl spells the verb the American way; this desktop's own surface does not, which is why the
+/// two spellings meet here rather than anywhere a caller can see.
+pub fn minimise(title: &str) -> Result<(), String> {
+    ask_compositor(toplevel_args("minimize", title))
+}
+
+// ── Which window a person meant ─────────────────────────────────────
+
+/// Every window a caller may name, the shell's own included.
+///
+/// [`shell_windows`] leaves the shell out on purpose: the taskbar must not offer to switch you to
+/// the desktop you are already looking at. A control surface is the opposite case — the shell's
+/// window is the one thing on this machine that a mind cannot reach any other way, and
+/// `focus_window title=Yantrik` answering "no open window matches" while the desktop was plainly
+/// running is how that omission was found.
+pub fn addressable_titles() -> Vec<String> {
+    let mut titles: Vec<String> = shell_windows().into_iter().map(|w| w.title).collect();
+    if !titles.iter().any(|t| t == SHELL_WINDOW_TITLE) {
+        titles.push(SHELL_WINDOW_TITLE.to_string());
+    }
+    titles
+}
+
+/// The open windows that answer to `want`, best first.
+///
+/// An exact title wins outright and alone, because "Notes" is Notes even while "Notes: Handover"
+/// is open. Failing that it is a substring, which is what a person typing part of a title means.
+///
+/// The shell comes last among the loose matches, and only among them. It is the one window that is
+/// always addressable and never in the window list, so it must not shadow something the person can
+/// actually see — but with nothing else matching, `Yantrik` has to reach the desktop, which is the
+/// whole reason it is in the candidate list.
+fn matching_titles(want: &str, open: &[String]) -> Vec<String> {
+    let want = want.trim().to_lowercase();
+    if want.is_empty() {
+        return Vec::new();
+    }
+    if let Some(exact) = open.iter().find(|title| title.to_lowercase() == want) {
+        return vec![exact.clone()];
+    }
+    let shell_matches = SHELL_WINDOW_TITLE.to_lowercase().contains(&want)
+        && open.iter().any(|title| title == SHELL_WINDOW_TITLE);
+    let mut found: Vec<String> = open
+        .iter()
+        .filter(|title| *title != SHELL_WINDOW_TITLE && title.to_lowercase().contains(&want))
+        .cloned()
+        .collect();
+    if shell_matches {
+        found.push(SHELL_WINDOW_TITLE.to_string());
+    }
+    found
+}
+
+/// The refusal when nothing open answers to that name.
+///
+/// One sentence for all three verbs: a caller being told what is open should not have to learn it
+/// twice in two different wordings.
+fn nothing_matches(want: &str, open: &[String]) -> String {
+    format!("no open window matches `{}`; there is: {}", want.trim(), open.join(", "))
+}
+
+/// The window a caller means, or a refusal that names what is open instead.
+///
+/// For the verbs a person can undo by hand — focus, minimise. The first match is good enough for
+/// those: guessing wrong shows itself immediately and costs one more call to put right.
+pub fn window_named(want: &str, open: &[String]) -> Result<String, String> {
+    matching_titles(want, open)
+        .into_iter()
+        .next()
+        .ok_or_else(|| nothing_matches(want, open))
+}
+
+/// The window to close, or a refusal saying why nothing was closed.
+///
+/// Stricter than [`window_named`] on two counts, because closing is the one verb here that a
+/// person cannot undo by clicking something.
+///
+/// An ambiguous title is refused rather than resolved to whichever window came back first: with
+/// two Chromium windows open, `close_window title=chromium` picking one of them is a coin toss
+/// with somebody's tab in it.
+///
+/// And the desktop itself is refused. `Yantrik OS` is the shell — the status bar, the dock, the
+/// Lens and every screen — so closing it ends the session, which is not what anyone asking to
+/// close a window means. Stepping away has `lock`.
+pub fn window_to_close(want: &str, open: &[String]) -> Result<String, String> {
+    let found = matching_titles(want, open);
+    let title = match found.len() {
+        0 => return Err(nothing_matches(want, open)),
+        1 => found[0].clone(),
+        _ => {
+            return Err(format!(
+                "`{}` matches {} open windows and closing the wrong one cannot be undone; \
+                 say which: {}",
+                want.trim(),
+                found.len(),
+                found.join(", ")
+            ))
+        }
+    };
+    if title == SHELL_WINDOW_TITLE {
+        return Err(format!(
+            "`{SHELL_WINDOW_TITLE}` is the desktop itself — the status bar, the dock and every \
+             screen — so closing it ends the session rather than a window. Use `lock` to step \
+             away, or name one of the app windows"
+        ));
+    }
+    Ok(title)
 }
 
 /// Ask the compositor what is on screen, through `wlrctl toplevel list`.
@@ -488,6 +702,151 @@ mod tests {
     #[test]
     fn a_line_with_no_separator_is_all_title() {
         assert_eq!(split_toplevel_line("Some Foreign Window").0, "Some Foreign Window");
+    }
+
+    /// The exact command lines the shell hands wlrctl, because every one of them has been wrong
+    /// at some point and each was wrong in silence.
+    ///
+    /// `title:` is not decoration. Without the key, wlrctl reads the word as an app_id; our Slint
+    /// windows declare no app_id; a match on nothing exits zero. That is how the taskbar came to
+    /// do nothing when clicked, for every window, without a line in the log.
+    #[test]
+    fn the_command_lines_name_the_window_by_title() {
+        assert_eq!(
+            toplevel_args("focus", "Editor"),
+            ["toplevel", "focus", "title:Editor"]
+        );
+        assert_eq!(
+            toplevel_args("close", "Notes: Handover"),
+            ["toplevel", "close", "title:Notes: Handover"],
+            "a colon in the title belongs to the title; wlrctl splits the matchspec on the first"
+        );
+        assert_eq!(
+            restore_args("System Monitor"),
+            ["toplevel", "maximize", "title:System Monitor", "state:minimized"],
+            "only windows that ARE minimized, or presenting a visible window resizes it"
+        );
+        // One argument each, so a title with a space travels as a title with a space. There is no
+        // shell between us and wlrctl and there must not be a quoting scheme pretending there is.
+        assert_eq!(toplevel_args("focus", "Yantrik OS").len(), 3);
+    }
+
+    /// wlrctl spells it `minimize`. This desktop's action is `minimise_window`, and the two
+    /// spellings are allowed to meet in exactly one place — here.
+    #[test]
+    fn minimise_asks_the_compositor_to_minimize() {
+        assert_eq!(
+            toplevel_args("minimize", "Calendar"),
+            ["toplevel", "minimize", "title:Calendar"]
+        );
+    }
+
+    /// The shell asks for itself by the title its own window carries, and by nothing else:
+    /// `title:` is an exact, case-sensitive comparison in wlrctl, so `title:Yantrik` matches
+    /// no window on a machine whose shell is called `Yantrik OS`.
+    #[test]
+    fn the_shell_asks_for_itself_by_its_whole_title() {
+        assert_eq!(
+            toplevel_args("focus", SHELL_WINDOW_TITLE),
+            ["toplevel", "focus", "title:Yantrik OS"]
+        );
+    }
+
+    fn open(titles: &[&str]) -> Vec<String> {
+        titles.iter().map(|t| (*t).to_string()).collect()
+    }
+
+    /// The desktop was reachable by no name at all.
+    ///
+    /// `focus_window title=Yantrik` answered "no open window matches `yantrik`" on a machine with
+    /// the shell plainly running, because the window list leaves the shell out — deliberately, so
+    /// the taskbar does not offer to switch you to the desktop you are on — and the control
+    /// surface read that same list. The shell is a window; a caller has to be able to name it.
+    #[test]
+    fn the_shell_answers_to_its_own_name() {
+        let desktop = open(&["Editor", "Terminal", "Notes", SHELL_WINDOW_TITLE]);
+        assert_eq!(window_named("Yantrik", &desktop).unwrap(), SHELL_WINDOW_TITLE);
+        assert_eq!(window_named("yantrik", &desktop).unwrap(), SHELL_WINDOW_TITLE);
+        assert_eq!(window_named("Yantrik OS", &desktop).unwrap(), SHELL_WINDOW_TITLE);
+        assert_eq!(window_named("  yantrik os  ", &desktop).unwrap(), SHELL_WINDOW_TITLE);
+    }
+
+    /// The desktop is always one of the windows a caller can name.
+    ///
+    /// `shell_windows` — what the taskbar and `describe shell` read — leaves the shell out, and
+    /// that is right for both of them. The control surface read the same list, which is how the
+    /// one window that is always open became the one window nothing could ask for.
+    #[test]
+    fn the_desktop_is_always_addressable_even_with_nothing_else_open() {
+        let open = addressable_titles();
+        assert!(
+            open.iter().any(|t| t == SHELL_WINDOW_TITLE),
+            "the shell's own window has to be nameable: {open:?}"
+        );
+        assert_eq!(window_named("Yantrik", &open).unwrap(), SHELL_WINDOW_TITLE);
+    }
+
+    /// An exact title wins outright, even while a longer title contains it.
+    #[test]
+    fn an_exact_title_beats_a_window_that_merely_contains_it() {
+        let desktop = open(&["Notes: Handover", "Notes", SHELL_WINDOW_TITLE]);
+        assert_eq!(window_named("notes", &desktop).unwrap(), "Notes");
+        assert_eq!(window_named("handover", &desktop).unwrap(), "Notes: Handover");
+    }
+
+    /// The desktop does not shadow a window the person can see.
+    ///
+    /// A terminal showing `yantrik@home: ~` contains "yantrik"; so does the shell. The one on
+    /// screen is the one meant, and the shell is still there when nothing else matches.
+    #[test]
+    fn the_shell_comes_last_among_the_loose_matches() {
+        let desktop = open(&["yantrik@home: ~", SHELL_WINDOW_TITLE]);
+        assert_eq!(window_named("yantrik", &desktop).unwrap(), "yantrik@home: ~");
+        assert_eq!(window_named("OS", &desktop).unwrap(), SHELL_WINDOW_TITLE);
+    }
+
+    /// A refusal says what IS open, so the next call can be right.
+    #[test]
+    fn naming_nothing_open_says_what_is() {
+        let desktop = open(&["Editor", SHELL_WINDOW_TITLE]);
+        let err = window_named("gimp", &desktop).unwrap_err();
+        assert!(err.contains("no open window matches `gimp`"), "{err}");
+        assert!(err.contains("Editor"), "{err}");
+        assert!(err.contains(SHELL_WINDOW_TITLE), "the desktop is one of the windows: {err}");
+        assert!(window_named("   ", &desktop).is_err(), "an empty title matches nothing");
+    }
+
+    /// Closing is the one verb here nobody can undo with a click, so it refuses to guess.
+    #[test]
+    fn closing_an_ambiguous_title_is_refused_rather_than_guessed() {
+        let desktop = open(&[
+            "Northwind Cloud - Pricing - Chromium",
+            "Ask | Hacker News - Chromium",
+            SHELL_WINDOW_TITLE,
+        ]);
+        let err = window_to_close("chromium", &desktop).unwrap_err();
+        assert!(err.contains("matches 2 open windows"), "{err}");
+        assert!(err.contains("Hacker News"), "the refusal names them: {err}");
+        // Naming one of them exactly still works.
+        assert_eq!(
+            window_to_close("Ask | Hacker News - Chromium", &desktop).unwrap(),
+            "Ask | Hacker News - Chromium"
+        );
+        // And the same ambiguity is fine for a verb that can be undone.
+        assert!(window_named("chromium", &desktop).is_ok());
+    }
+
+    /// Closing the desktop is not closing a window.
+    #[test]
+    fn the_desktop_itself_is_not_closable() {
+        let desktop = open(&["Editor", SHELL_WINDOW_TITLE]);
+        for asked in ["Yantrik", "Yantrik OS", "yantrik os"] {
+            let err = window_to_close(asked, &desktop)
+                .expect_err("closing the shell must be refused");
+            assert!(err.contains("is the desktop itself"), "{err}");
+            assert!(err.contains("lock"), "the refusal offers what was probably meant: {err}");
+        }
+        assert_eq!(window_to_close("Editor", &desktop).unwrap(), "Editor");
     }
 
     // What used to be here: a hand-written list of every app id and the window title it was
