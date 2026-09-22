@@ -601,7 +601,12 @@ fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
             handler(ui, &core, "screenshot"),
         ),
         (
+            // Sensitive, like Notes' own `trash` and unlike everything else here: a built game
+            // is work somebody asked for, and the Trash is a recovery a person has to know
+            // about. Not `dangerous` — that grade is for deleting a path the caller names,
+            // which is what Files does; this one can only reach Arcade's own library.
             Action::new("delete", "Move a game to the Trash, where Files can bring it back")
+                .risk("sensitive")
                 .arg(Param::text("game").describe("Title or slug of a saved game")),
             handler(ui, &core, "delete"),
         ),
