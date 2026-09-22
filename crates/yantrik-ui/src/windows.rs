@@ -167,6 +167,7 @@ pub fn shell_windows() -> Vec<WindowEntry> {
 /// stems for the rest. `app_names_agree_everywhere` in the tests below reads the .desktop files
 /// and each app's Window title and fails if any of them drifts from this.
 pub const APP_NAMES: &[(&str, &str)] = &[
+    ("arcade", "Arcade"),
     ("browser", "Browser"),
     ("calendar", "Calendar"),
     ("containers", "Containers"),
@@ -872,6 +873,7 @@ mod app_name_tests {
     /// whole machine, so ours are `yantrik-download-manager`; the shell calls the same thing
     /// `downloads`, which is what the icon set and the dock are keyed by.
     const STEM_TO_ID: &[(&str, &str)] = &[
+        ("arcade", "arcade"),
         ("calendar", "calendar"),
         ("container-manager", "containers"),
         ("document-editor", "documents"),

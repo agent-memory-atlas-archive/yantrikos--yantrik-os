@@ -55,6 +55,7 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["files"], Launch::Screen(8)),
     (&["settings"], Launch::Screen(7)),
     (&["notes"], Launch::Program { id: "notes", bin: "yantrik-notes" }),
+    (&["arcade"], Launch::Program { id: "arcade", bin: "yantrik-arcade" }),
     (&["editor", "text_editor"], Launch::Program { id: "editor", bin: "yantrik-text-editor" }),
     (&["image_viewer", "images"], Launch::Program { id: "images", bin: "yantrik-image-viewer" }),
     (&["bond"], Launch::Screen(4)),
@@ -235,6 +236,7 @@ const PURPOSES: &[(&str, &str)] = &[
     ("files", "browse, move, rename and delete files"),
     ("settings", "this desktop's settings"),
     ("browser", "the web"),
+    ("arcade", "game making: small JSON specs in, one playable HTML game out"),
 ];
 
 /// The launcher's id for an app, given any name the app answers to.

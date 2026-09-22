@@ -170,6 +170,7 @@ pub fn service_id_for(app_id: &str) -> String {
 /// checked against (`every_launchable_name_reaches_a_surface` in `wire::dock`). Adding a route
 /// spelling without a name here fails that test rather than shipping another refusal.
 const SURFACES: &[(&str, &[&str])] = &[
+    ("arcade", &[]),
     ("calendar", &[]),
     ("containers", &["container-manager"]),
     ("documents", &["document-editor"]),
