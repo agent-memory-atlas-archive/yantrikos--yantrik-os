@@ -870,3 +870,27 @@ impl Tool for BrainStatusTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recall_says_it_needs_a_query_and_the_registry_can_read_that() {
+        // The companion called its own recall with no query on 22 September: the query planner
+        // wrote `{"tool": "recall", "args": {}}` and the recipe executor ran it. `recall` has
+        // always said `query` is required — in its schema, which nothing consulted — so the
+        // call went through and answered with an error the synthesis step then narrated to the
+        // person as a thought. This is the pairing the executor now relies on.
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(RecallTool));
+
+        assert_eq!(
+            registry.missing_required_args("recall", &serde_json::json!({})),
+            vec!["query".to_string()]
+        );
+        assert!(registry
+            .missing_required_args("recall", &serde_json::json!({ "query": "morning brief" }))
+            .is_empty());
+    }
+}

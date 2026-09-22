@@ -144,6 +144,18 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// The arguments this tool's own schema says it must have, that this call does not.
+    ///
+    /// Empty for a tool nobody registered: "unknown tool" is a different answer, and
+    /// [`Self::execute`] is the one that gives it.
+    pub fn missing_required_args(&self, name: &str, args: &serde_json::Value) -> Vec<String> {
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|t| missing_required_args(&t.definition(), args))
+            .unwrap_or_default()
+    }
+
     /// Find tools in the same category as the given tool (for error recovery).
     /// Returns up to 3 alternative tool names.
     pub fn similar_tools(&self, tool_name: &str, max_permission: PermissionLevel) -> Vec<String> {
@@ -304,6 +316,39 @@ fn summarize_json(val: &serde_json::Value) -> String {
         }
         _ => val.to_string(),
     }
+}
+
+/// The names in a tool definition's `required` list that this call does not supply.
+///
+/// Every tool already publishes which of its arguments are compulsory — that is what the
+/// `required` array in its JSON schema is for — but nothing read it, so a caller that composed
+/// the arguments itself could ask a tool to run on nothing. On 22 September 2026 the query
+/// planner wrote the step `{"tool": "recall", "args": {}}`, the recipe executor ran it, and
+/// `recall` answered `Error: query is required`; the synthesis step then read that error as its
+/// only evidence and wrote a sentence round it, which the desktop posted as one of the
+/// companion's thoughts.
+///
+/// Present-but-empty counts as missing. `{"query": ""}` and `{"query": null}` fail inside the
+/// tool for the same reason an absent key does, and a caller that can be told beforehand should
+/// be told beforehand.
+pub fn missing_required_args(definition: &serde_json::Value, args: &serde_json::Value) -> Vec<String> {
+    let Some(required) = definition["function"]["parameters"]["required"].as_array() else {
+        return Vec::new();
+    };
+    required
+        .iter()
+        .filter_map(|name| name.as_str())
+        .filter(|name| {
+            match args.get(name) {
+                None | Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::String(s)) => s.trim().is_empty(),
+                Some(serde_json::Value::Array(a)) => a.is_empty(),
+                Some(serde_json::Value::Object(o)) => o.is_empty(),
+                _ => false,
+            }
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 /// Extract first sentence from description (for compact metadata).
@@ -585,6 +630,59 @@ mod gate_tests {
             "vault_get ran",
             "a tool that did not run cannot have brought anything in"
         );
+    }
+}
+
+#[cfg(test)]
+mod required_args_tests {
+    //! A tool publishes which of its arguments are compulsory. Until a caller reads that, the
+    //! only way to find out is to run the tool and read the error it returns — which is what
+    //! the recipe executor used to do, and what the companion then said out loud.
+
+    use super::*;
+
+    #[test]
+    fn a_tool_call_that_supplies_nothing_is_caught_before_it_runs() {
+        // `recall`'s own schema, as it publishes it.
+        let definition = serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "recall",
+                "description": "Search stored memories; read-only",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "query": { "type": "string" } },
+                    "required": ["query"]
+                }
+            }
+        });
+
+        // What the query planner actually wrote on 22 September.
+        assert_eq!(
+            missing_required_args(&definition, &serde_json::json!({})),
+            vec!["query".to_string()]
+        );
+        // The three other ways of saying nothing.
+        for empty in [
+            serde_json::json!({ "query": "" }),
+            serde_json::json!({ "query": "   " }),
+            serde_json::json!({ "query": null }),
+        ] {
+            assert_eq!(missing_required_args(&definition, &empty), vec!["query".to_string()],
+                "{empty}");
+        }
+
+        // A real call is left alone, and so is a placeholder a later step will fill in.
+        assert!(missing_required_args(&definition, &serde_json::json!({ "query": "morning brief" }))
+            .is_empty());
+        assert!(missing_required_args(&definition, &serde_json::json!({ "query": "{{topic}}" }))
+            .is_empty());
+
+        // A tool that requires nothing is never in the way.
+        let no_args = serde_json::json!({
+            "function": { "parameters": { "type": "object", "properties": {} } }
+        });
+        assert!(missing_required_args(&no_args, &serde_json::json!({})).is_empty());
     }
 }
 

@@ -992,6 +992,18 @@ fn deliver(
     route
 }
 
+/// How long a headline may be before it is cut at a word.
+const HEADLINE_LEN: usize = 80;
+
+/// How long a *complete first sentence* may be and still stand as the headline whole. Cutting
+/// ten characters off the end of a sentence to obey [`HEADLINE_LEN`] reads worse than the
+/// sentence does, and the store keeps a title of 200 (`MAX_TITLE`), so there is room.
+const SENTENCE_LEN: usize = 120;
+
+/// How much of the rest is kept. The store's bound is 2,000 (`MAX_BODY`); an unprompted thought
+/// is a paragraph, and this is room for one without turning a notification into a log dump.
+const BODY_LEN: usize = 600;
+
 /// A message written for a conversation, cut to fit a notification: a headline and the rest.
 ///
 /// The first 120 characters used to go in as the title, whatever they were. A companion writes
@@ -999,11 +1011,88 @@ fn deliver(
 /// — asterisks, a table's pipes and two newlines in a one-line title. The headline is the first
 /// line that says something, with the markup taken off; what follows it is the body, flattened
 /// the same way and cut at a word.
+///
+/// Then a person found the second half of that fix: a thought the companion wrote as ONE
+/// paragraph has no second line, so everything past the cut went nowhere. Notification 61 on
+/// 22 September was a 293-character sentence stored as an 89-character title ending in "…" and
+/// an empty body; the whole of it survived only in `yantrik-os.log`. The remainder of the first
+/// line is now the start of the body — nothing the companion said is dropped on the way in.
 fn headline_and_rest(text: &str) -> (String, String) {
-    let mut lines = text.lines().map(plain_line).filter(|l| !l.is_empty());
-    let title = clip_at_word(&lines.next().unwrap_or_default(), 90);
-    let body = clip_at_word(&lines.collect::<Vec<_>>().join(" "), 220);
-    (title, body)
+    let lines: Vec<String> = text.lines().map(plain_line).filter(|l| !l.is_empty()).collect();
+    let Some(first) = lines.first() else {
+        return (String::new(), String::new());
+    };
+    let (title, mut rest) = split_headline(first);
+    for line in lines.iter().skip(1) {
+        if !rest.is_empty() {
+            rest.push(' ');
+        }
+        rest.push_str(line);
+    }
+    (title, clip_at_word(&rest, BODY_LEN))
+}
+
+/// Split one line into the headline and whatever is left of it.
+///
+/// Three rules, in order, and the last two both keep the remainder:
+///
+/// * A line that already fits is the headline. A line break is the writer saying where a thought
+///   stops, so `Ran the check. Here's the unvarnished read:` stays in one piece.
+/// * Otherwise the first sentence, when it is one line's worth of sentence.
+/// * Otherwise as much of it as fits, cut at a word, with an ellipsis to say so.
+fn split_headline(line: &str) -> (String, String) {
+    if line.chars().count() <= HEADLINE_LEN {
+        return (line.to_string(), String::new());
+    }
+    if let Some(end) = first_sentence_end(line) {
+        if line[..end].chars().count() <= SENTENCE_LEN {
+            return (line[..end].trim().to_string(), line[end..].trim().to_string());
+        }
+    }
+    let cut = word_cut(line, HEADLINE_LEN);
+    let head = line[..cut].trim_end_matches([',', ';', ':', '.', ' ']);
+    (format!("{head}…"), line[cut..].trim().to_string())
+}
+
+/// Where the first sentence of a line ends, as a byte index just past its full stop.
+///
+/// A full stop is `.`, `!` or `?` followed by a space or the end of the line, together with
+/// anything that closes with it — `?!`, a quote, a bracket. `3.5` and `v1.2` are not sentence
+/// ends, because what follows them is not a space. That is as much sentence detection as a
+/// notification title has any use for.
+fn first_sentence_end(line: &str) -> Option<usize> {
+    let mut chars = line.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if !matches!(c, '.' | '!' | '?') {
+            continue;
+        }
+        let mut end = i + c.len_utf8();
+        while let Some(&(j, next)) = chars.peek() {
+            if matches!(next, '.' | '!' | '?' | '"' | '\'' | '\u{2019}' | '\u{201d}' | ')' | ']') {
+                end = j + next.len_utf8();
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        match chars.peek() {
+            None => return Some(end),
+            Some(&(_, next)) if next.is_whitespace() => return Some(end),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The byte index to cut a line at so the headline is about `max` characters and does not end
+/// half way through a word.
+fn word_cut(line: &str, max: usize) -> usize {
+    let hard = line
+        .char_indices()
+        .nth(max)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
+    line[..hard].rfind(' ').unwrap_or(hard)
 }
 
 /// One line of markdown as plain words: emphasis, heading and list marks, table pipes and rules
@@ -1082,10 +1171,83 @@ mod tests {
 
         let (title, body) = headline_and_rest("One line.");
         assert_eq!((title.as_str(), body.as_str()), ("One line.", ""));
+    }
 
-        let long = "word ".repeat(60);
-        let (title, _) = headline_and_rest(&long);
-        assert!(title.chars().count() <= 91 && title.ends_with('…'), "{title}");
+    #[test]
+    fn a_thought_written_as_one_paragraph_keeps_everything_past_the_headline() {
+        // Notification 61, verbatim: 293 characters, no line break in it. It was stored as an
+        // 89-character title ending in "…" and an empty body — the rest of the sentence existed
+        // only in the log.
+        let text = "One thing that stood out: your memory graph shows you've set up both a \
+                    morning brief and a preference for warm, concise end-of-day reflections \
+                    without exclamation marks — so you're quietly building yourself a daily \
+                    bookend ritual, which is a more thoughtful habit than most people admit to \
+                    having.";
+        let (title, body) = headline_and_rest(text);
+
+        assert!(title.chars().count() <= 81 && title.ends_with('…'), "{title}");
+        assert!(title.starts_with("One thing that stood out:"), "{title}");
+        assert!(!body.is_empty(), "the rest of the sentence went nowhere");
+        assert!(body.ends_with("most people admit to having."), "{body}");
+        // And between them they hold the whole of it: the body picks up at the word the
+        // headline was cut before, so nothing falls down the seam.
+        assert_eq!(
+            format!("{} {}", title.trim_end_matches('…'), body),
+            text,
+            "the two halves must add back up to what the companion said"
+        );
+    }
+
+    #[test]
+    fn a_first_sentence_that_reads_as_one_line_becomes_the_headline_whole() {
+        // Notification 59 opened with a 264-character sentence — too long for any title — and
+        // a second sentence after it.
+        let (title, body) = headline_and_rest(
+            "Fun one: you've got a \"morning_brief\" notification preference on one side and a \
+             \"warm, concise end-of-day reflections, no exclamation marks\" preference on the \
+             other — your whole day is bookended by two short briefings. Pretty deliberate \
+             rhythm for someone who's into tech.",
+        );
+        assert!(title.ends_with('…'), "{title}");
+        assert!(body.ends_with("someone who's into tech."), "{body}");
+
+        // A sentence a person would read as one line stays in one piece, and what follows it
+        // is the body rather than a casualty.
+        let (title, body) = headline_and_rest(
+            "The backup finished and it took nine minutes, which is about twice as long as \
+             usual. Two of the three disks were busy the whole time.",
+        );
+        assert_eq!(
+            title,
+            "The backup finished and it took nine minutes, which is about twice as long as usual."
+        );
+        assert_eq!(body, "Two of the three disks were busy the whole time.");
+
+        // A version number is not a full stop.
+        let (title, body) = headline_and_rest(
+            "This machine is on 0.1.0-289-gf529880 and the build waiting for it is newer, which \
+             is worth a look when there is a moment for it.",
+        );
+        assert!(title.contains("0.1.0-289-gf529880"), "{title}");
+        assert!(!body.is_empty(), "{body}");
+    }
+
+    #[test]
+    fn a_line_with_no_sentence_in_it_is_cut_at_a_word_and_the_rest_kept() {
+        // Every word is the same eight letters, so a cut in the middle of one is visible.
+        let long = "alphabet ".repeat(40);
+        let (title, body) = headline_and_rest(&long);
+        assert!(title.chars().count() <= 81 && title.ends_with('…'), "{title}");
+        assert!(title.ends_with("alphabet…"), "cut mid-word: {title}");
+        assert!(body.starts_with("alphabet "), "the body starts mid-word: {body}");
+        // 359 characters in, 359 characters out, give or take the ellipsis and the space the
+        // cut fell on.
+        assert!(
+            title.chars().count() + body.chars().count() >= long.trim_end().chars().count() - 1,
+            "title {} + body {} lost text",
+            title.chars().count(),
+            body.chars().count()
+        );
     }
 
     #[test]

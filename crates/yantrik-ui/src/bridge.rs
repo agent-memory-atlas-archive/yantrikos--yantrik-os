@@ -1818,7 +1818,27 @@ fn worker_loop(
                         companion.record_suppressed_urge(&delivery_key, reason);
                     }
 
-                    if on_cooldown {
+                    // Machinery talking, not the companion. Checked before every other gate
+                    // because the others all ask WHEN this should be said, and this one says it
+                    // must not be said at all. An EXECUTE urge reaches here without passing
+                    // through `ProactiveEngine::check`, which is why the same rule is applied
+                    // in both places — and this is the path notification 68 took.
+                    if let Some(why) = yantrik_companion::proactive::looks_like_tool_error(&msg.text) {
+                        tracing::warn!(
+                            reason = why,
+                            text = msg.text,
+                            urges = ?msg.urge_ids,
+                            "Refused a proactive message: it is a tool error, not a thought"
+                        );
+                        companion.record_suppressed_urge(&delivery_key, "the message was a tool error");
+                        event_bus.emit(
+                            yantrik_os::EventKind::ProactiveSuppressed {
+                                reason: "the message was a tool error".into(),
+                                urge_ids: msg.urge_ids.clone(),
+                            },
+                            yantrik_os::EventSource::ProactiveEngine,
+                        );
+                    } else if on_cooldown {
                         tracing::info!(
                             key = %delivery_key,
                             "Proactive message on per-key cooldown, skipping"

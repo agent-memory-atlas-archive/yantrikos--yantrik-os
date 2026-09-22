@@ -1236,6 +1236,39 @@ impl CompanionService {
         let mut tool_calls_made: Vec<String> = Vec::new();
         let mut notify_messages: Vec<String> = Vec::new();
 
+        // Which of the planned tool steps could run at all.
+        //
+        // The planner is a language model writing JSON, and it writes steps it cannot fill in:
+        // `{"tool": "recall", "args": {}}` for a plan whose whole purpose was to recall
+        // something. That step used to be executed anyway, `recall` answered "Error: query is
+        // required", and the synthesis step below — which is told to answer from the collected
+        // data and nothing else — wrote a sentence round the error and delivered it as the
+        // companion's own thought. A tool is not called without what its schema says it needs.
+        let planned_tools = steps
+            .iter()
+            .filter(|s| matches!(s, RecipeStep::Tool { .. }))
+            .count();
+        let runnable_tools = steps
+            .iter()
+            .filter(|s| match s {
+                RecipeStep::Tool { tool_name, args, .. } => {
+                    self.registry.missing_required_args(tool_name, args).is_empty()
+                }
+                _ => false,
+            })
+            .count();
+        if planned_tools > 0 && runnable_tools == 0 {
+            // Nothing would be gathered, so the synthesis step would have nothing to answer
+            // from. The normal pipeline, which recalls on the request itself, does better than
+            // a plan that asks for nothing.
+            tracing::warn!(
+                goal,
+                planned_tools,
+                "QueryPlanner: no step in the plan supplies what its tool requires — abandoning it"
+            );
+            return None;
+        }
+
         for (i, step) in steps.iter().enumerate() {
             match step {
                 RecipeStep::Tool { tool_name, args, store_as, .. } => {
@@ -1244,6 +1277,21 @@ impl CompanionService {
                     let resolved_args_str = resolve_template_vars(&args_str, &vars);
                     let resolved_args: serde_json::Value =
                         serde_json::from_str(&resolved_args_str).unwrap_or(args.clone());
+
+                    // Checked again on the resolved arguments: an earlier step that stored
+                    // nothing turns `{"query": "{{topic}}"}` into `{"query": ""}`.
+                    let missing = self.registry.missing_required_args(tool_name, &resolved_args);
+                    if !missing.is_empty() {
+                        tracing::warn!(
+                            step = i, tool = tool_name.as_str(), missing = ?missing,
+                            "QueryPlanner: step not run — the plan did not say what to pass it"
+                        );
+                        vars.insert(
+                            store_as.clone(),
+                            format!("(not gathered — the plan gave no {})", missing.join(", ")),
+                        );
+                        continue;
+                    }
 
                     tracing::info!(
                         step = i, tool = tool_name.as_str(),
