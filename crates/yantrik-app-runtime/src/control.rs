@@ -1453,9 +1453,13 @@ mod tests {
         }));
         serve_rpc(APP, 1);
 
+        // The server binds on its own thread, after building a tokio runtime, and on a busy CI
+        // runner that has taken longer than the three seconds this used to allow: the test
+        // failed on two pull requests that never touched this crate, and each time passed on a
+        // rerun. Thirty seconds is a bound on a hung server, not a budget for a slow one.
         let address = RpcServer::default_address(&service_id_for(APP));
         let mut socket = None;
-        for _ in 0..100 {
+        for _ in 0..1000 {
             if let Ok(s) = UnixStream::connect(&address) {
                 socket = Some(s);
                 break;
