@@ -1232,11 +1232,12 @@ fn text(value: Option<&serde_json::Value>) -> String {
 /// The arguments the grant will be bound to.
 ///
 /// Accepts both shapes this can arrive in, because both are real. Over raw JSON-RPC a caller
-/// sends `args_json` as a string. Through `yos act shell request_approval args_json={...}`, the
-/// CLI's own `parse_args` has already run `json.loads` on it and it arrives as an object. The
-/// two must produce the same canonical form or a grant requested one way and consumed the other
-/// would never match — so both land here, and the canonicalisation is done once, in Rust, on the
-/// parsed value.
+/// sends `args_json` as a string. Through `yos act shell request_approval args_json={...}` it is
+/// also a string, because this parameter is published as `text` and the CLI keeps a value bound
+/// for a text parameter as the text it arrived as — but the CLI predates that rule, and older
+/// builds of it parsed every value as JSON and sent an object. The two must produce the same
+/// canonical form or a grant requested one way and consumed the other would never match — so
+/// both land here, and the canonicalisation is done once, in Rust, on the parsed value.
 fn args_value(raw: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
     match raw {
         None | Some(serde_json::Value::Null) => Ok(serde_json::json!({})),

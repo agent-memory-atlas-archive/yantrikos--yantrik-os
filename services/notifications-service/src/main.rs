@@ -143,7 +143,7 @@ impl ServiceHandler for NotificationsHandler {
             }
 
             MARK_READ => {
-                let id = params["id"].as_str().map(str::to_string);
+                let id = optional_str(&params, "id")?;
                 let count = self.store.mark_read(id.as_deref());
                 Ok(serde_json::json!({ "marked_read": count }))
             }
@@ -306,7 +306,7 @@ impl NotificationsHandler {
                 ))
             }
             "mark_read" => {
-                let id = args["id"].as_str().map(str::to_string);
+                let id = optional_str(&args, "id")?;
                 let count = self.store.mark_read(id.as_deref());
                 Ok(act_json(
                     "notifications",
@@ -379,12 +379,76 @@ fn bad_request(message: String) -> ServiceError {
     }
 }
 
+/// One text argument that may have arrived as a number.
+///
+/// Every id this store hands out is a counter rendered as a string — "67", "75" — and a caller
+/// that puts one back through anything which reads JSON gets a number instead. `yos act
+/// notifications dismiss id=67` did exactly that, and this service read a non-string as no
+/// string at all: a mind following the published describe to the letter was told "missing `id`"
+/// for an id it had just read off the list, and had no way to learn better from the words.
+///
+/// `yos` now keeps a value bound for a `string` parameter as text, so that route is fixed at
+/// source. This is the other half: a number is what the caller meant either way, whatever
+/// plumbing it came through, so it is read as the id it spells. Anything else — an object, an
+/// array, a flag — is not an id in any spelling, and is refused by name below.
+fn as_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn kind_of(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
 fn required_str(params: &serde_json::Value, key: &str) -> Result<String, ServiceError> {
-    params[key]
-        .as_str()
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| bad_request(format!("missing `{key}`")))
+    let value = params.get(key).unwrap_or(&serde_json::Value::Null);
+    if value.is_null() {
+        return Err(bad_request(format!("missing `{key}`")));
+    }
+    match as_text(value).filter(|s| !s.trim().is_empty()) {
+        Some(text) => Ok(text),
+        // "missing" was what this said for a value that was plainly there, which sent every
+        // reader looking for an argument it had already sent. Say what arrived and what was
+        // wanted instead.
+        None if value.is_string() => Err(bad_request(format!("missing `{key}`"))),
+        None => Err(bad_request(format!(
+            "`{key}` must be a string, and {} arrived",
+            kind_of(value)
+        ))),
+    }
+}
+
+/// The same reading for an argument that may simply be absent.
+///
+/// The distinction matters more here than anywhere: `mark_read` with no id marks EVERY
+/// notification read, so a number that fell through `as_str` did not fail — it quietly cleared
+/// the whole centre for a caller that had asked about one line of it.
+///
+/// Only an absent argument means "all of them". An id that is present and unreadable is an
+/// error, and an empty one stays an id that matches nothing, because widening either of those
+/// into the whole list is the same accident by another route.
+fn optional_str(params: &serde_json::Value, key: &str) -> Result<Option<String>, ServiceError> {
+    match params.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => match as_text(value) {
+            Some(text) => Ok(Some(text)),
+            None => Err(bad_request(format!(
+                "`{key}` must be a string naming one notification, or be left out to mean all \
+                 of them, and {} arrived",
+                kind_of(value)
+            ))),
+        },
+    }
 }
 
 /// Read an `notifications.add` payload.
@@ -429,7 +493,7 @@ fn parse_add(params: &serde_json::Value) -> Result<AddRequest, ServiceError> {
             Some("freedesktop") => Source::Freedesktop,
             _ => Source::Yantrik,
         },
-        replaces_id: params["replaces_id"].as_str().map(str::to_string),
+        replaces_id: optional_str(params, "replaces_id")?,
     })
 }
 
@@ -473,6 +537,57 @@ mod tests {
         .unwrap();
         assert_eq!(req.actions.len(), 2);
         assert_eq!(req.actions[1].label, "retry");
+    }
+
+    #[test]
+    fn an_id_that_arrived_as_a_number_is_the_id_it_spells() {
+        // Found on 22 September 2026: `yos act notifications dismiss id=67` was refused with
+        // "missing `id`" while `"id": "67"` over the raw socket dismissed it, because the CLI
+        // ran every value through a JSON parser and this read a non-string as nothing at all.
+        // The CLI keeps text as text now; a number still arrives from anything else that
+        // re-reads JSON on the way, and it is not ambiguous — every id here is decimal.
+        assert_eq!(
+            required_str(&serde_json::json!({ "id": 67 }), "id").unwrap(),
+            "67"
+        );
+        assert_eq!(
+            optional_str(&serde_json::json!({ "id": 67 }), "id").unwrap(),
+            Some("67".to_string())
+        );
+    }
+
+    #[test]
+    fn an_argument_that_is_not_text_at_all_is_told_what_was_wanted() {
+        // The old message for every one of these was "missing `id`", which sent the reader
+        // looking for an argument it had plainly sent.
+        let err = required_str(&serde_json::json!({ "id": { "n": 1 } }), "id").unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("must be a string"), "{}", err.message);
+        assert!(err.message.contains("an object"), "{}", err.message);
+        // And an argument that really is absent still says so.
+        assert!(required_str(&serde_json::json!({}), "id")
+            .unwrap_err()
+            .message
+            .contains("missing"));
+    }
+
+    #[test]
+    fn mark_read_with_an_unreadable_id_refuses_rather_than_clearing_everything() {
+        // `mark_read` with no id marks EVERY notification read, so an id this could not read
+        // used to mean the whole centre was cleared for a caller asking about one line of it.
+        assert!(optional_str(&serde_json::json!({ "id": ["67"] }), "id").is_err());
+        // No id at all is still the whole-list case, which is what the action publishes.
+        assert_eq!(optional_str(&serde_json::json!({}), "id").unwrap(), None);
+        assert_eq!(
+            optional_str(&serde_json::json!({ "id": serde_json::Value::Null }), "id").unwrap(),
+            None
+        );
+        // An empty id names nothing and marks nothing, which is what it did before. Reading it
+        // as "no id given" would clear the whole centre on a caller's blank field.
+        assert_eq!(
+            optional_str(&serde_json::json!({ "id": "" }), "id").unwrap(),
+            Some(String::new())
+        );
     }
 
     #[test]
