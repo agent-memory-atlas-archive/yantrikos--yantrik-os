@@ -235,6 +235,17 @@ yos describe notes                          # any running app answers for itself
 yantrik ask "what is using the most disk?"  # ask the companion
 ```
 
+The same two verbs reach everything, including the things this project did not write:
+
+```bash
+yos ls                                      # what is open, and what can be opened
+yos act arcade build game="Tuk's Teal Morning"
+yos act arcade verify game=tuk-s-teal-morning   # boots, no console errors, a bot wins, a bot loses
+yos act blender add_primitive kind=monkey       # Blender, through the addon the launcher starts it with
+yos act blender render output=/tmp/suzanne.png  # {"path": …, "seconds": 1.53, "bytes": 368298}
+yos act image-viewer open path=/tmp/suzanne.png # and look at it, on the same desktop
+```
+
 Actions are graded safe, standard, sensitive or dangerous. `yos-mcp` exposes the same surface
 over MCP.
 
