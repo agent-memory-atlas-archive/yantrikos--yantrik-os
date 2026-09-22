@@ -1,10 +1,20 @@
 # Yantrik OS
 
+[![Chat on Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/7cDw3jd3Xf)
+[![Nightly image](https://img.shields.io/badge/nightly-iso.yantrikos.com-informational)](https://iso.yantrikos.com/nightly/)
+[![CI](https://github.com/yantrikos/yantrik-os/actions/workflows/ci.yml/badge.svg)](https://github.com/yantrikos/yantrik-os/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+
 An AI-native desktop operating system where the AI **is** the shell. Built in Rust, on Debian
 13, shipped as a live ISO you boot and try before you install anything.
 
 Yantrik OS replaces the traditional desktop metaphor with an agent that watches the system,
 learns your patterns and helps without being asked, alongside a suite of built-in apps.
+
+> **Come and talk to us: [discord.gg/7cDw3jd3Xf](https://discord.gg/7cDw3jd3Xf)**
+> — `#nightly` announces every published image, `#apps-and-surfaces` is where the app control
+> protocol gets argued about, and the **help** forum is the place to say what broke. It is a small
+> server and a question there is read by the people who wrote the code.
 
 ## What makes it different
 
@@ -48,6 +58,14 @@ so that this page cannot promise them.
 | **Network** | WiFi, ethernet and bluetooth |
 | **System Monitor** | CPU, memory, disk, network, processes |
 | **Arcade** | Builds a playable game from two small JSON specs, verified headlessly |
+
+**Blender**, if it is installed, is drivable too — and it is not ours. The launcher starts it with
+an addon that binds the same kind of socket every app here does, so `yos describe blender` reports
+the scene, the objects, the engine and the resolution, and `yos act blender add_primitive`,
+`set_light`, `set_camera` and `render` work from a terminal or a mind exactly as an app's own
+actions do. `render` is `sensitive` and `run_python` is `dangerous`, for the obvious reasons. This
+is the first thing on the desktop that shows the control protocol is not a house convention:
+a program nobody here wrote can join it by publishing one socket.
 
 **Shelved — not in this build:**
 
@@ -104,7 +122,7 @@ Not a chatbot. A proactive agent with:
 └────────────────────────────────────────────────────────────┘
 ```
 
-23 crates, 15 shipped apps (17 in the tree, two shelved) and 10 services. The ones worth
+25 crates, 15 shipped apps (17 in the tree, two shelved) and 10 services. The ones worth
 knowing:
 
 | Crate | Purpose |
@@ -386,9 +404,27 @@ yantrik-os/
 
 GPL-3.0. See [LICENSE](LICENSE).
 
+## Community
+
+**[discord.gg/7cDw3jd3Xf](https://discord.gg/7cDw3jd3Xf)** — a small server, read by the people who
+wrote the code.
+
+| Where | For |
+|-------|-----|
+| `#nightly` | every published image, with its version, size and sha256 |
+| `#apps-and-surfaces` | the control protocol — `describe`/`act`, grades, what an app owes a mind |
+| `#minds` | attaching a harness: Hermes, Pi, OpenClaw, DeepSeek, or one you wrote |
+| **help** forum | say what broke; the audits under `design/` mean nothing here needs defending |
+| `#showcase` | what you made with it |
+
+Issues are at [github.com/yantrikos/yantrik-os/issues](https://github.com/yantrikos/yantrik-os/issues).
+The ones labelled [`good first issue`](https://github.com/yantrikos/yantrik-os/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+are real and unassigned — say which one you want and it is yours.
+
 ## Links
 
 - **Images (nightly)**: https://iso.yantrikos.com/nightly/
+- **Install helper**: https://get.yantrikos.com/install.sh
 - **Release bundles**: https://releases.yantrikos.com
 - **Issues**: https://github.com/yantrikos/yantrik-os/issues
-- **Community**: https://discord.gg/7cDw3jd3Xf
+- **Discord**: https://discord.gg/7cDw3jd3Xf
