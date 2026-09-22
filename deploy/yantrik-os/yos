@@ -18,7 +18,8 @@ protocol and prints what came back.
     yos act shell open_app name=notes   ask something to do something
     yos act notes append text='...'     with arguments
     yos act shell open_app name=notes --full     the reply with the app state
-    yos perception [N]                  the last N kernel observations
+    yos perception [N]                  the last N kernel observations, starting the
+                                        service if the desktop has not needed it yet
     yos journal                         is the eye being drained, and how far behind
     yos notify "Build finished"         tell the person something
     yos notify "Disk full" "/ is at 98%" --urgency critical
@@ -59,9 +60,11 @@ import socket
 import sys
 import time
 
-# perception-service needs CAP_SYS_ADMIN at startup so it runs as root and its socket
-# lands in /run/yantrik; everything else lives in the user's runtime dir. A caller
-# should not have to know which uid started what.
+# Everything the session starts lives in the user's runtime dir. perception-service is the
+# one that can be either: started by the desktop it lands there like the rest, and started
+# privileged — it wants CAP_SYS_ADMIN and CAP_NET_ADMIN for its descriptors — it has no
+# XDG_RUNTIME_DIR and lands in /run/yantrik. A caller should not have to know which uid
+# started what, so both are looked in, session first.
 SOCKET_DIRS = [
     os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "yantrik"),
     "/run/yantrik",
@@ -110,17 +113,30 @@ def socket_candidates(name):
     return found
 
 
-def call(name, method, params=None, timeout=40):
+class Unreachable(Exception):
+    """A request that could not be made, or was refused, carrying the sentence a reader wants.
+
+    `call` turns this into an exit code, which is right for almost every command: a caller
+    asking about a window that is shut has made a mistake and should hear so. It is wrong for
+    a caller that can carry on without the answer — `perception` asks the desktop to start a
+    service and has something honest to print if no desktop answers, and exiting 1 there put
+    "failed (exit 1)" in front of a mind that had done nothing wrong.
+    """
+
+
+def request(name, method, params=None, timeout=40):
     """One JSON-RPC round trip. One line in, one line out.
 
     Tries every socket the name could mean, in order, skipping any that no longer has a
     process behind it. A socket file outlives the process that made it, so a connection
     refused is "that window is gone", not an error worth stopping on — the next candidate,
     usually the always-on service, answers.
+
+    Raises `Unreachable` rather than exiting, so both kinds of caller can be written.
     """
     candidates = socket_candidates(name)
     if not candidates:
-        die("no socket for %r (try: yos ls)" % name)
+        raise Unreachable("no socket for %r (try: yos ls)" % name)
 
     last_error = None
     for path in candidates:
@@ -137,7 +153,8 @@ def call(name, method, params=None, timeout=40):
             # Connecting to a unix socket needs *write* permission, which is why a
             # world-readable socket is still unreachable. Say that rather than "denied".
             s.close()
-            die("%s is not readable by this user — perception runs as root; try sudo" % path)
+            raise Unreachable(
+                "%s is not readable by this user — perception runs as root; try sudo" % path)
         s.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}) + "\n").encode())
         buf = b""
         while not buf.endswith(b"\n"):
@@ -147,16 +164,26 @@ def call(name, method, params=None, timeout=40):
             buf += chunk
         s.close()
         if not buf:
-            die("%s closed the connection without answering" % name)
+            raise Unreachable("%s closed the connection without answering" % name)
         reply = json.loads(buf)
         if "error" in reply:
-            die("%s.%s refused: %s" % (name, method, reply["error"].get("message", "unknown")))
+            raise Unreachable(
+                "%s.%s refused: %s" % (name, method, reply["error"].get("message", "unknown")))
         return reply["result"]
 
     # The caller asked about something that is closed. Say how to open it: "its socket is
     # stale" is the mechanism, and the reader wanted to know what to do next.
-    die("%s is not open. If it is an app, open it first: act shell open_app name=%s — then "
+    raise Unreachable(
+        "%s is not open. If it is an app, open it first: act shell open_app name=%s — then "
         "describe it again. (`yos ls` shows what is open and what can be opened.)" % (name, name))
+
+
+def call(name, method, params=None, timeout=40):
+    """`request`, with an unreachable service as the end of the command."""
+    try:
+        return request(name, method, params, timeout)
+    except Unreachable as e:
+        die(str(e))
 
 
 def die(message):
@@ -193,6 +220,60 @@ def _answers(path):
         return False
     finally:
         s.close()
+
+
+def is_up(name):
+    """Whether any socket this name could mean has a process behind it."""
+    return any(_answers(path) for path in socket_candidates(name))
+
+
+# ── Services that are only started when something needs them ──
+#
+# calendar, notes, email and perception are registered without autostart, so on a fresh session
+# their sockets do not exist and the machine rail calls them "on demand". The shell owns service
+# lifetimes through its ServiceManager, so a caller that needs one asks the shell — `act shell
+# start_service` — rather than spawning the binary behind its back. Starting it any other way
+# would have the rail report a running process as stopped, which is the same class of lie as the
+# caption it replaced. This is the same request `yantrik_ipc_transport::service::ensure` makes
+# from inside an app.
+
+
+def started_on_demand(name, wait=2.0):
+    """Ask the desktop to start a service, and say whether its socket answers afterwards.
+
+    Reports rather than exiting, because for one caller a service that will not start is an
+    answer to print and not an error to raise: `perception` has a plain sentence for a machine
+    with no record to read, and dying there would put "failed (exit 1)" in front of a mind that
+    had asked a perfectly good question. `ensure_service` is the strict wrapper for the rest.
+    """
+    if is_up(name):
+        return True
+    try:
+        request("shell", "app.act", {"action": "start_service", "args": {"name": name}})
+    except Unreachable:
+        # No desktop to ask, or it does not know this service. Either way it is not coming up on
+        # this request, and the caller has its own words for that.
+        return False
+    # The manager returns once it has spawned the process; the socket appears a moment later.
+    # Measured on a release build: perception-service binds 54ms after exec, opening its
+    # descriptors and closing its Landlock eyelid on the way.
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if is_up(name):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def ensure_service(name):
+    """Make sure a service is up, asking the desktop to start it if it is not.
+
+    The notifications service is autostarted, but "autostarted" is not "running": it can
+    have died, or the shell can still be coming up. Sending into a socket nobody is behind
+    would lose the message silently, which is the failure this whole path exists to end.
+    """
+    if not started_on_demand(name):
+        die("the %s service is not running and the desktop could not start it" % name)
 
 
 def _one_line(path):
@@ -455,22 +536,42 @@ def cmd_act(argv):
 
 def cmd_perception(argv):
     limit = int(argv[0]) if argv else 20
-    # Offered to every mind as a tool, and on a machine where the perception service is not
-    # running it answered "failed (exit 1) / no socket for 'perception' (try: yos ls)" — which
-    # reads as the caller having done something wrong, and sends it to a listing that will
-    # not show it. Nothing is wrong with the request; there is no record to read, and that is
-    # an answer.
-    if not any(_answers(path) for path in socket_candidates("perception")):
-        print("The perception service is not running on this machine, so there is no record of "
-              "recent activity to read. Nothing is wrong with the request. To see what an app is "
-              "showing right now, describe it instead.")
+    # This request is the demand, so it is what starts the service.
+    #
+    # perception is registered without autostart, like calendar and notes, and for a while
+    # nothing anywhere started it: `describe shell` said "stopped, on demand", every mind was
+    # offered os_perception, and every call answered "no socket for 'perception' (try: yos ls)"
+    # — which reads as the caller having done something wrong and sends it to a listing that
+    # will not show it. "On demand" was a caption on a process nothing ever ran.
+    #
+    # Started from the session it lands in the user's runtime directory and answers. It cannot
+    # join the process connector or open fanotify from there — those need CAP_NET_ADMIN and
+    # CAP_SYS_ADMIN, which a desktop session has no way to grant — so it comes up on PSI alone
+    # and publishes a `SourceFailed` observation naming each source it had to do without. That
+    # is the first thing printed below, at salience 1.0. Half-blind and saying which half is a
+    # report; a socket that was never opened is not. A privileged one already running is found
+    # first and left alone, because `started_on_demand` only asks when nothing answers.
+    if not started_on_demand("perception"):
+        print("The perception service is not running on this machine and the desktop could not "
+              "start it, so there is no record of recent activity to read. Nothing is wrong with "
+              "the request. To see what an app is showing right now, describe it instead.")
         return
     page = call("perception", "perception.since", {"seq": 0})
     obs = page["observations"]
     print("%d held, next_seq %d, missed %d" % (len(obs), page["next_seq"], page["missed"]))
     if page["missed"]:
         print("  (%d observations were overwritten before anything read them)" % page["missed"])
-    for o in obs[-limit:]:
+    # A source that could not start says so once, in the first observations of the run, which is
+    # exactly what the tail slice hides: ask for the last three on a service that has been up an
+    # hour and "perception cannot use its files source" is the first thing off the end. So it is
+    # printed whatever the limit, in its own place in the order. A reader who does not know a
+    # source is missing reads its silence as nothing having happened, and this feed is answering
+    # "what has been going on" for a mind that has no other way to find out.
+    shown = obs[-limit:]
+    for o in obs[:len(obs) - len(shown)]:
+        if (o.get("kind") or {}).get("type") == "source_failed":
+            print("  [%.2f] %s" % (o["salience"], o["summary"]))
+    for o in shown:
         print("  [%.2f] %s" % (o["salience"], o["summary"]))
 
 
@@ -488,24 +589,6 @@ def cmd_journal(_):
 # be told. It lands in the same store as every notification on the machine — `notify-send`,
 # Chromium, our own apps — so the toast, the notification centre and `yos describe shell`
 # all see it.
-
-
-def ensure_service(name):
-    """Make sure a service is up, asking the desktop to start it if it is not.
-
-    The notifications service is autostarted, but "autostarted" is not "running": it can
-    have died, or the shell can still be coming up. Sending into a socket nobody is behind
-    would lose the message silently, which is the failure this whole path exists to end.
-    """
-    if any(_answers(path) for path in socket_candidates(name)):
-        return
-    call("shell", "app.act", {"action": "start_service", "args": {"name": name}})
-    # The manager returns once it has spawned the process; the socket appears a moment later.
-    for _ in range(20):
-        if any(_answers(path) for path in socket_candidates(name)):
-            return
-        time.sleep(0.1)
-    die("the %s service is not running and the desktop could not start it" % name)
 
 
 def cmd_notify(argv):

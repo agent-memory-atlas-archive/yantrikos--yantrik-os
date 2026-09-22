@@ -524,12 +524,17 @@ pub fn publish(
             },
         )
         .action(
-            // What "on demand" in the machine rail is supposed to mean. calendar, email and
-            // notes are registered without autostart, so on a fresh session their sockets do
-            // not exist; an app calling one got a connect failure and, in the calendar's case,
-            // reported the appointment as saved anyway. Apps now ask for the service first,
-            // and the manager that starts it is the same one the rail reads, so a running
-            // service is never described as stopped.
+            // What "on demand" in the machine rail is supposed to mean. calendar, email, notes
+            // and perception are registered without autostart, so on a fresh session their
+            // sockets do not exist; an app calling one got a connect failure and, in the
+            // calendar's case, reported the appointment as saved anyway. Apps now ask for the
+            // service first, and the manager that starts it is the same one the rail reads, so
+            // a running service is never described as stopped.
+            //
+            // perception came to this last and is the reason to keep the action general: its
+            // caller is not an app but `yos perception`, and so os_perception. The rail called
+            // it "stopped, on demand" for every boot of the machine while nothing anywhere
+            // supplied the demand, and every mind offered the tool was told "no socket".
             //
             // Standard, not sensitive: this starts one of the machine's own registered
             // services, which is what opening the app that needs it would have done.

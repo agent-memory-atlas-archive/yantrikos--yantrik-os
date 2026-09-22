@@ -255,9 +255,12 @@ fn start_services() -> yantrik_shell_core::service_manager::ServiceManager {
     // Reads windows we did not write. Autostarted: it costs nothing when there is no
     // accessibility bus, and connects lazily if one appears later.
     mgr.register("a11y", "a11y-service", true);
-    // The kernel's periphery. Not autostarted from here — it needs CAP_NET_ADMIN and
-    // CAP_SYS_ADMIN to open its descriptors, which a desktop session cannot grant. Registered so
-    // the shell can report whether it is running.
+    // The kernel's periphery. Not autostarted, because it wants CAP_NET_ADMIN and CAP_SYS_ADMIN
+    // to open its descriptors and a desktop session cannot grant either: started from here it
+    // comes up on PSI alone, which is worth having on request and not worth running all session
+    // for nobody. It is still startable through `start_service`, and that is what reaches it —
+    // `yos perception`, and so os_perception, asks for it on the first request. Without that the
+    // machine rail's "on demand" was a caption on a process nothing anywhere ever ran.
     mgr.register("perception", "perception-service", false);
 
     // Start autostart services (best-effort — binary may not exist in dev)
