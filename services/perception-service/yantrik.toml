@@ -22,6 +22,9 @@ methods = [
     "perception.snapshot",
     "perception.scope",
 ]
-# Not autostarted: it needs capabilities the session cannot grant, so it is started by the system
-# rather than by the shell. Registered here so the shell can see whether it is up.
+# Not autostarted: the capabilities above are not the session's to grant, so a shell-started
+# instance sees pressure and nothing else. Worth having when something asks —
+# `start_service perception` brings it up, and it publishes a SourceFailed observation for each
+# source it had to do without — and not worth running all session for nobody. A system unit or a
+# binary with file capabilities gets the whole periphery; neither exists on a shipped machine yet.
 autostart = false

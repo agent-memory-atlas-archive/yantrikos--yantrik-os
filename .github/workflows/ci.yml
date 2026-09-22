@@ -144,6 +144,13 @@ jobs:
       - name: The update server's publish path
         run: python3 deploy/yantrik-os/server/publish_selftest.py
 
+      # `yos` is what every one of those MCP tools actually runs, and it had a whole command
+      # that could not work: perception is registered "on demand" and nothing anywhere supplied
+      # the demand, so os_perception answered "no socket for 'perception'" on every boot of the
+      # machine. This holds the request that starts it against the action the shell publishes.
+      - name: yos starts an on-demand service when something asks for it
+        run: python3 deploy/yantrik-os/yos-selftest.py
+
       # The harnesses that ship as source (harnesses/lib, harnesses/pi, harnesses/deepseek).
       # Same shape as the two above: stdlib-only Python over a fake of everything it talks to —
       # a fake desktop socket, a fake yos-mcp, a fake chat-completions API and a fake `pi` — so
