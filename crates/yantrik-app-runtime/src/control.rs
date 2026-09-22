@@ -190,6 +190,9 @@ const SURFACES: &[(&str, &[&str])] = &[
     // its own notifications' buttons and approval cards have to reach it.
     ("shell", &[]),
     ("snippets", &["snippet-manager"]),
+    // No other name: "images" is the image viewer's alias, and inventing a second one for the app
+    // that makes them would be a guess about how people will ask.
+    ("studio", &[]),
     ("system-monitor", &["sysmonitor"]),
     ("terminal", &[]),
     ("weather", &[]),
@@ -498,6 +501,45 @@ pub fn published_grade(action: &str) -> Option<&'static str> {
         cell.borrow().as_ref().and_then(|reg| {
             reg.actions.iter().find(|(a, _)| a.name == action).map(|(a, _)| a.permission)
         })
+    })
+}
+
+/// Re-declare the grade THIS app publishes for one of its own actions, while it is running.
+///
+/// An app whose actions cost different amounts depending on how it is configured needs this.
+/// Studio's `generate` sends a prompt to whatever backend the person chose: to a ComfyUI on their
+/// own LAN that is `standard`, to a hosted service it is `sensitive`, because the words leave the
+/// machine and may cost money doing it. The grade is fixed when [`App::serve`] runs, and the
+/// configuration can change afterwards from an action on this same surface — so without a way to
+/// move it, a caller could point the app at a hosted service and generate in the same breath, and
+/// the prompt would leave under the grade that applied when it was still local. That is the one
+/// direction a grade must never be wrong in, and it is why an app may raise its own grade at
+/// runtime rather than publish the cautious one forever.
+///
+/// Returns the grade now published, so a handler can say what the next call will be asked for.
+/// `Err` leaves the published grade untouched: a typo must not quietly un-grade an action.
+///
+/// Like [`published_grade`], this reads the registry installed by [`App::serve`], so it answers
+/// only on the thread that owns the window — which is where handlers run, and the only place a
+/// grade can be changed without racing the dispatch that reads it.
+pub fn regrade(action: &str, permission: &'static str) -> Result<&'static str, String> {
+    if grade(permission).is_none() {
+        return Err(format!(
+            "`{permission}` is not a level this OS defines ({}), so `{action}` kept the grade it had",
+            LADDER.join(" < ")
+        ));
+    }
+    REGISTRY.with(|cell| {
+        let mut installed = cell.borrow_mut();
+        let Some(registry) = installed.as_mut() else {
+            return Err("this app published no control surface, so there is no grade to change".to_string());
+        };
+        let Some(index) = registry.actions.iter().position(|(a, _)| a.name == action) else {
+            let known: Vec<&str> = registry.actions.iter().map(|(a, _)| a.name.as_str()).collect();
+            return Err(format!("this app has no action `{action}`; it offers: {}", known.join(", ")));
+        };
+        registry.actions[index].0.permission = permission;
+        Ok(registry.actions[index].0.permission)
     })
 }
 
@@ -1390,6 +1432,98 @@ mod tests {
 
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
         assert_eq!(published_grade("files_delete"), None, "and nothing is served here now");
+    }
+
+    #[test]
+    fn an_action_can_be_regraded_while_the_app_runs_and_the_ceiling_follows() {
+        // Studio's shape: `generate` is graded when the surface is published, and the backend it
+        // sends prompts to can be changed afterwards by another action on the same surface. The
+        // grade has to move with it, or a caller under a `standard` ceiling can be talked into
+        // sending a prompt off the machine by an action that never asked for anything.
+        REGISTRY.with(|cell| {
+            *cell.borrow_mut() = Some(Registry {
+                app_id: "studio".into(),
+                describe: None,
+                actions: vec![(
+                    Action::new("generate", "Make a picture from a sentence"),
+                    Box::new(|_| Ok(serde_json::json!({"queued": 1}))),
+                )],
+            })
+        });
+
+        // Local backend: a `standard` ceiling lets it through, and says it settled nothing yet only
+        // because this handler is not deferred.
+        REGISTRY.with(|cell| {
+            let installed = cell.borrow();
+            let registry = installed.as_ref().unwrap();
+            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#1", "standard").is_ok());
+        });
+
+        assert_eq!(regrade("generate", "sensitive").unwrap(), "sensitive");
+        assert_eq!(published_grade("generate"), Some("sensitive"), "the two readers disagree");
+
+        REGISTRY.with(|cell| {
+            let installed = cell.borrow();
+            let registry = installed.as_ref().unwrap();
+            // The same call, the same arguments, the same ceiling: refused now, and refused for the
+            // grade rather than for anything about the arguments.
+            let err = registry
+                .act("generate", &serde_json::json!({}), None, "studio#2", "standard")
+                .unwrap_err();
+            assert!(err.starts_with("CEILING:"), "{err}");
+            assert!(err.contains("graded `sensitive`"), "{err}");
+            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#3", "sensitive").is_ok());
+            // And `describe` — what a caller reads before deciding — reports the new grade, so the
+            // card a person is shown is the card the dispatch will enforce.
+            let described = registry.describe();
+            assert_eq!(described["actions"][0]["permission"], serde_json::json!("sensitive"));
+        });
+
+        // Down again, because the backend can be pointed back at a machine the person owns.
+        assert_eq!(regrade("generate", "standard").unwrap(), "standard");
+        REGISTRY.with(|cell| {
+            let installed = cell.borrow();
+            let registry = installed.as_ref().unwrap();
+            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#4", "standard").is_ok());
+        });
+        REGISTRY.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    #[test]
+    fn a_grade_this_os_does_not_define_leaves_the_action_at_the_one_it_had() {
+        REGISTRY.with(|cell| {
+            *cell.borrow_mut() = Some(Registry {
+                app_id: "studio".into(),
+                describe: None,
+                actions: vec![
+                    (
+                        Action::new("generate", "Make a picture").risk("standard"),
+                        Box::new(|_| Ok(serde_json::Value::Null)),
+                    ),
+                    (
+                        Action::new("refresh", "Read the gallery again"),
+                        Box::new(|_| Ok(serde_json::Value::Null)),
+                    ),
+                ],
+            })
+        });
+
+        // A typo must not quietly un-grade an action, which is what writing the string through
+        // without checking it would do.
+        let err = regrade("generate", "catastrophic").unwrap_err();
+        assert!(err.contains("not a level this OS defines"), "{err}");
+        assert!(err.contains(LADDER[0]) && err.contains(LADDER[3]), "{err} does not name the ladder");
+        assert_eq!(published_grade("generate"), Some("standard"), "the grade moved anyway");
+
+        // Nor may one action's regrade touch another, or an action that does not exist.
+        let err = regrade("no_such_action", "sensitive").unwrap_err();
+        assert!(err.contains("no action `no_such_action`"), "{err}");
+        assert!(err.contains("generate") && err.contains("refresh"), "{err} does not name what is there");
+        assert_eq!(published_grade("refresh"), Some("standard"), "an unknown action regraded a known one");
+
+        REGISTRY.with(|cell| *cell.borrow_mut() = None);
+        let err = regrade("generate", "sensitive").unwrap_err();
+        assert!(err.contains("published no control surface"), "{err}");
     }
 
     // ── Who is calling ──

@@ -271,6 +271,10 @@ export global Icons {
              // The image viewer. The glyph existed and this function did not offer it, so the
              // one app whose whole subject is pictures fell through to a category glyph.
              : id == "image"         ? self.image
+             // Studio makes pictures; `image` is already the one that looks at them, and two apps
+             // drawing the same rectangle-with-a-mountain in the launcher would be exactly the
+             // confusion this table exists to prevent. A spark is the making, not the result.
+             : id == "studio"        ? self.spark
              : "";
     }
 

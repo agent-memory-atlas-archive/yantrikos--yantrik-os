@@ -70,6 +70,10 @@ export global AppColor {
              : id == "music"          ? root.pink      // media
              : id == "media"          ? root.pink
              : id == "image"          ? root.magenta
+             // Beside `image` on purpose but not the same colour: making and looking are one word
+             // apart in the launcher and in a model's choice of app. Violet, because its
+             // alphabetical neighbours there are spreadsheet (green) and system-monitor (lime).
+             : id == "studio"         ? root.violet
 
              : id == "terminal"       ? root.green     // the machine, cool
              : id == "system"         ? root.azure
