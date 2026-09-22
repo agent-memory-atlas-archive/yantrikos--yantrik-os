@@ -10,6 +10,10 @@ as it arrives.
 
 ## Install
 
+**Settings → Harnesses** lists DeepSeek whether or not it is configured. With no
+`~/.config/yantrik/deepseek.json` the row reads "Needs setup" and names that file; once it is
+there, *Start* enables the unit. What follows is the same thing by hand.
+
 ```sh
 mkdir -p ~/.config/yantrik
 install -m 600 /dev/null ~/.config/yantrik/deepseek.json

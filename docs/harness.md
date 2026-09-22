@@ -39,6 +39,64 @@ The OS never connects to you. That is deliberate, and three useful things follow
   gone when you stop polling. Nothing to deregister, and nothing can be listed that is not
   actually there.
 
+## …and the one place that rule is wrong
+
+"Being attached is what makes you exist" is right for the *answering* list — you cannot be handed
+a turn if you are not there — and it was wrong for **Settings → Harnesses**, which is the page a
+person opens *because* a mind is missing. A harness the image ships but nobody installed, or one
+whose unit died with a shell restart, was simply absent from it: no hint that the machine carries
+it, that it needs an `npm install`, that it needs a config file, or that a unit merely needs
+starting.
+
+So a harness that ships with the image also carries a **manifest** beside its code, and the
+Settings list is the manifests rather than the attach registry:
+
+```yaml
+# /opt/yantrik/share/harnesses/pi/harness.yaml
+id: pi
+name: Pi
+detail: The pi coding agent, over its RPC mode   # only until it attaches and says better
+docs: README.md
+unit: yantrik-pi.service                          # omit for a harness something else starts
+
+requires:                                         # missing any → "Not installed"
+  - binary: pi                                    # on PATH
+    why: Pi itself, which npm installs per user
+  - file: yantrik_pi.py                           # beside the manifest, absolute, or ~/…
+    why: the harness script
+
+install:                                          # omit and the row names the docs instead
+  command: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+  doing: fetching @earendil-works/pi-coding-agent
+
+setup:                                            # missing any → "Needs setup"
+  - config: pi.json                               # ~/.config/yantrik/pi.json
+    why: which provider and model Pi should use
+```
+
+From that, `PATH`, the config directory, systemd and the attach registry, each row derives one
+state — **Not installed**, **Installing**, **Needs setup**, **Ready to start**, **Starting up**,
+**Would not start**, **Attached**, **Answering** — and offers the one thing that moves it on:
+*Install* runs `install.command` as a user job with its output streamed into the row, *Start*
+does `systemctl --user enable --now <unit>`, and *Use this* appears only once something has
+actually attached. The same list is in `describe shell` under `harnesses`, and the same two jobs
+are `install_harness` and `start_harness`, both graded `sensitive` because they change the
+machine.
+
+Two rules this page keeps:
+
+- **A manifest names a file; it never opens one.** A "Needs setup" row says
+  `~/.config/yantrik/deepseek.json` and the name of the variable that holds the key, and that is
+  the end of it. Nothing in the catalogue reads a config, so nothing it can print contains a
+  credential, and there is a test that writes a key into a fixture and asserts no row carries it.
+- **Only attachment makes a mind answerable.** The picker, the quick switcher and `use_harness`
+  are unchanged and still work off the attach registry alone. A row on this page saying "Ready to
+  start" is a row that cannot be selected, which is the truth.
+
+Nothing about this is required of a harness. A manifest is how something gets *listed before it
+runs*; attaching is still the whole protocol, and a harness that just attaches works exactly as
+it always did — it appears in both lists the moment it does.
+
 ## Driving the desktop
 
 Separate, and it already exists. An attached harness reads and steers the OS through the control

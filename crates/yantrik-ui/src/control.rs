@@ -427,6 +427,12 @@ pub fn publish(
                         })
                         .unwrap_or(serde_json::Value::Array(Vec::new())),
                 )
+                // What this machine could have, whether or not it is running — `minds` above is
+                // only what has attached. Published because the question "why can I not talk to
+                // Pi" has an answer the machine knows and nothing could read: it is not
+                // installed, or its config file was never written, or its unit is stopped. An
+                // agent asked to fix that needs the same list the Settings page draws.
+                .with("harnesses", crate::wire::harness::catalogue_for_describe())
                 .with("files", files)
                 .with("installer", installer)
                 .with("editor", editor)
@@ -757,6 +763,67 @@ pub fn publish(
                 Ok(serde_json::json!({
                     "answering": id,
                     "tools": host.list().iter().find(|e| e.id == id).map(|e| e.capabilities.tools),
+                }))
+            },
+        )
+        .action(
+            // Sensitive, and the word is meant: it runs the harness's own install command, which
+            // fetches software and puts it on this machine. Not dangerous — nothing is erased and
+            // nothing is replaced — so it is a card the person answers rather than a refusal.
+            //
+            // Deferred, because an `npm install -g` takes half a minute and the reply would
+            // otherwise be a timeout. What it returns is the command it started; the progress is
+            // on the Harnesses page and in `describe shell` under `harnesses`.
+            Action::new(
+                "install_harness",
+                "Run a harness's own install command, so it can become one of this machine's minds",
+            )
+            .risk("sensitive")
+            .defers()
+            .arg(
+                Param::text("id")
+                    .describe("Harness id, as `describe shell` lists under `harnesses`"),
+            ),
+            move |args| {
+                let id = args["id"].as_str().unwrap_or_default().trim().to_string();
+                if id.is_empty() {
+                    return Err("`id` is empty".into());
+                }
+                let command = crate::wire::harness::install(&id)?;
+                Ok(serde_json::json!({
+                    "installing": id,
+                    "command": command,
+                    "watch": "describe the shell and read harnesses[] — the row says `installing` \
+                              until it finishes, then what is still missing",
+                }))
+            },
+        )
+        .action(
+            // Also sensitive: enabling a user unit is a decision about what this machine runs on
+            // every login, not just now.
+            Action::new(
+                "start_harness",
+                "Enable and start a harness's user service, so it attaches and can answer",
+            )
+            .risk("sensitive")
+            .defers()
+            .arg(
+                Param::text("id")
+                    .describe("Harness id, as `describe shell` lists under `harnesses`"),
+            ),
+            move |args| {
+                let id = args["id"].as_str().unwrap_or_default().trim().to_string();
+                if id.is_empty() {
+                    return Err("`id` is empty".into());
+                }
+                let command = crate::wire::harness::start(&id)?;
+                Ok(serde_json::json!({
+                    "starting": id,
+                    "command": command,
+                    // Attaching is the harness's own move and takes a moment after the unit is
+                    // up, so "started" is not "answering" and this says which one it means.
+                    "watch": "describe the shell and read harnesses[] — the row says `starting` \
+                              until the harness attaches, then `attached`; `use_harness` after that",
                 }))
             },
         )

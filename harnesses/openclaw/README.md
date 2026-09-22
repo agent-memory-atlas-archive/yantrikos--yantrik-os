@@ -74,6 +74,11 @@ the standard library, and the HTTP route above reaches the same agent without an
 
 ## Install
 
+**Settings → Harnesses** lists OpenClaw whether or not it is installed. It offers no *Install*
+button, on purpose — OpenClaw's own documentation is the only thing that knows how to install
+OpenClaw — but it says so rather than leaving the row out, and once `openclaw` is on `PATH` the
+*Start* button enables the unit below.
+
 ```sh
 mkdir -p ~/.config/yantrik
 $EDITOR ~/.config/yantrik/openclaw.json          # optional — see below

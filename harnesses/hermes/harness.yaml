@@ -1,0 +1,30 @@
+# What the desktop can say about Hermes before Hermes is running.
+# See harnesses/pi/harness.yaml for why this file exists at all.
+id: hermes
+name: Hermes
+detail: Hermes, with this desktop as one of its platforms
+docs: README.md
+
+# No `unit`. Hermes is started by Hermes — its own gateway service — and this directory is a
+# plugin inside that gateway rather than a process of ours. So the row never offers to start
+# it: there is nothing here to start, and `systemctl --user enable yantrik-hermes` would fail
+# with a sentence about a unit that was never meant to exist.
+
+requires:
+  - binary: hermes
+    why: Hermes itself, which brings its own model, keys and memory
+  - file: ~/.hermes/plugins/yantrik/plugin.yaml
+    why: the desktop plugin, copied into your Hermes install and enabled there
+
+install:
+  # The three lines docs/harness.md gives, run as the person. `{dir}` is wherever this manifest
+  # was read from, so it works from the image and from a checkout without being edited.
+  command: >
+    mkdir -p ~/.hermes/plugins/yantrik &&
+    cp -r "{dir}/." ~/.hermes/plugins/yantrik/ &&
+    hermes plugins enable yantrik-desktop &&
+    systemctl --user restart hermes-gateway
+  doing: copying the plugin into ~/.hermes and enabling it
+
+# Hermes keeps its model, endpoint, keys and memory in ~/.hermes, as it always has, so there is
+# no file of ours for the person to write and nothing to check for.

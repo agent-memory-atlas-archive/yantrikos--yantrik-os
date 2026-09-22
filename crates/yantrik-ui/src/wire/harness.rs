@@ -10,12 +10,13 @@
 
 use std::sync::{Arc, OnceLock};
 
-use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use yantrik_harness::{Answer, Capabilities, Chunk, Harness, Health, Host, Turn};
 
 use crate::app_context::AppContext;
 use crate::bridge::CompanionBridge;
-use crate::{App, HarnessData};
+use crate::harness_catalogue::{self, Manifest};
+use crate::{App, HarnessData, HarnessRowData};
 
 /// How often the list is refreshed.
 ///
@@ -23,6 +24,17 @@ use crate::{App, HarnessData};
 /// would show one that left ten minutes ago. Two seconds is below noticing and costs a lock and a
 /// few string clones.
 const REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The screen and the section the catalogue is drawn on — `settings`, and `Harnesses` inside it.
+///
+/// The catalogue costs a directory walk, a handful of `stat` calls and one `systemctl show`, all
+/// of which are free once and wasteful as a habit: on a machine nobody is touching it would be a
+/// process spawn every two seconds forever. So it is only gathered while somebody is looking at
+/// it, while a job this shell started is still running, or once at the start so the first open is
+/// not blank. Everything else on this page — the picker, the status bar — needs only the attach
+/// registry, which is in memory.
+const SETTINGS_SCREEN: i32 = 7;
+const HARNESSES_SECTION: i32 = 8;
 
 static HOST: OnceLock<Host> = OnceLock::new();
 
@@ -118,6 +130,33 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         });
     }
 
+    // Installing a mind, and starting one whose unit is merely stopped. Both change the machine,
+    // so both are jobs: the row says what is happening and streams what the command says, rather
+    // than freezing the settings screen for the half minute an `npm install -g` takes.
+    {
+        let weak = ui.as_weak();
+        let host = host.clone();
+        ui.on_install_harness(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let outcome = manifest(&id).and_then(|m| crate::harness_install::install(&m));
+            report(&ui, &id, outcome);
+            // Straight away rather than on the next tick: two seconds between pressing a button
+            // and the row changing is two seconds in which it looks like nothing happened, and
+            // that is exactly how a button gets pressed twice.
+            publish(&ui, &host);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let host = host.clone();
+        ui.on_start_harness(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let outcome = manifest(&id).and_then(|m| crate::harness_install::start(&m));
+            report(&ui, &id, outcome);
+            publish(&ui, &host);
+        });
+    }
+
     publish(ui, &host);
 
     let timer = Timer::default();
@@ -132,6 +171,79 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     }
     // Keep timer alive
     std::mem::forget(timer);
+}
+
+/// The Settings list, for `describe shell`.
+///
+/// Read on demand rather than from what the screen last published: a `describe` is asked a
+/// question and can afford one `systemctl show`, and answering from a cache that only refreshes
+/// while a person has the page open would answer "not installed" about a harness installed ten
+/// minutes ago.
+pub fn catalogue_for_describe() -> serde_json::Value {
+    let entries = match host() {
+        Some(host) => host.list(),
+        None => Vec::new(),
+    };
+    let machine = harness_catalogue::machine(crate::harness_install::views());
+    serde_json::Value::Array(
+        harness_catalogue::rows(&machine, &entries)
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "id": row.id,
+                    "name": row.name,
+                    // The key rather than the label: one is matched on by a program and the
+                    // other is read by a person, and conflating them is how "needs setup"
+                    // becomes a string comparison against a UI string.
+                    "state": row.state.key(),
+                    "detail": row.detail,
+                    // What to do next, in the same words the row shows. Never a credential:
+                    // this names a file at most.
+                    "need": row.need,
+                    "can_answer": row.state.can_answer(),
+                    "can_install": row.can_install,
+                    "can_start": row.can_start,
+                    "builtin": row.builtin,
+                    "docs": row.docs,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The manifest for an id, or a sentence saying there is none.
+fn manifest(id: &str) -> Result<Manifest, String> {
+    harness_catalogue::read_manifests(&harness_catalogue::roots())
+        .remove(id)
+        .ok_or_else(|| format!("nothing on this machine describes a harness called `{id}`"))
+}
+
+/// The same two jobs the buttons start, for the shell's control surface.
+///
+/// Parity, the same way `use_harness` has it: anything a person can do on the Harnesses screen
+/// an agent can ask for, and the grading on the action is what decides whether the person is
+/// asked first.
+pub fn install(id: &str) -> Result<String, String> {
+    crate::harness_install::install(&manifest(id)?)
+}
+
+pub fn start(id: &str) -> Result<String, String> {
+    crate::harness_install::start(&manifest(id)?)
+}
+
+/// Say what happened where the person is looking.
+///
+/// A refusal goes on the page rather than into the log for the same reason the picker's does:
+/// somebody just pressed a button and is owed an answer about whether it worked. The command that
+/// was started is logged, never shown — it is long, and the row is already streaming its output.
+fn report(ui: &App, id: &str, outcome: Result<String, String>) {
+    match outcome {
+        Ok(command) => {
+            tracing::info!(harness = %id, command = %command, "started a harness job");
+            ui.set_harness_error("".into());
+        }
+        Err(e) => ui.set_harness_error(format!("{id}: {e}").into()),
+    }
 }
 
 /// Give the conversation back to the mind the person chose, once it is there to take it.
@@ -209,6 +321,58 @@ fn publish(ui: &App, host: &Host) {
     // on. "Something else is answering" is true either way, and it is what the status bar needs
     // in order to stop advertising the shell's own provider as the thing doing the work.
     ui.set_harness_driving(driving.is_some());
+
+    publish_catalogue(ui, &entries);
+}
+
+/// Put the Settings list in front of the person: every mind this machine could have.
+///
+/// Deliberately not the same list as above. That one is the picker and holds only what can be
+/// handed a turn; this one is what a person opens *because* a mind is missing, and its whole
+/// point is the rows that are not attached.
+fn publish_catalogue(ui: &App, entries: &[yantrik_harness::Entry]) {
+    let busy = crate::harness_install::busy();
+    let looking = ui.get_current_screen() == SETTINGS_SCREEN
+        && ui.get_settings_category() == HARNESSES_SECTION;
+    // The first pass always runs, so the page is populated before anyone can navigate to it.
+    let first = ui.get_harness_rows().row_count() == 0;
+    if !looking && !busy && !first {
+        return;
+    }
+
+    // A job's outcome stops being news once the harness it was for is answering questions. The
+    // row is about the present, and "install finished" on a mind that is now attached is the
+    // page still talking about five minutes ago.
+    let attached: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+    crate::harness_install::clear_settled(&attached);
+
+    let machine = harness_catalogue::machine(crate::harness_install::views());
+    let rows: Vec<HarnessRowData> = harness_catalogue::rows(&machine, entries)
+        .into_iter()
+        .map(|row| HarnessRowData {
+            id: row.id.into(),
+            name: row.name.into(),
+            detail: row.detail.into(),
+            state: row.state.label().into(),
+            need: row.need.into(),
+            log: row.log.into(),
+            builtin: row.builtin,
+            active: row.active,
+            attached: row.attached,
+            busy: row.busy,
+            tools: row.tools,
+            memory: row.memory,
+            can_install: row.can_install,
+            can_start: row.can_start,
+            docs: row.docs.into(),
+        })
+        .collect();
+
+    if let Some(model) = crate::models::changed(ui.get_harness_rows(), rows) {
+        ui.set_harness_rows(model);
+    }
+    // Drives the one animation on the page, and only while something is really running.
+    ui.set_harness_busy(busy);
 }
 
 /// Serve the `harness` socket for the life of the shell.

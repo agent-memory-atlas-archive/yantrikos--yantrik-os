@@ -46,6 +46,40 @@ export struct HarnessData {
     memory: bool,
 }
 
+// ── One mind this machine could have ──
+//
+// The row above is the *picker*: only something attached can be handed a turn, so only something
+// attached is in it. This one is the Settings list, which is a different question — a person
+// opens that page BECAUSE a mind is missing, and "being attached is what makes you exist" told
+// them nothing at all. A harness the image ships but nobody installed was simply absent.
+//
+// Everything here is derived in Rust from the manifest beside each harness's code, what is on
+// PATH, which config files exist, what systemd says and who has attached. See
+// crates/yantrik-ui/src/harness_catalogue.rs. Still no endpoint, model or credential: `need`
+// names a file at most, never anything in it.
+export struct HarnessRowData {
+    id: string,
+    name: string,
+    detail: string,
+    // "not installed" | "installing" | "needs setup" | "ready to start" | "starting up"
+    // | "would not start" | "attached" | "answering"
+    state: string,
+    // The one thing to do next, in a sentence. Empty when there is nothing to do.
+    need: string,
+    // Streaming output from an install, or a dead unit's last journal lines.
+    log: string,
+    builtin: bool,
+    active: bool,
+    // Attached, and therefore able to answer. The only thing that makes "Use this" appear.
+    attached: bool,
+    busy: bool,
+    tools: bool,
+    memory: bool,
+    can-install: bool,
+    can-start: bool,
+    docs: string,
+}
+
 // ── AI Model data (for model list) ──
 export struct AIModelData {
     id: string,
@@ -334,8 +368,45 @@ export component SettingsScreen inherits Rectangle {
 
     // ── Harnesses (category 8) ──
     in property <[HarnessData]> harnesses: [];
+    // What the machine could offer, installed or not. Separate from `harnesses` above on
+    // purpose: that one is the picker and only holds minds that can actually take a turn.
+    in property <[HarnessRowData]> harness-rows: [];
     in property <string> harness-error: "";
     callback use-harness(string);
+    callback install-harness(string);
+    callback start-harness(string);
+    // Whether any row has a job running. Computed in Rust because Slint cannot reduce over a
+    // model, and it is what stops the sweep below from animating on an idle machine.
+    in property <bool> harness-busy: false;
+
+    // A state's colour, defined once. A pill, its text and the sentence under it all have to
+    // agree, and three copies of the same conditional is three places to drift apart.
+    pure function harness-state-color(state: string) -> color {
+        state == "would not start" ? Theme.color-danger
+        : (state == "not installed" || state == "needs setup") ? Theme.color-warning
+        : state == "attached" ? Theme.color-success
+        : Theme.text-dim
+    }
+    pure function harness-state-tint(state: string) -> color {
+        state == "would not start" ? Theme.color-danger-dim
+        : (state == "not installed" || state == "needs setup") ? Theme.color-warning-dim
+        : state == "attached" ? Theme.color-success-dim
+        : Theme.bg-elevated
+    }
+
+    // Drives the indeterminate bar on a row that is installing or starting. 60ms rather than a
+    // frame, and only while this page is open with something actually running: a settings screen
+    // that repaints sixty times a second in the background is how an idle desktop gets warm.
+    property <float> harness-phase: 0;
+    // A triangle rather than a saw: the bar comes back the way it went instead of jumping to
+    // the left edge every two seconds.
+    property <float> harness-sweep: root.harness-phase < 0.5
+        ? root.harness-phase * 2 : (1.0 - root.harness-phase) * 2;
+    Timer {
+        interval: 60ms;
+        running: root.active-category == 8 && root.harness-busy;
+        triggered => { harness-phase = mod(root.harness-phase + 0.03, 1.0); }
+    }
 
     // Active settings category (sidebar).
     //
@@ -3023,19 +3094,20 @@ SettingRow{label:"AI providers";description:"Manage the model providers that are
                             }
                         }
 
-                        for h in root.harnesses : Rectangle {
+                        // Every mind this machine could have, whether or not it is running. A
+                        // card grows to fit what it has to say, because a row mid-install has a
+                        // sentence, a bar and six lines of npm output and a fixed 104px card
+                        // clipped all three.
+                        for h in root.harness-rows : Rectangle {
                             background: Theme.bg-card;
                             border-radius: Theme.r-lg;
                             border-width: 1px;
                             // The one answering is outlined in the accent: at a glance, before
                             // reading a word, you can see which mind you are talking to.
                             border-color: h.active ? AppIdentity.accent : Theme.border-subtle;
-                            // Tall enough that the action does not crowd the border it sits on:
-                            // three rows plus padding, measured on the deployed screen rather
-                            // than guessed.
-                            height: 104px;
+                            height: card.preferred-height;
 
-                            VerticalLayout {
+                            card := VerticalLayout {
                                 padding: Theme.sp-4;
                                 spacing: Theme.sp-2;
 
@@ -3053,10 +3125,15 @@ SettingRow{label:"AI providers";description:"Manage the model providers that are
                                         width: pill-text.preferred-width + 20px;
                                         height: 22px;
                                         border-radius: 11px;
-                                        background: h.active ? AppIdentity.accent : Theme.bg-elevated;
+                                        // The state is a colour as well as a word: amber for
+                                        // something the person has to do, red for something that
+                                        // broke, accent for the mind that is talking.
+                                        background: h.active ? AppIdentity.accent
+                                                  : root.harness-state-tint(h.state);
                                         pill-text := Text {
-                                            text: h.status;
-                                            color: h.active ? Theme.bg-deep : Theme.text-dim;
+                                            text: h.state;
+                                            color: h.active ? Theme.bg-deep
+                                                 : root.harness-state-color(h.state);
                                             font-size: Theme.fs-caption;
                                             font-weight: 500;
                                             horizontal-alignment: center;
@@ -3072,6 +3149,41 @@ SettingRow{label:"AI providers";description:"Manage the model providers that are
                                     color: Theme.text-dim;
                                     font-size: Theme.fs-caption;
                                     font-family: Theme.font-mono;
+                                }
+
+                                // The one thing to do next. A file path at most — never anything
+                                // that is in the file.
+                                if h.need != "" : Text {
+                                    text: h.need;
+                                    color: root.harness-state-color(h.state);
+                                    font-size: Theme.fs-caption;
+                                    wrap: word-wrap;
+                                }
+
+                                // Indeterminate on purpose. There is no way to know how far
+                                // through an `npm install` is, and a bar that claimed a
+                                // percentage would be a lie with a number on it.
+                                if h.busy : Rectangle {
+                                    height: 3px;
+                                    border-radius: 1.5px;
+                                    background: Theme.bg-elevated;
+                                    clip: true;
+                                    Rectangle {
+                                        width: parent.width * 0.3;
+                                        height: parent.height;
+                                        border-radius: 1.5px;
+                                        background: AppIdentity.accent;
+                                        x: (parent.width - self.width) * root.harness-sweep;
+                                    }
+                                }
+
+                                // What the install, or the unit that gave up, actually said.
+                                if h.log != "" : Text {
+                                    text: h.log;
+                                    color: Theme.text-dim;
+                                    font-size: Theme.fs-micro;
+                                    font-family: Theme.font-mono;
+                                    wrap: word-wrap;
                                 }
 
                                 HorizontalLayout {
@@ -3090,8 +3202,34 @@ SettingRow{label:"AI providers";description:"Manage the model providers that are
                                         font-size: Theme.fs-caption;
                                         vertical-alignment: center;
                                     }
+                                    if h.docs != "" : Text {
+                                        text: h.docs;
+                                        color: Theme.text-dim;
+                                        font-size: Theme.fs-micro;
+                                        font-family: Theme.font-mono;
+                                        vertical-alignment: center;
+                                        // Capped so a long staged path cannot push the buttons
+                                        // off the right-hand edge of the card.
+                                        max-width: 260px;
+                                        overflow: elide;
+                                    }
                                     Rectangle { horizontal-stretch: 1; }
-                                    if !h.active : YButton {
+                                    if h.can-install : YButton {
+                                        label: "Install";
+                                        size: 0;
+                                        variant: 1;
+                                        clicked => { root.install-harness(h.id); }
+                                    }
+                                    if h.can-start : YButton {
+                                        label: "Start";
+                                        size: 0;
+                                        variant: 1;
+                                        clicked => { root.start-harness(h.id); }
+                                    }
+                                    // Attachment is still the only thing that lets a mind answer.
+                                    // A "Use this" on a row that is not attached would be a
+                                    // button that cannot work.
+                                    if h.attached && !h.active : YButton {
                                         label: "Use this";
                                         size: 0;
                                         clicked => { root.use-harness(h.id); }
@@ -3100,32 +3238,34 @@ SettingRow{label:"AI providers";description:"Manage the model providers that are
                             }
                         }
 
-                        // Nothing attached is the normal state on a fresh machine, so it explains
-                        // itself rather than looking like a list that failed to load.
-                        if root.harnesses.length <= 1 : Rectangle {
+                        // Only when the machine really has nothing to offer — no manifests
+                        // staged, nothing attached but the built-in. That is a broken image or a
+                        // checkout, not a fresh install, so it says so rather than pretending
+                        // there was never anything to install.
+                        if root.harness-rows.length <= 1 : Rectangle {
                             background: Theme.bg-card;
                             border-radius: Theme.r-lg;
                             border-width: 1px;
                             border-color: Theme.border-subtle;
-                            height: 116px;
+                            height: empty-card.preferred-height;
 
-                            VerticalLayout {
+                            empty-card := VerticalLayout {
                                 padding: Theme.sp-4;
                                 spacing: Theme.sp-2;
                                 Text {
-                                    text: "Nothing else is attached";
+                                    text: "This machine knows of no other minds";
                                     color: Theme.text-primary;
                                     font-size: Theme.fs-body;
                                     font-weight: 600;
                                 }
                                 Text {
-                                    text: "There is nothing to install here. A harness — yantrik-mind, hermes, OpenClaw, your own — attaches itself to this machine and appears in this list while it is running.";
+                                    text: "The image stages a manifest beside each harness it ships, and this one has none — so there is nothing here to install or start. Any harness that attaches on its own still appears above while it runs.";
                                     color: Theme.text-secondary;
                                     font-size: Theme.fs-caption;
                                     wrap: word-wrap;
                                 }
                                 Text {
-                                    text: "docs/harness.md";
+                                    text: "/opt/yantrik/share/harnesses · docs/harness.md";
                                     color: Theme.text-dim;
                                     font-size: Theme.fs-caption;
                                     font-family: Theme.font-mono;
