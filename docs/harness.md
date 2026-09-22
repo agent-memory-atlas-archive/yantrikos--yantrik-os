@@ -215,41 +215,68 @@ things that shape carries with it:
 127.0.0.1, a primary agent that spawns sub-agents, its own channels, and persistent memory. It is
 the only one attached with `memory=true` and the only one whose tools this repo does not carry —
 OpenClaw has an MCP client of its own, so `yos-mcp` is registered in the person's
-`~/.openclaw/openclaw.json` under `.mcp.servers` with `env.YOS_MCP_REQUESTER=OpenClaw`, and the
-tool scope is approved once on the gateway's dashboard. Nothing about that passes through this
-harness, which is the right shape: a mind that already knows how to hold tools should be given
-the tools, not a proxy for them.
+`~/.openclaw/openclaw.json` under `mcp.servers` with `env.YOS_MCP_REQUESTER=OpenClaw`. Nothing
+about that passes through this harness, which is the right shape: a mind that already knows how
+to hold tools should be given the tools, not a proxy for them.
 
-It ships **two routes** because only one of them could be checked. The default is a per-turn
-`openclaw agent`, read as JSON lines and falling back to plain text; the other is a hand-written
-RFC 6455 client against the gateway, which streams properly and is the shape OpenClaw's own CLI
-uses. The WebSocket *framing* is a standard and is tested against an independent fake server. The
-*envelope* is not:
+This harness was written on a machine with no OpenClaw checkout and no network, and then run
+against **OpenClaw 2026.9.1** on the live image. Everything below is what that install does;
+where it disagreed with the blind version, the disagreement is recorded rather than quietly
+fixed, because the failure modes are the interesting part.
 
-- **What could not be verified offline, and is therefore an assumption:** the field names in
-  every message this harness sends the gateway, the gateway's WebSocket path, and the exact flags
-  of `openclaw agent`. This was written with no OpenClaw checkout and no network — nothing in it
-  was derived from `src/gateway/` — so each guess is confined to one place and named in the
-  README: `args` in the config, `GATEWAY_PATHS`, and `client_envelope()`. The decoder in the
-  other direction needed no guess, because it accepts flat `{type, delta}`, Anthropic-shaped
-  `content_block_delta` and OpenAI-shaped `choices[].delta` at once.
+- **`openclaw agent`'s flags were guessed wrong twice, and `--json` is not a stream.** The
+  message is `--message <text>`, not a positional; the session is `--session-key <key>`, and
+  there is no `--session`; and `--json` prints one indented JSON document when the turn is over
+  (`{runId, status, summary, result: {payloads, meta}}`). A JSON-lines reader pointed at that
+  document fails on every line and emits each one as text, so the first thing the person would
+  have seen on this route is the raw JSON in their chat panel. The harness now collects stdout
+  whole, and a run that prints nothing readable is reported as that rather than as an empty
+  answer — an empty bubble cannot be told from a hang.
+- **The tool trail exists on one route and not the other, and it says so.** The CLI route builds
+  it from the run's own `result.meta.toolSummary`, which names the tools and not their arguments.
+  The gateway route has none: OpenClaw's internal tool calls stay internal on that surface.
+- **The streaming route is HTTP, not the WebSocket, and that is an authorization fact rather
+  than a spelling one.** The gateway's control plane is `{type:"req", id, method, params}` at the
+  bare root path — the blind envelope was wrong, and so was the path probing. But correcting the
+  spelling would not have helped: a `connect` carrying only the shared gateway token is accepted
+  with `auth.scopes: []`, so `chat.send` answers `FORBIDDEN / missing scope: operator.write`.
+  Scopes come from device pairing — an Ed25519 identity signing a challenge-bound payload,
+  approved with `openclaw devices approve` — and there is no Ed25519 in the standard library.
+  The harness therefore uses the gateway's OpenAI-compatible route,
+  `POST /v1/chat/completions` with `stream: true` and `x-openclaw-session-key`, which OpenClaw's
+  own docs describe as "a normal Gateway agent run (same codepath as `openclaw agent`)". It is
+  off until `gateway.http.endpoints.chatCompletions.enabled` is true, and the 404 that says so
+  names that setting.
+- **Tools are gated by the tool profile, not by a dashboard approval.** The blind version told
+  people to approve a scope on the gateway's dashboard; there is no such step. A configured MCP
+  server is a plugin-owned tool under `bundle-mcp`, and `tools.profile` decides whether the agent
+  sees it — `minimal` plus `alsoAllow: ["bundle-mcp"]` is what leaves OpenClaw with the desktop's
+  eleven tools and none of its own ungraded shell, file and browser tools. OpenClaw also prefixes
+  a server's tools with its name, so the desktop's `os_apps` reaches the model as
+  `yantrik-os__os_apps`; the harness's preamble names them that way, because a mind told to start
+  with a tool it cannot see spends its first turn guessing.
 - **An unrecognised event is reported as unrecognised.** The failure this exists for is a
   protocol mismatch that looks exactly like an agent which has gone quiet: a decoder that
   silently drops what it does not know turns a five-minute config fix into an afternoon.
 - **A daemon that is not running is an answer, not a wait.** Connecting is retried with backoff
   and then the turn is failed with the sentence that names the command to run, which is the whole
   difference between a harness a person can debug and a cursor that never stops blinking.
-- **Closing a pipe is not the same as ending a process.** The shared `end_process` closes a
-  child's stdout before terminating it, which deadlocks when a reader thread is blocked inside
-  that stream — it holds the buffer's lock until it returns, and `close()` waits for that lock
-  forever. The CLI route signals the child first, lets the readers come back with EOF, and has
-  each one close the stream it owns.
+- **Ending a stream is not the same as closing it.** Two versions of one bug. The shared
+  `end_process` closes a child's stdout before terminating it, which deadlocks when a reader
+  thread is blocked inside that stream, so the CLI route signals the child first. And
+  `http.client` hands the socket to the response for any reply that will close the connection,
+  clearing `HTTPConnection.sock` — so `conn.close()` on a live stream is a no-op and the reader
+  blocks forever. The gateway route keeps the socket it captured before `getresponse()` and shuts
+  that down. A `/stop` that leaves the reader blocked is a turn that never closes.
 
-All three ship as source in the image and none is started: a machine that has not been configured
+All four ship as source in the image and none is started: a machine that has not been configured
 never talks to a provider. `harnesses/lib/yantrik_harness.py` is the half they share — attach,
 poll, heartbeat, `/stop`, `/new`, the MCP client, and one `_close` that every path out of a turn
 goes through — and `harnesses/tests` runs all of it offline against a fake desktop, a fake
-bridge, a fake chat API, a fake System One endpoint, a fake `pi` and a fake OpenClaw gateway.
+bridge, a fake chat API, a fake System One endpoint, a fake `pi` and a fake OpenClaw gateway. The
+fakes answer the way the real things answered when each harness was run against them, which is
+the only reason the offline suite is worth anything: a fake that agrees with a guess proves the
+guess is self-consistent and nothing else.
 
 ## What is not here yet
 

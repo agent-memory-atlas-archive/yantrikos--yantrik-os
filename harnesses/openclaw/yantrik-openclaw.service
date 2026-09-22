@@ -8,19 +8,25 @@ Type=simple
 ExecStart=/usr/bin/python3 /opt/yantrik/share/harnesses/openclaw/yantrik_openclaw.py
 Restart=on-failure
 RestartSec=5
-# A user service does not inherit a login shell's PATH, and `openclaw` and `node` are usually
-# installed per-user (~/.npm-global/bin, ~/.local/node/bin). Either set them here:
+# A user service does not inherit a login shell's PATH, and `openclaw` and `node` are installed
+# per-user (~/.npm-global/bin, ~/.local/node/bin). Without this the CLI route cannot start
+# openclaw at all and the picker line says "openclaw" with no version, because even
+# `openclaw --version` could not be run:
 #   Environment=PATH=%h/.npm-global/bin:%h/.local/node/bin:/usr/bin:/bin
-# or put the same string in `path` in ~/.config/yantrik/openclaw.json, which this harness
-# prepends.
+# The same string can go in `path` in ~/.config/yantrik/openclaw.json instead, which this
+# harness prepends.
 #
 # OpenClaw's model, keys, memory and MCP servers are OpenClaw's own business and live in
-# ~/.openclaw/openclaw.json. Nothing in this unit and nothing in the image holds one. If the
-# gateway needs a token, name its variable in `token_env` and put the variable itself here
-# (Environment=) or in ~/.config/environment.d/ — not in the harness config.
+# ~/.openclaw/openclaw.json and ~/.openclaw/.env. Nothing in this unit and nothing in the image
+# holds one. The gateway route needs the gateway's own token when `gateway.auth.mode` is
+# "token" (it is by default): name its variable in `token_env` and put the variable itself in an
+# EnvironmentFile the person owns at mode 600 —
+#   EnvironmentFile=%h/.config/yantrik/openclaw.env
+# — never in an Environment= line here, which `systemctl show` prints to anyone who asks.
 #
-# This unit does not start the gateway. If you use the gateway route, OpenClaw's own service
-# starts it; this one only talks to it, and says so in the conversation when it is not there.
+# This unit does not start the gateway. OpenClaw's own service does that (`openclaw daemon
+# start`, or a unit of its own); this one only talks to it, and says so in the conversation when
+# it is not there.
 
 [Install]
 WantedBy=default.target
