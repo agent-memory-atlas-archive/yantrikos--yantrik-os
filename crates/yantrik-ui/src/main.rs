@@ -57,6 +57,9 @@ mod clipboard;
 mod features;
 mod filebrowser;
 mod fileops;
+// What minds this machine could have, before any of them is running.
+mod harness_catalogue;
+mod harness_install;
 mod config_store;
 mod models;
 mod focus;

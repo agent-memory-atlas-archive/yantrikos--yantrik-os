@@ -1,0 +1,37 @@
+# What the desktop can say about Pi before Pi is running.
+#
+# A harness describes itself when it attaches, and until then the desktop knew nothing at all —
+# so Settings simply left it out and a person looking for a missing mind was told nothing. This
+# file is the part that can be read with nothing running: what it is, what it needs, what would
+# install it, and which unit starts it. Read by crates/yantrik-ui/src/harness_catalogue.rs.
+#
+# Nothing here holds a credential and nothing here is run unless somebody asks for it.
+id: pi
+name: Pi
+detail: The pi coding agent, over its RPC mode
+docs: README.md
+unit: yantrik-pi.service
+
+# Missing any of these and the row reads "Not installed", naming the first one that is missing.
+requires:
+  - binary: pi
+    why: Pi itself, which npm installs per user
+  - binary: node
+    why: Pi needs Node 22 or newer — Debian's Node 20 fails to start it
+  - file: yantrik_pi.py
+    why: the harness script, staged beside this file
+
+install:
+  # Run as the person, with its output streamed into the row. `--ignore-scripts` because a
+  # global install has no business running an arbitrary postinstall on this machine.
+  command: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+  doing: fetching @earendil-works/pi-coding-agent
+
+# Present, but a file only the person can write is not there yet: the row reads "Needs setup"
+# and names the path. It never reads what is in it.
+setup:
+  - config: pi.json
+    why: >
+      which provider and model Pi should use, and where `pi` and `node` are. With no file Pi
+      runs with its own default provider, `google`, which is rarely what you meant. Pi's keys
+      stay in ~/.pi/agent and nothing here reads them.

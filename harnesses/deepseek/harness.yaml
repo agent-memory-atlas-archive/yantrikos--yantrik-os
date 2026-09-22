@@ -1,0 +1,22 @@
+# What the desktop can say about this harness before it is running.
+# See harnesses/pi/harness.yaml for why this file exists at all.
+id: deepseek
+name: DeepSeek
+detail: Any OpenAI-compatible endpoint, with the desktop's tools
+docs: README.md
+unit: yantrik-deepseek.service
+
+requires:
+  - binary: python3
+    why: the harness is stdlib Python, and the image already carries it
+  - file: yantrik_deepseek.py
+    why: the harness script, staged beside this file
+
+# No `install`: there is nothing to fetch. On a machine that has the image, this harness is
+# already installed and the only thing between it and answering is the file below.
+setup:
+  - config: deepseek.json
+    why: >
+      the endpoint, the model, and the NAME of the environment variable that holds your key —
+      DEEPSEEK_API_KEY by convention. The file is yours, at mode 600; the desktop has nowhere
+      to put a key and never reads this one.
