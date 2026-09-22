@@ -101,6 +101,42 @@ impl Document {
         self.recovered || self.text != self.baseline
     }
 
+    /// What is in this document and in no file, as a clause a refusal can carry, or `None` when
+    /// nothing is at stake.
+    ///
+    /// A refusal that says only "there are unsaved changes" leaves a person working out for
+    /// themselves how much they are about to lose and where the rest of it is. This says both,
+    /// which is the difference between a warning and a sentence somebody can act on.
+    pub fn unsaved(&self) -> Option<String> {
+        if !self.dirty() {
+            return None;
+        }
+        // A recovered draft that has not been typed into since has no "edit" to measure — the
+        // whole of it is the thing nobody has agreed to.
+        let untouched_draft = self.recovered && self.text == self.baseline;
+        let count = if untouched_draft {
+            char_count(&self.text)
+        } else {
+            unsaved_chars(&self.text, &self.baseline)
+        };
+        let home = match &self.path {
+            Some(p) => format!("are not in {}", p.display()),
+            None => "are in no file at all".to_string(),
+        };
+        Some(if untouched_draft {
+            format!(
+                "a recovered draft of \u{201c}{}\u{201d} \u{2014} {count} characters that {home} \
+                 and that nobody has agreed to yet",
+                self.title()
+            )
+        } else {
+            format!(
+                "{count} characters of \u{201c}{}\u{201d} that {home}",
+                self.title()
+            )
+        })
+    }
+
     /// What to call this document on screen.
     ///
     /// The first `# ` heading, because in a Markdown document that IS the title and it is inside
@@ -141,8 +177,25 @@ impl Document {
     /// * a file that changed on disk since it was read is not overwritten, because the draft in
     ///   the window is not a merge of the two;
     /// * a Save As onto a path that already exists is refused, so "save a copy" can never be the
-    ///   thing that destroys the original of something else.
+    ///   thing that destroys the original of something else — [`Document::save_over`] is the
+    ///   same write with that last refusal answered.
     pub fn save(&self, path: &Path) -> Result<Saved, String> {
+        self.write(path, false)
+    }
+
+    /// The same write, told to replace whatever is already at `path`.
+    ///
+    /// This exists because of the one situation where every refusal was correct and there was
+    /// still no way to keep the work. Files moves a document with `rename`, so the file under an
+    /// open document can be carried off: `save` then refuses because the original is gone, and
+    /// `save_as` to where it went refuses because something is already there. Both sentences are
+    /// true; between them a person is stuck. `overwrite` is how the second one is answered, and
+    /// the refusal it answers names it.
+    pub fn save_over(&self, path: &Path) -> Result<Saved, String> {
+        self.write(path, true)
+    }
+
+    fn write(&self, path: &Path, overwrite: bool) -> Result<Saved, String> {
         validate(&self.text)?;
         if !path.is_absolute() {
             return Err(format!(
@@ -157,36 +210,53 @@ impl Document {
         let path = parent.join(name);
 
         let own = self.path.as_ref() == Some(&path);
+        let mut replace = false;
         let mut permissions = None;
-        if own {
-            let meta = fs::symlink_metadata(&path)
-                .map_err(|e| format!("The original file is gone: {e}. Use Save As."))?;
-            if !meta.is_file() || meta.nlink() > 1 {
-                return Err("That path is a link or is not a regular file. Use Save As.".into());
-            }
-            if meta.permissions().readonly() {
-                return Err("That file is read-only. Use Save As.".into());
-            }
-            // The stamp is the cheap check and the bytes are the real one. A touch that changed
-            // nothing must not block a save, and a rewrite that happens to land on the same size
-            // and second must not slip through — so a moved stamp sends us to the bytes, and the
-            // bytes decide.
-            if stamp_of(&path) != self.stamp && read(&path)? != self.baseline {
+        match fs::symlink_metadata(&path) {
+            // The document's own file is not where it was opened from any more. That is almost
+            // never a deletion — Files moves with `rename` — so the refusal goes looking, and
+            // `overwrite` is the caller having read it and said write it here anyway.
+            Err(_) if own && !overwrite => return Err(self.stranded(&path)),
+            Err(_) => {}
+            Ok(_) if !own && !overwrite && !self.is_its_own_moved_file(&path) => {
                 return Err(format!(
-                    "{} changed on disk since it was opened. Nothing was written; your draft is \
-                     intact. Use Save As to keep both versions.",
+                    "{} already exists. Choose another name; nothing was overwritten. Save As \
+                     with overwrite=true replaces it.",
                     path.display()
-                ));
+                ))
             }
-            permissions = Some(meta.permissions());
-        } else if fs::symlink_metadata(&path).is_ok() {
-            return Err(format!(
-                "{} already exists. Choose another name; nothing was overwritten.",
-                path.display()
-            ));
+            Ok(meta) => {
+                if !meta.is_file() || meta.nlink() > 1 {
+                    return Err(format!(
+                        "{} is a link or is not a regular file, so nothing was written. Save As \
+                         to another path.",
+                        path.display()
+                    ));
+                }
+                if meta.permissions().readonly() {
+                    return Err(format!(
+                        "{} is read-only, so nothing was written. Save As to another path.",
+                        path.display()
+                    ));
+                }
+                // The stamp is the cheap check and the bytes are the real one. A touch that
+                // changed nothing must not block a save, and a rewrite that happens to land on
+                // the same size and second must not slip through — so a moved stamp sends us to
+                // the bytes, and the bytes decide. Only for our own file: a caller that said
+                // "overwrite" has been told what is there and has answered.
+                if own && stamp_of(&path) != self.stamp && read(&path)? != self.baseline {
+                    return Err(format!(
+                        "{} changed on disk since it was opened. Nothing was written; your draft \
+                         is intact. Use Save As to keep both versions.",
+                        path.display()
+                    ));
+                }
+                replace = true;
+                permissions = Some(meta.permissions());
+            }
         }
 
-        atomic_write(&path, self.text.as_bytes(), own, permissions)?;
+        atomic_write(&path, self.text.as_bytes(), replace, permissions)?;
 
         // Read the file back for its size and mtime. This is what the save reports, and it is
         // the only number in the answer that was not supplied by the caller.
@@ -201,6 +271,47 @@ impl Document {
             },
             stamp,
         })
+    }
+
+    /// Why a save cannot write to the file this document came from, when that file is not there.
+    ///
+    /// Seen on 22 Sep 2026: Files moved an open document into a new folder and yDoc was left with
+    /// no way to save it at all. `save` refused because the original was gone; `save_as` to the
+    /// new path refused because something was already there; `open` on the new path dropped the
+    /// unsaved edit without a word. Every one of those was true and together they lost the work.
+    /// A refusal with no next step in it is the same as losing the work, so this one goes and
+    /// looks for where the file went and names it.
+    fn stranded(&self, path: &Path) -> String {
+        match moved_to(path, &self.baseline) {
+            Some(now) => format!(
+                "{} is not there any more \u{2014} the same file looks to be at {} now. Nothing \
+                 was written and your draft is intact: Save As to {} to write your changes into \
+                 it.",
+                path.display(),
+                now.display(),
+                now.display()
+            ),
+            None => format!(
+                "{} was moved or deleted, so there is nothing there to write into. Nothing was \
+                 written and your draft is intact: Save As with overwrite=true to write it here, \
+                 or Save As to wherever it went.",
+                path.display()
+            ),
+        }
+    }
+
+    /// Is the file at `path` this document's own, carried there by a move?
+    ///
+    /// True only when the file this document was opened from is no longer where it was, AND what
+    /// is at `path` has the same name and exactly the bytes this document last agreed with. That
+    /// is not a coincidence anyone should have to argue with: it is this document, moved. Writing
+    /// into it is what a plain Save would have done, so a Save As onto it is not a clobber and is
+    /// not refused as one.
+    fn is_its_own_moved_file(&self, path: &Path) -> bool {
+        let Some(origin) = &self.path else { return false };
+        origin.file_name() == path.file_name()
+            && fs::symlink_metadata(origin).is_err()
+            && read(path).ok().as_deref() == Some(self.baseline.as_str())
     }
 
     /// Where a Save should write, or why it cannot write anywhere.
@@ -255,6 +366,106 @@ fn slug(title: &str) -> String {
     } else {
         out
     }
+}
+
+// ── Following the file ──────────────────────────────────────────────────────
+//
+// A document open in yDoc is a file somebody else can move while it is open — Files does
+// exactly that, with `rename`, which keeps the bytes and the inode and changes only the name.
+// Nothing below watches anything; these are the two decisions the watcher makes, separated from
+// the events that trigger them so they can be tested with a temporary directory and no inotify.
+
+/// How far the search for a moved document is allowed to go.
+///
+/// A person moving a document in Files moves it near where it was: into a folder beside it,
+/// usually one they have just made. That is what this looks for. The bounds are what stop "where
+/// did my document go" from walking a whole home directory — four levels under the folder it used
+/// to be in, and two thousand entries, whichever runs out first.
+const SEARCH_DEPTH: usize = 4;
+const SEARCH_ENTRIES: usize = 2000;
+
+/// Where the file that used to be at `original` probably is now, or `None`.
+///
+/// The same name and exactly the bytes the document last agreed with, somewhere under the folder
+/// it used to live in. Both halves matter: the name on its own would point at any file called
+/// `notes.md`, and the bytes on their own would point at a backup copy under a different name.
+/// `None` is an honest answer and the callers say so rather than guessing.
+pub fn moved_to(original: &Path, baseline: &str) -> Option<PathBuf> {
+    let name = original.file_name()?;
+    // The folder it lived in — or, when that folder is itself the thing that was moved, the one
+    // above it. No further up than that: a search that climbs is a search with no bound.
+    let start = original.parent().filter(|p| p.is_dir()).or_else(|| {
+        original
+            .parent()
+            .and_then(|p| p.parent())
+            .filter(|p| p.is_dir())
+    })?;
+
+    let mut queue = vec![(start.to_path_buf(), 0usize)];
+    let mut seen = 0usize;
+    while let Some((folder, depth)) = queue.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else { continue };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > SEARCH_ENTRIES {
+                return None;
+            }
+            let path = entry.path();
+            // symlink_metadata, so a link pointing back up the tree cannot turn this walk into
+            // a loop: a symlinked folder is neither descended into nor read as a document.
+            let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+            if meta.is_dir() {
+                // Hidden folders are skipped. A `.git` or a `.cache` beside the document would
+                // spend the whole entry budget on somewhere nobody moved a document to.
+                let hidden = entry.file_name().to_string_lossy().starts_with('.');
+                if !hidden && depth < SEARCH_DEPTH {
+                    queue.push((path, depth + 1));
+                }
+            } else if meta.is_file()
+                && entry.file_name() == name
+                && meta.len() == baseline.len() as u64
+                && path.as_path() != original
+                && read(&path).ok().as_deref() == Some(baseline)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Where an open document lives after a rename the folder around it reported.
+///
+/// Two cases, and the second is the one that catches people out: the document's own file was
+/// renamed, or a folder it sits inside was. Moving a folder in Files strands every document in it
+/// exactly as thoroughly as moving one document does, and it is the same fix.
+pub fn follow_rename(current: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    if current == from {
+        return Some(to.to_path_buf());
+    }
+    current.strip_prefix(from).ok().map(|rest| to.join(rest))
+}
+
+/// How many characters of `text` the file does not have.
+///
+/// The characters between the longest common prefix and the longest common suffix of the two,
+/// which for an ordinary edit is the edit itself rather than the whole document. Characters and
+/// not bytes, for the same reason the status bar counts characters.
+pub fn unsaved_chars(text: &str, baseline: &str) -> usize {
+    let a: Vec<char> = text.chars().collect();
+    let b: Vec<char> = baseline.chars().collect();
+    let mut head = 0;
+    while head < a.len() && head < b.len() && a[head] == b[head] {
+        head += 1;
+    }
+    let mut tail = 0;
+    while tail < a.len() - head
+        && tail < b.len() - head
+        && a[a.len() - 1 - tail] == b[b.len() - 1 - tail]
+    {
+        tail += 1;
+    }
+    a.len() - head - tail
 }
 
 /// What this app will hold, said before anything is written or replaced.

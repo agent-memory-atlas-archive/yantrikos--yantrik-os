@@ -20,6 +20,7 @@
 //! backed by any of that are off the screen, each with the reason at the site it left.
 
 mod document;
+mod follow;
 
 use document::{Document, Format, Saved};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -27,6 +28,7 @@ use std::{
     cell::RefCell,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::mpsc,
     time::Duration,
 };
 use yantrik_app_runtime::prelude::*;
@@ -55,11 +57,14 @@ const DIALOG_EXPORT_HTML: i32 = 4;
 const DIALOG_UNSAVED: i32 = 5;
 
 /// What the unsaved-changes prompt is standing in front of.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Intent {
     None,
     Close,
     New,
+    /// Open this file, once the draft on screen has been saved or given up on purpose. The path
+    /// travels with the intent so that answering the prompt does not mean retyping it.
+    Open(PathBuf),
 }
 
 /// Everything the app holds that the window does not.
@@ -84,6 +89,11 @@ struct Editor {
     startup_notice: String,
     recovery_timer: slint::Timer,
     rail_timer: slint::Timer,
+    /// The watch on the folder the document lives in, re-pointed by `paint` as the document
+    /// moves. See `follow.rs` for why a document editor watches a folder at all.
+    follow: follow::Watch,
+    /// What that watch has seen, waiting for the UI thread to come and read it.
+    moves: mpsc::Receiver<follow::Move>,
 }
 
 type State = Rc<RefCell<Editor>>;
@@ -140,7 +150,7 @@ fn main() {
 
     let state = wire(&app, document::recovery_path(), argv.is_some());
     if let Some(path) = argv {
-        let _ = report(&app, open_path(&app, &state, &path));
+        let _ = report(&app, open_path(&app, &state, &path, false));
     }
     // Last, because a successful open clears the notice and a draft held aside is the one thing
     // a person opening a file still needs to be told.
@@ -290,7 +300,82 @@ fn paint(ui: &DocumentEditorApp, state: &State, content: bool) {
     );
     ui.set_doc_find_count(b.matches.len() as i32);
     drop(b);
+    follow_file(state);
     refresh_rail_soon(ui, state);
+}
+
+/// Point the folder watch at wherever the document lives now.
+///
+/// Called from `paint` rather than from each of the places that change the path, because `paint`
+/// is the one function every one of them already goes through — the same reason the title, the
+/// outline and the counts are derived there. Re-pointing at the folder already being watched
+/// costs a lock and a comparison.
+fn follow_file(state: &State) {
+    let mut b = state.borrow_mut();
+    let path = b.doc.path.clone();
+    b.follow.point_at(path.as_deref());
+}
+
+/// One thing the folder watch saw, or `None` when there is nothing waiting.
+///
+/// A function of its own so that the borrow it takes ends before the caller handles what it
+/// returns; draining the channel inside a `while let` over `state.borrow()` would hold the
+/// document borrowed while the handler tries to change it.
+fn next_move(state: &State) -> Option<follow::Move> {
+    state.borrow().moves.try_recv().ok()
+}
+
+/// The folder the open document lives in has reported a move. Follow it, if it was ours.
+///
+/// This is what closes the loop the issue describes: a document moved in Files goes on being the
+/// same document, saved by Save, named correctly in the window and in `describe`. Only the path
+/// changes — the text, the baseline and the stamp are all untouched, because a rename moves the
+/// same bytes and the same inode and a save's conflict check is still asking about the right
+/// file afterwards.
+fn file_moved(ui: &DocumentEditorApp, state: &State) {
+    // Everything waiting, read as one thing. A rename arrives as two events — "it left", then
+    // "and here is where it went" — and acting on the first would send the app hunting through a
+    // directory for a file the second event is about to name.
+    let mut waiting = Vec::new();
+    while let Some(moved) = next_move(state) {
+        waiting.push(moved);
+    }
+    let Some(moved) = follow::latest(waiting) else { return };
+
+    let open_file = {
+        let b = state.borrow();
+        b.doc.path.clone().map(|p| (p, b.doc.baseline.clone()))
+    };
+    let Some((current, baseline)) = open_file else { return };
+    let now = match moved {
+        follow::Move::To(to) => Some(to),
+        // The event said only that the file left. Where it went is a look at the disk.
+        follow::Move::Away => document::moved_to(&current, &baseline),
+    };
+    match now {
+        Some(now) if now != current => {
+            {
+                let stamp = document::stamp_of(&now);
+                let mut b = state.borrow_mut();
+                b.doc.path = Some(now.clone());
+                if stamp.is_some() {
+                    b.doc.stamp = stamp;
+                }
+            }
+            paint(ui, state, false);
+            checkpoint(ui, state);
+            ui.set_notice(format!("This document moved. It is {} now.", now.display()).into());
+        }
+        Some(_) => {}
+        None => ui.set_notice(
+            format!(
+                "{} is not there any more, and nothing with the same name and the same contents \
+                 was found near it. Your draft is untouched — Save As to give it a file again.",
+                current.display()
+            )
+            .into(),
+        ),
+    }
 }
 
 /// Refresh the agent rail a beat after the document stops changing.
@@ -392,12 +477,31 @@ fn commit(
     Ok(())
 }
 
+/// Open a file, and say what opening it would cost before it costs it.
+///
+/// `discard` is the caller agreeing to lose the draft on screen. Without it an open onto a dirty
+/// document is refused: it used to replace the buffer in silence, so the one action a person
+/// reached for when their document had been moved out from under them was also the action that
+/// threw the edit away. The window turns the refusal into the Save / Discard / Cancel prompt; a
+/// mind gets the refusal itself, with the size of what it is about to lose in it.
 fn open_path(
     ui: &DocumentEditorApp,
     state: &State,
     path: &Path,
+    discard: bool,
 ) -> Result<serde_json::Value, String> {
-    let doc = Document::open(&expanded(&path.to_string_lossy()))?;
+    let target = expanded(&path.to_string_lossy());
+    if !discard {
+        if let Some(lost) = state.borrow().doc.unsaved() {
+            return Err(format!(
+                "Opening {} would throw away {}. Save this document first, or open again with \
+                 discard=true.",
+                target.display(),
+                lost
+            ));
+        }
+    }
+    let doc = Document::open(&target)?;
     let opened = doc.path.clone().unwrap_or_default();
     let words = document::word_count(&doc.text);
     let bytes = doc.text.len();
@@ -452,14 +556,24 @@ fn new_document(
 /// `path` is `None` for a plain Save, which then needs the document to already have a home. This
 /// is THE bug: with no path it used to return in silence, so a person could press Save all day
 /// and lose everything. It now says so, and the window turns that into the Save As prompt.
+///
+/// `overwrite` is the caller having been told that something is already at `path` and answering.
+/// Nothing in the window passes it: the Save As prompt still refuses to write over a file it was
+/// not expecting, and the one case where that refusal was wrong — the target IS this document's
+/// own file, moved — is recognised inside `Document::save` and needs no permission.
 fn save_to(
     ui: &DocumentEditorApp,
     state: &State,
     path: Option<PathBuf>,
+    overwrite: bool,
 ) -> Result<serde_json::Value, String> {
     let doc = state.borrow().doc.clone();
     let target = doc.save_target(path)?;
-    let Saved { document: saved, stamp } = doc.save(&target)?;
+    let Saved { document: saved, stamp } = if overwrite {
+        doc.save_over(&target)?
+    } else {
+        doc.save(&target)?
+    };
     let written = saved.path.clone().unwrap_or_default();
     // The write is synchronous on this thread, so nothing can have been typed in between: the
     // document the save agreed with is still the document on screen.
@@ -641,6 +755,11 @@ fn finish_intent(ui: &DocumentEditorApp, state: &State) {
             let _ = ui.hide();
             let _ = slint::quit_event_loop();
         }
+        Intent::Open(path) => {
+            // Whichever way the prompt was answered — saved, or given up on purpose — the draft
+            // has been dealt with, so this open is no longer discarding anything unasked.
+            let _ = report(ui, open_path(ui, state, &path, true));
+        }
     }
 }
 
@@ -681,6 +800,15 @@ fn wire(ui: &DocumentEditorApp, recovery: PathBuf, have_argv: bool) -> State {
         }
     };
 
+    // The folder watch and its mailbox. The watcher's own thread cannot touch the document, so
+    // it puts what it saw on the channel and pokes `doc-file-event`, which is handled below on
+    // the UI thread where the document lives.
+    let (moves, inbox) = mpsc::channel();
+    let wake = ui.as_weak();
+    let follow = follow::Watch::new(moves, move || {
+        let _ = wake.upgrade_in_event_loop(|ui| ui.invoke_doc_file_event());
+    });
+
     let state: State = Rc::new(RefCell::new(Editor {
         doc,
         matches: vec![],
@@ -692,7 +820,18 @@ fn wire(ui: &DocumentEditorApp, recovery: PathBuf, have_argv: bool) -> State {
         startup_notice,
         recovery_timer: slint::Timer::default(),
         rail_timer: slint::Timer::default(),
+        follow,
+        moves: inbox,
     }));
+
+    {
+        let weak = ui.as_weak();
+        let st = state.clone();
+        ui.on_doc_file_event(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            file_moved(&ui, &st);
+        });
+    }
 
     // ── The document ──
     {
@@ -730,7 +869,7 @@ fn wire(ui: &DocumentEditorApp, recovery: PathBuf, have_argv: bool) -> State {
                 prompt_path(&ui, &st, DIALOG_SAVE_AS);
                 return;
             }
-            let _ = report(&ui, save_to(&ui, &st, None));
+            let _ = report(&ui, save_to(&ui, &st, None, false));
         });
     }
 
@@ -779,8 +918,19 @@ fn wire(ui: &DocumentEditorApp, recovery: PathBuf, have_argv: bool) -> State {
             let which = ui.get_doc_dialog();
             let path = expanded(&ui.get_doc_dialog_path());
             let outcome: Result<(), String> = match which {
-                DIALOG_OPEN => open_path(&ui, &st, &path).map(|_| ()),
-                DIALOG_SAVE_AS => save_to(&ui, &st, Some(path)).map(|_| ()),
+                DIALOG_OPEN => {
+                    if st.borrow().doc.dirty() {
+                        // There is work on screen that is in no file. Ask about that before the
+                        // file being opened takes the window; the path rides on the intent, so
+                        // answering the prompt does not mean typing it again. This is the third
+                        // of the three dead ends in the issue: Open used to replace the buffer
+                        // in silence and the unsaved edit was simply gone.
+                        prompt_unsaved(&ui, &st, Intent::Open(path));
+                        return;
+                    }
+                    open_path(&ui, &st, &path, false).map(|_| ())
+                }
+                DIALOG_SAVE_AS => save_to(&ui, &st, Some(path), false).map(|_| ()),
                 DIALOG_EXPORT_MD => export(&ui, &st, &path, false).map(|_| ()),
                 DIALOG_EXPORT_HTML => export(&ui, &st, &path, true).map(|_| ()),
                 DIALOG_UNSAVED => {
@@ -790,7 +940,7 @@ fn wire(ui: &DocumentEditorApp, recovery: PathBuf, have_argv: bool) -> State {
                         prompt_path(&ui, &st, DIALOG_SAVE_AS);
                         return;
                     }
-                    save_to(&ui, &st, None).map(|_| ())
+                    save_to(&ui, &st, None, false).map(|_| ())
                 }
                 _ => Ok(()),
             };
@@ -1250,10 +1400,17 @@ fn publish_control(ui: &DocumentEditorApp, state: State) {
     }
 
     action!(
-        Action::new("open", "Open a Markdown document by path").arg(Param::text("path")),
+        Action::new("open", "Open a Markdown document by path")
+            .arg(Param::text("path"))
+            .arg(
+                Param::flag("discard")
+                    .optional()
+                    .describe("Open even though this document has unsaved changes, losing them"),
+            ),
         |ui: &DocumentEditorApp, st: &State, args: &serde_json::Value| -> Result<serde_json::Value, String> {
             let path = args["path"].as_str().ok_or("`open` needs a path")?;
-            open_path(ui, st, Path::new(path))
+            let discard = args["discard"].as_bool().unwrap_or(false);
+            open_path(ui, st, Path::new(path), discard)
         }
     );
 
@@ -1264,15 +1421,21 @@ fn publish_control(ui: &DocumentEditorApp, state: State) {
 
     action!(
         Action::new("save", "Write the document to the file it came from"),
-        |ui: &DocumentEditorApp, st: &State, _a: &serde_json::Value| -> Result<serde_json::Value, String> { save_to(ui, st, None) }
+        |ui: &DocumentEditorApp, st: &State, _a: &serde_json::Value| -> Result<serde_json::Value, String> { save_to(ui, st, None, false) }
     );
 
     action!(
         Action::new("save_as", "Write the document to a path and keep it there")
-            .arg(Param::text("path")),
+            .arg(Param::text("path"))
+            .arg(
+                Param::flag("overwrite")
+                    .optional()
+                    .describe("Replace a file that is already at that path"),
+            ),
         |ui: &DocumentEditorApp, st: &State, args: &serde_json::Value| -> Result<serde_json::Value, String> {
             let path = args["path"].as_str().ok_or("`save_as` needs a path")?;
-            save_to(ui, st, Some(expanded(path)))
+            let overwrite = args["overwrite"].as_bool().unwrap_or(false);
+            save_to(ui, st, Some(expanded(path)), overwrite)
         }
     );
 
