@@ -581,7 +581,7 @@ fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
         (
             Action::new("new_character", "Save a character spec into the library")
                 .arg(Param::text("spec").describe(&format!(
-                    "The character JSON. Required: name, archetype, proportions                      (head_body, limb_length, width). Optional: ears, tail, palette                      (base/belly/accent/nose/eye as #rrggbb), expression, stance.                      The enumerated fields take {}. Ranges and the rest are in                      `describe`'s spec_grammar. A value outside any of them is refused with a                      sentence naming the field.",
+                    "The character JSON. Required: name, archetype, proportions (head_body, limb_length, width). Optional: ears, tail, palette (base/belly/accent/nose/eye as #rrggbb), expression, stance. The enumerated fields take {}. Ranges and the rest are in `describe`'s spec_grammar. A value outside any of them is refused with a sentence naming the field.",
                     spec::vocabulary_line("character")
                 ))),
             handler(ui, &core, "new_character"),
@@ -589,7 +589,7 @@ fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
         (
             Action::new("new_game", "Save a game spec into the library")
                 .arg(Param::text("spec").describe(&format!(
-                    "The game JSON. Required: title, arena (size, theme), player (character,                      speed), collectible (kind, count), hazards[] (kind, speed, count), lives,                      music. `player.character` may name a saved character or inline a whole one,                      in which case the character vocabulary applies to it too. The enumerated                      fields take {}. Ranges are in `describe`'s spec_grammar.",
+                    "The game JSON. Required: title, arena (size, theme), player (character, speed), collectible (kind, count), hazards[] (kind, speed, count), lives, music. `player.character` may name a saved character or inline a whole one, in which case the character vocabulary applies to it too. The enumerated fields take {}. Ranges are in `describe`'s spec_grammar.",
                     spec::vocabulary_line("game")
                 ))),
             handler(ui, &core, "new_game"),
