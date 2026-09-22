@@ -10312,6 +10312,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-arcade"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "libc",
+ "png",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "tracing",
+ "tungstenite",
+ "ureq 2.12.1",
+ "yantrik-app-runtime",
+ "yantrik-design-tokens",
+ "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
+ "yantrik-ui-kit",
+]
+
+[[package]]
 name = "yantrik-brain"
 version = "0.1.0"
 dependencies = [
