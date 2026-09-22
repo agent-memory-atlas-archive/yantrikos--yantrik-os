@@ -10308,6 +10308,7 @@ dependencies = [
  "tracing-subscriber",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-version",
 ]
 
 [[package]]
@@ -10855,6 +10856,7 @@ dependencies = [
  "yantrik-os",
  "yantrik-shell-core",
  "yantrik-ui-slint",
+ "yantrik-version",
  "yantrikdb",
 ]
 
@@ -10874,6 +10876,10 @@ dependencies = [
  "yantrik-design-tokens",
  "yantrik-ui-kit",
 ]
+
+[[package]]
+name = "yantrik-version"
+version = "0.1.0"
 
 [[package]]
 name = "yantrik-weather"

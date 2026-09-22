@@ -421,6 +421,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     // Published before anything reads a preference out of it.
     let _ = LIVE.set(settings.clone());
 
+    // The version on Settings → System. Nothing ever set this, so the row showed the Slint
+    // property's own default, `0.1.0`, on every machine this OS has ever run on — a third
+    // answer beside About's 0.3.0 and the BUILD marker's git describe.
+    ui.set_settings_version(yantrik_version::version().into());
+
     // YANTRIK_AGENT_MODE wins over the file so an agent harness or a kiosk image can
     // force either face without rewriting a user's settings.
     let agent_mode = match std::env::var("YANTRIK_AGENT_MODE") {

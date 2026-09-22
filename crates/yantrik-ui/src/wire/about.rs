@@ -119,12 +119,14 @@ fn populate_about_info(ui_weak: &slint::Weak<App>) {
     // Uptime from /proc/uptime — also re-read on a timer, see wire()
     ui.set_about_uptime(read_uptime().into());
 
-    // Version from Cargo.toml + git hash
-    let version = match option_env!("GIT_HASH") {
-        Some(hash) => format!("{} ({})", env!("CARGO_PKG_VERSION"), hash),
-        None => env!("CARGO_PKG_VERSION").to_string(),
-    };
-    ui.set_about_version(version.into());
+    // What is running here.
+    //
+    // This said `CARGO_PKG_VERSION` plus the git hash build.rs baked in: "0.3.0 (6fc8b13)" on a
+    // machine whose installed build was v0.1.0-179-g6fc8b13. The 0.3.0 is this crate's package
+    // version, which nobody has moved in months and which names no build. yantrik-version reads
+    // the installed BUILD marker — the same field `yantrik-update` compares — and that string
+    // already carries the commit, so there is nothing left to append.
+    ui.set_about_version(yantrik_version::version().into());
 
     // Build date from build.rs
     let build_date = option_env!("BUILD_DATE").unwrap_or("unknown");

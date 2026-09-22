@@ -56,7 +56,10 @@ const STAGES: &[Stage] = &[
 ];
 
 pub fn wire(ui: &App, ctx: &AppContext, services: ServiceManager) {
-    ui.set_version(SharedString::from(env!("CARGO_PKG_VERSION")));
+    // The same string About and Settings show, and the same one `yantrik-update` compares. It
+    // used to be this crate's `CARGO_PKG_VERSION`, so the first thing the machine said about
+    // itself on boot was a number that named no build.
+    ui.set_version(SharedString::from(yantrik_version::version()));
     push(ui, &[false; 4]);
 
     let started = Instant::now();

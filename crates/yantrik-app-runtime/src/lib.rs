@@ -62,6 +62,15 @@ pub mod prelude {
 
 /// Initialize tracing-subscriber with an env filter for the app.
 pub fn init_tracing(app_name: &str) {
+    // `--version`, answered here because this is the one line every app binary runs first.
+    //
+    // A machine used to give three answers about what it was, one of them a hardcoded
+    // `Yantrik Terminal v0.1.0` printed into the terminal's first pane. Sixteen app mains each
+    // reporting their own `CARGO_PKG_VERSION` is the same defect with more places to forget, so
+    // the flag is handled once, from the string yantrik-version resolves. Same reasoning as the
+    // SLINT_FULLSCREEN line below: the shared line is the only place a rule holds everywhere.
+    yantrik_version::handle_version_flag(app_name);
+
     // An app is not the OS.
     //
     // The session exports SLINT_FULLSCREEN=1 because the shell IS the desktop and must not be a

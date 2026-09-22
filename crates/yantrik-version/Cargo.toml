@@ -1,0 +1,5 @@
+[package]
+name = "yantrik-version"
+version = "0.1.0"
+edition = "2021"
+description = "The one version this machine answers with, wherever it is asked"

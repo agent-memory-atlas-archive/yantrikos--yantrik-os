@@ -68,6 +68,23 @@ build_field() {
 installed_git()     { build_field git; }
 installed_version() { build_field version; }
 
+# The one-line copy of the version, beside the marker that owns it.
+#
+# `$PREFIX/.version` is a convenience file — one line, no keys — that a person reads with `cat`
+# and nothing on the machine depends on. That is exactly how it came to be wrong and stay wrong:
+# a machine held `.version` = 0.3.0 next to `BUILD` = version=v0.1.0-179-g6fc8b13 and answered
+# whichever one you happened to ask, because the ISO build wrote it once, back when that script
+# had 0.3.0 typed into it, and no update since had touched it. So every path here that writes
+# BUILD writes this from the same string, and the two cannot drift apart again.
+#
+# Failing to write it is not a failed update. An empty version is not written at all: keeping
+# the last string that was true beats replacing it with a blank line.
+stamp_version_file() { # <prefix> <version>
+  [ -n "${2:-}" ] || return 0
+  printf '%s\n' "$2" > "$1/.version" 2>/dev/null && return 0
+  printf '%s\n' "$2" | sudo -n tee "$1/.version" >/dev/null 2>&1 || true
+}
+
 # Config file may set CHANNEL, HOST and SCHEME. Plain KEY=value, sourced only for those.
 #
 # ── One host, and no second address ──
@@ -369,7 +386,8 @@ give_back_to_owner() {
   [ "$(id -u)" = 0 ] || return 0
   local owner; owner="$(prefix_owner)"
   [ -n "$owner" ] && [ "$owner" != root ] || return 0
-  chown -R "$owner" "$UPDATES_DIR" "$BACKUP_DIR" "$BIN_DIR" "$SHARE_DIR" "$BUILD_FILE" 2>/dev/null || true
+  chown -R "$owner" "$UPDATES_DIR" "$BACKUP_DIR" "$BIN_DIR" "$SHARE_DIR" "$BUILD_FILE" \
+    "$PREFIX/.version" 2>/dev/null || true
 }
 
 cmd_apply() {
@@ -562,6 +580,7 @@ channel=$CHANNEL
 installed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 binaries=$installed
 EOF
+  stamp_version_file "$PREFIX" "$remote_ver"
 
   rm -rf "$stage"; rm -f "$dl"
   say "Installed $remote_ver ($remote_git)"
@@ -819,6 +838,8 @@ restore_backup() {
     cp -a "$backup/share" "$SHARE_DIR"
   fi
   [ -f "$backup/BUILD" ] && cp -a "$backup/BUILD" "$BUILD_FILE"
+  # A rollback moves the version backwards, so the one-line copy has to move with it.
+  stamp_version_file "$PREFIX" "$(installed_version)"
   info "restored from $backup"
 }
 
@@ -957,8 +978,9 @@ and this is running as $(id -un). Run: sudo yantrik-update set-channel $new"
 # ── selftest ────────────────────────────────────────────────────────────────────────────
 #
 # No network, no /opt, no machine. It runs THIS script against a scratch $YANTRIK_PREFIX and
-# checks the two things that had three different answers between them: where the channel comes
-# from when update.conf is silent, and that set-channel rewrites only the line it owns.
+# checks the things that had more than one answer between them: where the channel comes from
+# when update.conf is silent, that set-channel rewrites only the line it owns, and that the
+# one-line `.version` file is written from the same string as the BUILD marker.
 cmd_selftest() {
   local fails=0 root
   # Not `local`: the EXIT trap runs after this function has returned, in global scope, and
@@ -1015,7 +1037,20 @@ cmd_selftest() {
   t "the scheme is preserved"      "SCHEME=http" "$out"
   t "the comment is preserved"     "# hand-written" "$out"
 
-  # 5. A name that is not a channel changes nothing.
+  # 5. .version is stamped from the same string as BUILD, by whatever writes BUILD.
+  #
+  #    This is the check that would have caught the machine reporting `.version` 0.3.0 beside
+  #    `BUILD` version=v0.1.0-179-g6fc8b13: nothing wrote the one-line file after the install,
+  #    so it stayed at whatever the ISO builder had typed into it months earlier.
+  local p5="$root/stamp"; mkdir -p "$p5"
+  stamp_version_file "$p5" "v0.1.0-258-g64165ad"
+  out="$(cat "$p5/.version" 2>/dev/null)"
+  t ".version carries the version that was installed" "v0.1.0-258-g64165ad" "$out"
+  stamp_version_file "$p5" ""
+  out="$(cat "$p5/.version" 2>/dev/null)"
+  t "and a version nobody knows leaves the last true one" "v0.1.0-258-g64165ad" "$out"
+
+  # 6. A name that is not a channel changes nothing.
   local rc
   YANTRIK_PREFIX="$p4" "$0" set-channel hourly >/dev/null 2>&1
   rc=$?

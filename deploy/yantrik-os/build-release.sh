@@ -61,7 +61,13 @@ done
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 fail() { printf '\033[31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 
-VERSION="$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null)"
+# The version, computed once here and handed to everything downstream.
+#
+# YANTRIK_VERSION is honoured so a caller that has already computed it — the ISO workflow does,
+# for the image name — gets the identical string in the tarball, the BUILD marker and the
+# binaries. A step that recomputed it could land on a different answer than the step before it:
+# a tag pushed between the two is enough.
+VERSION="${YANTRIK_VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null)}"
 [ -n "$VERSION" ] || fail "cannot determine a version — refusing to build an unidentifiable release"
 STAMP="$(date -u +%Y%m%d)"
 GITREV="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -87,7 +93,12 @@ if [ "$DO_BUILD" = 1 ]; then
   say "Building the workspace"
   # One rustc in this workspace peaks near 14 GB of RSS (Slint macro expansion), so this
   # is the step that decides what machine can build a release at all.
-  ( cd "$PROJECT_ROOT" && RUSTFLAGS="-A warnings" cargo build --release --workspace ) \
+  #
+  # YANTRIK_VERSION goes in so crates/yantrik-version bakes THIS string rather than running
+  # `git describe` again for itself. The binaries read the installed BUILD marker first, so the
+  # baked value only shows up where there is no marker to read — but a fallback that disagrees
+  # with the release it was cut from is a fourth answer waiting to be found.
+  ( cd "$PROJECT_ROOT" && YANTRIK_VERSION="$VERSION" RUSTFLAGS="-A warnings" cargo build --release --workspace ) \
     || fail "cargo build failed"
 fi
 
@@ -345,6 +356,16 @@ built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 binaries=${#BINS[@]}
 models=$([ "$WITH_MODELS" = 1 ] && echo included || echo excluded)
 EOF
+
+# The same string, one line, no keys: `cat /opt/yantrik/.version` is what a person types, and
+# `.version` existed before BUILD did so scripts and habits still point at it.
+#
+# It used to be written only by the ISO builder, from that script's own idea of the version, and
+# by nothing afterwards — so a machine held `.version` = 0.3.0 (a literal that sat in the ISO
+# script for five months) beside `BUILD` = version=v0.1.0-179-g6fc8b13, and answered whichever
+# one you happened to ask. Both files come off this one variable now; the ISO build takes its
+# copy out of the marker, and `yantrik-update` rewrites both on every apply and rollback.
+printf '%s\n' "$VERSION" > "$ROOT/.version"
 
 mkdir -p "$OUT_DIR"
 TARBALL="$OUT_DIR/${NAME}.tar.zst"

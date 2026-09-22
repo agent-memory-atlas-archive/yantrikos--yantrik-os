@@ -415,9 +415,17 @@ fn install_to_target(
     }
 
     // Brand the installed system as Yantrik OS (so GRUB says "Yantrik OS" not "Debian")
+    //
+    // VERSION_ID was the literal "0.3.0", so every machine installed from the desktop said
+    // "Yantrik OS 0.3.0" on its getty banner and to every tool that reads os-release, whatever
+    // build it was carrying. It is the build being installed — the same string yantrik-install.sh
+    // takes out of the BUILD marker for the same file.
     let _ = sudo_write(
         &format!("{mount_dir}/etc/os-release"),
-        "PRETTY_NAME=\"Yantrik OS\"\nNAME=\"Yantrik OS\"\nID=yantrik\nID_LIKE=debian\nVERSION_ID=\"0.3.0\"\nHOME_URL=\"https://yantrikos.com\"\n",
+        &format!(
+            "PRETTY_NAME=\"Yantrik OS\"\nNAME=\"Yantrik OS\"\nID=yantrik\nID_LIKE=debian\nVERSION_ID=\"{}\"\nHOME_URL=\"https://yantrikos.com\"\n",
+            yantrik_version::version()
+        ),
     );
 
     // Configure GRUB defaults
