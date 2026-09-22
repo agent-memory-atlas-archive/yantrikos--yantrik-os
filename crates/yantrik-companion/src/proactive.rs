@@ -174,6 +174,17 @@ impl ProactiveEngine {
             return None;
         }
 
+        // Nothing that starts with a tool's error is a thought. See `looks_like_tool_error`.
+        if let Some(why) = looks_like_tool_error(&text) {
+            tracing::warn!(
+                instinct = urge.instinct_name,
+                reason = why,
+                text = text.as_str(),
+                "Proactive refused — the composed message is a tool error, not something to say"
+            );
+            return None;
+        }
+
         // V15: Question budget — check if this message is a question
         let is_question = text.ends_with('?');
         if !self.question_budget_ok(is_question) {
@@ -358,4 +369,103 @@ fn now_ts() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+// ── What is not a thought ───────────────────────────────────────────────────────────────────
+
+/// Openings that mean the text is machinery talking, not the companion.
+///
+/// Matched against the START of the message only. A thought is allowed to mention an error it
+/// found — "Error: query is required" as the first thing said is not a mention, it is the raw
+/// string a tool handed back.
+const NOT_A_THOUGHT: &[(&str, &str)] = &[
+    ("error:", "a tool's error string"),
+    ("exception:", "a tool's error string"),
+    ("traceback (most recent call last)", "a python traceback"),
+    ("panicked at", "a rust panic"),
+    ("permission denied:", "the tool registry's refusal"),
+    ("unknown tool:", "the tool registry's refusal"),
+    ("tool:", "a tool-call transcript line"),
+    ("recall failed:", "a tool's error string"),
+    ("i'm sorry, i can't", "a model refusal"),
+    ("i'm sorry, but i can't", "a model refusal"),
+    ("i cannot help with", "a model refusal"),
+    ("i can't help with", "a model refusal"),
+    ("as an ai language model", "a model refusal"),
+];
+
+/// Is this message a tool's error rather than something to say? The reason, if so.
+///
+/// Observed on 22 September 2026: a MemoryWeaver urge planned a single `recall` step, the plan
+/// carried no `query`, the tool answered `Error: query is required`, and the synthesis step —
+/// which is told to use only what the tools returned — turned that into
+/// *"Error: query is required, so there are no details available to surface a memory
+/// connection."* It was posted as notification 68 and sat in the notification centre as one of
+/// the machine's own thoughts.
+///
+/// The recall that could not run is fixed where it was called from. This is the backstop, and
+/// it is a separate rule: a synthesis step will narrate whatever it is handed, so any tool
+/// failure at all can come back out of the pipeline wearing a sentence. Nothing that opens with
+/// one is worth a person's attention, and saying nothing costs nothing — the urge is still in
+/// the log, which is where a broken tool call belongs.
+pub fn looks_like_tool_error(text: &str) -> Option<&'static str> {
+    let start = text
+        .trim_start()
+        .trim_start_matches(['*', '_', '`', '>', '"', '\'', ' '])
+        .to_lowercase()
+        // A model writes "can’t" as often as "can't", and the two must not be different rules.
+        .replace('\u{2019}', "'");
+    NOT_A_THOUGHT
+        .iter()
+        .find(|(opening, _)| start.starts_with(opening))
+        .map(|(_, reason)| *reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tool_error_is_never_said_out_loud() {
+        // Notification 68, verbatim. The synthesis step was handed `Error: query is required`
+        // and wrote a sentence around it; the desktop posted it as a thought.
+        assert_eq!(
+            looks_like_tool_error(
+                "Error: query is required, so there are no details available to surface a \
+                 memory connection."
+            ),
+            Some("a tool's error string")
+        );
+        // The same thing with the markdown a model tends to put round it.
+        assert_eq!(
+            looks_like_tool_error("**Error:** the recall returned nothing"),
+            Some("a tool's error string")
+        );
+        assert!(looks_like_tool_error("Traceback (most recent call last):\n  File \"x.py\"")
+            .is_some());
+        assert!(looks_like_tool_error("Permission denied: 'run_command' requires Dangerous")
+            .is_some());
+        assert!(looks_like_tool_error("Tool: recall() → Error: query is required").is_some());
+        assert!(looks_like_tool_error("I'm sorry, I can't help with that.").is_some());
+        assert!(looks_like_tool_error("I\u{2019}m sorry, I can\u{2019}t help with that.").is_some());
+    }
+
+    #[test]
+    fn an_ordinary_thought_still_gets_through() {
+        // Notification 61, verbatim — the one that was worth reading.
+        assert_eq!(
+            looks_like_tool_error(
+                "One thing that stood out: your memory graph shows you've set up both a morning \
+                 brief and a preference for warm, concise end-of-day reflections."
+            ),
+            None
+        );
+        assert_eq!(looks_like_tool_error("Hey — how's your morning shaping up?"), None);
+        // A thought is allowed to be ABOUT an error; it just may not open as one.
+        assert_eq!(
+            looks_like_tool_error("The backup job hit an error: the disk is full."),
+            None
+        );
+        assert_eq!(looks_like_tool_error(""), None);
+    }
 }
