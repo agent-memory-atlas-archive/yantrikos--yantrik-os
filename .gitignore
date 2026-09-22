@@ -127,3 +127,9 @@ prompt_catalog.db
 Cargo.companion.toml
 Dockerfile.build
 .dockerignore
+
+# The three app-icon sizes build-release.sh ships are inputs to a release, so they are kept;
+# everything else brand/render.py draws is regenerated.
+!brand/yantrik-mark-48.png
+!brand/yantrik-mark-128.png
+!brand/yantrik-mark-256.png
