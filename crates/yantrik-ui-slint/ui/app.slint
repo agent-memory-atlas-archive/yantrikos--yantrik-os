@@ -183,7 +183,19 @@ export component App inherits Window {
     in property <bool> battery-available: false;
     in property <int> battery-level: 100;
     in property <bool> battery-charging: false;
+    /// Wireless specifically — the Quick Settings tile, which is a radio.
+    /// It is false on a wired machine, which is why nothing that means "am I
+    /// online" may be drawn from it. See the four below.
     in property <bool> wifi-connected: false;
+    /// The one network reading, from the network service: whether anything is
+    /// up, over what medium, and under what name. The status bar's mark, the
+    /// System screen's row and `describe` all read these rather than deriving
+    /// their own — which is how a wired machine came to be shown as offline
+    /// under a Wi-Fi mark, with NetworkManager's connection name beside it.
+    in property <bool> network-online: false;
+    in property <string> network-medium: "";
+    in property <string> network-label: "Network";
+    in property <string> network-detail: "";
     in property <int> pending-count: 0;
     in property <string> greeting-text: "Hello";
 
@@ -606,8 +618,10 @@ export component App inherits Window {
     in property <float> sys-memory-usage: 0.0;
     in property <string> sys-memory-text: "0 / 0 MB";
     in property <string> sys-uptime-text: "";
+    /// The SSID, when there is one. Empty on anything not wireless: this
+    /// carried NetworkManager's primary connection name, so Settings > Network
+    /// headed "Wired connection 1" with "Wi-Fi".
     in property <string> sys-wifi-ssid: "";
-    in property <int> sys-wifi-signal: 0;
     in property <[ProcessData]> sys-top-processes: [];
     in property <[float]> sys-cpu-history: [];
     in property <[float]> sys-memory-history: [];
@@ -616,7 +630,7 @@ export component App inherits Window {
     in property <float> sys-memory-cached-percent: 0.0;
     in property <string> sys-memory-used-text: "";
     in property <string> sys-memory-cached-text: "";
-    in property <string> sys-memory-total-text: "";
+    in property <string> sys-memory-free-text: "";
     // Swap
     in property <float> sys-swap-usage: 0.0;
     in property <string> sys-swap-text: "";
@@ -1334,6 +1348,7 @@ export component App inherits Window {
             battery-level: root.battery-level;
             battery-charging: root.battery-charging;
             wifi-connected: root.wifi-connected;
+            wifi-ssid: root.sys-wifi-ssid;
             pending-count: root.pending-count;
             settings-incognito-mode: root.settings-incognito-mode;
             dnd-mode: root.dnd-mode;
@@ -1646,8 +1661,9 @@ export component App inherits Window {
                 max-tokens: root.settings-max-tokens;
                 tool-permission: root.settings-tool-permission;
                 auto-lock-secs: root.settings-auto-lock-secs;
-                wifi-connected: root.wifi-connected;
-                wifi-ssid: root.sys-wifi-ssid;
+                network-online: root.network-online;
+                network-label: root.network-label;
+                network-detail: root.network-detail;
                 ip-address: root.settings-ip-address;
                 display-resolution: root.settings-display-resolution;
                 llm-backend: root.settings-llm-backend;
@@ -1983,9 +1999,9 @@ export component App inherits Window {
                 battery-available: root.battery-available;
                 battery-level: root.battery-level;
                 battery-charging: root.battery-charging;
-                wifi-connected: root.wifi-connected;
-                wifi-ssid: root.sys-wifi-ssid;
-                wifi-signal: root.sys-wifi-signal;
+                network-online: root.network-online;
+                network-label: root.network-label;
+                network-detail: root.network-detail;
                 uptime-text: root.sys-uptime-text;
                 top-processes: root.sys-top-processes;
                 cpu-history: root.sys-cpu-history;
@@ -1994,7 +2010,7 @@ export component App inherits Window {
                 memory-cached-percent: root.sys-memory-cached-percent;
                 memory-used-text: root.sys-memory-used-text;
                 memory-cached-text: root.sys-memory-cached-text;
-                memory-total-text: root.sys-memory-total-text;
+                memory-free-text: root.sys-memory-free-text;
                 swap-usage: root.sys-swap-usage;
                 swap-text: root.sys-swap-text;
                 back-pressed => {
@@ -2580,7 +2596,8 @@ export component App inherits Window {
             battery-available: root.battery-available;
             battery-level: root.battery-level;
             battery-charging: root.battery-charging;
-            wifi-connected: root.wifi-connected;
+            network-online: root.network-online;
+            network-medium: root.network-medium;
             pending-count: root.pending-count;
             whisper-hint-count: root.whisper-hint-count;
             incognito-enabled: root.settings-incognito-mode;

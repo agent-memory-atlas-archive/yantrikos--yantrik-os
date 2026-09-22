@@ -51,6 +51,9 @@ export component DesktopScreen inherits Rectangle {
     in property <int> battery-level: 100;
     in property <bool> battery-charging: false;
     in property <bool> wifi-connected: false;
+    /// The SSID, for the Quick Settings tile. It stood as `wifi-ssid: ""` at
+    /// the QuickSettings below, so the tile never had a network to name.
+    in property <string> wifi-ssid: "";
     in property <int> pending-count: 0;
     in property <bool> settings-incognito-mode: false;
     in property <bool> dnd-mode: false;
@@ -933,7 +936,7 @@ export component DesktopScreen inherits Rectangle {
         battery-level: root.battery-level;
         battery-charging: root.battery-charging;
         wifi-connected: root.wifi-connected;
-        wifi-ssid: "";
+        wifi-ssid: root.wifi-ssid;
         brightness-level <=> root.brightness-level;
         volume-level <=> root.volume-level;
         toggle-wifi => { root.toggle-wifi(); }

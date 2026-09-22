@@ -132,7 +132,11 @@ fn populate_about_info(ui_weak: &slint::Weak<App>) {
 }
 
 /// The uptime field: /proc/uptime, formatted for display.
-fn read_uptime() -> String {
+///
+/// Shared with the System screen's uptime row, which had a second copy of this
+/// that dropped the minutes — so About said "3d 1h 2m" where System said
+/// "3d 1h" about the same boot.
+pub(crate) fn read_uptime() -> String {
     std::fs::read_to_string("/proc/uptime")
         .ok()
         .and_then(|u| parse_uptime_secs(&u))
@@ -149,7 +153,7 @@ fn parse_uptime_secs(proc_uptime: &str) -> Option<u64> {
         .map(|secs| secs as u64)
 }
 
-fn format_uptime(total_secs: u64) -> String {
+pub(crate) fn format_uptime(total_secs: u64) -> String {
     let days = total_secs / 86400;
     let hours = (total_secs % 86400) / 3600;
     let mins = (total_secs % 3600) / 60;
@@ -186,5 +190,8 @@ mod tests {
         assert_eq!(format_uptime(3600), "1h 0m");
         assert_eq!(format_uptime(35374), "9h 49m");
         assert_eq!(format_uptime(90061), "1d 1h 1m");
+        // Three days into the same boot, read off the machine again while the
+        // System screen was showing "3d 1h" for it from its own formatter.
+        assert_eq!(format_uptime(262922), "3d 1h 2m");
     }
 }

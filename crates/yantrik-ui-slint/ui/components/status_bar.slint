@@ -25,7 +25,11 @@ export component StatusBar inherits Rectangle {
     in property <bool> battery-available: false;
     in property <int> battery-level: 100;
     in property <bool> battery-charging: false;
-    in property <bool> wifi-connected: false;
+    /// Whether anything is up, and over what. Not `wifi-connected`: the bar's
+    /// one network mark meant "am I online", and drawing it from the wireless
+    /// flag dimmed it on a wired machine that was online the whole time.
+    in property <bool> network-online: false;
+    in property <string> network-medium: "";
     in property <int> pending-count: 0;
     in property <int> whisper-hint-count: 0;
     // Unread notifications, from the one notification store. The status bar is the only thing
@@ -506,9 +510,13 @@ export component StatusBar inherits Rectangle {
                     spacing: Theme.sp-2;
 
                     Icon {
-                        commands: Icons.wifi;
+                        // The mark says which medium as well as whether: the
+                        // wireless arcs are wrong on a machine with no radio,
+                        // and the Network Manager window already draws the
+                        // globe for a wired connection.
+                        commands: root.network-medium == "wifi" ? Icons.wifi : Icons.network;
                         size: 13px;
-                        tint: root.wifi-connected ? Theme.color-success : Theme.text-dim;
+                        tint: root.network-online ? Theme.color-success : Theme.text-dim;
                         y: (parent.height - self.height) / 2;
                     }
 

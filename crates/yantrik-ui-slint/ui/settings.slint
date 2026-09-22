@@ -205,9 +205,13 @@ export component SettingsScreen inherits Rectangle {
     callback toggle-incognito-mode();
     callback toggle-dnd-mode();
 
-    // Network
-    in property <bool> wifi-connected: false;
-    in property <string> wifi-ssid: "";
+    // Network — the reading from the network service, the same one the status
+    // bar's mark and the System screen's row are drawn from. This row used to
+    // head NetworkManager's "Wired connection 1" with "Wi-Fi", because all it
+    // had was the wireless flag and a connection name it took for an SSID.
+    in property <bool> network-online: false;
+    in property <string> network-label: "Network";
+    in property <string> network-detail: "";
     in property <string> ip-address: "";
 
     // Display
@@ -2906,7 +2910,7 @@ SettingRow{label:"Clear search";description:"Return to the complete settings lis
                         Text{text:"Network";color:Theme.text-primary;font-size:28px;font-weight:600;}
                         Text{text:"Connection information from this device.";color:Theme.text-secondary;font-size:13px;wrap:word-wrap;}
 
-SettingRow{label:root.wifi-ssid!=""?"Wi-Fi":"Connection";description:root.wifi-ssid!=""?root.wifi-ssid:"Wired and virtual adapters may not report a Wi-Fi name.";value:root.wifi-connected?"Connected":root.ip-address!=""?"Address assigned":"Not reported";interactive:false;}
+SettingRow{label:root.network-label;description:root.network-detail!=""?root.network-detail:"What this machine is connected over, as the network service reports it.";value:root.network-online?"Connected":"Offline";interactive:false;}
 SettingRow{label:"IP address";description:"The address reported by the system monitor.";value:root.ip-address!=""?root.ip-address:"Not available";interactive:false;}
 SettingRow{label:"Network manager";description:"Open the native app to inspect and manage connections.";value:"Open";activated=>{root.open-network();}}
 

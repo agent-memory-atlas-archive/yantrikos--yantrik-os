@@ -10,16 +10,31 @@ use slint::{ComponentHandle, Timer, TimerMode};
 
 use slint::{ModelRc, VecModel};
 
+// The network service's own shape, rather than hand-read JSON keys: the
+// contract is what keeps the two ends of this wire from drifting.
+use yantrik_ipc_contracts::network::{method as network_method, NetworkStatus};
+
 use crate::app_context::{self, AppContext};
 use crate::{cards, features, lock, system_context, windows, App, ProcessData, WindowItem};
+
+/// What a row shows when the reading behind it has not been taken yet. A
+/// number nobody has measured is worse than a blank, and a blank is what #50
+/// was about, so it is an em dash.
+const EM_DASH: &str = "\u{2014}";
 
 /// Maximum number of data points in the chart history ring buffer.
 const CHART_HISTORY_LEN: usize = 60;
 
-/// How often the WiFi flag is re-derived from the network service. The service
-/// answers from live interface state; 15s matches the observer's own network
-/// poll cadence and keeps an RPC out of most 3s ticks.
-const WIFI_REFRESH: Duration = Duration::from_secs(15);
+/// How often the network reading is re-asked of the network service. The
+/// service answers from live interface state; 15s matches the observer's own
+/// network poll cadence and keeps an RPC out of most 3s ticks.
+const NETWORK_REFRESH: Duration = Duration::from_secs(15);
+
+/// How long to leave a service that did not answer alone. The call blocks the
+/// thread that draws the screen for up to the client's timeout, so a wedged
+/// service is re-asked once a minute rather than four times; the observer's
+/// flag carries the reading in the meantime.
+const NETWORK_RETRY: Duration = Duration::from_secs(60);
 
 /// Wire the system poll timer.
 pub fn wire(ui: &App, ctx: &AppContext) {
@@ -40,8 +55,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     let event_dedup: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
     const DEDUP_WINDOW: Duration = Duration::from_secs(300); // 5 minutes
 
-    // WiFi flag cache: when the network service was last asked, and its answer.
-    let wifi_cache: RefCell<Option<(Instant, bool)>> = RefCell::new(None);
+    // Network cache: when the network service was last asked, and what it said.
+    // `None` inside the option is the service failing to answer, which is a
+    // different thing from not having asked yet.
+    let net_cache: RefCell<Option<(Instant, Option<NetworkStatus>)>> = RefCell::new(None);
 
     let timer = Timer::default();
     timer.start(TimerMode::Repeated, Duration::from_secs(3), move || {
@@ -49,6 +66,39 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         if let Some(ui) = ui_weak.upgrade() {
             let target = if ui.get_focus_mode() { 0.1 } else { 1.0 };
             scorer.borrow_mut().set_interruptibility(target);
+        }
+
+        // 0b. Publish the network reading.
+        //
+        // Before the early return below, and not inside the status-bar block
+        // further down, because the status bar is drawn above every screen
+        // while that block runs only on ticks where the observer happened to
+        // have something to say. The service is asked at its own cadence; the
+        // observer's flag is the fallback for when it cannot be reached.
+        if let Some(ui) = ui_weak.upgrade() {
+            // Read the cache out before the refresh arm below can write to it:
+            // a borrow guard held across that would make borrow_mut panic.
+            let cached = net_cache.borrow().as_ref().and_then(|(asked, answer)| {
+                let window = if answer.is_some() { NETWORK_REFRESH } else { NETWORK_RETRY };
+                (asked.elapsed() < window).then(|| answer.clone())
+            });
+            let answer = match cached {
+                Some(answer) => answer,
+                None => {
+                    let fresh = ask_network_service();
+                    *net_cache.borrow_mut() = Some((Instant::now(), fresh.clone()));
+                    fresh
+                }
+            };
+            let readout = {
+                let snap = snapshot.borrow();
+                network_readout(
+                    answer.as_ref(),
+                    snap.network_connected,
+                    snap.network_ssid.as_deref(),
+                )
+            };
+            publish_network(&ui, &readout);
         }
 
         // 1. Drain all pending system events
@@ -161,32 +211,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             ui.set_battery_available(snap.battery_available);
             ui.set_battery_level(snap.battery_level as i32);
             ui.set_battery_charging(snap.battery_charging);
-            // The dashboard's WiFi row is a claim about wireless specifically,
-            // but the observer only ever reports that *some* interface is up —
-            // a wired machine with no wireless hardware still sets
-            // network_connected, and the shell repeated that as "WiFi". The
-            // network service is the component that knows the connection type,
-            // so the flag is taken from its answer, re-asked at the service's
-            // own cadence rather than every tick.
-            // Read the cache out before the refresh arm can write to it — a
-            // borrow guard held across the match would make borrow_mut panic.
-            let cached = wifi_cache
-                .borrow()
-                .and_then(|(asked, flag)| (asked.elapsed() < WIFI_REFRESH).then_some(flag));
-            let wifi = match cached {
-                Some(flag) => flag,
-                None => {
-                    let flag = wifi_from_network_service(snap.network_connected);
-                    *wifi_cache.borrow_mut() = Some((Instant::now(), flag));
-                    flag
-                }
-            };
-            ui.set_wifi_connected(wifi);
+            // The network properties are set in step 0b, above every early
+            // return, because the status bar carries them on every screen —
+            // the address among them, when the service reports one. This is
+            // the fallback for when it does not: whatever `ip` lists first.
             if snap.network_connected {
-                if let Some(ssid) = &snap.network_ssid {
-                    ui.set_sys_wifi_ssid(slint::SharedString::from(ssid.as_str()));
-                }
-                // Populate IP address for Settings > Network (only if empty)
                 if ui.get_settings_ip_address().is_empty() {
                     let ip = std::process::Command::new("ip")
                         .args(["-4", "addr", "show", "scope", "global"])
@@ -206,8 +235,6 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                         .unwrap_or_default();
                     ui.set_settings_ip_address(slint::SharedString::from(ip.as_str()));
                 }
-            } else {
-                ui.set_settings_ip_address(slint::SharedString::default());
             }
 
             // Ambient Intelligence: push sentiment, cognitive load, time-of-day
@@ -265,11 +292,10 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             if ui.get_current_screen() == 10 {
                 ui.set_sys_cpu_usage(snap.cpu_usage_percent);
                 update_memory_readouts(&ui, &snap);
-
-                ui.set_sys_wifi_ssid(
-                    snap.network_ssid.clone().unwrap_or_default().into(),
-                );
-                ui.set_sys_wifi_signal(snap.network_signal.unwrap_or(0) as i32);
+                // Uptime moves while the screen is open. Read on entry only,
+                // it was as stale as the About screen's was before #50 — a
+                // minute out after a minute of looking at it.
+                ui.set_sys_uptime_text(super::about::read_uptime().into());
 
                 let procs: Vec<ProcessData> = snap
                     .running_processes
@@ -516,87 +542,308 @@ fn format_bytes(bytes: u64) -> String {
 /// bare labels because the entry path set only the headline figure, and one
 /// function feeding both paths is what keeps them from drifting apart again.
 pub(crate) fn update_memory_readouts(ui: &App, snap: &yantrik_os::SystemSnapshot) {
-    ui.set_sys_memory_usage(snap.memory_usage_percent());
+    let r = memory_readouts(snap);
+    ui.set_sys_memory_usage(r.usage_percent);
+    ui.set_sys_memory_text(r.headline.as_str().into());
+    ui.set_sys_memory_used_percent(r.used_percent);
+    ui.set_sys_memory_cached_percent(r.cached_percent);
+    ui.set_sys_memory_used_text(r.used.as_str().into());
+    ui.set_sys_memory_cached_text(r.cached.as_str().into());
+    ui.set_sys_memory_free_text(r.free.as_str().into());
+    ui.set_sys_swap_usage(r.swap_percent);
+    ui.set_sys_swap_text(r.swap.as_str().into());
+}
 
+/// The numbers the System Dashboard's memory rows show.
+struct MemoryReadouts {
+    usage_percent: f32,
+    headline: String,
+    used: String,
+    cached: String,
+    free: String,
+    used_percent: f32,
+    cached_percent: f32,
+    swap: String,
+    swap_percent: f32,
+}
+
+/// The snapshot's memory figures, formatted.
+///
+/// Every row goes to an em dash when the total is zero, which is the snapshot
+/// before the first `MemoryPressure` event has arrived rather than a machine
+/// with no memory in it. Printing the zeros instead would replace the bare
+/// "Used:" labels of #50 with "Used: 0 B" — a measurement nobody has taken,
+/// rendered as a fact.
+fn memory_readouts(snap: &yantrik_os::SystemSnapshot) -> MemoryReadouts {
     let total = snap.memory_total_bytes;
+    if total == 0 {
+        return MemoryReadouts {
+            usage_percent: 0.0,
+            headline: EM_DASH.to_string(),
+            used: EM_DASH.to_string(),
+            cached: EM_DASH.to_string(),
+            free: EM_DASH.to_string(),
+            used_percent: 0.0,
+            cached_percent: 0.0,
+            swap: EM_DASH.to_string(),
+            swap_percent: 0.0,
+        };
+    }
+
     let used = snap.memory_used_bytes;
     let cached = snap.memory_cached_bytes;
     let free = snap.memory_free_bytes;
-
-    // Overall memory text (used / total)
-    ui.set_sys_memory_text(format!("{} / {}", format_bytes(used), format_bytes(total)).into());
-
-    // Memory breakdown percentages
-    if total > 0 {
-        ui.set_sys_memory_used_percent((used as f64 / total as f64 * 100.0) as f32);
-        ui.set_sys_memory_cached_percent((cached as f64 / total as f64 * 100.0) as f32);
-    }
-    ui.set_sys_memory_used_text(format_bytes(used).into());
-    ui.set_sys_memory_cached_text(format_bytes(cached).into());
-    // "Free" label shows the actual free (not cached) memory
-    ui.set_sys_memory_total_text(format_bytes(free).into());
-
-    // Swap
     let swap_total = snap.swap_total_bytes;
     let swap_used = snap.swap_used_bytes;
-    if swap_total > 0 {
-        ui.set_sys_swap_usage((swap_used as f64 / swap_total as f64 * 100.0) as f32);
-        ui.set_sys_swap_text(
-            format!("{} / {}", format_bytes(swap_used), format_bytes(swap_total)).into(),
-        );
+
+    MemoryReadouts {
+        usage_percent: snap.memory_usage_percent(),
+        headline: format!("{} / {}", format_bytes(used), format_bytes(total)),
+        used: format_bytes(used),
+        cached: format_bytes(cached),
+        // The row is labelled "Free", so it is free memory and not the total.
+        free: format_bytes(free),
+        used_percent: (used as f64 / total as f64 * 100.0) as f32,
+        cached_percent: (cached as f64 / total as f64 * 100.0) as f32,
+        swap: if swap_total > 0 {
+            format!("{} / {}", format_bytes(swap_used), format_bytes(swap_total))
+        } else {
+            // This machine has no swap, which is a fact and not a failure.
+            "none".to_string()
+        },
+        swap_percent: if swap_total > 0 {
+            (swap_used as f64 / swap_total as f64 * 100.0) as f32
+        } else {
+            0.0
+        },
+    }
+}
+
+/// What the shell knows about being online, and over what.
+///
+/// One reading behind the status bar's indicator, the System screen's network
+/// row, Settings > Network and `describe`. Each used to derive its own, which
+/// is how the shell came to draw a Wi-Fi mark over NetworkManager's "Wired
+/// connection 1" on a machine with no wireless device in it.
+#[derive(Debug, Clone, PartialEq)]
+struct NetworkReadout {
+    /// Something is up and carrying traffic. True on a wired machine — this is
+    /// what the status bar's indicator means, and what a mind reads to decide
+    /// whether it can fetch anything.
+    online: bool,
+    /// The medium in the service's own word: `wifi`, `ethernet`, `vpn`,
+    /// `bridge`, `other` — or empty, which is the service having named none.
+    /// Only `wifi` is wireless.
+    medium: String,
+    /// The label the network row stands under.
+    label: String,
+    /// What stands beside it: the SSID, the connection's name, the address.
+    detail: String,
+    /// The SSID, and only ever an SSID — empty on anything not wireless.
+    ssid: String,
+    /// The address the service reports for the connection that is up.
+    ip: String,
+}
+
+/// Derive the reading from the network service's answer, falling back to the
+/// observer when the service cannot be reached.
+///
+/// `observer_connected` and `observer_connection` are the observer's
+/// `NetworkChanged`: whether *some* interface is up, and the name
+/// NetworkManager gives the primary connection. That name is the connection's,
+/// not an SSID — on the wired test machine it is "Wired connection 1" — so it
+/// is used as a name and never as evidence of wireless.
+fn network_readout(
+    service: Option<&NetworkStatus>,
+    observer_connected: bool,
+    observer_connection: Option<&str>,
+) -> NetworkReadout {
+    let Some(status) = service else {
+        // The service is the only component that knows the medium, so with it
+        // unreachable nothing here names one. The observer still knows whether
+        // an interface is up, which is all "online" claims.
+        return NetworkReadout {
+            online: observer_connected,
+            medium: String::new(),
+            label: "Network".to_string(),
+            detail: if observer_connected {
+                observer_connection.unwrap_or("Connected").to_string()
+            } else {
+                "Offline".to_string()
+            },
+            ssid: String::new(),
+            ip: String::new(),
+        };
+    };
+
+    let medium = status.conn_type.trim().to_ascii_lowercase();
+    let label = match medium.as_str() {
+        "wifi" => "Wi-Fi",
+        "ethernet" => "Ethernet",
+        "vpn" => "VPN",
+        "bridge" => "Bridge",
+        _ => "Network",
+    };
+    let ssid = if medium == "wifi" {
+        status.ssid.clone().unwrap_or_default()
     } else {
-        ui.set_sys_swap_usage(0.0);
-        ui.set_sys_swap_text("N/A".into());
+        String::new()
+    };
+    let ip = status.ip_address.clone().unwrap_or_default();
+    let detail = if !status.connected {
+        "Offline".to_string()
+    } else {
+        [ssid.as_str(), observer_connection.unwrap_or(""), ip.as_str()]
+            .into_iter()
+            .find(|candidate| !candidate.is_empty())
+            .unwrap_or("Connected")
+            .to_string()
+    };
+
+    NetworkReadout {
+        online: status.connected,
+        medium,
+        label: label.to_string(),
+        detail,
+        ssid,
+        ip,
     }
 }
 
-/// Ask the network service whether the connection that is up is a wireless one.
-/// Offline is never wifi, so `connected` gates the question. If the service
-/// cannot be reached the answer is false — an unverifiable "WiFi" claim is
-/// exactly the falsehood this replaced.
-fn wifi_from_network_service(connected: bool) -> bool {
-    if !connected {
-        return false;
-    }
+/// Ask the network service what is up. `None` is "could not be reached",
+/// which is not the same answer as "nothing is connected".
+fn ask_network_service() -> Option<NetworkStatus> {
     yantrik_ipc_transport::SyncRpcClient::for_service("network")
-        .call("network.status", serde_json::json!({}))
+        .call_typed(network_method::STATUS, &serde_json::json!({}))
         .ok()
-        .map(|status| {
-            is_wifi(
-                status["connected"].as_bool().unwrap_or(false),
-                status["type"].as_str().unwrap_or(""),
-            )
-        })
-        .unwrap_or(false)
 }
 
-/// The shell's wifi flag, derived from the network service's answer.
-fn is_wifi(connected: bool, conn_type: &str) -> bool {
-    connected && conn_type == "wifi"
+/// Push the reading into every property that states it.
+///
+/// Every write is guarded by a comparison. This runs on every 3s tick, a
+/// Slint property set marks its dependents dirty whether or not the value
+/// moved, and the status bar's mark depends on these — so writing
+/// unconditionally would repaint an idle desktop every three seconds.
+fn publish_network(ui: &App, r: &NetworkReadout) {
+    if ui.get_network_online() != r.online {
+        ui.set_network_online(r.online);
+    }
+    if ui.get_network_medium().as_str() != r.medium {
+        ui.set_network_medium(r.medium.as_str().into());
+    }
+    if ui.get_network_label().as_str() != r.label {
+        ui.set_network_label(r.label.as_str().into());
+    }
+    if ui.get_network_detail().as_str() != r.detail {
+        ui.set_network_detail(r.detail.as_str().into());
+    }
+    // Wireless specifically: the Quick Settings tile, which is a radio.
+    let wireless = r.online && r.medium == "wifi";
+    if ui.get_wifi_connected() != wireless {
+        ui.set_wifi_connected(wireless);
+    }
+    if ui.get_sys_wifi_ssid().as_str() != r.ssid {
+        ui.set_sys_wifi_ssid(r.ssid.as_str().into());
+    }
+    // The address Settings > Network shows. The service reports it for the
+    // connection that is actually up; the `ip` command the poll falls back on
+    // takes the first global address it finds, which on a machine with a VPN
+    // or a container bridge is not necessarily this one. One owner, so that
+    // nothing goes on showing an address after the connection has gone.
+    if !r.online {
+        ui.set_settings_ip_address(Default::default());
+    } else if !r.ip.is_empty() {
+        ui.set_settings_ip_address(r.ip.as_str().into());
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_wired_connection_is_not_wifi() {
-        // The live machine: network.status answers connected=true,
-        // type="ethernet", ssid=null — and the System screen used to say
-        // "WiFi: Connected" anyway, because the flag came from "some
-        // interface is up".
-        assert!(!is_wifi(true, "ethernet"));
-        assert!(!is_wifi(false, "none"));
-        // A reply missing the type is not a licence to claim wireless.
-        assert!(!is_wifi(true, ""));
+    /// The live machine's answer, captured from `yos describe network`:
+    /// online via ethernet at 192.168.4.44, ssid null, no wireless adapter.
+    fn wired_machine() -> NetworkStatus {
+        NetworkStatus {
+            connected: true,
+            conn_type: "ethernet".to_string(),
+            ssid: None,
+            ip_address: Some("192.168.4.44".to_string()),
+        }
     }
 
     #[test]
-    fn a_wireless_connection_is_wifi() {
-        assert!(is_wifi(true, "wifi"));
-        // The other connection types the service reports are not wifi either.
-        assert!(!is_wifi(true, "vpn"));
-        assert!(!is_wifi(true, "bridge"));
+    fn a_wired_machine_is_online_and_is_not_wifi() {
+        let r = network_readout(Some(&wired_machine()), true, Some("Wired connection 1"));
+        // The whole of #50's second screen: "WiFi" stood over NetworkManager's
+        // connection name on a machine with no wireless device.
+        assert_eq!(r.label, "Ethernet");
+        assert_eq!(r.detail, "Wired connection 1");
+        assert_eq!(r.ssid, "");
+        assert_eq!(r.medium, "ethernet");
+        // And it is online, which is what the status bar's mark means. Deriving
+        // that from the wifi flag drew a wired machine as offline.
+        assert!(r.online);
+        assert_eq!(r.ip, "192.168.4.44");
+    }
+
+    #[test]
+    fn a_wireless_machine_shows_its_ssid() {
+        let status = NetworkStatus {
+            connected: true,
+            conn_type: "wifi".to_string(),
+            ssid: Some("Wombat".to_string()),
+            ip_address: Some("10.0.0.8".to_string()),
+        };
+        let r = network_readout(Some(&status), true, Some("Wombat"));
+        assert_eq!(r.label, "Wi-Fi");
+        assert_eq!(r.detail, "Wombat");
+        assert_eq!(r.ssid, "Wombat");
+        assert!(r.online);
+    }
+
+    #[test]
+    fn a_connection_with_no_name_falls_back_to_its_address() {
+        let mut status = wired_machine();
+        status.ssid = None;
+        let r = network_readout(Some(&status), true, None);
+        assert_eq!(r.detail, "192.168.4.44");
+    }
+
+    #[test]
+    fn nothing_up_says_so() {
+        // The service's own answer when no interface is carrying anything:
+        // connected false, type "none".
+        let status = NetworkStatus {
+            connected: false,
+            conn_type: "none".to_string(),
+            ssid: None,
+            ip_address: None,
+        };
+        let r = network_readout(Some(&status), false, None);
+        assert!(!r.online);
+        assert_eq!(r.label, "Network");
+        assert_eq!(r.detail, "Offline");
+        // A name left over from the last connection is not evidence of one.
+        let r = network_readout(Some(&status), true, Some("Wired connection 1"));
+        assert!(!r.online);
+        assert_eq!(r.detail, "Offline");
+    }
+
+    #[test]
+    fn an_unreachable_service_claims_no_medium() {
+        // Whether an interface is up is the observer's to answer. What it is
+        // carrying is not, so an unverifiable "Wi-Fi" is not printed.
+        let r = network_readout(None, true, Some("Wired connection 1"));
+        assert!(r.online);
+        assert_eq!(r.medium, "");
+        assert_eq!(r.label, "Network");
+        assert_eq!(r.detail, "Wired connection 1");
+        assert_eq!(r.ssid, "");
+
+        let r = network_readout(None, false, None);
+        assert!(!r.online);
+        assert_eq!(r.detail, "Offline");
     }
 
     #[test]
@@ -605,5 +852,42 @@ mod tests {
         assert_eq!(format_bytes(1023), "1023 B");
         assert_eq!(format_bytes(2 * 1024 * 1024), "2 MB");
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    #[test]
+    fn memory_rows_with_no_reading_yet_are_dashes() {
+        // The snapshot before the first MemoryPressure event. The rows read
+        // "Used:" with nothing beside them until #50; they must not now read
+        // "Used: 0 B" on a machine with 7.8 GB in it.
+        let r = memory_readouts(&yantrik_os::SystemSnapshot::default());
+        assert_eq!(r.used, EM_DASH);
+        assert_eq!(r.cached, EM_DASH);
+        assert_eq!(r.free, EM_DASH);
+        assert_eq!(r.headline, EM_DASH);
+        assert_eq!(r.used_percent, 0.0);
+    }
+
+    #[test]
+    fn memory_rows_state_the_breakdown() {
+        // The live machine: 7.8 GB total, 1.7 GB used.
+        const GB: u64 = 1024 * 1024 * 1024;
+        let snap = yantrik_os::SystemSnapshot {
+            memory_total_bytes: 8 * GB,
+            memory_used_bytes: 2 * GB,
+            memory_cached_bytes: 1 * GB,
+            memory_free_bytes: 5 * GB,
+            swap_total_bytes: 0,
+            ..Default::default()
+        };
+        let r = memory_readouts(&snap);
+        assert_eq!(r.headline, "2.0 GB / 8.0 GB");
+        assert_eq!(r.used, "2.0 GB");
+        assert_eq!(r.cached, "1.0 GB");
+        assert_eq!(r.free, "5.0 GB");
+        assert_eq!(r.used_percent, 25.0);
+        assert_eq!(r.cached_percent, 12.5);
+        // No swap on this machine, which is not a reading that failed.
+        assert_eq!(r.swap, "none");
+        assert_eq!(r.swap_percent, 0.0);
     }
 }

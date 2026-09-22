@@ -447,6 +447,20 @@ pub fn publish(
                 .with("disk", ui.get_bar_disk_text().to_string())
                 .with("disk_percent", ui.get_bar_disk_percent())
                 .with("wifi", ui.get_wifi_connected())
+                // `wifi` alone was the whole of what the desktop said about
+                // its network, and on the wired test machine it is false —
+                // so a mind reading this concluded there was no network on a
+                // machine that was online the entire time. What is up, and
+                // over what, is the network service's answer, as the status
+                // bar and the System screen show it.
+                .with(
+                    "network",
+                    serde_json::json!({
+                        "online": ui.get_network_online(),
+                        "type": ui.get_network_medium().to_string(),
+                        "connection": ui.get_network_detail().to_string(),
+                    }),
+                )
                 .with(
                     "battery",
                     if ui.get_battery_available() {
