@@ -73,6 +73,20 @@ class _Chat(BaseHTTPRequestHandler):
             ]
         if model == "echo-key":
             return [frame({"content": "your header was %s" % auth}), DONE]
+        if model == "fills":
+            # A model asked for the arguments of one action, which writes the arguments and
+            # also writes an app and an action of its own — what a provider that reads the
+            # pinned schema as a hint does. See test_deepseek_decider.
+            if nth == 1:
+                return [
+                    frame({"tool_calls": [{"index": 0, "id": "call_pin", "type": "function",
+                                           "function": {"name": "os_act", "arguments": ""}}]}),
+                    frame({"tool_calls": [{"index": 0, "function": {
+                        "arguments": '{"app": "notes", "action": "new_note", '
+                                     '"args": {"title": "Dentist", "date": "2026-09-25"}}'}}]}),
+                    DONE,
+                ]
+            return [frame({"content": "Put it on the calendar."}), DONE]
         if model == "loop":
             return [
                 frame({"tool_calls": [{"index": 0, "id": "call_%d" % nth, "type": "function",

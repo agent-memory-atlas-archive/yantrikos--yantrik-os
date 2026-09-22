@@ -167,6 +167,40 @@ What it assumes, and what that cost:
   tool-calling loop is. The README says so in those words, and the config file is the person's
   rather than the machine's.
 
+It is also where the **decider** is, because this is the harness whose loop is small enough to
+see the seam in. A `decider` block in `~/.config/yantrik/deepseek.json` names a decision model —
+Jev (`POST /v1/systemone`, TypeSafe), Kev (the same wire, served locally) or a `/v1/decide`
+endpoint — and each step it is asked, in one request, whether the request is finished, which app
+the next step uses, and which of that app's actions. Above a confidence gate the chat model is
+then given `os_act` as its only tool, with `tool_choice` on it and the app and action already
+fixed in the schema, so all it writes is the arguments. Below the gate the generative tool call
+happens exactly as before and the disagreement is logged. No block means none of it runs, and
+the whole thing is tested offline against a fake System One server.
+
+**It picks; it does not write.** That line is the design and not a caveat. The decider chooses
+among things the desktop already published — an app in `os_apps`, an action in `os_describe` —
+and answers one yes/no question; every word that reaches an app is still the generator's. Four
+things that shape carries with it:
+
+- **A decision model can only choose an option it was given**, so the option list has to be
+  complete or not offered at all. Before `os_apps` has answered there is nothing to choose
+  between; an `os_describe` answer that was too long to keep whole is a partial action list, and
+  a partial list is worse than none, because it does not make the answer uncertain — it makes it
+  confidently wrong. `none of these` is always among the apps, which is what turns "nothing here
+  applies" into an answer rather than a wrong app.
+- **Questions in one request cannot read each other, and the id is not sent to the model.** So
+  each question's instructions carry their whole meaning, and the speculative ones say so —
+  "suppose the next step is taken with `calendar`, whether or not another app would be a better
+  choice; that is decided elsewhere".
+- **A refusal is not a thing to decide around.** After a `REFUSED` the decider is stood down for
+  the rest of that question. What a refusal means is in the system prompt, which the generator
+  reads and the decider is not shown, and the wrong reading of it — another route to the same
+  thing — is exactly what a fast pick would produce.
+- **The gate is the whole of the protection, and it is a probability rather than a measured
+  accuracy rate.** A pinned step is a step the model is forced to take, so the only honest thing
+  to do with the number is log it: one line per step with the pick, the probability, the latency,
+  whether the gate held, and what the generator picked on every step where both of them did.
+
 **OpenClaw** (`harnesses/openclaw`) is the local-first personal agent: a gateway daemon on
 127.0.0.1, a primary agent that spawns sub-agents, its own channels, and persistent memory. It is
 the only one attached with `memory=true` and the only one whose tools this repo does not carry —
@@ -205,7 +239,7 @@ All three ship as source in the image and none is started: a machine that has no
 never talks to a provider. `harnesses/lib/yantrik_harness.py` is the half they share — attach,
 poll, heartbeat, `/stop`, `/new`, the MCP client, and one `_close` that every path out of a turn
 goes through — and `harnesses/tests` runs all of it offline against a fake desktop, a fake
-bridge, a fake chat API, a fake `pi` and a fake OpenClaw gateway.
+bridge, a fake chat API, a fake System One endpoint, a fake `pi` and a fake OpenClaw gateway.
 
 ## What is not here yet
 
