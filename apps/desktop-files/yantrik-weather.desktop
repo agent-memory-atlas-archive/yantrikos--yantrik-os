@@ -3,6 +3,7 @@ Type=Application
 Name=Weather
 Comment=Weather forecasts, air quality, and alerts
 Exec=/opt/yantrik/bin/yantrik-weather
-Icon=yantrik-weather
+# One mark for now: brand/yantrik-mark.svg, installed as hicolor `yantrik`.
+Icon=yantrik
 Categories=Utility;
 Keywords=weather;forecast;temperature;

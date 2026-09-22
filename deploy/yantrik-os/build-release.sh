@@ -249,6 +249,29 @@ done
   || fail "no .desktop files to ship — the launcher would not list this OS's own apps"
 echo "   + $(ls "$ROOT/share/applications" | wc -l) application entries"
 
+# The icon those entries name.
+#
+# Every one of them says `Icon=yantrik`, and until this the machine had no file by that name
+# anywhere on the icon path — so sixteen correct .desktop entries drew sixteen blank tiles.
+# An Icon= key that resolves to nothing does not fall back to a generic icon; it falls back
+# to a hole.
+#
+# It goes under $ROOT/share/icons, beside share/applications, because the session puts
+# /opt/yantrik/share on XDG_DATA_DIRS and the freedesktop icon lookup walks
+# $XDG_DATA_DIRS/icons/hicolor/<size>/apps/<name>. Same directory, same mechanism, no root
+# and nothing written into /usr. The SVG is what a scalable theme wants; the three PNGs are
+# for the toolkits that will not read one.
+ICONS="$ROOT/share/icons/hicolor"
+mkdir -p "$ICONS/scalable/apps"
+cp "$PROJECT_ROOT/brand/yantrik-mark.svg" "$ICONS/scalable/apps/yantrik.svg" \
+  || fail "brand/yantrik-mark.svg missing — the apps would ship with an Icon= that resolves to nothing"
+for px in 48 128 256; do
+  mkdir -p "$ICONS/${px}x${px}/apps"
+  cp "$PROJECT_ROOT/brand/yantrik-mark-${px}.png" "$ICONS/${px}x${px}/apps/yantrik.png" \
+    || fail "brand/yantrik-mark-${px}.png missing — run: python3 brand/render.py"
+done
+echo "   + app icon (svg + 48/128/256) as hicolor 'yantrik'"
+
 echo "   + labwc theme and $(ls "$ROOT/share/fonts" | wc -l) fonts"
 
 # ── Nothing in this bundle may have CRLF line endings ──

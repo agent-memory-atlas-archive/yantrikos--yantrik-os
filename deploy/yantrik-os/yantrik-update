@@ -533,6 +533,24 @@ safely. Old backups live in $BACKUP_DIR."
       cp -a "$root/share/." "$SHARE_DIR/" || fail "could not install share/"
     fi
     info "installed $(find "$SHARE_DIR" -type f | wc -l) shared files"
+
+    # ── The app icon ──
+    #
+    # There is deliberately no separate copy step for it. It ships inside share/ as
+    # share/icons/hicolor/{scalable,48x48,128x128,256x256}/apps/yantrik.{svg,png}, the mirror
+    # above carries it, and `Icon=yantrik` in all sixteen .desktop entries resolves through
+    # XDG_DATA_DIRS — which yantrik-session puts $SHARE_DIR on. Said out loud here because
+    # the obvious next move, when someone goes looking for where icons get installed, is to
+    # add a second copy into /usr/share and end up with two that can disagree.
+    #
+    # Checked rather than assumed: an update that quietly drops the icon turns every tile in
+    # the launcher blank, and the .desktop entries would still be perfectly correct.
+    if [ -f "$SHARE_DIR/icons/hicolor/scalable/apps/yantrik.svg" ]; then
+      info "app icon in place (hicolor 'yantrik')"
+    else
+      warn "this build ships no app icon — launcher tiles will be blank."
+      warn "  the release is built without it: see build-release.sh and brand/render.py"
+    fi
   fi
 
   # Record the new build so `check` can prove currency next time.

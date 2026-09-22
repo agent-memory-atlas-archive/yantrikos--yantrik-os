@@ -15,6 +15,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
+import { YantrikMark } from "yantrik_mark.slint";
 
 export component StatusBar inherits Rectangle {
     in property <string> clock-text: "00:00";
@@ -87,6 +88,29 @@ export component StatusBar inherits Rectangle {
             horizontal-stretch: 1;
             spacing: Theme.sp-3;
             alignment: start;
+
+            // ── The mark ──
+            //
+            // The bar said "Yantrik" in 14px semibold beside a 6px dot, and that was the whole
+            // of the brand on the one surface drawn over every screen this OS has. The mark
+            // goes first, at 20px in a 32px bar, which is where the eye starts on a status bar
+            // and where every other desktop puts the thing that names the machine.
+            //
+            // Order is mark, dot, word — not mark, word, dot — because the dot is the
+            // companion's state and it belongs against the name it is the state OF, exactly
+            // where it already was. Nothing about the dot changes: same size, same colours,
+            // same 24px TouchArea opening the anchor. Reading "Yantrik" now costs one glyph
+            // less of work, because the shape in front of it already said it.
+            //
+            // Cost to the layout: ~32px (mark + one sp-3) added to the left zone. All three
+            // zones carry horizontal-stretch: 1, so the centre lane is positioned by the
+            // stretch and not by the left zone's content — it does not move. The left zone
+            // itself only ever held a dot, a word and an optional project chip, so there is
+            // room at every width the bar supports.
+            YantrikMark {
+                mark-size: 20px;
+                y: (parent.height - self.height) / 2;
+            }
 
             // AI status dot — 6px, state-coloured; the only thing on the bar that ever moves
             TouchArea {

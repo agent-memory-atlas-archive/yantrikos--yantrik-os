@@ -3,6 +3,7 @@
 // Authenticates via PAM, then transitions to desktop.
 
 import { Theme } from "theme.slint";
+import { YantrikMark } from "components/yantrik_mark.slint";
 
 export component LoginScreen inherits Rectangle {
     background: Theme.bg-deep;
@@ -101,34 +102,25 @@ export component LoginScreen inherits Rectangle {
 
         Rectangle { height: Theme.sp-5; }
 
-        // Orb
+        // ── The mark ──
+        //
+        // This was a hand-rolled pair of cyan circles — a 64px glow with a 32px dot breathing
+        // inside it — labelled "Orb" and being neither. It was not the product mark, which is
+        // the dark sphere with the lit rim and the Y; and it was not components/orb.slint
+        // either, which is the companion's presence and says something (it pulses while the
+        // mind thinks, brightens while it speaks). It was a third face, on the screen a person
+        // sees more often than any other, meaning nothing.
+        //
+        // It is the mark now. The breathing stays, but it is on the mark's OPACITY only: the
+        // shape never changes, which is the one thing a logo has to promise, and the screen
+        // keeps the life it had. The real Orb stays where it belongs — lock.slint and
+        // onboarding.slint, where it is a companion presence rather than a logo, and where a
+        // shape that changes with the machine's state is the point.
         HorizontalLayout {
             alignment: center;
-            Rectangle {
-                width: 80px;
-                height: 80px;
-
-                // Outer glow
-                Rectangle {
-                    width: 64px;
-                    height: 64px;
-                    border-radius: 32px;
-                    background: Theme.cyan.transparentize(80%);
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    opacity: 0.6 + 0.3 * sin(bg-phase * 6.2832 * 1rad);
-
-                    // Inner orb
-                    Rectangle {
-                        width: 32px;
-                        height: 32px;
-                        border-radius: 16px;
-                        background: Theme.cyan;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        opacity: 0.9;
-                    }
-                }
+            YantrikMark {
+                mark-size: 80px;
+                opacity: 0.82 + 0.18 * sin(bg-phase * 6.2832 * 1rad);
             }
         }
 
