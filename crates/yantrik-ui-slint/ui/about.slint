@@ -81,7 +81,9 @@ export component AboutScreen inherits Rectangle {
     in property <string> ram-total: "";
     in property <string> disk-info: "";
     in property <string> uptime-text: "";
-    in property <string> version-text: "0.3.0";
+    // Empty until wire/about.rs fills it from yantrik-version. It used to default to "0.3.0",
+    // which is a plausible-looking answer and was the wrong one on every machine.
+    in property <string> version-text: "";
     in property <string> build-date: "";
 
     // Component versions — installed only.
@@ -212,7 +214,9 @@ export component AboutScreen inherits Rectangle {
                                 border-color: Theme.cyan-dim;
 
                                 v-label := Text {
-                                    text: "v" + root.version-text;
+                                    // Not "v" + version: a git describe already starts with
+                                    // the tag, so prefixing gave "vv0.1.0-258-g64165ad".
+                                    text: root.version-text != "" ? root.version-text : "unknown";
                                     color: Theme.cyan;
                                     font-size: Theme.fs-micro;
                                     font-weight: 600;

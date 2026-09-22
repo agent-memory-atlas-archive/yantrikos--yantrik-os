@@ -151,6 +151,13 @@ jobs:
       - name: yos starts an on-demand service when something asks for it
         run: python3 deploy/yantrik-os/yos-selftest.py
 
+      # The updater's own offline checks, against a scratch $YANTRIK_PREFIX. Same story as the
+      # two above: it has existed for a while and only ever run on somebody's machine. It holds
+      # where the update channel comes from, and that `.version` is written from the same string
+      # as the BUILD marker — the pair that gave a machine two answers about its own version.
+      - name: The updater agrees with itself about channel and version
+        run: bash deploy/yantrik-os/yantrik-update selftest
+
       # The harnesses that ship as source (harnesses/lib, harnesses/pi, harnesses/deepseek).
       # Same shape as the two above: stdlib-only Python over a fake of everything it talks to —
       # a fake desktop socket, a fake yos-mcp, a fake chat-completions API and a fake `pi` — so

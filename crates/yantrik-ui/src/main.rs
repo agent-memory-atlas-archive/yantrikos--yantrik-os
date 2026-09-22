@@ -94,6 +94,11 @@ mod wire;
 pub use yantrik_ui_slint::*;
 
 fn main() {
+    // Before anything else, because `--version` has to work on a machine whose shell will not
+    // start. The first argument is otherwise a config path, so this also stops `--version`
+    // being read as the name of a config file that does not exist.
+    yantrik_version::handle_version_flag("yantrik-ui");
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(

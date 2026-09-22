@@ -11,6 +11,7 @@ members = [
     "crates/yantrik-ipc-contracts",
     "crates/yantrik-image-core",
     "crates/yantrik-manifest",
+    "crates/yantrik-version",
     "crates/yantrik-shell-core",
     "crates/yantrik-ui-kit",
     "crates/yantrik-ui-slint",
@@ -127,6 +128,7 @@ yantrik-ipc-transport = { path = "crates/yantrik-ipc-transport" }
 yantrik-service-sdk = { path = "crates/yantrik-service-sdk" }
 yantrik-app-runtime = { path = "crates/yantrik-app-runtime" }
 yantrik-manifest = { path = "crates/yantrik-manifest" }
+yantrik-version = { path = "crates/yantrik-version" }
 yantrik-chat = { path = "crates/yantrik-chat" }
 yantrik-companion = { path = "crates/yantrik-companion" }
 yantrik-os = { path = "crates/yantrik-os" }

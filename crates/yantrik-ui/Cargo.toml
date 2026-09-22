@@ -25,6 +25,9 @@ yantrik-ipc-transport = { workspace = true }
 # The shell publishes its own app.describe / app.act, like every app under apps/.
 yantrik-app-runtime = { workspace = true }
 yantrik-shell-core = { workspace = true }
+# What is running here, resolved in one place: About, the boot screen, Settings and the
+# /etc/os-release the installer writes all say the same string.
+yantrik-version = { workspace = true }
 slint = { workspace = true }
 crossbeam-channel = { workspace = true }
 tokio = { workspace = true }

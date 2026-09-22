@@ -363,6 +363,11 @@ pub fn publish(
                 .with("screen", screen_name(screen))
                 .with("conversation", serde_json::Value::Array(conversation))
                 .with("screen_id", screen)
+                // Which build is answering. The report this came from asked a machine three
+                // times what it was and got three answers, one of them months old; an agent
+                // writing that report should be able to read the version off the same describe
+                // it reads everything else off, rather than knowing which file to trust.
+                .with("version", yantrik_version::version())
                 .with("windows", serde_json::Value::Array(open))
                 .with("failed_launches", serde_json::Value::Array(failed))
                 // What is waiting on a person right now. Published so a second mind, or a

@@ -258,7 +258,9 @@ export component SettingsScreen inherits Rectangle {
 
     // System info
     in property <int> memory-count: 0;
-    in property <string> version-text: "0.1.0";
+    // Filled by wire/settings.rs from yantrik-version. The default was "0.1.0" and nothing
+    // set it, so that default was what the Settings row showed, always.
+    in property <string> version-text: "";
     in property <int> notification-count: 0;
 
     // Appearance
@@ -3012,7 +3014,7 @@ SettingRow{label:"Permissions";description:"Review the shell's tool permissions 
                         Text{text:"System";color:Theme.text-primary;font-size:28px;font-weight:600;}
                         Text{text:"Your device, apps, and system information.";color:Theme.text-secondary;font-size:13px;wrap:word-wrap;}
 
-SettingRow{label:"Yantrik OS";description:"Native desktop workspace";value:"Version "+root.version-text;interactive:false;}
+SettingRow{label:"Yantrik OS";description:"Native desktop workspace";value:root.version-text!=""?root.version-text:"unknown";interactive:false;}
 SettingRow{label:"Display";description:"Current display resolution reported by the shell.";value:root.display-resolution!=""?root.display-resolution:"Automatic";interactive:false;}
 SettingRow{label:"System monitor";description:"Inspect processor, memory, storage and running processes.";value:"Open";activated=>{root.navigate-to(10);}}
 SettingRow{label:"Notifications";description:"Review notifications and requests in one place.";value:"Open";activated=>{root.navigate-to(9);}}

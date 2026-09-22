@@ -55,8 +55,13 @@ TARGET_DIR="${TARGET_DIR:-$( \
 # From git, like the tarball's. A version hardcoded in a build script names whatever it named
 # the day it was written: this said 0.3.0 for five months, across every commit, so two ISOs
 # built a season apart had the same filename and nothing on either could tell them apart.
-YANTRIK_VERSION="${YANTRIK_VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null)}"
-[ -n "$YANTRIK_VERSION" ] || YANTRIK_VERSION="0.0.0-unknown"
+#
+# Exported, so build-release.sh below packages the bundle under this same string rather than
+# running `git describe` again for itself. Two describes a few minutes apart can differ — a tag
+# pushed between them is enough — and then the ISO's filename names one build while the BUILD
+# marker inside it names another.
+export YANTRIK_VERSION="${YANTRIK_VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null)}"
+[ -n "$YANTRIK_VERSION" ] || export YANTRIK_VERSION="0.0.0-unknown"
 DEBIAN_SUITE="trixie"
 DEBIAN_MIRROR="http://deb.debian.org/debian"
 ARCH="amd64"
@@ -1121,8 +1126,21 @@ sudo rm -rf "$ROOTFS/tmp/"*
 sudo rm -f "$ROOTFS/etc/resolv.conf"
 sudo ln -sf /run/NetworkManager/resolv.conf "$ROOTFS/etc/resolv.conf"
 
-# Store version
-echo "$YANTRIK_VERSION" | sudo tee "$ROOTFS/opt/yantrik/.version" > /dev/null
+# One version, taken from the build that is actually in the image.
+#
+# `.version` used to be written from $YANTRIK_VERSION — this script's own `git describe` — while
+# /opt/yantrik/BUILD came from the release bundle unpacked above. Those two agree only when the
+# ISO is built in the same checkout the bundle was, and for five months $YANTRIK_VERSION was the
+# literal "0.3.0" (see the note where it is set), which is how a machine ended up reporting
+# `.version` 0.3.0 beside `BUILD` version=v0.1.0-179-g6fc8b13. The marker is what the desktop,
+# yantrik-install.sh and yantrik-update all read, so the marker is the answer; this script's own
+# describe is the fallback for an image built with no bundle at all.
+#
+# `|| true`: this file is script-written and may not be there, and under `set -o pipefail` a
+# failing sed would abort forty minutes of debootstrap over a missing marker.
+INSTALLED_VERSION="$(sed -n 's/^version=//p' "$ROOTFS/opt/yantrik/BUILD" 2>/dev/null | head -1 || true)"
+[ -n "$INSTALLED_VERSION" ] || INSTALLED_VERSION="$YANTRIK_VERSION"
+echo "$INSTALLED_VERSION" | sudo tee "$ROOTFS/opt/yantrik/.version" > /dev/null
 
 # The live image says what it is. Only yantrik-install wrote /etc/os-release, so the image
 # people actually download called itself "Debian GNU/Linux 13" — on the getty banner, to every
@@ -1136,7 +1154,7 @@ ID=yantrik
 ID_LIKE=debian
 VERSION_ID="%s"
 HOME_URL="https://yantrikos.com"
-'     "$YANTRIK_VERSION" | sudo tee "$ROOTFS/etc/os-release" > /dev/null
+'     "$INSTALLED_VERSION" | sudo tee "$ROOTFS/etc/os-release" > /dev/null
 
 # Unmount chroot filesystems
 sudo umount "$ROOTFS/dev/pts" 2>/dev/null || true
