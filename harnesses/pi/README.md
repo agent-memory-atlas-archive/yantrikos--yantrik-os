@@ -12,6 +12,11 @@ Two parts:
 
 ## Install
 
+The desktop can do all of this for you: **Settings → Harnesses** lists Pi whether or not it is
+installed, says which of the steps below is still missing, and has an *Install* button that runs
+the `npm install` line with its output on the row and a *Start* button for the unit. What follows
+is the same thing by hand.
+
 ```sh
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 pi --version                                    # Node 22+; Debian's Node 20 fails to start it

@@ -462,7 +462,10 @@ fi
 # Hermes keeps its own model, keys and memory; nothing about them is in this image.
 if [ -d "$PROJECT_ROOT/harnesses/hermes" ]; then
     sudo mkdir -p "$ROOTFS/opt/yantrik/share/harnesses/hermes"
+    # harness.yaml goes with it: it is what Settings > Harnesses reads to say Hermes exists at
+    # all, and without it the desktop is back to only knowing what has attached.
     sudo cp "$PROJECT_ROOT/harnesses/hermes/"*.py "$PROJECT_ROOT/harnesses/hermes/plugin.yaml" \
+        "$PROJECT_ROOT/harnesses/hermes/harness.yaml" \
         "$ROOTFS/opt/yantrik/share/harnesses/hermes/" 2>/dev/null || true
     ok "Hermes desktop plugin staged at /opt/yantrik/share/harnesses/hermes"
 fi
@@ -480,8 +483,15 @@ fi
 # `openclaw` drives an OpenClaw install, which brings its own MCP client and so reaches the
 # desktop's tools through an entry in the person's own ~/.openclaw/openclaw.json rather than
 # through anything staged here.
-# Their unit files are staged beside them, to be copied into ~/.config/systemd/user by whoever
-# decides to run one — see each README.
+#
+# Each one's unit file is staged TWICE and the second copy is the one that matters. Beside its
+# source, where a person following the README copies it from — and in /etc/systemd/user, where
+# systemd itself looks. Without the second, `systemctl --user enable --now yantrik-pi` fails
+# with "unit not found" and the Start button on the Harnesses page has nothing to start: the
+# image shipped a harness whose own instructions were the only way to run it. Staging a unit is
+# not enabling it — `enable` writes a symlink into default.target.wants and nothing here does,
+# so the rule above still holds and a fresh image still starts none of them.
+sudo mkdir -p "$ROOTFS/etc/systemd/user"
 for harness in lib deepseek pi openclaw; do
     [ -d "$PROJECT_ROOT/harnesses/$harness" ] || continue
     sudo mkdir -p "$ROOTFS/opt/yantrik/share/harnesses/$harness"
@@ -489,8 +499,25 @@ for harness in lib deepseek pi openclaw; do
         "$ROOTFS/opt/yantrik/share/harnesses/$harness/" 2>/dev/null || true
     # __pycache__ from someone's checkout is not part of the image.
     sudo rm -rf "$ROOTFS/opt/yantrik/share/harnesses/$harness/__pycache__"
-    ok "Harness source staged at /opt/yantrik/share/harnesses/$harness (not enabled)"
+    unit="$PROJECT_ROOT/harnesses/$harness/yantrik-$harness.service"
+    if [ -f "$unit" ]; then
+        sudo install -m 644 "$unit" "$ROOTFS/etc/systemd/user/" \
+            || fail "could not stage yantrik-$harness.service — the image would ship a harness nothing can start"
+        ok "Harness staged at /opt/yantrik/share/harnesses/$harness, unit installed (not enabled)"
+    else
+        ok "Harness source staged at /opt/yantrik/share/harnesses/$harness (no unit of its own)"
+    fi
 done
+
+# The manifests are what Settings > Harnesses reads, so an image that staged the source and not
+# the manifests is an image whose picker is back to listing only what has attached. Asserted
+# rather than hoped for: this is the whole of issue #56 and it is one missing file away.
+for harness in hermes deepseek pi openclaw; do
+    [ -d "$PROJECT_ROOT/harnesses/$harness" ] || continue
+    [ -f "$ROOTFS/opt/yantrik/share/harnesses/$harness/harness.yaml" ] \
+        || fail "$harness has no harness.yaml in the image — Settings would not know it exists"
+done
+ok "Harness manifests staged — Settings can name every mind this image ships"
 
 # ── The mind, beside the OS ──
 #
