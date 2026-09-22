@@ -10471,6 +10471,7 @@ name = "yantrik-document-editor"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "notify",
  "pulldown-cmark",
  "regex",
  "serde",

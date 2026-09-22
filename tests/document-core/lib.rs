@@ -225,6 +225,228 @@ mod tests {
         assert!(saved.stamp.modified_unix > 0, "a real mtime, read back off the file");
     }
 
+    // ── Moved out from under it ─────────────────────────────────────────────
+    //
+    // Files moves a document with `rename`, so a document open in yDoc can have its file carried
+    // off while somebody is typing into it. On 22 Sep 2026 that left the app with three true
+    // refusals and no way through: Save said the original was gone, Save As said the new path
+    // already existed, and Open threw the unsaved edit away without saying anything. These are
+    // the decisions behind each of the three, with a real file really moved.
+
+    /// Open a document, then move its file the way Files does.
+    fn moved(dir: &Dir, name: &str, into: &str, text: &str) -> (Document, PathBuf) {
+        let from = dir.join(name);
+        std::fs::write(&from, text).unwrap();
+        let doc = Document::open(&from).expect("open");
+        let folder = dir.join(into);
+        std::fs::create_dir_all(&folder).unwrap();
+        let to = folder.join(name);
+        std::fs::rename(&from, &to).unwrap();
+        (doc, to)
+    }
+
+    #[test]
+    fn a_save_onto_a_file_that_was_moved_says_where_it_went() {
+        let dir = Dir::new();
+        let (mut doc, to) = moved(&dir, "northwind-pricing.md", "pricing", "# Pricing\n\nrates\n");
+        doc.text = "# Pricing\n\nrates, revised\n".into();
+
+        let here = doc.path.clone().expect("it came from a file");
+        let error = doc.save(&here).expect_err("there is nothing there to write into");
+        // The old message was "The original file is gone: ... Use Save As." — true, and the Save
+        // As it recommended was itself refused. This one names the way through.
+        assert!(error.contains(&to.display().to_string()), "{error}");
+        assert!(error.contains("Save As"), "{error}");
+        assert!(error.contains("draft is intact"), "{error}");
+        assert_eq!(doc.text, "# Pricing\n\nrates, revised\n");
+    }
+
+    #[test]
+    fn a_save_onto_a_file_that_was_really_deleted_still_offers_a_way_to_write_it() {
+        let dir = Dir::new();
+        let path = dir.join("gone.md");
+        std::fs::write(&path, "one\n").unwrap();
+        let mut doc = Document::open(&path).expect("open");
+        std::fs::remove_file(&path).unwrap();
+        doc.text = "two\n".into();
+
+        let error = doc.save(&path).expect_err("nothing to write into");
+        assert!(error.contains("moved or deleted"), "{error}");
+        assert!(error.contains("overwrite=true"), "{error}");
+        assert!(!path.exists(), "and it really did not write while it refused");
+
+        // The refusal is answerable, and what it offers is what it does.
+        let saved = doc.save_over(&path).expect("told to write it here anyway").document;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\n");
+        assert!(!saved.dirty());
+    }
+
+    #[test]
+    fn save_as_onto_the_moved_original_writes_into_it_rather_than_calling_it_somebody_elses() {
+        let dir = Dir::new();
+        let (mut doc, to) = moved(&dir, "handover.md", "archive", "first\n");
+        doc.text = "second\n".into();
+
+        // The file at `to` has this document's own bytes under this document's own name, and the
+        // path it was opened from no longer exists. That is not a stranger's file to refuse.
+        let saved = doc.save(&to).expect("its own file, moved").document;
+        assert_eq!(saved.path.as_deref(), Some(to.as_path()));
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "second\n");
+        assert!(!saved.dirty());
+    }
+
+    #[test]
+    fn save_as_onto_somebody_elses_file_still_refuses_and_says_how_to_mean_it() {
+        let dir = Dir::new();
+        let occupied = dir.join("occupied.md");
+        std::fs::write(&occupied, "someone else's work\n").unwrap();
+
+        let error = drafted("mine\n").save(&occupied).expect_err("it must refuse");
+        assert!(error.contains("already exists"), "{error}");
+        assert!(error.contains("nothing was overwritten"), "{error}");
+        assert!(error.contains("overwrite=true"), "{error}");
+        assert_eq!(std::fs::read_to_string(&occupied).unwrap(), "someone else's work\n");
+
+        // And the refusal is answerable rather than final.
+        let saved = drafted("mine\n").save_over(&occupied).expect("told to replace it").document;
+        assert_eq!(std::fs::read_to_string(&occupied).unwrap(), "mine\n");
+        assert_eq!(saved.path.as_deref(), Some(occupied.as_path()));
+        assert_eq!(dir.listing(), vec!["occupied.md".to_string()], "and no temporary left over");
+    }
+
+    #[test]
+    fn a_moved_file_is_found_by_its_name_and_its_bytes_together() {
+        let dir = Dir::new();
+        let text = "# Pricing\n\nrates\n";
+        let (doc, to) = moved(&dir, "northwind-pricing.md", "pricing/2026", text);
+        let from = doc.path.clone().unwrap();
+        assert_eq!(document::moved_to(&from, text).as_deref(), Some(to.as_path()));
+
+        // The same name with different bytes is a different document.
+        std::fs::write(dir.join("northwind-pricing.md"), "# Pricing\n\nsomething else\n").unwrap();
+        assert_eq!(document::moved_to(&from, "# Pricing\n\nnot this\n"), None);
+
+        // The same bytes under a different name is a copy, not this document.
+        std::fs::write(dir.join("pricing/copy.md"), text).unwrap();
+        std::fs::remove_file(&to).unwrap();
+        assert_eq!(document::moved_to(&from, text), None);
+    }
+
+    #[test]
+    fn the_search_for_a_moved_file_does_not_find_the_file_it_started_from() {
+        let dir = Dir::new();
+        let path = dir.join("still-here.md");
+        std::fs::write(&path, "body\n").unwrap();
+        assert_eq!(document::moved_to(&path, "body\n"), None);
+    }
+
+    #[test]
+    fn the_search_stays_out_of_hidden_folders() {
+        let dir = Dir::new();
+        let text = "body\n";
+        let path = dir.join("notes.md");
+        std::fs::write(&path, text).unwrap();
+        std::fs::create_dir_all(dir.join(".cache/deep")).unwrap();
+        std::fs::write(dir.join(".cache/deep/notes.md"), text).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // A copy under `.cache` is a cache, not where a person moved their document.
+        assert_eq!(document::moved_to(&path, text), None);
+    }
+
+    #[test]
+    fn a_document_follows_its_own_rename_and_the_rename_of_a_folder_above_it() {
+        let renamed = document::follow_rename(
+            Path::new("/home/p/Documents/notes.md"),
+            Path::new("/home/p/Documents/notes.md"),
+            Path::new("/home/p/Documents/pricing.md"),
+        );
+        assert_eq!(renamed.as_deref(), Some(Path::new("/home/p/Documents/pricing.md")));
+
+        let carried = document::follow_rename(
+            Path::new("/home/p/Documents/notes.md"),
+            Path::new("/home/p/Documents"),
+            Path::new("/home/p/Archive"),
+        );
+        assert_eq!(carried.as_deref(), Some(Path::new("/home/p/Archive/notes.md")));
+    }
+
+    #[test]
+    fn a_rename_of_some_other_file_leaves_the_document_where_it_is() {
+        assert_eq!(
+            document::follow_rename(
+                Path::new("/home/p/Documents/notes.md"),
+                Path::new("/home/p/Documents/other.md"),
+                Path::new("/home/p/Documents/renamed.md"),
+            ),
+            None
+        );
+        // A prefix that is not a path component is not an ancestor: `/home/p/Doc` is not the
+        // folder `/home/p/Documents` is in, whatever the strings look like.
+        assert_eq!(
+            document::follow_rename(
+                Path::new("/home/p/Documents/notes.md"),
+                Path::new("/home/p/Doc"),
+                Path::new("/home/p/Elsewhere"),
+            ),
+            None
+        );
+    }
+
+    // ── What an open would cost ─────────────────────────────────────────────
+
+    #[test]
+    fn a_document_with_nothing_unsaved_has_nothing_to_warn_about() {
+        let dir = Dir::new();
+        let saved = drafted("kept\n").save(&dir.join("kept.md")).expect("save").document;
+        assert_eq!(saved.unsaved(), None);
+    }
+
+    #[test]
+    fn an_unsaved_document_says_how_much_is_at_stake_and_where_the_rest_of_it_is() {
+        let dir = Dir::new();
+        let path = dir.join("northwind-pricing.md");
+        std::fs::write(&path, "# Pricing\n\nrates\n").unwrap();
+        let mut doc = Document::open(&path).expect("open");
+        doc.text = "# Pricing\n\nrates and terms\n".into();
+
+        let warning = doc.unsaved().expect("there is something to lose");
+        // The size of the edit, not the size of the document: " and terms" is ten characters.
+        assert!(warning.contains("10 characters"), "{warning}");
+        assert!(warning.contains("Pricing"), "{warning}");
+        assert!(warning.contains(&path.display().to_string()), "{warning}");
+    }
+
+    #[test]
+    fn a_draft_that_is_in_no_file_at_all_says_that_rather_than_naming_one() {
+        let warning = drafted("# Thought\n\nnot written down anywhere.\n")
+            .unsaved()
+            .expect("there is something to lose");
+        assert!(warning.contains("no file at all"), "{warning}");
+        assert!(warning.contains("Thought"), "{warning}");
+    }
+
+    #[test]
+    fn a_recovered_draft_is_at_stake_whole_because_nobody_has_agreed_to_any_of_it() {
+        let mut doc = drafted("# Half a thought\n\nfrom last time\n");
+        doc.baseline = doc.text.clone();
+        doc.recovered = true;
+        let warning = doc.unsaved().expect("a recovered draft is always at stake");
+        assert!(warning.contains("recovered draft"), "{warning}");
+        assert!(
+            warning.contains(&document::char_count(&doc.text).to_string()),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn the_unsaved_count_is_the_edit_and_not_the_document() {
+        assert_eq!(document::unsaved_chars("same", "same"), 0);
+        assert_eq!(document::unsaved_chars("a long document, edited", "a long document"), 8);
+        assert_eq!(document::unsaved_chars("", "everything was deleted"), 0);
+        // Characters, not bytes: an accented word replaced by another is counted as characters.
+        assert_eq!(document::unsaved_chars("café", ""), 4);
+    }
+
     // ── What it will not hold ───────────────────────────────────────────────
 
     #[test]
