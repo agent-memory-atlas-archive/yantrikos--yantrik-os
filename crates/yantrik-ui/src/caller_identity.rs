@@ -295,13 +295,21 @@ fn is_this_desktop(facts: &ProcessFacts) -> bool {
 }
 
 /// The words in a mind's name that are distinctive enough to match a path on.
+///
+/// The OS's own name is not one of them. The built-in minds are all "Yantrik something", and
+/// "yantrik" is also the user this desktop runs as, its home directory and every path under
+/// `/opt/yantrik` — so `sshd-session: yantrik@notty`, a probe run over ssh, was shown on the
+/// card as "the attached mind". The word that tells the minds apart is the other one.
 fn name_tokens(name: &str) -> Vec<String> {
     name.to_ascii_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| t.len() >= 4)
+        .filter(|t| t.len() >= 4 && *t != OS_NAME)
         .map(|t| t.to_string())
         .collect()
 }
+
+/// The one word that is in every path on this machine and therefore names nothing.
+const OS_NAME: &str = "yantrik";
 
 /// `yos` or `yos-mcp`, however they were started.
 ///
@@ -665,6 +673,27 @@ mod caller_identity_tests {
         // ...while a real Hermes gateway process still matches by its own command line.
         let hermes = vec![facts(7000, "/home/u/.local/bin/python3.11", "python -m hermes_cli.main gateway")];
         assert_eq!(mind_for(&hermes, &minds).as_deref(), Some("Hermes Agent"));
+    }
+
+    #[test]
+    fn the_desktops_own_name_in_a_path_or_a_username_names_no_mind() {
+        // Seen live: a probe run over ssh as the desktop's user came up as "sshd-session:
+        // yantrik@notty (pid 638879) · the attached mind". "yantrik" is a token of every
+        // built-in mind's name, and it is also the username, the home directory and /opt/yantrik.
+        let minds = vec![
+            Mind { id: "companion".into(), name: "Yantrik Companion".into() },
+            Mind { id: "hermes".into(), name: "Hermes Agent".into() },
+        ];
+        let ssh = vec![
+            facts(5400, "/usr/bin/bash", "bash -c python3 /home/yantrik/forge.py"),
+            facts(5300, "/usr/sbin/sshd-session", "sshd-session: yantrik@notty"),
+        ];
+        assert_eq!(mind_for(&ssh, &minds), None, "{:?}", mind_for(&ssh, &minds));
+        let home = vec![facts(5500, "/usr/bin/python3.13", "python3 /home/yantrik/forge.py")];
+        assert_eq!(mind_for(&home, &minds), None);
+        // The other word still does: the companion's own process is named by it.
+        let companion = vec![facts(5600, "/usr/bin/python3.13", "python3 companion_bridge.py")];
+        assert_eq!(mind_for(&companion, &minds).as_deref(), Some("Yantrik Companion"));
     }
 
     #[test]
