@@ -218,7 +218,7 @@ fn wire_file_open(ui: &App, ctx: &AppContext) {
             // standalone viewer could ship for months without anyone noticing it opened nothing.
             FileAction::ImageViewer => {
                 super::dock::spawn_app_with_args(
-                    "images",
+                    "image",
                     "yantrik-image-viewer",
                     &[&full.to_string_lossy()],
                 );

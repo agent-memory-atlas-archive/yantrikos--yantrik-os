@@ -182,7 +182,9 @@ const SURFACES: &[(&str, &[&str])] = &[
     ("download-manager", &["downloads"]),
     ("editor", &["text-editor"]),
     ("email", &[]),
-    ("image-viewer", &["images"]),
+    // Both, because the launcher now opens it under `image` and a caller holding the older
+    // `images` must still reach the same surface.
+    ("image-viewer", &["images", "image"]),
     ("network", &["network-manager"]),
     ("notes", &[]),
     ("presentation", &["slides"]),
