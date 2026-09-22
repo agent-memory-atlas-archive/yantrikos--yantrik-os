@@ -17,7 +17,7 @@ import { BondScreen, BondData } from "bond.slint";
 import { PersonalityScreen, OpinionData, SharedRefData } from "personality.slint";
 import { LockScreen } from "lock.slint";
 import { LoginScreen } from "login.slint";
-import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData } from "settings.slint";
+import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData, HarnessRowData } from "settings.slint";
 import { SkillData } from "skill_store.slint";
 import { MemoryBrowser, MemoryItem } from "memory_browser.slint";
 import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem } from "file_browser.slint";
@@ -52,7 +52,7 @@ import { YMenuAction } from "components/y_context_menu.slint";
 import { Icons } from "components/icon.slint";
 import { Tr } from "translations.slint";
 
-export { HarnessData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, MindRule, MindAuditEntry, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, NotifActionData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, ToastActionData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction }
+export { HarnessData, HarnessRowData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, MindRule, MindAuditEntry, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, NotifActionData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, ToastActionData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction }
 
 export component App inherits Window {
     default-font-family: Theme.font-ui;
@@ -431,6 +431,10 @@ export component App inherits Window {
     // Read by two places that must not disagree: the Harnesses screen, and the status bar badge
     // a person glances at without opening anything.
     in property <[HarnessData]> harnesses: [];
+    // What the machine could offer, installed or not — the Settings list rather than the
+    // picker. A harness that has never been installed belongs in one and not the other.
+    in property <[HarnessRowData]> harness-rows: [];
+    in property <bool> harness-busy: false;
     in property <int> harness-count: 0;
     in property <string> active-harness-name: "";
     in property <string> active-harness-detail: "";
@@ -438,6 +442,9 @@ export component App inherits Window {
     in property <string> active-harness-id: "";
     in-out property <string> harness-error: "";
     callback use-harness(string);
+    // Both change the machine, so both are jobs whose output lands back on the row.
+    callback install-harness(string);
+    callback start-harness(string);
     callback settings-search(string);
     in-out property <string> settings-query;
     in-out property <string> settings-save-status:"Preferences are saved automatically";
@@ -1720,8 +1727,12 @@ export component App inherits Window {
                 open-network=>{root.launch-app("network");}
                 choose-accent(name)=>{root.choose-accent(name);}
                 harnesses: root.harnesses;
+                harness-rows: root.harness-rows;
+                harness-busy: root.harness-busy;
                 harness-error: root.harness-error;
                 use-harness(id) => { root.use-harness(id); }
+                install-harness(id) => { root.install-harness(id); }
+                start-harness(id) => { root.start-harness(id); }
                 settings-search(query) => { root.settings-search(query); }
                 add-provider => { root.add-provider(); }
                 save-provider(name, ptype, url, key, auth) => { root.save-provider(name, ptype, url, key, auth); }
