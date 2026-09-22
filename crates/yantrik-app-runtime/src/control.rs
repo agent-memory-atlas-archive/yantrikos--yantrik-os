@@ -319,7 +319,15 @@ impl Registry {
 
     fn describe(&self) -> serde_json::Value {
         let now = self.snapshot();
-        let specs: Vec<Action> = self.actions.iter().map(|(a, _)| a.clone()).collect();
+        let specs: Vec<Action> = self
+            .actions
+            .iter()
+            .map(|(a, _)| {
+                let mut spec = a.clone();
+                spec.permission = effective_grade(&spec.name, spec.permission);
+                spec
+            })
+            .collect();
         let view = View { summary: now.summary, state: now.state };
         describe_json(&self.app_id, &view, &specs)
     }
@@ -356,13 +364,17 @@ impl Registry {
         // about the action, and answering any narrower question first would mean doing work for
         // a call that was never allowed. An unrecognised ceiling falls back to the default rather
         // than failing open: the same choice the companion's `parse_permission` makes.
-        let Some(level) = grade(spec.permission) else {
+        // `effective_grade`, not `spec.permission`: an app may have moved its own grade since the
+        // surface was published (see `regrade`), and the check has to read the grade that
+        // `describe` is currently showing or the two disagree.
+        let published = effective_grade(name, spec.permission);
+        let Some(level) = grade(published) else {
             return Err(format!(
                 "CEILING: {}.{} is graded `{}`, which is not a level this OS defines ({}), \
                  so it was not run.",
                 self.app_id,
                 name,
-                spec.permission,
+                published,
                 LADDER.join(" < ")
             ));
         };
@@ -374,7 +386,7 @@ impl Registry {
                  run. An action at that grade needs a person to authorise it directly — raise \
                  the ceiling in Settings if that is the intent.",
                 app = self.app_id,
-                perm = spec.permission
+                perm = published
             ));
         }
 
@@ -435,6 +447,32 @@ impl Registry {
 thread_local! {
     /// Installed by [`App::serve`] on the thread that owns the window.
     static REGISTRY: RefCell<Option<Registry>> = const { RefCell::new(None) };
+
+    /// Grades [`regrade`] has moved since the surface was published, by action name.
+    ///
+    /// A separate cell, and that is the whole point. The dispatch runs a handler from *inside*
+    /// `REGISTRY.borrow()` (see `on_ui_thread`), so a handler that reached for `borrow_mut` on
+    /// the same cell panicked with "RefCell already borrowed" and took the app down with it —
+    /// which is exactly what `set_backend` did, since calling `regrade` from a handler is the
+    /// only way this function is ever meant to be used. Writing the override here means the
+    /// registry stays immutably borrowed and nothing re-enters it.
+    static OVERRIDES: RefCell<Vec<(String, &'static str)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The grade an action is published at right now: what it was declared with, unless
+/// [`regrade`] has moved it.
+///
+/// Every reader goes through here — the ceiling check in [`Registry::act`], [`published_grade`],
+/// and the specs [`Registry::describe`] hands out — so the card a person is shown and the
+/// dispatch that enforces it can never be reading two different numbers.
+fn effective_grade(action: &str, declared: &'static str) -> &'static str {
+    OVERRIDES.with(|cell| {
+        cell.borrow()
+            .iter()
+            .find(|(name, _)| name == action)
+            .map(|(_, grade)| *grade)
+            .unwrap_or(declared)
+    })
 }
 
 // ── Who is calling ──────────────────────────────────────────────────
@@ -499,7 +537,10 @@ pub fn caller() -> Option<Caller> {
 pub fn published_grade(action: &str) -> Option<&'static str> {
     REGISTRY.with(|cell| {
         cell.borrow().as_ref().and_then(|reg| {
-            reg.actions.iter().find(|(a, _)| a.name == action).map(|(a, _)| a.permission)
+            reg.actions
+                .iter()
+                .find(|(a, _)| a.name == action)
+                .map(|(a, _)| effective_grade(&a.name, a.permission))
         })
     })
 }
@@ -522,6 +563,12 @@ pub fn published_grade(action: &str) -> Option<&'static str> {
 /// Like [`published_grade`], this reads the registry installed by [`App::serve`], so it answers
 /// only on the thread that owns the window — which is where handlers run, and the only place a
 /// grade can be changed without racing the dispatch that reads it.
+///
+/// It takes only a SHARED borrow of the registry, and writes the new grade into a separate cell.
+/// That is not tidiness: the dispatch runs a handler from inside `REGISTRY.borrow()`, so the
+/// first version of this — which took `borrow_mut` — panicked with "RefCell already borrowed"
+/// the first time an action called it, killing the app. Calling this from a handler is the only
+/// way it is ever meant to be used, so that was every use of it.
 pub fn regrade(action: &str, permission: &'static str) -> Result<&'static str, String> {
     if grade(permission).is_none() {
         return Err(format!(
@@ -530,17 +577,24 @@ pub fn regrade(action: &str, permission: &'static str) -> Result<&'static str, S
         ));
     }
     REGISTRY.with(|cell| {
-        let mut installed = cell.borrow_mut();
-        let Some(registry) = installed.as_mut() else {
+        let installed = cell.borrow();
+        let Some(registry) = installed.as_ref() else {
             return Err("this app published no control surface, so there is no grade to change".to_string());
         };
-        let Some(index) = registry.actions.iter().position(|(a, _)| a.name == action) else {
+        if !registry.actions.iter().any(|(a, _)| a.name == action) {
             let known: Vec<&str> = registry.actions.iter().map(|(a, _)| a.name.as_str()).collect();
             return Err(format!("this app has no action `{action}`; it offers: {}", known.join(", ")));
-        };
-        registry.actions[index].0.permission = permission;
-        Ok(registry.actions[index].0.permission)
-    })
+        }
+        Ok(())
+    })?;
+    OVERRIDES.with(|cell| {
+        let mut set = cell.borrow_mut();
+        match set.iter_mut().find(|(name, _)| name == action) {
+            Some(entry) => entry.1 = permission,
+            None => set.push((action.to_string(), permission)),
+        }
+    });
+    Ok(permission)
 }
 
 /// Installs `who` for the duration of `job` and takes it back afterwards.
@@ -1487,6 +1541,7 @@ mod tests {
             assert!(registry.act("generate", &serde_json::json!({}), None, "studio#4", "standard").is_ok());
         });
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
+        OVERRIDES.with(|cell| cell.borrow_mut().clear());
     }
 
     #[test]
@@ -1522,8 +1577,71 @@ mod tests {
         assert_eq!(published_grade("refresh"), Some("standard"), "an unknown action regraded a known one");
 
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
+        OVERRIDES.with(|cell| cell.borrow_mut().clear());
         let err = regrade("generate", "sensitive").unwrap_err();
         assert!(err.contains("published no control surface"), "{err}");
+    }
+
+    #[test]
+    fn a_handler_can_regrade_from_inside_its_own_dispatch() {
+        // The test the first two were missing, and the only way `regrade` is ever actually used.
+        //
+        // Both tests above called `regrade` from open code, where nothing was holding the
+        // registry. Real callers do not: `on_ui_thread` runs every handler from INSIDE
+        // `REGISTRY.borrow()`, so the first shipped version — which took `borrow_mut` — panicked
+        // with "RefCell already borrowed" the moment Studio's `set_backend` ran, and took the
+        // whole app down with it. The config had already been written by then, so the app came
+        // back pointed at a hosted service with the grade never raised: precisely the state
+        // `regrade` exists to prevent.
+        //
+        // This mirrors the dispatch: the borrow is held across `act`, exactly as it is in
+        // `on_ui_thread`. It panics on the old implementation and passes on this one.
+        REGISTRY.with(|cell| {
+            *cell.borrow_mut() = Some(Registry {
+                app_id: "studio".into(),
+                describe: None,
+                actions: vec![
+                    (
+                        Action::new("generate", "Make a picture from a sentence"),
+                        Box::new(|_| Ok(serde_json::json!({"queued": 1}))),
+                    ),
+                    (
+                        Action::new("set_backend", "Choose where pictures are made").risk("sensitive"),
+                        Box::new(|_| {
+                            // A handler, doing the one thing this function is for.
+                            let now = regrade("generate", "sensitive")?;
+                            Ok(serde_json::json!({ "generate_is_graded": now }))
+                        }),
+                    ),
+                ],
+            })
+        });
+
+        let answered = REGISTRY.with(|cell| {
+            let installed = cell.borrow();
+            let registry = installed.as_ref().unwrap();
+            registry
+                .act("set_backend", &serde_json::json!({}), None, "studio#1", "sensitive")
+                .expect("set_backend must not take the app down")
+        });
+        assert_eq!(answered["accepted"], serde_json::json!(true));
+        assert_eq!(answered["result"]["generate_is_graded"], serde_json::json!("sensitive"));
+
+        // And the move took effect for every reader, still from inside the same kind of borrow.
+        REGISTRY.with(|cell| {
+            let installed = cell.borrow();
+            let registry = installed.as_ref().unwrap();
+            let err = registry
+                .act("generate", &serde_json::json!({}), None, "studio#2", "standard")
+                .unwrap_err();
+            assert!(err.starts_with("CEILING:") && err.contains("graded `sensitive`"), "{err}");
+            let described = registry.describe();
+            assert_eq!(described["actions"][0]["permission"], serde_json::json!("sensitive"));
+        });
+        assert_eq!(published_grade("generate"), Some("sensitive"));
+
+        REGISTRY.with(|cell| *cell.borrow_mut() = None);
+        OVERRIDES.with(|cell| cell.borrow_mut().clear());
     }
 
     // ── Who is calling ──
