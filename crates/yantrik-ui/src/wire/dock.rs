@@ -60,7 +60,12 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["notes"], Launch::Program { id: "notes", bin: "yantrik-notes" }),
     (&["arcade"], Launch::Program { id: "arcade", bin: "yantrik-arcade" }),
     (&["editor", "text_editor"], Launch::Program { id: "editor", bin: "yantrik-text-editor" }),
-    (&["image_viewer", "images"], Launch::Program { id: "images", bin: "yantrik-image-viewer" }),
+    // `image`, not `images`, and the extra spelling is kept only as an alias. The id a route
+    // launches under is the key `merge_windows` pairs the launch registry against the
+    // compositor's snapshot by, and every other table in the shell calls this app `image`
+    // (APP_NAMES, STEM_TO_ID, the icon map). While they disagreed, one open viewer was two
+    // windows in `describe shell` and two buttons in the taskbar — #93.
+    (&["image_viewer", "images", "image"], Launch::Program { id: "image", bin: "yantrik-image-viewer" }),
     (&["bond"], Launch::Screen(4)),
     (&["personality"], Launch::Screen(5)),
     (&["memory"], Launch::Screen(6)),
@@ -233,7 +238,7 @@ const PURPOSES: &[(&str, &str)] = &[
     ("terminal", "a shell: run commands"),
     ("notes", "quick markdown notes kept in the notes library, not files you name"),
     ("editor", "plain-text and code files, opened and saved by path"),
-    ("images", "view pictures"),
+    ("image", "view pictures"),
     // Written against `images` on purpose: the two are one word apart and a model choosing between
     // them has only these few words. Looking and making are the difference, and where the pixels
     // come from is the second thing a caller has to know before it asks.
@@ -1020,6 +1025,37 @@ mod tests {
             assert!(
                 route(app).is_some(),
                 "apps/{app} ships a binary that `open_app name={app}` cannot launch"
+            );
+        }
+    }
+
+    /// The id a route launches under is the id the rest of the shell must know it by.
+    ///
+    /// `windows::merge_windows` pairs the launch registry against the compositor's snapshot by
+    /// app id: the registry names a window by the id `ROUTES` launched it under, and the snapshot
+    /// names it by resolving the window's title through `APP_NAMES`. When those two disagree the
+    /// merge sees two applications and keeps both, so one open window becomes two rows in
+    /// `describe shell` and two buttons in the taskbar.
+    ///
+    /// That is not hypothetical. The image viewer launched under `images` while every other table
+    /// — `APP_NAMES`, `STEM_TO_ID`, the icon map — called it `image`, and it was listed twice for
+    /// as long as it was open (#93). One row, wrong for months, and nothing here noticed.
+    ///
+    /// Aliases are free: a route may answer to as many spellings as it likes. It is the id it
+    /// *launches under* that has to be the one name the shell knows.
+    #[test]
+    fn a_route_launches_under_a_name_the_rest_of_the_shell_knows() {
+        let known: Vec<&str> = crate::windows::APP_NAMES.iter().map(|(id, _)| *id).collect();
+        for (names, launch) in ROUTES {
+            let Launch::Program { id, bin } = launch else {
+                continue;
+            };
+            assert!(
+                known.contains(id),
+                "`{bin}` launches under id `{id}`, which no APP_NAMES row matches. \
+                 The shell would list one of its windows twice. Either add `{id}` to APP_NAMES, \
+                 or launch under the name that is already there — and keep `{id}` in this row's \
+                 aliases ({names:?}) so callers holding the old spelling still reach it."
             );
         }
     }
