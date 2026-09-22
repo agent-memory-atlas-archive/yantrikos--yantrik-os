@@ -166,3 +166,13 @@ jobs:
       # over is closed exactly once, however the mind behind it behaves.
       - name: The attachable harnesses close every turn exactly once
         run: python3 -m unittest discover -s harnesses/tests -v
+
+      # The Blender control surface's tests: the addon that answers for somebody else's
+      # program, driven against a fake `bpy`. Stdlib-only, no Blender and no display needed,
+      # like everything above. Among them is one vector the Rust side asserts too — the
+      # revision hash in yantrik-ipc-contracts — so the Python port of the wire cannot drift
+      # from the original without a test failing in one language or the other. What these
+      # cannot say is that a real Blender agrees; that half is the headless run recorded in
+      # design/blender-surface-2026-09-22.md.
+      - name: The Blender addon speaks the runtime's own wire and vocabulary
+        run: python3 -m unittest discover -s tests/blender-core

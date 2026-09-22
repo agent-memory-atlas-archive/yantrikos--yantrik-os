@@ -283,6 +283,21 @@ for px in 48 128 256; do
 done
 echo "   + app icon (svg + 48/128/256) as hicolor 'yantrik'"
 
+# The Blender addon and its bootstrap.
+#
+# Blender itself is not built or shipped here — it is a program the machine has, or does
+# not. What the release carries is the half that makes it an app of this desktop:
+# bootstrap.py, which the launcher starts Blender with, and the yantrik_surface package
+# the bootstrap imports, which binds app-blender.sock and answers app.describe / app.act
+# like every app this OS builds. The dock route (Launch::Blender in wire/dock.rs) and the
+# .desktop entry both name this exact path; if this block moves, both move with it.
+mkdir -p "$ROOT/share/blender"
+cp "$PROJECT_ROOT/apps/blender/bootstrap.py" "$ROOT/share/blender/bootstrap.py" \
+  || fail "apps/blender/bootstrap.py missing — the launcher would open Blender with no way to talk to it"
+cp -r "$PROJECT_ROOT/apps/blender/addon/yantrik_surface" "$ROOT/share/blender/" \
+  || fail "apps/blender/addon/yantrik_surface missing — the bootstrap would import nothing"
+echo "   + blender control-surface addon (bootstrap + yantrik_surface)"
+
 echo "   + labwc theme and $(ls "$ROOT/share/fonts" | wc -l) fonts"
 
 # ── Nothing in this bundle may have CRLF line endings ──
