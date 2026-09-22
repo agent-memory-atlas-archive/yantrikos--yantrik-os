@@ -37,7 +37,7 @@ learns your patterns and helps without being asked, alongside a suite of built-i
 
 ## Built-in apps
 
-**Fifteen** application binaries ship, each its own window, each drivable by the agent. Two
+**Sixteen** application binaries ship, each its own window, each drivable by the agent. Two
 more exist in the tree and are **shelved** — deliberately not in this build, and listed below
 so that this page cannot promise them.
 
@@ -58,6 +58,7 @@ so that this page cannot promise them.
 | **Network** | WiFi, ethernet and bluetooth |
 | **System Monitor** | CPU, memory, disk, network, processes |
 | **Arcade** | Builds a playable game from two small JSON specs, verified headlessly |
+| **Studio** | Pictures from a sentence — your own GPU through ComfyUI, a hosted service, or neither |
 
 **Blender**, if it is installed, is drivable too — and it is not ours. The launcher starts it with
 an addon that binds the same kind of socket every app here does, so `yos describe blender` reports
@@ -116,13 +117,13 @@ Not a chatbot. A proactive agent with:
 │   yantrik-os          yantrikdb                            │
 │    (system)            (memory)                            │
 │                                                            │
-│   15 app binaries · 10 services · one control surface      │
+│   16 app binaries · 10 services · one control surface      │
 │                                                            │
 │   Debian 13 → labwc (Wayland) → Slint                      │
 └────────────────────────────────────────────────────────────┘
 ```
 
-25 crates, 15 shipped apps (17 in the tree, two shelved) and 10 services. The ones worth
+25 crates, 16 shipped apps (18 in the tree, two shelved) and 10 services. The ones worth
 knowing:
 
 | Crate | Purpose |
