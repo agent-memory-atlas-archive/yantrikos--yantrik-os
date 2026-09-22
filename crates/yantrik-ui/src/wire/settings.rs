@@ -171,6 +171,40 @@ pub fn set_pinned_apps(pins: Vec<String>) {
     save(&settings);
 }
 
+/// Whether notifications are being held.
+pub fn dnd_mode() -> bool {
+    match LIVE.get().and_then(|s| s.lock().ok()) {
+        Some(settings) => settings.dnd_mode,
+        None => load().dnd_mode,
+    }
+}
+
+/// Hold or release notifications, and say whether the file was written.
+///
+/// The one writer for this preference, and the only setting whose writer hands the failure
+/// back. The settings screen used to be the whole of it: its toggle flipped the property on
+/// screen, called `persist` and dropped the `Result`. That is fine for a row with a "Not saved"
+/// line under it and wrong for `set_do_not_disturb`, whose caller gets `settled` and nothing
+/// else to read — a mind that turns notifications off for the night needs to hear about a
+/// read-only settings file now, not discover it at the next restart.
+///
+/// Written even when the shell is already in the asked-for state. A copy in memory that says
+/// `true` over a file that says `false` is what a dropped write leaves behind, and asking for
+/// `true` a second time is how somebody repairs it.
+pub fn set_dnd_mode(on: bool) -> Result<(), String> {
+    if let Some(shared) = LIVE.get() {
+        // A lock we cannot take is a write we cannot make: `persist` locks the same mutex and
+        // returns that as the error, rather than this reporting success over an unchanged value.
+        if let Ok(mut settings) = shared.lock() {
+            settings.dnd_mode = on;
+        }
+        return persist(shared);
+    }
+    let mut settings = load();
+    settings.dnd_mode = on;
+    save(&settings)
+}
+
 /// Which mind the person last chose. Empty if they never have.
 pub fn preferred_mind() -> String {
     match LIVE.get().and_then(|s| s.lock().ok()) {
@@ -308,12 +342,21 @@ fn validate_file<T: serde::de::DeserializeOwned>(path: &str) -> Result<(), Strin
     }
     Ok(())
 }
-fn save(settings: &UserSettings) -> Result<(), String> {
-    let result = validate_file::<UserSettings>(&settings_path()).and_then(|()| {
+/// The whole of the durable write, against a named file and with nothing global in it.
+///
+/// Split out from `save` so the write can be tested for what it actually leaves on the disk.
+/// Everything above it took the file path from `HOME` and reported the outcome to a status line,
+/// which made "does this preference survive a restart" a question only a running shell could
+/// answer — and the answer nobody had checked was do-not-disturb's.
+fn save_to(path: &str, settings: &UserSettings) -> Result<(), String> {
+    validate_file::<UserSettings>(path).and_then(|()| {
         serde_yaml::to_string(settings)
-            .map_err(|_| "Cannot serialize preferences.".into())
-            .and_then(|yaml| crate::config_store::save(settings_path(), &yaml))
-    });
+            .map_err(|_| "Cannot serialize preferences.".to_string())
+            .and_then(|yaml| crate::config_store::save(path, &yaml))
+    })
+}
+fn save(settings: &UserSettings) -> Result<(), String> {
+    let result = save_to(&settings_path(), settings);
     report(&result);
     result
 }
@@ -462,15 +505,15 @@ pub fn wire(ui: &App, ctx: &AppContext) {
 
     // Do Not Disturb toggle — persists across reboots
     let ui_weak = ui.as_weak();
-    let s = settings.clone();
     ui.on_toggle_dnd_mode(move || {
         let Some(ui) = ui_weak.upgrade() else { return };
         let new_val = !ui.get_dnd_mode();
         ui.set_dnd_mode(new_val);
-        if let Ok(mut st) = s.lock() {
-            st.dnd_mode = new_val;
-        }
-        persist(&s);
+        // Through `set_dnd_mode`, which is also what the control surface writes with, so there
+        // is one answer to what a persisted do-not-disturb is. A failure is dropped here on
+        // purpose: this row has the save-status line under it, like every other row on the
+        // screen, and a click has nowhere else to put an error.
+        let _ = set_dnd_mode(new_val);
         tracing::info!(dnd = new_val, "Do Not Disturb toggled");
     });
 
@@ -1489,5 +1532,137 @@ fn format_param_count(size_bytes: u64) -> String {
     } else {
         let mb = size_bytes as f64 / 1_048_576.0;
         format!("{:.0}MB", mb)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// A settings file of our own, in a directory of its own, so the preference store's
+    /// per-path bookkeeping never sees two tests through one file.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "yantrik-settings-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir.join("settings.yaml")
+    }
+
+    fn reload(path: &Path) -> UserSettings {
+        let raw = std::fs::read_to_string(path).expect("the settings file is on the disk");
+        serde_yaml::from_str(&raw).expect("the settings file parses")
+    }
+
+    /// Do-not-disturb has to come back after a restart, which means it has to be in the file.
+    ///
+    /// The audit that found this ran `grep dnd ~/.config/yantrik/settings.yaml` straight after a
+    /// toggle that had answered `settled: true`, and read back `dnd_mode: false`. So this is the
+    /// same check: write the preferences the way the shell writes them, read the bytes off the
+    /// disk, and load them again. Both directions, because releasing the hold has to stick too —
+    /// a file that merely lost the key would come up quiet on a machine somebody had unmuted.
+    #[test]
+    fn do_not_disturb_survives_the_write_and_the_reload() {
+        let path = scratch("roundtrip");
+        let name = path.to_string_lossy().to_string();
+
+        let mut settings = UserSettings::default();
+        assert!(
+            !settings.dnd_mode,
+            "a machine nobody has told anything comes up able to interrupt"
+        );
+
+        settings.dnd_mode = true;
+        settings.pinned_apps = vec!["notes".to_string()];
+        save_to(&name, &settings).expect("the settings file is written");
+
+        let raw = std::fs::read_to_string(&path).expect("the settings file is on the disk");
+        assert!(
+            raw.contains("dnd_mode: true"),
+            "the durable copy says nothing about do-not-disturb:\n{raw}"
+        );
+        let back = reload(&path);
+        assert!(back.dnd_mode, "do-not-disturb did not survive the reload");
+        assert_eq!(
+            back.pinned_apps,
+            vec!["notes".to_string()],
+            "the neighbouring preferences were rewritten by the do-not-disturb write"
+        );
+
+        let mut released = back;
+        released.dnd_mode = false;
+        save_to(&name, &released).expect("the settings file is written again");
+        let raw = std::fs::read_to_string(&path).expect("the settings file is on the disk");
+        assert!(
+            raw.contains("dnd_mode: false"),
+            "releasing the hold left the file saying nothing:\n{raw}"
+        );
+        assert!(!reload(&path).dnd_mode, "the release did not survive the reload");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A write that cannot happen comes back as an error, not as a preference that quietly did
+    /// not change.
+    ///
+    /// This is the half that `set_do_not_disturb` needs: it answers `settled`, which is a promise
+    /// about the disk, so it has to be able to fail. A read-only settings file is the ordinary way
+    /// this happens — the shell preserves it rather than replacing it.
+    #[test]
+    fn a_settings_file_that_cannot_be_written_is_reported_not_swallowed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = scratch("readonly");
+        let name = path.to_string_lossy().to_string();
+        let mut settings = UserSettings::default();
+        save_to(&name, &settings).expect("the settings file is written once");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+            .expect("the settings file can be made read-only");
+
+        settings.dnd_mode = true;
+        let err = save_to(&name, &settings)
+            .expect_err("a read-only settings file must not report a successful write");
+        assert!(!err.is_empty(), "the failure has to say something");
+        assert!(
+            !reload(&path).dnd_mode,
+            "the file changed after a write that reported failure"
+        );
+
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A settings file written before the preference existed opens with notifications audible.
+    #[test]
+    fn a_settings_file_with_no_do_not_disturb_reads_as_released() {
+        let settings: UserSettings = serde_yaml::from_str("dark_mode: true\naccent_color: cyan\n")
+            .expect("an older settings file parses");
+        assert!(!settings.dnd_mode);
+    }
+
+    /// And something puts it back on the window at boot, which is the other half of persisting it.
+    ///
+    /// Read from the source because there is no second reader: every toast decision asks the
+    /// window for `dnd_mode`, so deleting this one line in `AppContext::init` would take the
+    /// preference away again with every test in this file still passing.
+    #[test]
+    fn do_not_disturb_is_restored_when_the_shell_starts() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app_context.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let restores = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .any(|l| l.contains("set_dnd_mode(") && l.contains("user_settings.dnd_mode"));
+        assert!(
+            restores,
+            "nothing in {} puts the saved do-not-disturb back on the window at start. \
+             Persisting it is only half of the fix; without this the file is written and \
+             never read.",
+            path.display()
+        );
     }
 }
