@@ -55,6 +55,12 @@ APP = "containers"  # the control surface id; the app and its binary are contain
 APP_BIN = "/opt/yantrik/bin/yantrik-container-manager"
 ABSENT = "yantrik-probe-no-such-container"
 
+# Every name a caller could arrive with: the id it publishes, the name in /opt/yantrik/bin, the
+# launcher's second spelling of it, and the same words typed by a person. `describe
+# container-manager` used to answer "no socket for 'container-manager'" — a refusal from an app
+# that was open in front of whoever asked — so the names are checked rather than assumed.
+NAMES = [APP, "container-manager", "container_manager", "Container Manager"]
+
 # The actions that name a container, and the key each one puts in its result when it believes it
 # did something. `remove` answering `{"removed": name}` for a container it never looked at is the
 # fault this app was found with.
@@ -154,6 +160,18 @@ def run():
                 "this launch added nothing to the shell's failed_launches",
                 not opened["new_failed_launches_for_this_app"],
                 contract=1, evidence={"added_by_this_launch": opened["new_failed_launches"]})
+
+            # Every name the app is known by describes the app. The one that mattered is the
+            # name it carries in /opt/yantrik/bin, in the launcher and in open_app — and that
+            # was the one its socket did not answer to.
+            by_name = {}
+            for name in NAMES:
+                answered = lib.describe(name)
+                by_name[name] = answered.get("unreachable") or answered.get("app") or "(no app id)"
+            probe.check(
+                "every name this app is known by reaches its surface, not only the id it publishes",
+                all(answer == APP for answer in by_name.values()),
+                contract=1, evidence=by_name)
 
             view = lib.describe(APP)
             state = view.get("state") or {}

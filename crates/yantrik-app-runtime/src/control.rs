@@ -137,6 +137,87 @@ pub fn service_id_for(app_id: &str) -> String {
     format!("app-{app_id}")
 }
 
+// ── The names one app answers to ─────────────────────────────────────
+
+/// Every app that publishes a control surface, and the other names it is known by.
+///
+/// An app has up to three names and they are not always the same word: the id it publishes here
+/// (`containers`), the program in `/opt/yantrik/bin` (`yantrik-container-manager`), and the
+/// launcher's word for its tile (`containers`, but `sysmonitor` for System Monitor). Which of
+/// them a caller happens to be holding decided whether it could describe the app at all:
+///
+/// ```text
+/// yos ls                          → app-containers
+/// yos describe container-manager  → "no socket for 'container-manager'"
+/// ```
+///
+/// The app is `container-manager` in `/opt/yantrik/bin`, in the launcher's route table and in
+/// `open_app`; only its socket was `containers`. A mind that found the app by the name everything
+/// else calls it, and then asked it to describe itself, was refused — and had no way to learn
+/// better from the refusal.
+///
+/// So the other names are written down once, here, and [`App::serve`] links each of them at the
+/// socket the app binds. The ids are the apps' own and are not changed by this: the id an app
+/// publishes is still what `describe` reports and what `yos ls` lists. What changes is that the
+/// other names reach it.
+///
+/// Hyphens, because that is how an app publishes its own id (`download-manager`). [`fold`] makes
+/// `container_manager`, `Container Manager` and `container-manager` one question, so a caller's
+/// punctuation is not part of the name.
+///
+/// An app with no other name still belongs in this table: it is what makes the table a complete
+/// answer to "is this a surface of this desktop", which is what the shell's route table is
+/// checked against (`every_launchable_name_reaches_a_surface` in `wire::dock`). Adding a route
+/// spelling without a name here fails that test rather than shipping another refusal.
+const SURFACES: &[(&str, &[&str])] = &[
+    ("calendar", &[]),
+    ("containers", &["container-manager"]),
+    ("documents", &["document-editor"]),
+    ("download-manager", &["downloads"]),
+    ("editor", &["text-editor"]),
+    ("email", &[]),
+    ("image-viewer", &["images"]),
+    ("network", &["network-manager"]),
+    ("notes", &[]),
+    ("presentation", &["slides"]),
+    // Nothing "opens" the desktop, so it is in no launcher table; it does publish a surface, and
+    // its own notifications' buttons and approval cards have to reach it.
+    ("shell", &[]),
+    ("snippets", &["snippet-manager"]),
+    ("system-monitor", &["sysmonitor"]),
+    ("terminal", &[]),
+    ("weather", &[]),
+];
+
+/// One spelling of a name, so the separator a caller arrived with is not part of the question.
+fn fold(name: &str) -> String {
+    name.trim().to_lowercase().replace([' ', '_'], "-")
+}
+
+/// The id whose control surface answers to `name`, whichever of the app's names that is.
+///
+/// `surface_id("container-manager")`, `surface_id("Container Manager")` and
+/// `surface_id("containers")` are all `containers` — the id the socket is bound under. `None`
+/// means no app of this desktop answers to that name at all, which is a different thing from an
+/// app that is closed.
+pub fn surface_id(name: &str) -> Option<&'static str> {
+    let key = fold(name);
+    SURFACES.iter().find_map(|(id, others)| {
+        (*id == key || others.contains(&key.as_str())).then_some(*id)
+    })
+}
+
+/// The other names `app_id`'s surface answers to. Empty for an app with one name, and for a name
+/// that is not this desktop's.
+pub fn other_names(app_id: &str) -> &'static [&'static str] {
+    let key = fold(app_id);
+    SURFACES
+        .iter()
+        .find(|(id, _)| *id == key)
+        .map(|(_, others)| *others)
+        .unwrap_or(&[])
+}
+
 // ── The ceiling ─────────────────────────────────────────────────────
 
 /// The grades an action can carry, lowest first. The same ladder the MCP bridge and the
@@ -688,6 +769,7 @@ impl App {
 fn serve_rpc(app_id: &str, action_count: usize) {
     {
         let service_id = service_id_for(app_id);
+        link_other_names(app_id);
         std::thread::Builder::new()
             .name(format!("{service_id}-rpc"))
             .spawn(move || {
@@ -720,18 +802,92 @@ fn serve_rpc(app_id: &str, action_count: usize) {
     }
 }
 
+/// Put every other name this app answers to beside the socket it is about to bind.
+///
+/// A symlink, not a second listener: it is one surface, so a caller that follows
+/// `app-container-manager.sock` has to land in the same process and read the same revision. Two
+/// listeners would be two answers to the same question, and a `describe`/`act` pair split across
+/// them is the race `expect_revision` exists to close.
+///
+/// Made before the bind rather than after it, because nothing here can be told when the bind
+/// happened and polling for the file would be a second way to be wrong. A symlink to a socket
+/// that does not exist yet is invisible to a caller — `os.path.exists` is false and `connect`
+/// gets ENOENT — and starts working the moment the socket lands, which is the same fall-through
+/// every caller already has for the stale socket of a closed window.
+///
+/// Nothing here is fatal. An app whose other names cannot be linked is still a working app,
+/// reachable by the id it publishes, which is what it was before.
+#[cfg(unix)]
+fn link_other_names(app_id: &str) {
+    let others = other_names(app_id);
+    if others.is_empty() {
+        return;
+    }
+    let dir = yantrik_ipc_transport::server::socket_dir();
+    for name in link_names(&dir, app_id, others) {
+        tracing::info!(name = %name, app = app_id, "Control surface also answers to this name");
+    }
+}
+
+#[cfg(not(unix))]
+fn link_other_names(_app_id: &str) {}
+
+/// Link `others` at `app_id`'s socket inside `dir`, and report the names that now reach it.
+///
+/// Separated from the directory lookup so it can be tested in a directory of its own. Relative
+/// link targets on purpose: the socket directory is moved by nothing, and a relative target
+/// survives being read from a different mount view of the same runtime dir.
+#[cfg(unix)]
+fn link_names(dir: &std::path::Path, app_id: &str, others: &[&str]) -> Vec<String> {
+    let target = format!("{}.sock", service_id_for(app_id));
+    let mut linked = Vec::new();
+    for name in others {
+        let link = dir.join(format!("{}.sock", service_id_for(name)));
+        // What is there already is from an earlier run of this app, or from an earlier release
+        // that bound this name for real. Either way it is not something to connect to now, and
+        // leaving it would leave the other name pointing at nothing.
+        match std::fs::read_link(&link) {
+            Ok(existing) if existing == std::path::Path::new(&target) => {
+                linked.push((*name).to_string());
+                continue;
+            }
+            Ok(_) => {
+                let _ = std::fs::remove_file(&link);
+            }
+            Err(_) if link.symlink_metadata().is_ok() => {
+                let _ = std::fs::remove_file(&link);
+            }
+            Err(_) => {}
+        }
+        match std::os::unix::fs::symlink(&target, &link) {
+            Ok(()) => linked.push((*name).to_string()),
+            Err(e) => tracing::warn!(
+                name = *name,
+                app = app_id,
+                error = %e,
+                "Could not link one of this app's other names; callers holding it cannot reach it"
+            ),
+        }
+    }
+    linked
+}
+
 // ── Finding the others ──────────────────────────────────────────────
 
 /// The app ids that currently have a control socket in this session.
 ///
 /// A socket file outlives a crashed process, so this is a list of candidates, not of live apps —
 /// callers should treat a failed `app.describe` as "gone" rather than as an error worth reporting.
+///
+/// One app, one entry: the other names an app answers to are symlinks to its socket (see
+/// `link_names`), and listing those would report one open window twice under two names.
 #[cfg(unix)]
 pub fn running_apps() -> Vec<String> {
     let dir = yantrik_ipc_transport::server::socket_dir();
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut ids: Vec<String> = entries
         .filter_map(|e| e.ok())
+        .filter(|e| !e.file_type().is_ok_and(|kind| kind.is_symlink()))
         .filter_map(|e| e.file_name().into_string().ok())
         .filter_map(|name| {
             name.strip_suffix(".sock")
@@ -762,6 +918,74 @@ mod tests {
         // notes-service owns `notes`; the Notes window must not bind the same socket.
         assert_eq!(service_id_for("notes"), "app-notes");
         assert_ne!(service_id_for("notes"), "notes");
+    }
+
+    /// The name the container manager is called everywhere else reaches the id it publishes.
+    ///
+    /// This is the refusal the table was written for: `yos ls` said `app-containers`, the app was
+    /// `container-manager` in `/opt/yantrik/bin`, in the launcher and in `open_app`, and
+    /// `describe container-manager` answered "no socket for 'container-manager'".
+    #[test]
+    fn every_name_an_app_is_known_by_reaches_the_id_it_publishes() {
+        for spelling in [
+            "container-manager", "container_manager", "Container Manager", "CONTAINER-MANAGER",
+            "  containers  ", "containers",
+        ] {
+            assert_eq!(surface_id(spelling), Some("containers"), "{spelling}");
+        }
+        assert_eq!(surface_id("sysmonitor"), Some("system-monitor"));
+        assert_eq!(surface_id("downloads"), Some("download-manager"));
+        assert_eq!(surface_id("text-editor"), Some("editor"));
+        assert_eq!(surface_id("slides"), Some("presentation"));
+        // An app with one name answers to it, and nothing answers for an app this desktop does
+        // not have. "No such app" and "that app is closed" are different answers and a caller
+        // acts differently on them.
+        assert_eq!(surface_id("notes"), Some("notes"));
+        assert_eq!(surface_id("no-such-app"), None);
+        assert_eq!(surface_id(""), None);
+    }
+
+    /// No name is claimed twice, and every name is written the way the folding leaves it.
+    ///
+    /// A second claim on one name would be resolved by whichever row came first, silently, and a
+    /// name stored with an underscore could never match anything, because every lookup folds.
+    #[test]
+    fn no_two_apps_answer_to_the_same_name() {
+        let mut seen = std::collections::HashSet::new();
+        for (id, others) in SURFACES {
+            for name in std::iter::once(id).chain(others.iter()) {
+                assert!(seen.insert(*name), "`{name}` is claimed by two apps");
+                assert_eq!(fold(name), *name, "`{name}` is not folded, so nothing can match it");
+            }
+        }
+    }
+
+    /// The other names of a running app are its socket under another name, not another socket.
+    #[cfg(unix)]
+    #[test]
+    fn another_name_for_an_app_points_at_the_socket_it_bound() {
+        let dir = std::env::temp_dir().join(format!("yantrik-names-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("app-containers.sock");
+        std::fs::write(&socket, b"stands in for the bound socket").unwrap();
+
+        let linked = link_names(&dir, "containers", other_names("containers"));
+        assert_eq!(linked, vec!["container-manager".to_string()]);
+        let link = dir.join("app-container-manager.sock");
+        assert_eq!(std::fs::read_link(&link).unwrap().to_str(), Some("app-containers.sock"));
+        assert_eq!(std::fs::read(&link).unwrap(), std::fs::read(&socket).unwrap());
+
+        // Run twice, as a reopened app does: the second link is the same link, not an error.
+        assert_eq!(link_names(&dir, "containers", other_names("containers")).len(), 1);
+
+        // A real file under that name, left by a release that bound it for real, is replaced —
+        // otherwise the other name would go on answering out of a socket nothing is behind.
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&link, b"an older release bound this name").unwrap();
+        assert_eq!(link_names(&dir, "containers", other_names("containers")).len(), 1);
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use slint::ComponentHandle;
+use yantrik_app_runtime::control;
 
 use crate::app_context::AppContext;
 use crate::apps::DesktopEntry;
@@ -183,18 +184,31 @@ pub fn route(app: &str) -> Option<Launch> {
     ROUTES.iter().find(|(names, _)| names.contains(&id.as_str())).map(|(_, launch)| *launch)
 }
 
-/// The name an opened program answers to on the control surface, where that is not its
-/// `open_app` name.
+/// The name an opened app answers to on the control surface, given any name it opens under.
 ///
 /// A driver opens `sysmonitor` and then has to describe `system-monitor`; opens `downloads` and
 /// describes `download-manager`. Nothing said so anywhere a driver could read, so the second
-/// step of the most ordinary job on this desktop — open an app, look at it — was a guess. The
-/// names are the apps' own and are not changed here; they are written down.
-const SURFACES: &[(&str, &str)] = &[
-    ("sysmonitor", "system-monitor"),
-    ("downloads", "download-manager"),
-    ("images", "image-viewer"),
-];
+/// step of the most ordinary job on this desktop — open an app, look at it — was a guess.
+///
+/// Every spelling in a row reaches the same answer, which is the half that was missing: the
+/// container manager was routed under both `containers` and `container_manager` and only the
+/// first of them resolved, so a mind holding the name off the binary or the launcher's second
+/// spelling was refused by an app that was open in front of it.
+///
+/// The names are the apps' own and are not decided here. Which id an app publishes, and what
+/// else that id answers to, is `yantrik_app_runtime::control::SURFACES` — one table, read by the
+/// apps when they bind their socket and by the shell here when it is asked what to call one.
+/// A screen of the desktop is described as `shell`, because that is the surface it is part of.
+pub fn surface_for(app: &str) -> Option<&'static str> {
+    match route(app)? {
+        Launch::Program { id, .. } => Some(control::surface_id(id).unwrap_or(id)),
+        // The browser is a window we did not write. It publishes nothing, and the desktop's own
+        // surface is not a stand-in for it: a notification button that named the browser and was
+        // answered by `shell` would run somebody else's action on this desktop.
+        Launch::Browser => None,
+        _ => Some("shell"),
+    }
+}
 
 /// What each app is FOR, in a few words, for a reader choosing between them.
 ///
@@ -223,18 +237,24 @@ const PURPOSES: &[(&str, &str)] = &[
     ("browser", "the web"),
 ];
 
-/// The launcher's id for an app, given either that id or the name its surface is described by.
+/// The launcher's id for an app, given any name the app answers to.
 ///
 /// A mind knows an app by the name it passes to `describe` and `act` — `system-monitor`,
 /// `download-manager` — while windows are titled from the launcher's id (`sysmonitor`,
 /// `downloads`). `show_app` takes whichever the caller has.
+///
+/// Read out of the route table rather than from a second list of pairs beside it, so every
+/// spelling a row carries arrives at the same window: `container-manager` used to fall through
+/// unchanged and `present_app` then looked for a window titled after a name no window carries.
 pub fn launcher_id(name: &str) -> String {
     let want = name.trim().to_lowercase();
-    SURFACES
-        .iter()
-        .find(|(_, surface)| *surface == want)
-        .map(|(id, _)| (*id).to_string())
-        .unwrap_or(want)
+    match route(&want) {
+        // The id the window is registered and titled under, which is the route's own, not the
+        // first spelling in its row: the image viewer is routed as `image_viewer` and every
+        // window of it is `images`.
+        Some(Launch::Program { id, .. }) => id.to_string(),
+        _ => want,
+    }
 }
 
 /// Everything `open_app` will open, for a caller that cannot read this file.
@@ -257,7 +277,7 @@ pub fn openable() -> Vec<serde_json::Value> {
             };
             let mut entry = match launch {
                 Launch::Program { id, .. } => {
-                    let surface = SURFACES.iter().find(|(from, _)| from == id).map_or(*id, |(_, to)| *to);
+                    let surface = control::surface_id(id).unwrap_or(*id);
                     serde_json::json!({ "name": name, "opens": "app", "describe_as": surface })
                 }
                 Launch::Browser => serde_json::json!({ "name": name, "opens": "web browser" }),
@@ -737,28 +757,164 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
 mod tests {
     use super::*;
 
-    /// The ids apps publish on their own control surfaces, from `App::new(...)`.
+    /// The id each app under `apps/` publishes on its control surface, read out of the call that
+    /// publishes it — `(app directory, id)`.
     ///
     /// This is the vocabulary an agent actually has: it reads an id from `yos ls` or from an
     /// app's own describe, and hands that back to `open_app`. Anything it can describe, it must
     /// be able to open.
-    const SURFACE_IDS: &[&str] = &[
-        "calendar", "containers", "download-manager", "email", "notes", "system-monitor",
-        "terminal", "weather",
-    ];
+    ///
+    /// It was a hand-written list of eight ids and six of the fourteen were missing from it —
+    /// among the missing, the rows whose other spellings reached no surface at all. A list of
+    /// names kept by hand beside the names themselves is the shape of the bug this file is being
+    /// changed for, so the ids are read from the apps instead. `windows::app_name_tests` reads
+    /// the same tree for the same reason.
+    ///
+    /// An app that publishes nothing (the two on the shelf) has no `App::new` to find and is
+    /// simply absent, which is what it should be.
+    fn published_ids() -> Vec<(String, String)> {
+        let apps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps");
+        let Ok(entries) = std::fs::read_dir(&apps) else {
+            // Packaged source without the apps tree; nothing to read the ids out of.
+            return Vec::new();
+        };
+        let mut found: Vec<(String, String)> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let dir = e.file_name().into_string().ok()?;
+                let source = std::fs::read_to_string(e.path().join("src/main.rs")).ok()?;
+                published_id(&source).map(|id| (dir, id))
+            })
+            .collect();
+        found.sort();
+        assert!(
+            found.len() > 10,
+            "only {} apps were read out of {}; the scan has stopped finding them",
+            found.len(),
+            apps.display()
+        );
+        found
+    }
+
+    /// The id one app publishes, from its `App::new(…)`.
+    ///
+    /// Matched on the exact type name so that `EmailApp::new()` — a window, not a surface — is
+    /// not mistaken for one, and the argument is taken either as the literal or through the
+    /// file's own `APP_ID`, because three apps name it that way.
+    fn published_id(source: &str) -> Option<String> {
+        for (at, _) in source.match_indices("::new(") {
+            let before = &source[..at];
+            let receiver = before
+                .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or_default();
+            if !matches!(receiver, "App" | "Surface" | "ControlSurface") {
+                continue;
+            }
+            let argument = source[at + "::new(".len()..].split(')').next()?.trim();
+            if let Some(literal) = argument.strip_prefix('"') {
+                return literal.split('"').next().map(str::to_string);
+            }
+            // `App::new(APP_ID)`, with the id a const at the top of the same file.
+            let declaration = format!("const {argument}: &str = \"");
+            let value = source.find(&declaration)? + declaration.len();
+            return source[value..].split('"').next().map(str::to_string);
+        }
+        None
+    }
 
     #[test]
     fn every_app_with_a_control_surface_opens_by_the_id_it_publishes() {
-        for id in SURFACE_IDS {
+        for (dir, id) in published_ids() {
             assert!(
-                is_known_app(id, &[]),
-                "`{id}` publishes a control surface, so an agent will ask for it by that name"
+                is_known_app(&id, &[]),
+                "apps/{dir} publishes `{id}`, so an agent will ask for it by that name"
             );
             assert!(
-                route(id).is_some(),
+                route(&id).is_some(),
                 "`{id}` normalises to `{}`, which no route answers to",
-                canonical_id(id)
+                canonical_id(&id)
             );
+        }
+    }
+
+    /// The other way round, and the one nobody was checking: every name that opens an app also
+    /// describes it.
+    ///
+    /// The container manager was opened as `containers` or as `container_manager`, was
+    /// `yantrik-container-manager` in `/opt/yantrik/bin`, and published `containers`. `yos ls`
+    /// showed `app-containers`, `describe containers` answered, and `describe container-manager`
+    /// said "no socket for 'container-manager'" — so a mind that found the app by the name
+    /// everything else calls it and then asked it to describe itself was refused by an app that
+    /// was open in front of it.
+    ///
+    /// Every spelling is checked against the app's own name table rather than against this file,
+    /// because that table is what the app reads when it binds its socket: a name that resolves
+    /// here is a name that answers there. A new spelling in ROUTES with nothing in that table
+    /// fails here instead of shipping the same refusal under a different word.
+    #[test]
+    fn every_launchable_name_reaches_a_surface() {
+        for (names, launch) in ROUTES {
+            let Launch::Program { id, bin } = launch else { continue };
+            let (id, bin) = (*id, *bin);
+            let surface = surface_for(id).expect("a routed program resolves to something");
+            // The name in /opt/yantrik/bin is one of the app's names too: it is what a caller
+            // reads off `ps`, off a log line, or off the directory itself.
+            let program = bin.strip_prefix("yantrik-").unwrap_or(bin);
+            for name in names.iter().copied().chain(std::iter::once(program)) {
+                assert_eq!(
+                    surface_for(name),
+                    Some(surface),
+                    "`open_app name={name}` opens the app that publishes `{surface}`, and \
+                     `describe {name}` has to reach it"
+                );
+                assert_eq!(
+                    control::surface_id(name),
+                    Some(surface),
+                    "`{name}` opens `{surface}` and the app's own name table does not know the \
+                     name, so its socket answers to `{surface}` alone and `describe {name}` is \
+                     refused. Add it beside `{surface}` in yantrik_app_runtime::control::SURFACES."
+                );
+            }
+        }
+        // And a screen of the desktop is part of the desktop's own surface, which is what a
+        // caller has to describe to see it.
+        assert_eq!(surface_for("files"), Some("shell"));
+        assert_eq!(surface_for("settings"), Some("shell"));
+        assert_eq!(surface_for("no-such-app"), None);
+        // Chromium is not one of ours and the desktop's own surface does not answer for it.
+        assert_eq!(surface_for("browser"), None);
+        // The mismatches this is really about, spelled out, so the intent survives a refactor.
+        assert_eq!(surface_for("container-manager"), Some("containers"));
+        assert_eq!(surface_for("sysmonitor"), Some("system-monitor"));
+        assert_eq!(surface_for("text_editor"), Some("editor"));
+    }
+
+    /// Nothing is written down twice: the id an app publishes is the id the apps' name table
+    /// says it publishes, and every other name in that table is a name this shell would open.
+    ///
+    /// The table decides which names an app links at its socket, so a table that disagreed with
+    /// the app about what it is called would hand out names that reach nothing — this bug again,
+    /// from the other end.
+    #[test]
+    fn the_apps_name_table_and_the_route_table_know_the_same_names() {
+        for (dir, id) in published_ids() {
+            let surface = control::surface_id(&id).unwrap_or_else(|| {
+                panic!(
+                    "apps/{dir} publishes `{id}` and no app of that name is in \
+                     yantrik_app_runtime::control::SURFACES, so every other name it is called by \
+                     reaches nothing"
+                )
+            });
+            assert_eq!(surface, id, "apps/{dir} publishes `{id}` and the table calls it `{surface}`");
+            for name in control::other_names(surface) {
+                assert!(
+                    route(name).is_some(),
+                    "the apps' name table says `{surface}` also answers to `{name}`, and this \
+                     shell would not open anything called that"
+                );
+                assert_eq!(surface_for(name), Some(surface), "`{name}`");
+            }
         }
     }
 

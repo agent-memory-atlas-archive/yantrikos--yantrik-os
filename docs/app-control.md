@@ -166,8 +166,20 @@ socket.
 The id is the app's own name, not its binary's: Container Manager publishes `containers`, because
 that is what a caller would think to ask for.
 
+It is not the only name it is asked for by, though, and it used to be the only one that worked.
+The same app is `container-manager` in `/opt/yantrik/bin`, in the launcher's route table and in
+`open_app`, and `yos describe container-manager` answered "no socket for 'container-manager'" —
+a refusal from an app that was open in front of the caller. So `control::SURFACES` holds every
+app's other names once, `serve` links each of them at the socket the app binds, and `yos ls`
+shows them beside the app rather than as apps of their own. A symlink rather than a second
+listener, because it is one surface: following either name has to land in the same process and
+read the same revision. The shell resolves the same names through the same table
+(`wire::dock::surface_for`), and `every_launchable_name_reaches_a_surface` fails if a name the
+launcher offers is one no surface answers to.
+
 `list_apps` finds surfaces by listing `app-*.sock` in the session's socket directory. A socket file
 outlives a crash, so anything that fails to answer is simply left out — a stale socket is not news.
+A symlink is left out too: one open window must not be offered twice under two of its names.
 
 ## Verifying one
 

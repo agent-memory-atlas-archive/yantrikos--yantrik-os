@@ -32,7 +32,13 @@ TIMEOUT = 30
 KNOWN_GRADES = {"safe", "standard", "sensitive", "dangerous"}
 
 # Fixed launch targets (check 2) and the fixed allowlist (check 3).
-LAUNCH_APPS = ["notes", "calendar", "email", "terminal", "download-manager"]
+#
+# `container-manager` is in the list by the name it is NOT published under: the app publishes
+# `containers`, and it is `container-manager` in /opt/yantrik/bin, in the launcher and in
+# `open_app`. `describe container-manager` answered "no socket for 'container-manager'", so
+# opening the app by the name everything else calls it and then describing it — the most ordinary
+# pair of steps on this desktop — failed on the second one.
+LAUNCH_APPS = ["notes", "calendar", "email", "terminal", "download-manager", "container-manager"]
 ALLOWLIST = [
     ("notes", "new_note", {"title": "smoke test"}),
     ("notes", "save", {}),
