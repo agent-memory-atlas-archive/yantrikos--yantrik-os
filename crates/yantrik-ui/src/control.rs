@@ -868,13 +868,33 @@ pub fn publish(
             },
         )
         .action(
-            Action::new("set_do_not_disturb", "Hold or release notifications")
+            // The write is the action, and a failed write is a failed action.
+            //
+            // `settled` is not a field a handler fills in: this surface computes it as
+            // `!deferred`, and the shell publishes this one as "settles on return", so every Ok
+            // out of here is a promise that the settings file has been written. It used to press
+            // the settings screen's own toggle and return the flag it had been handed. That
+            // toggle does write — the audit's machine writes `dnd_mode` on every flip — but it
+            // calls `persist` and drops the `Result`, which is right for a row with a "Not
+            // saved" line under it and wrong here. A read-only settings file, a file changed
+            // underneath the shell, existing values the shell refuses to overwrite: each of
+            // those came back to a caller as a durable setting.
+            //
+            // So the file first, the error propagated, the screen after. An error out of here
+            // means the shell is exactly as the caller found it.
+            Action::new("set_do_not_disturb", "Hold or release notifications. Stays after a restart")
                 .arg(Param::flag("on")),
             move |args| {
                 let ui = dnd_ui()?;
                 let on = args["on"].as_bool().ok_or("`on` must be true or false")?;
-                if ui.get_dnd_mode()!=on { ui.invoke_toggle_dnd_mode(); }
-                Ok(serde_json::json!({ "do_not_disturb": on }))
+                crate::wire::settings::set_dnd_mode(on)?;
+                ui.set_dnd_mode(on);
+                tracing::info!(dnd = on, "Do Not Disturb set, and written to the settings file");
+                // Read back out of the preference store, the way `pin_app` answers with the
+                // pinned list rather than with the flag it was given.
+                Ok(serde_json::json!({
+                    "do_not_disturb": crate::wire::settings::dnd_mode(),
+                }))
             },
         )
         .action(
@@ -1079,6 +1099,52 @@ mod screen_table_tests {
         assert_eq!(
             ids, expected,
             "settings section ids are the sidebar's indices, so they run 0..n with no gaps"
+        );
+    }
+}
+
+#[cfg(test)]
+mod do_not_disturb_tests {
+    use std::path::Path;
+
+    /// `set_do_not_disturb`'s handler as it is written, taken from the code above the tests: a
+    /// check that names what it forbids is worth nothing if it can match itself.
+    fn handler() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
+        let from = src
+            .find("\"set_do_not_disturb\"")
+            .expect("the shell still publishes set_do_not_disturb");
+        let rest = &src[from..];
+        let end = rest.find(".action(").unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    /// `settled: true` is a promise about the settings file, so the write has to be the action.
+    ///
+    /// This action is not deferred, which means the surface answers `settled: true` on every Ok
+    /// the handler returns. It used to return Ok after pressing the settings screen's own toggle
+    /// — a Slint callback that flips the property, saves, and drops the result — so `settled` was
+    /// a claim about the disk that nothing had checked, and every way that save can fail came
+    /// back to the caller as a durable setting.
+    #[test]
+    fn set_do_not_disturb_reports_settled_only_once_the_file_is_written() {
+        let handler = handler();
+        assert!(
+            handler.contains("settings::set_dnd_mode(on)?"),
+            "`set_do_not_disturb` must write the preference through \
+             `wire::settings::set_dnd_mode` and hand its failure on with `?`. This action is \
+             not deferred, so returning Ok answers `settled: true`, and that is a claim about \
+             ~/.config/yantrik/settings.yaml rather than about the chip in the status bar. \
+             Handler as written:\n{handler}"
+        );
+        assert!(
+            !handler.contains("invoke_toggle_dnd_mode"),
+            "`set_do_not_disturb` presses the settings screen's own toggle. That callback \
+             flips the property and throws its save result away, which is how this action came \
+             to report a durable preference it had never written. Handler as written:\n{handler}"
         );
     }
 }
