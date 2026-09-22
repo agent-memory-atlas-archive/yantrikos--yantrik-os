@@ -1,0 +1,70 @@
+{
+  "_comment": [
+    "The graph Studio sends to a ComfyUI server: a plain SDXL text-to-image pass, in the API",
+    "format the editor writes with 'Save (API Format)' under Dev mode. It is one KSampler, one",
+    "checkpoint, an empty latent, two text encoders and a save — deliberately the smallest graph",
+    "that is still a real picture, because a graph nobody can read is a graph nobody will fix",
+    "when their checkpoint is called something else.",
+    "",
+    "Studio fills it in by following the sampler's own links rather than by assuming these node",
+    "numbers, so a graph you export yourself and name in the config's `workflow` works too, and",
+    "anything it could not fill is reported rather than silently ignored."
+  ],
+  "4": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd_xl_base_1.0.safetensors"
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["4", 1]
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["4", 1]
+    }
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 0,
+      "steps": 30,
+      "cfg": 7.0,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["4", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["5", 0]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["4", 2]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "Studio",
+      "images": ["8", 0]
+    }
+  }
+}

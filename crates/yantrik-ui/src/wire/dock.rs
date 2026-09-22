@@ -83,6 +83,10 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["permissions", "permission_dashboard"], Launch::Screen(28)),
     (&["documents", "document_editor"], Launch::Program { id: "documents", bin: "yantrik-document-editor" }),
     (&["presentation", "slides"], Launch::Program { id: "presentation", bin: "yantrik-presentation" }),
+    // One spelling, because the app publishes `studio` and the binary is `yantrik-studio`: every
+    // name a caller could hold already reaches it. `images` is the image viewer's, and the app
+    // that makes pictures must not answer to the name of the one that looks at them.
+    (&["studio"], Launch::Program { id: "studio", bin: "yantrik-studio" }),
     (&["launchpad"], Launch::Launchpad),
 ];
 
@@ -230,6 +234,10 @@ const PURPOSES: &[(&str, &str)] = &[
     ("notes", "quick markdown notes kept in the notes library, not files you name"),
     ("editor", "plain-text and code files, opened and saved by path"),
     ("images", "view pictures"),
+    // Written against `images` on purpose: the two are one word apart and a model choosing between
+    // them has only these few words. Looking and making are the difference, and where the pixels
+    // come from is the second thing a caller has to know before it asks.
+    ("studio", "make pictures from a sentence, on your own GPU or a hosted service; they land as files"),
     ("email", "read and send mail"),
     ("calendar", "events and appointments"),
     ("network", "this machine's connections, Wi-Fi and firewall state"),
@@ -999,7 +1007,8 @@ mod tests {
     const SHIPPED_APPS: &[&str] = &[
         "calendar", "container-manager", "document-editor", "download-manager", "email",
         "image-viewer", "music-player", "network-manager", "notes", "presentation",
-        "snippet-manager", "spreadsheet", "system-monitor", "terminal", "text-editor", "weather",
+        "snippet-manager", "spreadsheet", "studio", "system-monitor", "terminal", "text-editor",
+        "weather",
     ];
 
     #[test]

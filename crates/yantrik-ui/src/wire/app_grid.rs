@@ -232,15 +232,15 @@ mod icon_id_tests {
             "packages", "memory", "media", "music", "weather", "settings", "calendar", "bond",
             "notifications", "spreadsheet", "documents", "presentation", "launchpad", "yantrik",
             "about", "containers", "devices", "downloads", "permissions", "personality",
-            "skills", "snippets", "sysmonitor", "image",
+            "skills", "snippets", "sysmonitor", "image", "studio",
         ];
         const SHIPPED: &[&str] = &[
             "yantrik-calendar", "yantrik-container-manager", "yantrik-document-editor",
             "yantrik-download-manager", "yantrik-email", "yantrik-image-viewer",
             "yantrik-music-player", "yantrik-network-manager", "yantrik-notes",
             "yantrik-presentation", "yantrik-snippet-manager", "yantrik-spreadsheet",
-            "yantrik-system-monitor", "yantrik-terminal", "yantrik-text-editor",
-            "yantrik-weather",
+            "yantrik-studio", "yantrik-system-monitor", "yantrik-terminal",
+            "yantrik-text-editor", "yantrik-weather",
         ];
 
         let missing: Vec<String> = SHIPPED
