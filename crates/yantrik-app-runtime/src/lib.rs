@@ -36,6 +36,22 @@ pub mod notify;
 pub mod service;
 pub mod theme;
 
+/// Held by every test in this crate that sets `XDG_RUNTIME_DIR`, or binds a socket under it.
+///
+/// The environment is process-wide and the test harness runs tests on parallel threads. Two
+/// `notify` tests point the variable at `/tmp` for their own reasons; a test that had started
+/// a server under the runner's `/run/user/<uid>` then looked for its socket where the variable
+/// pointed *now*. On GitHub's runners that lost the race on four pull requests in one night,
+/// none of which touched this crate, and passed on every rerun. A poisoned lock is fine to
+/// take: whatever the last holder panicked about was its own business.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Commonly-needed imports for app authors.
 pub mod prelude {
     pub use crate::{companion, control, init_tracing, instance, notify, service, theme, SyncRpcClient};

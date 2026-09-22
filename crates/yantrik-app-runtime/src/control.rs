@@ -1434,6 +1434,15 @@ mod tests {
 
         const APP: &str = "caller-test";
 
+        // The server binds wherever `XDG_RUNTIME_DIR` points when its thread gets there, and the
+        // connect below looks wherever it points then. Nothing else may move it in between —
+        // see `env_lock` — and it points at a directory this test owns, not at the runner's
+        // `/run/user/<uid>`, which need not exist on a machine with no login session.
+        let _env = crate::env_lock();
+        let runtime = std::env::temp_dir().join(format!("yantrik-ui-hop-test-{}", std::process::id()));
+        std::fs::create_dir_all(&runtime).expect("a runtime dir of our own");
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+
         test_ui_thread::start(Box::new(|| Registry {
             app_id: APP.into(),
             describe: Some(Box::new(|| View::new("caller-test"))),
@@ -1453,10 +1462,9 @@ mod tests {
         }));
         serve_rpc(APP, 1);
 
-        // The server binds on its own thread, after building a tokio runtime, and on a busy CI
-        // runner that has taken longer than the three seconds this used to allow: the test
-        // failed on two pull requests that never touched this crate, and each time passed on a
-        // rerun. Thirty seconds is a bound on a hung server, not a budget for a slow one.
+        // Thirty seconds is a bound on a hung server, not a budget for a slow one: the server
+        // binds on its own thread after building a tokio runtime, and the failure this loop used
+        // to report was never slowness but the environment race described at `env_lock`.
         let address = RpcServer::default_address(&service_id_for(APP));
         let mut socket = None;
         for _ in 0..1000 {

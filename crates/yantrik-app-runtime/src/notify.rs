@@ -237,6 +237,7 @@ mod tests {
         // The whole point. This runs in a test process with no notifications socket and no
         // shell to ask for one, so the delivery thread will spend a couple of seconds failing —
         // and the caller, which in a real app is the UI thread, must not wait for any of it.
+        let _env = crate::env_lock();
         std::env::set_var("XDG_RUNTIME_DIR", std::env::temp_dir());
         let started = Instant::now();
         for i in 0..3 {
@@ -253,6 +254,7 @@ mod tests {
     fn the_number_of_sends_in_flight_is_bounded() {
         // Anything on this machine can call `send`. A caller in a loop has to lose
         // notifications rather than spawn threads until the process dies.
+        let _env = crate::env_lock();
         std::env::set_var("XDG_RUNTIME_DIR", std::env::temp_dir());
         for i in 0..(MAX_IN_FLIGHT * 20) {
             send(Notification::new("flood", format!("{i}")));
