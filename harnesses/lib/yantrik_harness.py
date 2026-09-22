@@ -402,14 +402,31 @@ class Harness:
             reply = self._call(CHUNK, {"session": turn.session, "turn_id": turn.turn_id,
                                        "delta": delta}) or {}
         except HarnessError as exc:
-            self.log("chunk on turn %d failed: %s" % (turn.turn_id, exc))
-            turn.dropped = True
+            # The desktop no longer holds this turn — it was failed for us (a re-attach, a
+            # restart, a person who moved on). A turn that is dropped is over: the mind behind
+            # it is told to stop, and this is logged once, not on every delta. Pi kept
+            # answering a weather question for three minutes into a turn the desktop had
+            # dropped at the first second, one log line per token.
+            if not turn.dropped:
+                self.log("chunk on turn %d failed: %s" % (turn.turn_id, exc))
+            self._drop(turn)
             return False
         turn.last_call = time.monotonic()
         if reply.get("dropped"):
-            turn.dropped = True
+            self._drop(turn)
             return False
         return True
+
+    def _drop(self, turn: Turn) -> None:
+        """The panel stopped listening: nothing more is sent, and the mind is asked to stop."""
+        if turn.dropped:
+            return
+        turn.dropped = True
+        turn.cancelled.set()
+        try:
+            self.handler.cancel(turn)
+        except Exception as exc:  # noqa: BLE001 — a handler's cancel must not kill the loop
+            self.log("cancel raised: %s" % exc)
 
     def _close(self, turn: Turn, error: Optional[str] = None) -> None:
         """Complete or fail, once. Every path out of a turn comes through here."""

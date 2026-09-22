@@ -371,9 +371,32 @@ sudo chmod +x "$ROOTFS/opt/yantrik/bin/"*
 sudo mkdir -p "$ROOTFS/opt/yantrik/share"
 sudo cp -a "$UNPACK/share/." "$ROOTFS/opt/yantrik/share/"
 sudo chown -R root:root "$ROOTFS/opt/yantrik/share"
-for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session; do
+for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session \
+                share/icons/hicolor/scalable/apps/yantrik.svg; do
     [ -e "$ROOTFS/opt/yantrik/$required" ] || fail "$required missing from the image — the desktop session would not be the shipped one"
 done
+
+# ── The app icon, also in the system icon theme ──
+#
+# It already landed under /opt/yantrik/share above, which is where the Yantrik session finds
+# it because yantrik-session puts that directory on XDG_DATA_DIRS. But this image also runs
+# a live installer, a polkit agent and whatever else the person launches, none of which get
+# that environment — and the .desktop entries this OS ships say `Icon=yantrik` everywhere.
+# So the same files go into the ordinary system theme as well, where every toolkit looks
+# without being told to. Two copies of one 1.7 KB file and three small PNGs, versus a
+# launcher full of blank tiles in half the contexts on the machine.
+sudo mkdir -p "$ROOTFS/usr/share/icons/hicolor/scalable/apps"
+sudo cp "$ROOTFS/opt/yantrik/share/icons/hicolor/scalable/apps/yantrik.svg" \
+        "$ROOTFS/usr/share/icons/hicolor/scalable/apps/yantrik.svg"
+for px in 48 128 256; do
+    src="$ROOTFS/opt/yantrik/share/icons/hicolor/${px}x${px}/apps/yantrik.png"
+    if [ -f "$src" ]; then
+        sudo mkdir -p "$ROOTFS/usr/share/icons/hicolor/${px}x${px}/apps"
+        sudo cp "$src" "$ROOTFS/usr/share/icons/hicolor/${px}x${px}/apps/yantrik.png"
+    fi
+done
+# Refresh the theme cache if the tool is in the chroot; harmless and skipped if not.
+sudo chroot "$ROOTFS" gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
 
 # The build manifest travels with the image so a running machine can answer
 # "which build is this?" — a question that was unanswerable on the VM all day.
@@ -453,10 +476,13 @@ fi
 #
 # `lib` is the half they share (attach, poll, heartbeat, the MCP client, one place a turn is
 # closed); `deepseek` is a tool-calling loop over an OpenAI-compatible API; `pi` drives the pi
-# coding agent over its RPC mode and carries the extension that gives it the desktop's tools.
+# coding agent over its RPC mode and carries the extension that gives it the desktop's tools;
+# `openclaw` drives an OpenClaw install, which brings its own MCP client and so reaches the
+# desktop's tools through an entry in the person's own ~/.openclaw/openclaw.json rather than
+# through anything staged here.
 # Their unit files are staged beside them, to be copied into ~/.config/systemd/user by whoever
 # decides to run one — see each README.
-for harness in lib deepseek pi; do
+for harness in lib deepseek pi openclaw; do
     [ -d "$PROJECT_ROOT/harnesses/$harness" ] || continue
     sudo mkdir -p "$ROOTFS/opt/yantrik/share/harnesses/$harness"
     sudo cp -r "$PROJECT_ROOT/harnesses/$harness/." \

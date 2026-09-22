@@ -62,7 +62,7 @@ script that only acts never needs to attach.
 - **Nothing waiting is an ordinary reply**, not an error. You will poll far more often than a
   person types.
 
-## Four harnesses exist
+## Five harnesses exist
 
 **Yantrik Mind** attaches from its own process (`crates/mind-core/src/harness.rs` in its repo).
 It is the reference for a mind written in Rust that already has its own model and memory.
@@ -167,11 +167,45 @@ What it assumes, and what that cost:
   tool-calling loop is. The README says so in those words, and the config file is the person's
   rather than the machine's.
 
-Both ship as source in the image and neither is started: a machine that has not been configured
+**OpenClaw** (`harnesses/openclaw`) is the local-first personal agent: a gateway daemon on
+127.0.0.1, a primary agent that spawns sub-agents, its own channels, and persistent memory. It is
+the only one attached with `memory=true` and the only one whose tools this repo does not carry —
+OpenClaw has an MCP client of its own, so `yos-mcp` is registered in the person's
+`~/.openclaw/openclaw.json` under `.mcp.servers` with `env.YOS_MCP_REQUESTER=OpenClaw`, and the
+tool scope is approved once on the gateway's dashboard. Nothing about that passes through this
+harness, which is the right shape: a mind that already knows how to hold tools should be given
+the tools, not a proxy for them.
+
+It ships **two routes** because only one of them could be checked. The default is a per-turn
+`openclaw agent`, read as JSON lines and falling back to plain text; the other is a hand-written
+RFC 6455 client against the gateway, which streams properly and is the shape OpenClaw's own CLI
+uses. The WebSocket *framing* is a standard and is tested against an independent fake server. The
+*envelope* is not:
+
+- **What could not be verified offline, and is therefore an assumption:** the field names in
+  every message this harness sends the gateway, the gateway's WebSocket path, and the exact flags
+  of `openclaw agent`. This was written with no OpenClaw checkout and no network — nothing in it
+  was derived from `src/gateway/` — so each guess is confined to one place and named in the
+  README: `args` in the config, `GATEWAY_PATHS`, and `client_envelope()`. The decoder in the
+  other direction needed no guess, because it accepts flat `{type, delta}`, Anthropic-shaped
+  `content_block_delta` and OpenAI-shaped `choices[].delta` at once.
+- **An unrecognised event is reported as unrecognised.** The failure this exists for is a
+  protocol mismatch that looks exactly like an agent which has gone quiet: a decoder that
+  silently drops what it does not know turns a five-minute config fix into an afternoon.
+- **A daemon that is not running is an answer, not a wait.** Connecting is retried with backoff
+  and then the turn is failed with the sentence that names the command to run, which is the whole
+  difference between a harness a person can debug and a cursor that never stops blinking.
+- **Closing a pipe is not the same as ending a process.** The shared `end_process` closes a
+  child's stdout before terminating it, which deadlocks when a reader thread is blocked inside
+  that stream — it holds the buffer's lock until it returns, and `close()` waits for that lock
+  forever. The CLI route signals the child first, lets the readers come back with EOF, and has
+  each one close the stream it owns.
+
+All three ship as source in the image and none is started: a machine that has not been configured
 never talks to a provider. `harnesses/lib/yantrik_harness.py` is the half they share — attach,
 poll, heartbeat, `/stop`, `/new`, the MCP client, and one `_close` that every path out of a turn
 goes through — and `harnesses/tests` runs all of it offline against a fake desktop, a fake
-bridge, a fake chat API and a fake `pi`.
+bridge, a fake chat API, a fake `pi` and a fake OpenClaw gateway.
 
 ## What is not here yet
 

@@ -1,0 +1,26 @@
+[Unit]
+Description=OpenClaw, attached to the Yantrik OS desktop as a mind
+Documentation=file:///opt/yantrik/share/harnesses/openclaw/README.md
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/yantrik/share/harnesses/openclaw/yantrik_openclaw.py
+Restart=on-failure
+RestartSec=5
+# A user service does not inherit a login shell's PATH, and `openclaw` and `node` are usually
+# installed per-user (~/.npm-global/bin, ~/.local/node/bin). Either set them here:
+#   Environment=PATH=%h/.npm-global/bin:%h/.local/node/bin:/usr/bin:/bin
+# or put the same string in `path` in ~/.config/yantrik/openclaw.json, which this harness
+# prepends.
+#
+# OpenClaw's model, keys, memory and MCP servers are OpenClaw's own business and live in
+# ~/.openclaw/openclaw.json. Nothing in this unit and nothing in the image holds one. If the
+# gateway needs a token, name its variable in `token_env` and put the variable itself here
+# (Environment=) or in ~/.config/environment.d/ — not in the harness config.
+#
+# This unit does not start the gateway. If you use the gateway route, OpenClaw's own service
+# starts it; this one only talks to it, and says so in the conversation when it is not there.
+
+[Install]
+WantedBy=default.target
