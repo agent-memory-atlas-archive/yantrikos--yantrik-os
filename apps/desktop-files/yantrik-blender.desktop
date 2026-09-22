@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Blender
+Comment=3D modelling, animation and rendering
+# The addon is the point of this exact command: it is what makes the Blender this desktop
+# opens answer to `yos describe blender`. The dock route runs the same two pieces, and
+# availability() checks both before offering the tile.
+Exec=blender --python /opt/yantrik/share/blender/bootstrap.py
+# One mark for now: brand/yantrik-mark.svg, installed as hicolor `yantrik`.
+Icon=yantrik
+Categories=Graphics;3DGraphics;
+Keywords=3d;modelling;render;animation;

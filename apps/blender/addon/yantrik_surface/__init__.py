@@ -1,0 +1,151 @@
+"""The Yantrik control surface, inside Blender.
+
+Blender is not ours. It is a program this OS opens, like the browser. What makes it an app
+of this desktop rather than a window a mind can only photograph is this addon: it binds
+`app-blender.sock` in the session's socket directory and answers `app.describe` and
+`app.act` in the same JSON-RPC every other app speaks, so `yos describe blender` reads a
+scene the way `yos describe notes` reads a note — and the same ceiling, the same revision
+guard and the same refusal vocabulary bind it, because `surface.py` is a port of
+`yantrik-app-runtime::control`'s dispatch rather than an opinion of its own.
+
+Threading. The socket is served on a thread of its own; `bpy` is not thread-safe and every
+read or change of the scene is marshalled onto Blender's main thread and waited for — the
+same hop the Rust apps make with `slint::invoke_from_event_loop`. How the main thread picks
+the work up differs by mode, because the two modes have different main threads:
+
+  * windowed: a `bpy.app.timers` callback pumps the queue, so the hop lands between
+    Blender's own event-loop turns;
+  * background (`blender -b`): there is no event loop to time, so `start()` becomes the
+    main loop and pumps the queue itself until the process is stopped.
+
+Tests. Nothing below this file imports `bpy` at import time — `scene.py` is handed the
+module — so `tests/blender-core` drives the whole dispatch layer against a fake. This file
+is the only place that touches the real thing.
+"""
+
+import os
+import sys
+import threading
+import time
+
+APP_ID = "blender"
+
+_here = os.path.dirname(os.path.abspath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+
+from . import wire  # noqa: E402
+from .bridge import QueuedBridge  # noqa: E402
+from .scene import Scene  # noqa: E402
+from .surface import Surface  # noqa: E402
+
+# Blender's addon registry reads this. The addon also runs without being installed — the
+# launcher starts `blender --python .../bootstrap.py`, which calls start() directly — so
+# nothing below depends on registration having happened.
+bl_info = {
+    "name": "Yantrik Surface",
+    "author": "Yantrik OS",
+    "version": (1, 0, 0),
+    "blender": (4, 0, 0),
+    "location": "Socket: $XDG_RUNTIME_DIR/yantrik/app-blender.sock",
+    "description": "Publishes this Blender on the Yantrik control surface (app.describe / app.act)",
+    "category": "System",
+}
+
+_lock = threading.Lock()
+_running = None  # the _Session that is serving, or None
+
+
+class _Session:
+    """One serving Blender: the bridge, the surface, the socket, and how to stop all three."""
+
+    def __init__(self, bpy_mod, background):
+        self.bpy = bpy_mod
+        self.background = background
+        self.bridge = QueuedBridge()
+        self.surface = Surface(Scene(bpy_mod), self.bridge, app_id=APP_ID)
+        self.server = wire.Server(wire.default_socket_path(APP_ID), self.surface)
+        self.stopped = False
+
+    def start(self):
+        self.server.start()
+        if self.background:
+            return
+        # Windowed: pump between Blender's own turns. The interval is a floor on how long a
+        # `yos act` waits for the main thread to notice it, not a poll of anything; 50 ms is
+        # below the resolution of a person watching and of a caller timing out.
+        def pump_timer():
+            if self.stopped:
+                return None
+            self.bridge.pump()
+            return 0.05
+
+        self.bpy.app.timers.register(pump_timer, first_interval=0.05, persistent=True)
+
+    def run_foreground_loop(self):
+        """The main loop of a background Blender. Returns when stop() is called."""
+        while not self.stopped:
+            if not self.bridge.pump():
+                time.sleep(0.02)
+
+    def stop(self):
+        self.stopped = True
+        self.server.stop()
+        self.bridge.wake()
+
+
+def start():
+    """Bind the socket and start answering. Blocks while Blender is in background mode.
+
+    Called from the main thread — by `bootstrap.py`, or by Blender itself through
+    `register()`. Failing to serve is not fatal and must not be: a Blender whose socket
+    cannot be bound is still a working Blender, and taking the window down over that would
+    be the worse outcome (the same choice `App::serve` makes in the Rust runtime).
+    """
+    global _running
+    import bpy  # imported here, not at module level, so the tests never need it
+
+    background = bool(getattr(bpy.app, "background", False))
+    with _lock:
+        if _running is not None:
+            session = _running
+        else:
+            session = _Session(bpy, background)
+            try:
+                session.start()
+            except OSError as e:
+                # Said where a person will see it, and not raised: see the docstring.
+                print("[yantrik] control surface not serving: %s" % e, file=sys.stderr)
+                return None
+            _running = session
+    socket_path = session.server.path
+    print("[yantrik] control surface on %s (%d actions, %s)"
+          % (socket_path, len(session.surface.actions),
+             "background" if background else "windowed"),
+          file=sys.stderr)
+    if background:
+        try:
+            session.run_foreground_loop()
+        except KeyboardInterrupt:
+            stop()
+    return session
+
+
+def stop():
+    """Stop serving and unlink the socket. Safe to call when nothing is running."""
+    global _running
+    with _lock:
+        session = _running
+        _running = None
+    if session is not None:
+        session.stop()
+
+
+def register():
+    """Blender's addon hook: the surface comes up when the addon is enabled."""
+    start()
+
+
+def unregister():
+    """Blender's addon hook: the surface goes away when the addon is disabled."""
+    stop()

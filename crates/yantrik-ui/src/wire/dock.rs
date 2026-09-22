@@ -24,6 +24,8 @@ pub enum Launch {
     Program { id: &'static str, bin: &'static str },
     /// Whichever web browser this machine has.
     Browser,
+    /// Blender, opened with the Yantrik addon so its control surface comes up with it.
+    Blender,
 }
 
 /// Every app the shell opens by name, and what opening it does.
@@ -52,6 +54,7 @@ pub enum Launch {
 const ROUTES: &[(&[&str], Launch)] = &[
     (&["terminal"], Launch::Program { id: "terminal", bin: "yantrik-terminal" }),
     (&["browser"], Launch::Browser),
+    (&["blender"], Launch::Blender),
     (&["files"], Launch::Screen(8)),
     (&["settings"], Launch::Screen(7)),
     (&["notes"], Launch::Program { id: "notes", bin: "yantrik-notes" }),
@@ -207,6 +210,10 @@ pub fn surface_for(app: &str) -> Option<&'static str> {
         // surface is not a stand-in for it: a notification button that named the browser and was
         // answered by `shell` would run somebody else's action on this desktop.
         Launch::Browser => None,
+        // Blender is not ours either, but unlike the browser it does publish: the addon the
+        // launcher starts it with binds app-blender.sock, so the name resolves through the
+        // apps' own table rather than being asserted here.
+        Launch::Blender => control::surface_id("blender"),
         _ => Some("shell"),
     }
 }
@@ -237,6 +244,7 @@ const PURPOSES: &[(&str, &str)] = &[
     ("settings", "this desktop's settings"),
     ("browser", "the web"),
     ("arcade", "game making: small JSON specs in, one playable HTML game out"),
+    ("blender", "3D scenes: model them, light them, render them"),
 ];
 
 /// The launcher's id for an app, given any name the app answers to.
@@ -283,6 +291,12 @@ pub fn openable() -> Vec<serde_json::Value> {
                     serde_json::json!({ "name": name, "opens": "app", "describe_as": surface })
                 }
                 Launch::Browser => serde_json::json!({ "name": name, "opens": "web browser" }),
+                // An app, and listed as one: opening it brings up a surface a caller can
+                // describe and act on, which is the whole reason the route exists.
+                Launch::Blender => {
+                    let surface = control::surface_id("blender").unwrap_or("blender");
+                    serde_json::json!({ "name": name, "opens": "app", "describe_as": surface })
+                }
                 _ => serde_json::json!({ "name": name, "opens": "a screen of the desktop itself", "describe_as": "shell" }),
             };
             let id = match launch {
@@ -356,6 +370,18 @@ pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
                 "a web browser (looked for {})",
                 BROWSERS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")
             )),
+        },
+        // Both halves are checked: a Blender without the addon is a window a mind can only
+        // photograph, and an addon without Blender has nothing to run inside. The refusal
+        // names the half that is missing, because the fix is different for each.
+        Some(Launch::Blender) => match find_program("blender") {
+            None => Availability::Missing("blender".to_string()),
+            Some(_) => match blender_bootstrap() {
+                Some(_) => Availability::Ready,
+                None => Availability::Missing(
+                    "the Yantrik addon for Blender (share/blender/bootstrap.py)".to_string(),
+                ),
+            },
         },
         Some(Launch::Screen(_) | Launch::SettingsSection(_) | Launch::Editor | Launch::Launchpad) => {
             Availability::Ready
@@ -463,6 +489,25 @@ const CHROMIUM_FLAGS: &[&str] = &[
 /// The first browser from `BROWSERS` this machine has.
 pub fn find_browser() -> Option<(&'static str, &'static [&'static str])> {
     BROWSERS.iter().copied().find(|(name, _)| find_program(name).is_some())
+}
+
+/// The Blender addon's entry point, where a release stages it.
+///
+/// `blender --python <this file>` is what makes a Blender this desktop opened into a Blender
+/// this desktop can talk to: the bootstrap binds app-blender.sock before the first frame is
+/// drawn. The deploy path first, then the same layout relative to the shell's own binary,
+/// which is what a development tree or a relocated install has.
+pub fn blender_bootstrap() -> Option<PathBuf> {
+    let mut candidates = vec![PathBuf::from("/opt/yantrik/share/blender/bootstrap.py")];
+    if let Some(root) = std::env::current_exe()
+        .ok()
+        .as_ref()
+        .and_then(|exe| exe.parent())
+        .and_then(|bin| bin.parent())
+    {
+        candidates.push(root.join("share/blender/bootstrap.py"));
+    }
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 /// Where a program is, if it is anywhere it could be run from.
@@ -588,6 +633,25 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 None => tracing::error!(
                     "Cannot open the browser: none is installed (looked for {})",
                     BROWSERS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")
+                ),
+            },
+            // Blender opens through the one launcher like any other window — registry, reaper,
+            // session environment — with the addon as its argument. A Blender started without
+            // `--python` would still be Blender, but a window a mind can only photograph, and
+            // the refusal below says so rather than quietly opening the lesser thing.
+            Launch::Blender => match (find_program("blender"), blender_bootstrap()) {
+                (Some(bin), Some(bootstrap)) => {
+                    let bin = bin.to_string_lossy().into_owned();
+                    let bootstrap = bootstrap.to_string_lossy().into_owned();
+                    spawn_app_with_args("blender", &bin, &["--python", &bootstrap]);
+                }
+                (None, _) => {
+                    tracing::error!("Cannot open Blender: it is not installed on this machine")
+                }
+                (_, None) => tracing::error!(
+                    "Cannot open Blender: the Yantrik addon is missing \
+                     (expected /opt/yantrik/share/blender/bootstrap.py), and a Blender \
+                     without it answers to nothing"
                 ),
             },
         }
@@ -886,6 +950,11 @@ mod tests {
         assert_eq!(surface_for("no-such-app"), None);
         // Chromium is not one of ours and the desktop's own surface does not answer for it.
         assert_eq!(surface_for("browser"), None);
+        // Blender is not one of ours either, but it does answer: the addon the route starts it
+        // with binds app-blender.sock, and the name is in the apps' table like any other.
+        assert_eq!(surface_for("blender"), Some("blender"));
+        assert_eq!(control::surface_id("blender"), Some("blender"));
+        assert_eq!(route("blender"), Some(Launch::Blender));
         // The mismatches this is really about, spelled out, so the intent survives a refactor.
         assert_eq!(surface_for("container-manager"), Some("containers"));
         assert_eq!(surface_for("sysmonitor"), Some("system-monitor"));

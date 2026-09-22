@@ -269,6 +269,45 @@ mod tests {
         assert_eq!(schema["parameters"]["required"], serde_json::json!(["pid"]));
     }
 
+    /// A revision pinned against the Python port, byte for byte.
+    ///
+    /// `apps/blender/addon/yantrik_surface/wire.py` recomputes this hash in Python — an addon
+    /// inside somebody else's program cannot link this crate — and `tests/blender-core/test_wire.py`
+    /// asserts the same vector with the same hex. The two implementations can only drift if one of
+    /// them changes what it hashes, and whichever side moves, its test fails with this vector in
+    /// the message. If this hash is ever deliberately changed, change it in both files in the same
+    /// commit.
+    #[test]
+    fn revision_vector_shared_with_the_python_port() {
+        let view = View::new("Blender — \"monkey.blend\", 3 objects, Cycles 1920x1080").state(
+            serde_json::json!({
+                "scene": "Scene",
+                "file": "/tmp/monkey.blend",
+                "unsaved": false,
+                "objects": [
+                    {
+                        "name": "Suzanne",
+                        "type": "MESH",
+                        "location": [0.0, 0.0, 0.0],
+                        "dimensions": [2.0, 2.0, 2.0]
+                    }
+                ],
+                "objects_total": 3,
+                "camera": { "name": "Camera", "location": [4.0, -4.0, 3.0] },
+                "render": {
+                    "engine": "cycles",
+                    "resolution": "1920x1080",
+                    "samples": 32,
+                    "output": "/tmp/monkey.png"
+                },
+                "last_render": null,
+                "notice": "",
+                "background": true
+            }),
+        );
+        assert_eq!(view.revision(), "6d6dd36469ee8664");
+    }
+
     #[test]
     fn describe_envelope_has_the_expected_keys() {
         let view = View::new("Weather — 21°C in Dallas").with("temp", 21);

@@ -97,6 +97,10 @@ test_*.py
 # above misses it by exactly one directory — which would have left CI running a discover over
 # four files git had never heard of, and passing.
 !harnesses/tests/test_*.py
+# ...nor the Blender control surface's tests. They are the shipped addon's test suite, not
+# local-only scripts, and the same one-directory miss applies: CI runs a discover over
+# tests/blender-core that would pass with the files it runs never committed.
+!tests/blender-core/test_*.py
 
 # Brainstorm outputs
 brainstorm_*.py
