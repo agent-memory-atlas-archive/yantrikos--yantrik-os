@@ -260,7 +260,7 @@ pub fn identify(chain: Vec<ProcessFacts>, minds: &[Mind]) -> CallerIdentity {
 /// program we wrote to talk to it would prove nothing.
 fn mind_for(chain: &[ProcessFacts], minds: &[Mind]) -> Option<String> {
     for facts in chain {
-        if is_bridge(facts) {
+        if is_bridge(facts) || is_this_desktop(facts) {
             continue;
         }
         let haystack = facts.haystack();
@@ -278,6 +278,20 @@ fn mind_for(chain: &[ProcessFacts], minds: &[Mind]) -> Option<String> {
         }
     }
     None
+}
+
+/// The shell and the programs it ships, which are the ancestry of everything a person starts.
+///
+/// Every window on this desktop descends from `/opt/yantrik/bin/yantrik-ui`, and every built-in
+/// mind is called Yantrik something — so a script run from the Terminal app matched "yantrik"
+/// four processes up and was labelled *the attached mind*. That is the one line on the approval
+/// card that exists to unmask a program pretending to be a mind, and it was awarding the badge
+/// to the pretender: `forge.py`, claiming to be Hermes, was shown as "python3 forge.py · the
+/// attached mind". The desktop's own binaries prove that a process was started from the desktop,
+/// which is true of nearly everything, and nothing about which mind it is.
+fn is_this_desktop(facts: &ProcessFacts) -> bool {
+    let exe = facts.exe.as_str();
+    exe.starts_with("/opt/yantrik/bin/") || basename(exe).starts_with("yantrik-")
 }
 
 /// The words in a mind's name that are distinctive enough to match a path on.
@@ -630,6 +644,27 @@ mod caller_identity_tests {
         assert!(who.via_shell, "a bash stood between the peer and the terminal");
         assert!(who.line().contains("yantrik-terminal"), "{}", who.line());
         assert!(who.line().contains("terminal"), "{}", who.line());
+    }
+
+    #[test]
+    fn a_script_run_from_the_terminal_app_is_not_the_attached_mind() {
+        // forge.py claimed to be Hermes and was launched from the Terminal app, whose ancestry
+        // is /opt/yantrik/bin/yantrik-terminal ← /opt/yantrik/bin/yantrik-ui. "yantrik" is a
+        // token of "Yantrik Companion", and the card said "python3 forge.py · the attached mind".
+        let chain = vec![
+            facts(9001, "/usr/bin/python3.13", "python3 forge.py"),
+            facts(9000, "/opt/yantrik/bin/yantrik-terminal", "/opt/yantrik/bin/yantrik-terminal"),
+            facts(8000, "/opt/yantrik/bin/yantrik-ui", "/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml"),
+        ];
+        let minds = vec![
+            Mind { id: "companion".into(), name: "Yantrik Companion".into() },
+            Mind { id: "hermes".into(), name: "Hermes Agent".into() },
+            Mind { id: "mind".into(), name: "Yantrik Mind".into() },
+        ];
+        assert_eq!(mind_for(&chain, &minds), None, "the desktop's own binaries name no mind");
+        // ...while a real Hermes gateway process still matches by its own command line.
+        let hermes = vec![facts(7000, "/home/u/.local/bin/python3.11", "python -m hermes_cli.main gateway")];
+        assert_eq!(mind_for(&hermes, &minds).as_deref(), Some("Hermes Agent"));
     }
 
     #[test]
