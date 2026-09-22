@@ -12,57 +12,79 @@ The desktop's tools do NOT come through this file. OpenClaw has an MCP client of
 README. That is why `McpTools` is unused here and why `tools=True` at attach is a statement about
 OpenClaw's configuration rather than about this process.
 
-## Two routes, and which one is real
+## Two routes, and what each one actually is
 
-**Route A — `"route": "cli"` (the default, and the one that ships).** One `openclaw agent …`
-per turn, its stdout read as it arrives. A per-turn process is a worse fit for a long-running
-agent than a socket is, but it is the route whose failure modes are all visible: a wrong flag is
-a non-zero exit with a sentence on stderr, not a silent hang.
+Everything below was checked against **OpenClaw 2026.9.1 running on the Yantrik OS VM**. The
+first version of this file was written with no OpenClaw checkout and no network, and three of its
+guesses were wrong; what replaced them is recorded here rather than in a changelog, because the
+next person to read this file needs the reasons, not the history.
 
-**Route B — `"route": "gateway"` (implemented, UNVERIFIED).** A hand-written RFC 6455 client
-against the Gateway's WebSocket, which is the shape OpenClaw's own CLI uses and the one that
-streams properly.
+**Route A — `"route": "cli"` (the default).** One `openclaw agent --json …` per turn. The flags
+are `--message` (the message is NOT a positional) and `--session-key` (there is no `--session`),
+and `--json` prints **one pretty-printed JSON document when the turn is over**, not a stream of
+JSON lines:
 
-*The message envelope in Route B is an assumption, not a derivation.* This harness was written
-with no OpenClaw checkout and no network: the two local clones that would have settled it
-(`%TEMP%/openclaw`, commit 29680046, v2026.6.10) were gone, so nothing here was read out of
-`src/gateway/`. What IS certain is the framing (RFC 6455 is a standard) and the default port
-(18789). What is assumed is every JSON field name, and the WebSocket path. Both are written down
-in exactly one place each — `GATEWAY_PATHS` and `client_envelope()` below — so correcting them
-against a live install is a two-minute edit rather than a rewrite. The decoder in the other
-direction (`decode`) does not need correcting: it accepts every plausible spelling at once.
+    {"runId": "…", "status": "ok", "summary": "completed",
+     "result": {"payloads": [{"text": "…"}], "meta": {"toolSummary": {…}, …}}}
+
+So the whole of stdout is collected and parsed once. Reading it line by line — which is what a
+JSON-lines reader does — fails on every line of an indented document and dumps the raw JSON into
+the person's chat panel, which is what this harness did before it was ever run.
+
+**Route B — `"route": "gateway"`.** The Gateway's OpenAI-compatible HTTP surface,
+`POST /v1/chat/completions` on the same loopback port as the WebSocket, with `stream: true` for
+Server-Sent Events and `x-openclaw-session-key` for conversation routing. Docs call it "a normal
+Gateway agent run (same codepath as `openclaw agent`)", so it is the same agent with the same
+tools and the same memory — it just streams, and it costs no Node start-up per turn.
+
+*It is off by default*: `gateway.http.endpoints.chatCompletions.enabled` must be `true` in
+`~/.openclaw/openclaw.json`. A 404 from this route says exactly that.
+
+### Why this is not the Gateway's WebSocket control plane
+
+The earlier version of this file shipped a hand-written RFC 6455 client against
+`ws://127.0.0.1:18789` with a guessed message envelope. The framing was right and the envelope
+was wrong, but the real reason that route is gone is authorization, not spelling. The live
+protocol is `{type:"req", id, method, params}` / `{type:"res", …}` / `{type:"event", …}`, the
+first frame must be `connect`, and a `connect` that carries only the shared gateway token comes
+back with
+
+    {"ok": true, "payload": {"auth": {"role": "operator", "scopes": []}}}
+
+— an authenticated connection with no scopes, so `chat.send` answers `FORBIDDEN / missing scope:
+operator.write`. Scopes come from **device pairing**: an Ed25519 identity signing a
+challenge-bound payload, approved once with `openclaw devices approve`. A harness that ships as
+stdlib-only Python cannot sign Ed25519, and the HTTP route above needs none of it while reaching
+the same agent. That is the whole trade, and it is why there is no WebSocket in this file.
 
 ## What this file gets right, which is the part that is not guesswork
 
 - **Every turn closes exactly once.** Nothing here calls `harness.complete` or `harness.fail`;
   `answer()` returns or raises and `yantrik_harness.Harness._close` does it, once, on every path.
-  The five ways this mind can finish — a `done` event, the child exiting, the gateway dropping
-  the connection, `/stop`, and silence — all become "return from `answer()`" or "raise from
-  `answer()`", and nothing else.
+  The ways this mind can finish — the run's own ending, the child exiting, the stream closing,
+  `/stop`, and silence — all become "return from `answer()`" or "raise from `answer()`".
 - **A gateway that is not running is an answer, not a hang.** Connecting is retried with backoff
   for a few seconds and then the turn fails with a sentence naming the command that fixes it.
-- **Silence becomes an ending.** 420 seconds by default, which is above the ~270s an `os_act`
-  can legitimately spend waiting for somebody to answer an approval card.
+- **Silence becomes an ending.** 600 seconds by default, which is `openclaw agent`'s own deadline
+  and above the ~270s an `os_act` can legitimately spend waiting for somebody to answer an
+  approval card.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
+import http.client
 import json
 import os
 import queue
 import shlex
 import socket
 import ssl
-import struct
 import subprocess
 import sys
 import threading
 import time
-import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 # The generic half lives beside this file, both in the checkout and at
@@ -74,29 +96,34 @@ if _LIB.is_dir() and str(_LIB) not in sys.path:
 
 from yantrik_harness import Handler, Harness, Turn  # noqa: E402
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 CONFIG_ENV = "YANTRIK_OPENCLAW_CONFIG"
 CONFIG_PATH = "~/.config/yantrik/openclaw.json"
 
-# The Gateway's documented default: HTTP dashboard and WebSocket on the same loopback port.
-DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18789"
-# ASSUMED. The port is documented; the path is not, and no checkout was available to read it out
-# of. Tried in order on connect, first 101 wins, and the winner is remembered for next time — so
-# a wrong guess here costs one failed handshake, not a failed harness. Put the real one in
-# `gateway_url` (e.g. "ws://127.0.0.1:18789/ws") and none of this runs.
-GATEWAY_PATHS = ("/ws", "/", "/gateway", "/socket", "/api/ws", "/agent")
+# The Gateway serves its WebSocket control plane and its HTTP routes on one loopback port. This
+# is the HTTP one, because that is the surface this harness uses (see the module docstring).
+DEFAULT_GATEWAY_URL = "http://127.0.0.1:18789"
+# Verified against 2026.9.1. Same port as the WebSocket; disabled unless
+# `gateway.http.endpoints.chatCompletions.enabled` is true.
+CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+# OpenClaw treats the OpenAI `model` field as an *agent* target, not a provider model id. The
+# stable alias for "whatever this install's default agent is" is `openclaw/default`; a named
+# agent is `openclaw/<agentId>`. The backend model is the agent's own, or `x-openclaw-model`.
+AGENT_TARGET_DEFAULT = "openclaw/default"
 
 DEFAULT_SESSION = "yantrik-desktop"
-# `openclaw agent` with the flags this harness assumes. ASSUMED, and replaceable wholesale with
-# `args` in the config — which is what to do the moment `openclaw agent --help` disagrees.
+# `openclaw agent --json`. Verified: `--json` exists and prints one document at the end of the
+# turn. Replaceable wholesale with `args` in the config if a future build renames it.
 DEFAULT_CLI_ARGS = ("agent", "--json")
 
 # How long OpenClaw may say nothing at all before the turn is failed rather than left hanging.
-# It has to exceed the longest legitimate silence, and the longest one is not the model: an
-# `os_act` above this session's ceiling puts a card on the desktop and waits up to about 270
-# seconds for the person to answer it, inside a single tool call, with no events at all.
-DEFAULT_SILENCE_TIMEOUT = 420.0
+# 600 seconds is `openclaw agent`'s own default deadline, so on the CLI route the two give up at
+# about the same moment and the person gets OpenClaw's reason rather than only ours. It also has
+# to exceed the longest legitimate silence, and the longest one is not the model: an `os_act`
+# above this session's ceiling puts a card on the desktop and waits up to about 270 seconds for
+# the person to answer it, inside a single tool call, with nothing on the wire at all.
+DEFAULT_SILENCE_TIMEOUT = 600.0
 # After /stop, how long to let OpenClaw wind itself down before closing the turn regardless. An
 # abort that is never acknowledged must not hold the turn open.
 ABORT_GRACE = 10.0
@@ -106,16 +133,30 @@ DEFAULT_CONNECT_BACKOFF = 0.5
 DEFAULT_CONNECT_TIMEOUT = 10.0
 
 # The one sentence a person can act on when nothing is listening on 18789. Said instead of
-# hanging, which is the failure this replaces.
-GATEWAY_DOWN = ("OpenClaw's gateway is not running — start it with `openclaw gateway start`, "
-                "or set \"local\": true in %s to run the agent without it.")
+# hanging, which is the failure this replaces. `openclaw gateway start` does not exist — the real
+# commands are `openclaw gateway run` in the foreground and `openclaw daemon start` for the
+# installed service.
+GATEWAY_DOWN = ("OpenClaw's gateway is not running — start it with `openclaw daemon start` (or "
+                "`openclaw gateway run` in a terminal), or set \"local\": true in %s to run the "
+                "agent without it.")
+# What a 404 on /v1/chat/completions means, which is never "wrong URL" on a gateway that
+# answered: the route exists and is switched off.
+ENDPOINT_OFF = ("OpenClaw's gateway is running but its OpenAI-compatible route is switched off. "
+                "Set gateway.http.endpoints.chatCompletions.enabled to true in "
+                "~/.openclaw/openclaw.json and restart the gateway, or use \"route\": \"cli\" in "
+                "%s.")
 
 # What OpenClaw is told about where it is. Short: OpenClaw has its own system prompt, its own
 # memory and its own instructions, and this is a preface to the first message of a session
 # rather than a replacement for any of that.
+#
+# The tool names are prefixed on purpose. OpenClaw exposes a configured MCP server's tools under
+# a prefix derived from the server's name, so the `yantrik-os` entry the README asks for turns
+# `os_apps` into `yantrik-os__os_apps` — confirmed by asking a live agent to list its own tools.
+# A mind told to "start with os_apps" and shown no such tool spends its first turn guessing.
 DESKTOP_PROMPT = """You are answering the Yantrik OS desktop: the chat panel of the computer you are running on, used by its owner. Markdown renders.
 
-The os_* and web_* tools are this machine. Start with os_apps, which says what is open and what can be opened. Use os_describe on an app before acting on it.
+This machine is the MCP server registered as `yantrik-os`, so its tools carry that prefix: `yantrik-os__os_apps`, `yantrik-os__os_describe`, `yantrik-os__os_act`, `yantrik-os__os_perception`, and `yantrik-os__web_*`. Start with os_apps, which says what is open and what can be opened. Use os_describe on an app before acting on it.
 
 A tool result whose first word is REFUSED is an answer, not an error: the desktop declined that action under the person's current mode or ceiling. Do not retry it and do not look for another route to the same thing — say what was refused and stop. A denied approval is the person saying no; stop and tell them what you were doing.
 
@@ -155,7 +196,8 @@ class OpenClawConfig:
                 raise ConfigError(
                     "%s names %s as the gateway token's environment variable, and it is not set "
                     "in this process. A user service does not inherit your shell: set it in the "
-                    "unit (Environment=) or in ~/.config/environment.d/." % (source, token_env))
+                    "unit (EnvironmentFile= at mode 600) or in ~/.config/environment.d/."
+                    % (source, token_env))
         self.token: str = token.strip()
 
         self.agent: str = str(data.get("agent") or "").strip()
@@ -169,12 +211,10 @@ class OpenClawConfig:
         self.args: List[str] = ([str(a) for a in args] if isinstance(args, (list, tuple))
                                 else list(DEFAULT_CLI_ARGS))
         self.extra_args: List[str] = [str(a) for a in (data.get("extra_args") or [])]
-        # `openclaw agent --local` bypasses the gateway entirely. The escape hatch for a machine
-        # where the daemon is not wanted, and the thing the gateway-down sentence points at.
+        # `openclaw agent --local` runs the embedded agent instead of going through the daemon.
+        # The escape hatch for a machine where the gateway is not wanted, and the thing the
+        # gateway-down sentence points at.
         self.local: bool = bool(data.get("local", False))
-        # Some CLIs take the message as a positional, some on stdin. Both are here because
-        # neither could be checked offline.
-        self.message_on_stdin: bool = bool(data.get("message_on_stdin", False))
 
         self.env: Dict[str, str] = {str(k): str(v) for k, v in (data.get("env") or {}).items()}
         # A user service does not get a login shell's PATH, and on a machine where openclaw and
@@ -210,6 +250,15 @@ class OpenClawConfig:
     def gateway_down(self) -> str:
         return GATEWAY_DOWN % self.source
 
+    @property
+    def endpoint_off(self) -> str:
+        return ENDPOINT_OFF % self.source
+
+    @property
+    def agent_target(self) -> str:
+        """The OpenAI `model` field for the HTTP route: which *agent* answers, not which model."""
+        return ("openclaw/%s" % self.agent) if self.agent else AGENT_TARGET_DEFAULT
+
     def environ(self) -> Dict[str, str]:
         env = dict(os.environ)
         env.update(self.env)
@@ -218,21 +267,24 @@ class OpenClawConfig:
         return env
 
     def cli_argv(self, text: str, session: str) -> List[str]:
-        """`openclaw agent …` for one turn.
+        """`openclaw agent --json … --message <text>` for one turn.
 
-        Order matters only to a human reading `ps`: the message goes last so a long one does not
-        hide the flags.
+        Every flag here was read off `openclaw agent --help` on a live install. The two that were
+        guessed wrong before: the message is `--message`, never a positional, and the session is
+        `--session-key` (a bare key scopes to the selected agent), never `--session`.
         """
         argv = list(self.command) + list(self.args)
         if self.local:
             argv.append("--local")
         if self.agent:
             argv += ["--agent", self.agent]
+        if self.model:
+            argv += ["--model", self.model]
         if session:
-            argv += ["--session", session]
+            argv += ["--session-key", session]
         argv += list(self.extra_args)
-        if not self.message_on_stdin:
-            argv.append(text)
+        # Last, so a long message does not hide the flags from anyone reading `ps`.
+        argv += ["--message", text]
         return argv
 
 
@@ -260,7 +312,9 @@ def openclaw_version(config: OpenClawConfig) -> str:
     """`openclaw --version`, asked once and never allowed to matter.
 
     It is the `detail` line under the name in the picker. A harness that failed to start because
-    it could not learn its own version number would be a poor trade.
+    it could not learn its own version number would be a poor trade. The live output is
+    `OpenClaw 2026.9.1 (ad6fe23)`; the build hash is dropped because the picker line is narrow
+    and nobody reads a commit id there.
     """
     key = id(config)
     if key in _VERSION_CACHE:
@@ -268,10 +322,10 @@ def openclaw_version(config: OpenClawConfig) -> str:
     version = ""
     try:
         out = subprocess.run(config.command + ["--version"], capture_output=True, text=True,
-                             timeout=10, env=config.environ())
+                             timeout=30, env=config.environ())
         first = (out.stdout or out.stderr or "").strip().splitlines()
         if first:
-            version = first[0].strip()[:32]
+            version = first[0].split("(", 1)[0].strip()[:32]
     except Exception:
         version = ""
     _VERSION_CACHE[key] = version
@@ -280,17 +334,16 @@ def openclaw_version(config: OpenClawConfig) -> str:
 
 # ── What OpenClaw says, whatever it calls it ────────────────────────────────────────────
 #
-# The decoder is deliberately permissive, and that is not laziness. The envelope could not be
-# read out of OpenClaw's source offline, so instead of betting on one spelling this accepts every
-# plausible one at once: an agent framework's event stream is either Anthropic-shaped
-# (`content_block_delta` / `delta.text`), OpenAI-shaped (`choices[].delta.content`), or its own
-# flat `{type, text}`. All three land in the same three signals below, and a shape that is none
-# of them shows up as unrecognised rather than as silence.
+# The decoder stays deliberately permissive. The HTTP route's chunks are OpenAI-shaped
+# (`choices[].delta.content`), which is the shape this already read; keeping the other spellings
+# costs nothing and means a build that streams its own event names shows up as text rather than
+# as silence.
 
 TEXT_TYPES = frozenset((
     "text", "text_delta", "delta", "assistant", "assistant_delta", "assistant_message",
     "message", "message_delta", "chunk", "content", "content_block_delta", "agent_message",
     "agent_text", "output_text", "response.output_text.delta", "stream",
+    "chat.completion.chunk", "chat.completion",
 ))
 TOOL_TYPES = frozenset((
     "tool", "tool_use", "tool_call", "tool_start", "tool_execution_start", "tool_invocation",
@@ -317,7 +370,11 @@ Signal = Tuple[str, Any, Any]
 
 
 def event_type(event: Dict[str, Any]) -> str:
-    for key in ("type", "event", "kind", "name"):
+    # `object` is last and is there for one reason: an OpenAI-shaped chunk has no `type`, and the
+    # first chunk of every gateway answer carries only `delta.role`. Without this it decodes as
+    # unrecognised and the log opens every turn with a protocol-mismatch warning about a frame
+    # that is simply the stream saying hello.
+    for key in ("type", "event", "kind", "name", "object"):
         value = event.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip().lower()
@@ -353,6 +410,10 @@ def event_text(event: Dict[str, Any]) -> Tuple[str, bool]:
             piece = _string(choice.get("delta") or {}, "content", "text")
             if piece:
                 return piece, False
+            # A non-streamed completion puts the whole answer under `message`.
+            whole = _string(choice.get("message") or {}, "content", "text")
+            if whole:
+                return whole, True
     message = event.get("message")
     if isinstance(message, dict):
         inner = _string(message, "text", "content")
@@ -381,17 +442,27 @@ def event_tool(event: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]]:
     return (name or "tool"), args
 
 
+def error_sentence(event: Dict[str, Any]) -> str:
+    """The sentence inside an error object, wherever this build put it."""
+    detail = _string(event, "error", "message", "detail", "reason")
+    if not detail:
+        inner = event.get("error")
+        detail = _string(inner, "message", "detail", "reason") if isinstance(inner, dict) else ""
+    return detail or "OpenClaw reported an error with no detail"
+
+
 def decode(event: Any) -> List[Signal]:
     """One JSON object from OpenClaw, as zero or more signals."""
     if not isinstance(event, dict):
         return []
     kind = event_type(event)
     if kind in ERROR_TYPES:
-        detail = _string(event, "error", "message", "detail", "reason")
-        if not detail:
-            inner = event.get("error")
-            detail = _string(inner, "message", "detail") if isinstance(inner, dict) else ""
-        return [("error", detail or "OpenClaw reported an error with no detail", None)]
+        return [("error", error_sentence(event), None)]
+    if not kind and isinstance(event.get("error"), (dict, str)):
+        # The OpenAI error shape: `{"error": {"message": …, "type": "invalid_request_error"}}`.
+        # There is no top-level `type` to match on, and a decoder that shrugged at this would
+        # turn a refused request into a turn that says nothing.
+        return [("error", error_sentence(event), None)]
     if kind in TOOL_TYPES:
         name, args = event_tool(event)
         return [("tool", name, args)]
@@ -416,7 +487,7 @@ def decode(event: Any) -> List[Signal]:
 def _advance(said: str, incoming: str) -> str:
     """What is actually new in `incoming`, given `said` has already been shown.
 
-    Handles a gateway that resends the whole answer each time. It would mis-trim a delta that
+    Handles a stream that resends the whole answer each time. It would mis-trim a delta that
     genuinely repeats everything said so far, which is only possible if it IS a snapshot, and
     that is the trade taken knowingly — the same one `_accrete` takes in the DeepSeek harness.
     """
@@ -425,344 +496,341 @@ def _advance(said: str, incoming: str) -> str:
     return incoming
 
 
-# ── A WebSocket, by hand ────────────────────────────────────────────────────────────────
-#
-# Stdlib only, so there is no `websockets` to import. This is RFC 6455 and nothing else: the
-# handshake, masked client frames, unmasked server frames, continuation, ping/pong and close.
-# Roughly a hundred lines, which is the whole reason the gateway route is worth having at all.
-
-_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-_OP_CONT, _OP_TEXT, _OP_BINARY, _OP_CLOSE, _OP_PING, _OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
+# ── The agent-run document `openclaw agent --json` prints ───────────────────────────────
 
 
-class WebSocketError(Exception):
-    """The handshake failed, the frame was malformed, or the peer went away."""
+def run_document(document: Dict[str, Any]) -> List[Signal]:
+    """One `openclaw agent --json` reply, as signals.
 
+    The live shape, which is not a stream and not an event:
 
-class WebSocket:
-    """One client connection. `recv` blocks; `close` unblocks it from another thread."""
+        {"runId": …, "status": "ok", "summary": "completed",
+         "result": {"payloads": [{"text": …, "mediaUrl": null}],
+                    "meta": {"toolSummary": {"calls": 3, "tools": [...]}, …}}}
 
-    def __init__(self, sock: socket.socket, url: str) -> None:
-        self.sock = sock
-        self.url = url
-        self.closed = False
-        self._send_lock = threading.Lock()
-
-    # ── opening ─────────────────────────────────────────────────────────
-
-    @classmethod
-    def connect(cls, url: str, headers: Optional[Dict[str, str]] = None,
-                timeout: float = DEFAULT_CONNECT_TIMEOUT) -> "WebSocket":
-        parts = urlsplit(url)
-        secure = parts.scheme == "wss"
-        host = parts.hostname or "127.0.0.1"
-        port = parts.port or (443 if secure else 80)
-        target = parts.path or "/"
-        if parts.query:
-            target += "?" + parts.query
-
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        lines = [
-            "GET %s HTTP/1.1" % target,
-            "Host: %s:%d" % (host, port),
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            "Sec-WebSocket-Key: %s" % key,
-            "Sec-WebSocket-Version: 13",
-            "Origin: %s://%s:%d" % ("https" if secure else "http", host, port),
-            "User-Agent: yantrik-openclaw/%s" % VERSION,
-        ]
-        for name, value in (headers or {}).items():
-            lines.append("%s: %s" % (name, value))
-        request = ("\r\n".join(lines) + "\r\n\r\n").encode("utf-8")
-
-        sock = socket.create_connection((host, port), timeout=timeout)
-        try:
-            if secure:
-                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
-            sock.sendall(request)
-            head = cls._read_head(sock)
-        except Exception:
-            try:
-                sock.close()
-            except OSError:
-                pass
-            raise
-
-        status = head.split("\r\n", 1)[0]
-        if " 101" not in status:
-            try:
-                sock.close()
-            except OSError:
-                pass
-            raise WebSocketError("%s answered %s instead of upgrading to a WebSocket"
-                                 % (url, status.strip() or "nothing"))
-        expected = base64.b64encode(
-            hashlib.sha1((key + _WS_GUID).encode("ascii")).digest()).decode("ascii")
-        got = ""
-        for line in head.split("\r\n")[1:]:
-            name, _, value = line.partition(":")
-            if name.strip().lower() == "sec-websocket-accept":
-                got = value.strip()
-        if got != expected:
-            try:
-                sock.close()
-            except OSError:
-                pass
-            raise WebSocketError("%s upgraded with the wrong Sec-WebSocket-Accept, so it is not "
-                                 "speaking RFC 6455" % url)
-        # Blocking from here on: the reader thread sits in recv and `close()` shuts the socket
-        # down to wake it, which is the one thing that works on every platform.
-        sock.settimeout(None)
-        return cls(sock, url)
-
-    @staticmethod
-    def _read_head(sock: socket.socket) -> str:
-        buf = b""
-        while b"\r\n\r\n" not in buf:
-            piece = sock.recv(4096)
-            if not piece:
-                raise WebSocketError("the connection closed during the WebSocket handshake")
-            buf += piece
-            if len(buf) > 65536:
-                raise WebSocketError("the handshake reply was implausibly large")
-        return buf.split(b"\r\n\r\n", 1)[0].decode("latin-1")
-
-    # ── frames ──────────────────────────────────────────────────────────
-
-    def _exact(self, count: int) -> bytes:
-        buf = b""
-        while len(buf) < count:
-            piece = self.sock.recv(count - len(buf))
-            if not piece:
-                raise WebSocketError("the gateway closed the connection")
-            buf += piece
-        return buf
-
-    def _read_frame(self) -> Tuple[bool, int, bytes]:
-        head = self._exact(2)
-        fin = bool(head[0] & 0x80)
-        opcode = head[0] & 0x0F
-        masked = bool(head[1] & 0x80)
-        length = head[1] & 0x7F
-        if length == 126:
-            length = struct.unpack("!H", self._exact(2))[0]
-        elif length == 127:
-            length = struct.unpack("!Q", self._exact(8))[0]
-        if length > 32 * 1024 * 1024:
-            raise WebSocketError("the gateway sent a %d-byte frame, which is not a chat message"
-                                 % length)
-        key = self._exact(4) if masked else b""
-        data = self._exact(length) if length else b""
-        if masked and data:
-            data = bytes(byte ^ key[i % 4] for i, byte in enumerate(data))
-        return fin, opcode, data
-
-    def _send_frame(self, opcode: int, payload: bytes) -> None:
-        length = len(payload)
-        head = bytearray([0x80 | opcode])
-        # Every client frame is masked. A server is required to drop one that is not.
-        if length < 126:
-            head.append(0x80 | length)
-        elif length < 65536:
-            head.append(0x80 | 126)
-            head += struct.pack("!H", length)
-        else:
-            head.append(0x80 | 127)
-            head += struct.pack("!Q", length)
-        mask = os.urandom(4)
-        head += mask
-        body = bytearray(payload)
-        for i in range(length):
-            body[i] ^= mask[i % 4]
-        with self._send_lock:
-            if self.closed:
-                raise WebSocketError("this connection is closed")
-            try:
-                self.sock.sendall(bytes(head) + bytes(body))
-            except OSError as exc:
-                raise WebSocketError("could not reach the gateway: %s" % exc) from exc
-
-    # ── public ──────────────────────────────────────────────────────────
-
-    def send_text(self, text: str) -> None:
-        self._send_frame(_OP_TEXT, text.encode("utf-8"))
-
-    def recv(self) -> Optional[str]:
-        """The next complete text message, or None once the peer has closed."""
-        parts: List[bytes] = []
-        kind = _OP_TEXT
-        while True:
-            try:
-                fin, opcode, data = self._read_frame()
-            except (OSError, WebSocketError) as exc:
-                if self.closed:
-                    return None
-                raise WebSocketError(str(exc)) from None
-            if opcode == _OP_CLOSE:
-                # Echo the close code back, as the RFC asks, then stop.
-                try:
-                    self._send_frame(_OP_CLOSE, data[:2])
-                except WebSocketError:
-                    pass
-                self.closed = True
-                return None
-            if opcode == _OP_PING:
-                try:
-                    self._send_frame(_OP_PONG, data)
-                except WebSocketError:
-                    return None
-                continue
-            if opcode == _OP_PONG:
-                continue
-            if opcode in (_OP_TEXT, _OP_BINARY):
-                kind, parts = opcode, [data]
-            elif opcode == _OP_CONT:
-                parts.append(data)
-            else:
-                raise WebSocketError("the gateway sent opcode %d, which is not in RFC 6455"
-                                     % opcode)
-            if fin:
-                if kind == _OP_BINARY:
-                    parts = []
-                    continue  # nothing in a chat stream is binary; ignore rather than fail
-                return b"".join(parts).decode("utf-8", "replace")
-
-    def close(self, code: int = 1000) -> None:
-        if self.closed:
-            return
-        self.closed = True
-        try:
-            self._send_frame(_OP_CLOSE, struct.pack("!H", code))
-        except Exception:
-            pass
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self.sock.close()
-        except OSError:
-            pass
-
-
-# ── Route B: the gateway ────────────────────────────────────────────────────────────────
-
-
-def client_envelope(kind: str, config: OpenClawConfig, session: str,
-                    request_id: str, text: str = "") -> Dict[str, Any]:
-    """What this harness sends the gateway. **ASSUMED — see the module docstring.**
-
-    Three messages, and they are the only place a field name is guessed. If a live install
-    disagrees, this function is the whole fix; nothing else in the gateway route knows the
-    envelope's shape.
+    `status` is `ok`, `error`, `timeout` or `in_flight`, and a failing run still prints the
+    document before exiting non-zero — so the reason belongs to the person, not to the log.
     """
-    if kind == "message":
-        body: Dict[str, Any] = {"type": "message", "id": request_id, "session": session,
-                                "text": text}
-        if config.agent:
-            body["agent"] = config.agent
-        return body
-    if kind == "abort":
-        return {"type": "abort", "id": request_id, "session": session}
-    if kind == "new":
-        return {"type": "session.new", "session": session}
-    raise ValueError("no such envelope: %s" % kind)
+    result = document.get("result")
+    result = result if isinstance(result, dict) else {}
+    payloads = result.get("payloads")
+    said = "\n\n".join(
+        str(p.get("text")) for p in (payloads if isinstance(payloads, list) else [])
+        if isinstance(p, dict) and isinstance(p.get("text"), str) and p["text"].strip())
+    if not said:
+        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+        said = _string(meta, "finalAssistantVisibleText", "finalAssistantRawText")
+
+    out: List[Signal] = []
+    # The trail comes from the run's own tool summary. It names what was called and nothing
+    # about the arguments, which is the same bargain `tool_trail` makes everywhere else — except
+    # here the arguments are not even available, so there is nothing to withhold.
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    summary = meta.get("toolSummary") if isinstance(meta.get("toolSummary"), dict) else {}
+    for name in (summary.get("tools") or []) if isinstance(summary.get("tools"), list) else []:
+        if isinstance(name, str) and name:
+            out.append(("tool", name, None))
+
+    status = str(document.get("status") or "").strip().lower()
+    ok = document.get("ok")
+    if status in ("", "ok", "success", "completed") and ok is not False:
+        if said:
+            out.append(("text", said, False))
+        out.append(("end", None, None))
+        return out
+
+    if said:
+        out.append(("text", said, False))
+    if status == "in_flight":
+        out.append(("error", "OpenClaw is already working on this conversation. Wait for that "
+                             "turn to finish, or say /stop.", None))
+        return out
+    detail = error_sentence(document) if document.get("error") else ""
+    if not detail:
+        detail = str(document.get("summary") or "").strip()
+    out.append(("error", "OpenClaw's run ended as %s%s"
+                         % (status or "a failure", (": " + detail) if detail else "."), None))
+    return out
+
+
+def cli_output(raw: str) -> List[Signal]:
+    """Everything `openclaw agent` wrote on stdout, as signals.
+
+    Three shapes, in the order they are tried: the single JSON document a current build prints
+    with `--json`; JSON lines, for a build that streams events instead; and plain text, for one
+    that has no JSON mode at all. Guessing wrong about which is which is how an answering CLI
+    becomes a silent harness, so the fallbacks are real rather than decorative.
+    """
+    text = raw.strip()
+    if not text:
+        return []
+    try:
+        document = json.loads(text)
+    except ValueError:
+        pass
+    else:
+        if isinstance(document, dict) and ("result" in document or "status" in document
+                                           or "payloads" in document):
+            return run_document(document)
+        if isinstance(document, dict):
+            return decode(document)
+        if isinstance(document, list):
+            out: List[Signal] = []
+            for item in document:
+                out.extend(decode(item))
+            return out
+
+    out = []
+    for line in text.splitlines():
+        line = line.rstrip()
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            # Not JSON, so this build has no JSON mode — or `--json` is spelled differently
+            # here. Either way the line is the answer, and showing it beats discarding it while
+            # the person watches a cursor.
+            out.append(("text", line + "\n", False))
+            continue
+        out.extend(decode(event))
+    return out
+
+
+# ── Route B: the gateway's OpenAI-compatible HTTP surface ───────────────────────────────
+
+
+def chat_request(config: OpenClawConfig, session: str, text: str) -> Tuple[Dict[str, str],
+                                                                          Dict[str, Any]]:
+    """The headers and body of one `POST /v1/chat/completions`.
+
+    Every name here was read off a live 2026.9.1 gateway rather than guessed: `model` is an agent
+    target, `x-openclaw-session-key` is what makes two turns one conversation, and
+    `x-openclaw-model` overrides the agent's backend model for shared-secret callers.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "User-Agent": "yantrik-openclaw/%s" % VERSION,
+        # Explicit routing, so /new actually starts a new conversation instead of OpenClaw
+        # deriving a key from something this harness does not control.
+        "x-openclaw-session-key": session,
+    }
+    if config.token:
+        headers["Authorization"] = "Bearer %s" % config.token
+    if config.model:
+        headers["x-openclaw-model"] = config.model
+    body: Dict[str, Any] = {
+        "model": config.agent_target,
+        "stream": True,
+        "messages": [{"role": "user", "content": text}],
+        # OpenAI's `user` field, which the gateway derives a stable session key from when no
+        # explicit header is given. The header above wins; this is here so a gateway old enough
+        # not to read it still keeps the desktop's turns in one conversation.
+        "user": session,
+    }
+    return headers, body
+
+
+def _drop_socket(sock: Optional[socket.socket],
+                 response: Optional[http.client.HTTPResponse] = None) -> None:
+    """End a streaming response from any thread.
+
+    Shut the socket down before closing anything: a reader blocked inside `readline` holds the
+    buffer's lock, and closing the stream it is blocked on waits for that lock forever. The
+    shutdown wakes it with end-of-file first, which is the same reason `_end_child` signals a
+    child before touching its pipes.
+    """
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+    if response is not None:
+        try:
+            response.close()
+        except Exception:
+            pass
 
 
 class GatewayRoute:
-    """One long-lived WebSocket to the gateway, reconnected with backoff when it drops."""
+    """One streaming HTTP request per turn, against the gateway's chat-completions route."""
 
     name = "gateway"
 
     def __init__(self, config: OpenClawConfig, log: Callable[[str], None]) -> None:
         self.config = config
         self.log = log
-        self._ws: Optional[WebSocket] = None
-        self._ws_lock = threading.Lock()
+        # The socket, not the connection object. `http.client` hands the socket to the response
+        # and clears `HTTPConnection.sock` for any reply that will close the connection, so a
+        # `conn.close()` on a streaming response is a no-op and the reader blocks forever. The
+        # socket captured before `getresponse()` is the only handle that can end this stream.
+        self._sock: Optional[socket.socket] = None
+        self._response: Optional[http.client.HTTPResponse] = None
+        self._lock = threading.Lock()
         self._q: Optional["queue.Queue[Signal]"] = None
         self._q_lock = threading.Lock()
-        self._request_id = ""
-        self._path_hint: Optional[str] = None
+        # Set when /stop closed the stream. A socket this harness shut down itself is not a
+        # gateway that dropped the answer, and telling the person it was is a lie about their own
+        # /stop.
+        self._stopped = threading.Event()
 
     # ── connecting ──────────────────────────────────────────────────────
 
-    def _candidates(self) -> List[str]:
+    def _target(self) -> Tuple[bool, str, int, str]:
+        """(secure, host, port, path) from `gateway_url`.
+
+        `ws://` and `wss://` are accepted and translated, because that is what the earlier
+        version of this harness told people to write and a config file should not break when the
+        transport underneath it is corrected.
+        """
         parts = urlsplit(self.config.gateway_url)
-        if parts.path and parts.path not in ("", "/"):
-            return [self.config.gateway_url]          # the person said which path; believe them
-        base = "%s://%s" % (parts.scheme or "ws", parts.netloc)
-        paths = list(GATEWAY_PATHS)
-        if self._path_hint and self._path_hint in paths:
-            paths.remove(self._path_hint)
-            paths.insert(0, self._path_hint)          # the one that worked last time, first
-        return [base + path for path in paths]
+        scheme = (parts.scheme or "http").lower()
+        secure = scheme in ("https", "wss")
+        host = parts.hostname or "127.0.0.1"
+        port = parts.port or (443 if secure else 80)
+        base = (parts.path or "").rstrip("/")
+        # A person who put the whole endpoint in `gateway_url` is believed; anything else is the
+        # host and this harness knows the route.
+        path = base if base.endswith(CHAT_COMPLETIONS_PATH) else base + CHAT_COMPLETIONS_PATH
+        return secure, host, port, path
 
-    def _headers(self) -> Dict[str, str]:
-        return {"Authorization": "Bearer %s" % self.config.token} if self.config.token else {}
+    def _open(self) -> http.client.HTTPConnection:
+        secure, host, port, _ = self._target()
+        if secure:
+            return http.client.HTTPSConnection(host, port, timeout=self.config.connect_timeout,
+                                               context=ssl.create_default_context())
+        return http.client.HTTPConnection(host, port, timeout=self.config.connect_timeout)
 
-    def _connect(self) -> WebSocket:
-        with self._ws_lock:
-            live = self._ws
-            if live is not None and not live.closed:
-                return live
-            self._ws = None
-            delay = self.config.connect_backoff
-            last = ""
-            for attempt in range(self.config.connect_attempts):
-                if attempt:
-                    time.sleep(delay)
-                    delay *= 2
-                for url in self._candidates():
-                    try:
-                        ws = WebSocket.connect(url, self._headers(), self.config.connect_timeout)
-                    except (OSError, WebSocketError) as exc:
-                        last = str(exc)
-                        continue
-                    self._path_hint = urlsplit(url).path or "/"
-                    self._ws = ws
-                    threading.Thread(target=self._read, args=(ws,), name="openclaw-gateway",
-                                     daemon=True).start()
-                    self.log("connected to the gateway at %s" % url)
-                    return ws
-            self.log("could not reach the gateway (%s)" % (last or "no reason given"))
-            raise RouteError(self.config.gateway_down)
+    # ── one turn ────────────────────────────────────────────────────────
 
-    def _read(self, ws: WebSocket) -> None:
-        """Every frame from the gateway, on its own thread, for as long as it lives."""
-        why = "the gateway closed the connection"
+    def begin(self, text: str, session: str, q: "queue.Queue[Signal]") -> None:
+        with self._q_lock:
+            self._q = q
+        self._stopped.clear()
+        _, _, _, path = self._target()
+        headers, body = chat_request(self.config, session, text)
+        payload = json.dumps(body).encode("utf-8")
+
+        delay = self.config.connect_backoff
+        last = ""
+        for attempt in range(self.config.connect_attempts):
+            if attempt:
+                time.sleep(delay)
+                delay *= 2
+            conn = self._open()
+            try:
+                # Connecting is separate from sending on purpose. Only "nothing is listening" is
+                # retried: once the message is on the wire the gateway may have accepted the
+                # turn, and a second attempt would be a second turn — the same tool calls run
+                # twice on somebody's desktop.
+                conn.connect()
+            except OSError as exc:
+                last = str(exc)
+                _drop_socket(conn.sock)
+                continue
+            sock = conn.sock              # captured before getresponse() can take it away
+            try:
+                conn.request("POST", path, body=payload, headers=headers)
+                response = conn.getresponse()
+            except (OSError, http.client.HTTPException) as exc:
+                _drop_socket(sock)
+                raise RouteError("OpenClaw's gateway accepted the connection and then went away "
+                                 "(%s). It may have taken the turn anyway, so ask again rather "
+                                 "than repeating anything that changes something." % exc) from None
+            if response.status != 200:
+                detail = self._refusal(response)
+                _drop_socket(sock, response)
+                raise RouteError(detail)
+            # The headers are in; from here the stream can be quiet for as long as a tool call
+            # takes, and a socket timeout would end a turn that was working. `_pump` owns the
+            # silence budget, and closing the socket is what unblocks this reader.
+            try:
+                if sock is not None:
+                    sock.settimeout(None)
+            except OSError:
+                pass
+            with self._lock:
+                self._sock, self._response = sock, response
+            threading.Thread(target=self._read, args=(sock, response), name="openclaw-sse",
+                             daemon=True).start()
+            return
+        self.log("could not reach the gateway (%s)" % (last or "no reason given"))
+        raise RouteError(self.config.gateway_down)
+
+    def _refusal(self, response: http.client.HTTPResponse) -> str:
+        """A non-200 as a sentence the person can act on."""
+        try:
+            raw = response.read(65536).decode("utf-8", "replace")
+        except Exception:
+            raw = ""
+        detail = ""
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            detail = raw.strip()[:300]
+        else:
+            if isinstance(parsed, dict):
+                detail = error_sentence(parsed)
+        if response.status == 404:
+            return self.config.endpoint_off
+        if response.status in (401, 403):
+            return ("OpenClaw's gateway refused this harness's credentials (%d %s). Its "
+                    "`gateway.auth.mode` wants a token or password; name the variable holding it "
+                    "in `token_env` in %s."
+                    % (response.status, detail or response.reason, self.config.source))
+        return ("OpenClaw's gateway answered %d %s%s"
+                % (response.status, response.reason, (": " + detail) if detail else "."))
+
+    def _read(self, sock: Optional[socket.socket],
+              response: http.client.HTTPResponse) -> None:
+        """Server-Sent Events, one `data:` line at a time, for as long as the turn lasts."""
+        ended = False
+        why = ""
         try:
             while True:
-                raw = ws.recv()
-                if raw is None:
+                line = response.readline()
+                if not line:
+                    break
+                line = line.decode("utf-8", "replace").strip()
+                if not line or line.startswith(":"):
+                    continue          # a comment or the blank line between events
+                if not line.startswith("data:"):
+                    continue          # `event:`/`id:`/`retry:` — nothing this harness needs
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    ended = True
                     break
                 try:
-                    event = json.loads(raw)
+                    event = json.loads(data)
                 except ValueError:
-                    # Not JSON. A gateway that streams plain text is still saying something, and
-                    # showing it beats dropping it.
-                    self._emit(("text", raw, False))
-                    continue
-                if isinstance(event, list):
-                    for item in event:
-                        for signal in decode(item):
-                            self._emit(signal)
+                    self._emit(("text", data, False))
                     continue
                 for signal in decode(event):
                     self._emit(signal)
-        except WebSocketError as exc:
+        except (OSError, http.client.HTTPException) as exc:
             why = str(exc)
         except Exception as exc:  # a reader that dies silently is a turn that hangs
-            why = "the gateway connection failed: %s" % exc
+            why = "the stream failed: %s" % exc
         finally:
-            with self._ws_lock:
-                if self._ws is ws:
-                    self._ws = None
-            ws.close()
-            # Only a turn that is open cares. Between turns this is dropped and the next turn
-            # reconnects, which is what a dropped idle connection should cost.
-            self._emit(("error", "OpenClaw's gateway dropped the connection before this answer "
-                                 "was finished (%s). Ask again — it will reconnect." % why, None))
+            _drop_socket(sock, response)
+            with self._lock:
+                if self._sock is sock:
+                    self._sock, self._response = None, None
+        if ended or self._stopped.is_set():
+            self._emit(("end", None, None))
+        else:
+            # Every finished stream ends with `[DONE]`, so reaching the end of the body without
+            # one means the connection went away mid-answer — the daemon restarted, or something
+            # between here and it did. Said as that rather than passed off as an ending, because
+            # a truncated answer presented as a complete one is the worse failure.
+            self._emit(("error", "OpenClaw's gateway dropped this answer before it was finished "
+                                 "(%s). Ask again — the next turn reconnects."
+                                 % (why or "the stream ended without finishing"), None))
 
     def _emit(self, signal: Signal) -> None:
         with self._q_lock:
@@ -770,47 +838,33 @@ class GatewayRoute:
         if q is not None:
             q.put(signal)
 
-    # ── one turn ────────────────────────────────────────────────────────
-
-    def begin(self, text: str, session: str, q: "queue.Queue[Signal]") -> None:
-        with self._q_lock:
-            self._q = q
-        ws = self._connect()
-        self._request_id = uuid.uuid4().hex
-        try:
-            ws.send_text(json.dumps(client_envelope("message", self.config, session,
-                                                    self._request_id, text)))
-        except WebSocketError as exc:
-            raise RouteError("OpenClaw's gateway accepted the connection and then would not take "
-                             "the message (%s). Ask again." % exc) from None
-
     def finish(self) -> None:
         with self._q_lock:
             self._q = None
+        self._shut()
 
     def abort(self) -> None:
-        ws = self._ws
-        if ws is None or ws.closed:
-            return
-        try:
-            ws.send_text(json.dumps(client_envelope("abort", self.config, "", self._request_id)))
-        except WebSocketError as exc:
-            self.log("could not send the abort: %s" % exc)
+        """/stop — the stream is closed, which is all this route can do.
+
+        There is no abort on the chat-completions route. The run belongs to the gateway and may
+        well finish on its own; what the person asked for is to stop being told about it, and
+        that is what closing the connection does. `openclaw sessions abort` is the way to stop
+        the run itself.
+        """
+        self._stopped.set()
+        self._shut()
 
     def reset(self, session: str) -> None:
-        ws = self._ws
-        if ws is None or ws.closed:
-            return
-        try:
-            ws.send_text(json.dumps(client_envelope("new", self.config, session, "")))
-        except WebSocketError as exc:
-            self.log("could not start a new session on the gateway: %s" % exc)
+        """/new — nothing to tell: the next request carries the new session key."""
 
     def close(self) -> None:
-        with self._ws_lock:
-            ws, self._ws = self._ws, None
-        if ws is not None:
-            ws.close()
+        self.finish()
+
+    def _shut(self) -> None:
+        with self._lock:
+            sock, self._sock = self._sock, None
+            response, self._response = self._response, None
+        _drop_socket(sock, response)
 
 
 # ── Route A: the CLI ────────────────────────────────────────────────────────────────────
@@ -859,7 +913,13 @@ def _end_child(proc: Optional[subprocess.Popen]) -> None:
 
 
 class CliRoute:
-    """One `openclaw agent …` per turn: stdout read as it arrives, stderr kept for the sentence."""
+    """One `openclaw agent …` per turn: stdout collected whole, stderr kept for the sentence.
+
+    Collected whole rather than streamed on purpose. `openclaw agent --json` prints one
+    pretty-printed document when the turn is over — nothing arrives while the model works, and
+    every line of that document is invalid JSON on its own. A line reader here is not a slower
+    stream, it is a chat panel full of raw JSON.
+    """
 
     name = "cli"
 
@@ -868,14 +928,13 @@ class CliRoute:
         self.log = log
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
-        self._said = False
 
     def begin(self, text: str, session: str, q: "queue.Queue[Signal]") -> None:
         argv = self.config.cli_argv(text, session)
         try:
             proc = subprocess.Popen(
-                argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1, env=self.config.environ(),
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=self.config.environ(),
             )
         except OSError as exc:
             raise RouteError(
@@ -883,27 +942,12 @@ class CliRoute:
                 % (argv[0], exc, self.config.source)) from None
         with self._lock:
             self._proc = proc
-            self._said = False
         errors: List[str] = []
-        threading.Thread(target=self._feed, args=(proc, text), name="openclaw-stdin",
-                         daemon=True).start()
         stderr = threading.Thread(target=self._errors, args=(proc, errors),
                                   name="openclaw-stderr", daemon=True)
         stderr.start()
         threading.Thread(target=self._read, args=(proc, q, errors, stderr),
                          name="openclaw-cli", daemon=True).start()
-
-    def _feed(self, proc: subprocess.Popen, text: str) -> None:
-        try:
-            if proc.stdin is None:
-                return
-            if self.config.message_on_stdin:
-                proc.stdin.write(text + "\n")
-                proc.stdin.flush()
-        except (OSError, ValueError):
-            pass
-        finally:
-            _close_stream(proc.stdin)
 
     def _errors(self, proc: subprocess.Popen, errors: List[str]) -> None:
         try:
@@ -919,28 +963,9 @@ class CliRoute:
 
     def _read(self, proc: subprocess.Popen, q: "queue.Queue[Signal]", errors: List[str],
               stderr: threading.Thread) -> None:
-        ended = False
+        raw = ""
         try:
-            for line in proc.stdout:  # type: ignore[union-attr]
-                line = line.rstrip("\r\n")
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    # Not JSON, so `--json` is not what this build calls it — or there is no JSON
-                    # mode. Either way the line is the answer, and showing it is better than
-                    # discarding it while the person watches a cursor.
-                    self._said = True
-                    q.put(("text", line + "\n", False))
-                    continue
-                for signal in decode(event):
-                    if signal[0] == "end":
-                        ended = True
-                        continue     # the process exiting is the real ending; see below
-                    if signal[0] == "text":
-                        self._said = True
-                    q.put(signal)
+            raw = proc.stdout.read() or ""  # type: ignore[union-attr]
         except Exception as exc:
             q.put(("error", "could not read what openclaw was saying: %s" % exc, None))
             return
@@ -948,23 +973,49 @@ class CliRoute:
             _close_stream(proc.stdout)
         code = proc.wait()
         # The reason a failing run gives is on stderr, and it arrives on its own thread. Waiting
-        # a moment for it is the difference between "openclaw exited 2" and a sentence saying
+        # a moment for it is the difference between "openclaw exited 1" and a sentence saying
         # which flag it did not know.
-        stderr.join(timeout=1.0)
+        stderr.join(timeout=2.0)
         tail = " ".join(errors[-5:]).strip()
-        if code == 0 or ended or self._said:
-            # A non-zero exit after a complete answer is still an answer. Say so in the log and
-            # let the turn complete with what was streamed.
-            if code not in (0, None) and not ended:
+
+        signals = cli_output(raw)
+        said = any(kind == "text" for kind, _, _ in signals)
+        failed = any(kind == "error" for kind, _, _ in signals)
+        if signals and (said or failed):
+            # The document is the answer, whatever the exit code was: a non-zero exit after a
+            # complete reply is how `openclaw agent` reports a run that ended in error, and it
+            # has already said why in the JSON it printed.
+            if code not in (0, None) and not failed:
                 self.log("openclaw exited %s after answering: %s" % (code, tail[:300]))
+            for signal in signals:
+                q.put(signal)
+            if not failed:
+                q.put(("end", None, None))
+            return
+        if code is not None and code < 0:
+            # Killed by a signal, which on this route only happens because `abort()` sent one:
+            # the person said /stop, or the desktop dropped the turn. That is an ending, not a
+            # failure, and reporting "openclaw exited -15" for it would blame OpenClaw for the
+            # person's own decision.
             q.put(("end", None, None))
+            return
+        if code in (0, None):
+            # Exited cleanly and printed nothing this harness could read. Reported as the
+            # protocol mismatch it is, rather than as an empty answer: an empty bubble is
+            # indistinguishable from a hang, and this is the shape that told us `--json` had
+            # changed in the first place.
+            q.put(("error",
+                   "openclaw finished without printing an answer%s. `args` in %s is what this "
+                   "harness passes — run `%s agent --help` if this build disagrees."
+                   % ((": " + tail[:200]) if tail else "", self.config.source,
+                      " ".join(self.config.command)), None))
             return
         if any(marker in tail.lower() for marker in _DOWN_MARKERS):
             q.put(("error", self.config.gateway_down, None))
             return
         q.put(("error",
                "openclaw exited %s without answering%s. If it is a flag it did not recognise, "
-               "`args` in %s is what this harness passes — run `%s --help` and correct it."
+               "`args` in %s is what this harness passes — run `%s agent --help` and correct it."
                % (code, (": " + tail[:300]) if tail else "", self.config.source,
                   " ".join(self.config.command)), None))
 
@@ -974,13 +1025,17 @@ class CliRoute:
         _end_child(proc)
 
     def abort(self) -> None:
-        """/stop — there is no abort message on a pipe, so the child is ended."""
+        """/stop — there is no abort message on a pipe, so the child is ended.
+
+        `openclaw agent` sends `chat.abort` for the run it started when it is signalled, so
+        ending the child does stop the work on this route rather than only stopping the waiting.
+        """
         with self._lock:
             proc = self._proc
         _end_child(proc)
 
     def reset(self, session: str) -> None:
-        """/new — nothing to tell: the next invocation carries the new session name."""
+        """/new — nothing to tell: the next invocation carries the new session key."""
 
     def close(self) -> None:
         self.finish()
@@ -998,8 +1053,9 @@ class OpenClawMind(Handler):
     so `Harness._close` runs exactly once for every one of them.
     """
 
-    # OpenClaw's gateway holds one conversation per session. Two desktop turns at once would
-    # interleave into it and neither answer would make sense.
+    # OpenClaw holds one conversation per session key. Two desktop turns at once would interleave
+    # into it and neither answer would make sense; the gateway would also answer the second with
+    # `in_flight` rather than an answer.
     concurrent = False
 
     def __init__(self, config: OpenClawConfig, log: Optional[Callable[[str], None]] = None) -> None:
@@ -1012,7 +1068,7 @@ class OpenClawMind(Handler):
 
     @property
     def session(self) -> str:
-        """The session name OpenClaw is asked for. `/new` moves it on; memory stays behind."""
+        """The session key OpenClaw is asked for. `/new` moves it on; memory stays behind."""
         base = self.config.session
         return base if not self._generation else "%s-%d" % (base, self._generation)
 
@@ -1086,9 +1142,8 @@ class OpenClawMind(Handler):
                 if unknown <= 3:
                     # Once per kind is enough to tell a protocol mismatch from a quiet agent, and
                     # it is the first thing to look at when an answer never arrives.
-                    self.log("unrecognised event from OpenClaw: %s. If answers are missing, the "
-                             "envelope in yantrik_openclaw.py needs correcting against this "
-                             "install." % a)
+                    self.log("unrecognised event from OpenClaw: %s. If answers are missing, this "
+                             "build streams something yantrik_openclaw.py does not know." % a)
             # "alive": nothing to show, and the silence clock has already been reset above.
 
     # ── the two commands ────────────────────────────────────────────────
@@ -1128,9 +1183,6 @@ def main(argv: Optional[List[str]] = None) -> int:
           % (config.route, config.session,
              (", gateway %s" % config.gateway_url) if config.route == "gateway" else ""),
           file=sys.stderr)
-    if config.route == "gateway":
-        print("the gateway message envelope is an ASSUMPTION — see the README before trusting "
-              "it against a live install", file=sys.stderr)
     try:
         harness.run()
     except KeyboardInterrupt:
