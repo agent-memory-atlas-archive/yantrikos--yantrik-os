@@ -15,8 +15,9 @@ What it is actually checking, in one line each:
 
   * a `standard` action still runs with nobody asked;
   * a `sensitive` action asks, and what the card is bound to is what the app will be run with —
-    including the type the CLI will coerce the value to, which is the thing that would silently
-    drift apart;
+    including the type the CLI will read the value as, which is the thing that would silently
+    drift apart; an id the app publishes as `string` stays "3" all the way to the app, and a
+    parameter it publishes as a number still arrives as one;
   * granted / denied / no-answer / above-the-machine-ceiling / no-shell each produce a distinct
     message, and only the first of them runs anything;
   * a grant whose arguments do not match is refused and nothing runs;
@@ -50,11 +51,12 @@ from importlib.machinery import SourceFileLoader
 HERE = pathlib.Path(__file__).resolve().parent
 SOURCE = HERE / "yos-mcp"
 
-# The fake `yos`. It mirrors the real one's argument parsing (`json.loads` per value, falling
-# back to the raw text) and its printing (`result` as indent-2 JSON after the header), because
-# those two details are exactly what yos-mcp reads back.
+# The fake `yos`. It mirrors the real one's argument parsing (each value read against the type
+# the app published for that parameter, falling back to JSON where nothing was said) and its
+# printing (`result` as indent-2 JSON after the header), because those two details are exactly
+# what yos-mcp reads back.
 FAKE_YOS = r'''#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, re, sys, time
 
 STATE = os.environ["FAKE_YOS_STATE"]
 
@@ -72,15 +74,36 @@ def save(s):
         json.dump(s, fh)
     os.replace(tmp, STATE)
 
-def parse_args(pairs):
+def parse_args(pairs, types):
+    # `yos.read_value`, which keeps a value bound for a `string` parameter as the text it
+    # arrived as. The fake has to read arguments the way the real CLI does, or the bridge's
+    # prediction of what the app will receive would be checked against something else.
     out = {}
     for pair in pairs:
         key, value = pair.split("=", 1)
         try:
-            out[key] = json.loads(value)
+            parsed = json.loads(value)
         except ValueError:
             out[key] = value
+            continue
+        if isinstance(parsed, str) or types.get(key) != "string":
+            out[key] = parsed
+        else:
+            out[key] = value
     return out
+
+def declared(target, action):
+    """The types this fake desktop publishes for one action's arguments."""
+    types, seen = {}, None
+    for line in (DESCRIBE_CALENDAR if target == "calendar" else "").splitlines():
+        head = re.match(r"^\s*act:\s*(\w+)\(", line)
+        if head:
+            seen = head.group(1)
+            continue
+        arg = re.match(r"^ {8,}(\w+)\??:\s*(\S+)", line)
+        if arg and seen == action:
+            types[arg.group(1)] = arg.group(2)
+    return types
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -103,10 +126,11 @@ revision: c0ffee
 }
   act: list_events()  [safe, settles on return]
        List the events currently in view.
-  act: add_event(title, date)  [standard, settles on return]
+  act: add_event(title, date, duration_min?)  [standard, settles on return]
        Add an event to the calendar.
          title: string - what it is
          date: string - YYYY-MM-DD
+         duration_min?: number - how long it runs, in minutes
   act: move_event(id, date)  [sensitive, settles on return]
        Move an event to another day. Move it back to undo it.
          id: string - the event's id, as list_events reports it
@@ -179,7 +203,7 @@ if argv[:1] == ["web"]:
 
 if argv[:1] == ["act"]:
     target, action = argv[1], argv[2]
-    args = parse_args(argv[3:])
+    args = parse_args(argv[3:], declared(target, action))
 
     if target == "shell" and action == "request_approval":
         if state.get("shell_down"):
@@ -468,20 +492,63 @@ with tempfile.TemporaryDirectory() as d:
     check("the answer says a person allowed it",
           not is_error and "allowed this once" in text, text)
 
-    # 3. The argument the app will receive is the argument the person approved.
+    # 3. The argument the app will receive is the argument the person approved — and for a
+    # parameter the app publishes as text, that is the text.
     #
-    # `yos act` parses every value back with json.loads, so a model sending {"id": "3"} means
-    # the app receives 3. The card has to say 3 and the grant has to bind 3, or the person
-    # approved one thing and the machine did another.
+    # `yos act` used to parse every value back with json.loads, so a model sending {"id": "3"}
+    # meant the app received 3. On 22 September that was how `dismiss id=67` reached the
+    # notifications service as a number and came back "missing `id`". Values are read against
+    # the published type now, on both sides of this boundary: whatever the CLI will send, the
+    # card has to say and the grant has to bind, or the person approved one thing and the
+    # machine did another.
     module, state = case(tmp, "coercion", answer="granted")
     text, is_error = act(module, "calendar", "delete_event", {"id": "3"})
     s = read(state)
     req = (s.get("requests") or [{}])[0]
-    check("the approval binds the value the app will actually get",
-          req.get("args_json") == {"id": 3}, req)
+    check("an id the app publishes as text is not turned into a number",
+          req.get("args_json") == {"id": "3"}, req)
     check("and the call carries the same value",
-          s.get("acted", [{}])[0].get("args") == {"id": 3}, s.get("acted"))
+          s.get("acted", [{}])[0].get("args") == {"id": "3"}, s.get("acted"))
     check("so the grant matches and the action runs", not is_error, text)
+
+    # And the other half: a parameter the app publishes as a number is still a number, or the
+    # rule would simply have moved the same failure to `duration_min=30`.
+    module, state = case(tmp, "coercion-number", answer="granted")
+    wanted = {"title": "Call", "date": "2026-10-02", "duration_min": 15}
+    text, is_error = act(module, "calendar", "add_event", dict(wanted))
+    s = read(state)
+    check("a parameter the app publishes as a number arrives as one",
+          s.get("acted", [{}])[0].get("args") == wanted, s.get("acted"))
+    check("and the bridge predicts exactly that",
+          module.effective_args({"app": "calendar", "action": "add_event",
+                                 "args": dict(wanted)}) == wanted,
+          module.effective_args({"app": "calendar", "action": "add_event",
+                                 "args": dict(wanted)}))
+
+    # 3b. The bridge's reading of a `key=value` value and the CLI's are one reading.
+    #
+    # This bridge predicts what `yos` will send so that the card, the grant and the call bind
+    # the same bytes. It reaches `yos` by running it and cannot import it, so the rule is
+    # written twice — and two copies drift silently in the direction nobody tests. Both are
+    # driven through the same table here.
+    module, _ = case(tmp, "read-value", ceiling=None)
+    yos_loader = SourceFileLoader("yos_under_test", str(HERE / "yos"))
+    yos_spec = importlib.util.spec_from_loader("yos_under_test", yos_loader)
+    yos_module = importlib.util.module_from_spec(yos_spec)
+    yos_loader.exec_module(yos_module)
+    table = [("67", "string"), ("67", "number"), ("67", None), ('"67"', "string"),
+             ("true", "boolean"), ("true", "string"), ("true", None),
+             ("hello world", "string"), ("hello world", None), ("", "string"),
+             ('{"a": 1}', "string"), ('{"a": 1}', "object"), ("null", "string"),
+             ("2026-10-02", "string"), ("-3.5", "number"), ("[1, 2]", "string")]
+    drifted = ["%r as %s: the CLI reads %r, this bridge %r"
+               % (t, d, yos_module.read_value(t, d), module.read_value(t, d))
+               for t, d in table if module.read_value(t, d) != yos_module.read_value(t, d)]
+    check("the bridge reads a value exactly as the CLI will", not drifted, drifted)
+    check("and that reading is the one the issue asked for",
+          yos_module.read_value("67", "string") == "67"
+          and yos_module.read_value("67", "number") == 67
+          and yos_module.read_value('"67"', "number") == "67", None)
 
     # 4. Denied: nothing runs, and the mind is told not to ask again.
     module, state = case(tmp, "denied", answer="denied")

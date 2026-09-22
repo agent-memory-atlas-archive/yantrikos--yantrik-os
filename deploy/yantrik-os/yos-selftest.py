@@ -23,8 +23,11 @@ What it is checking, in one line each:
     leaving a reader to take a quiet feed for a quiet machine;
   * with no desktop to ask, the answer is a plain sentence and exit 0 — not a traceback and not
     the "failed (exit 1)" that a mind used to be handed for a perfectly good question;
-  * and `ensure_service`, which the notify path uses, still ends the command when the service
-    will not come up.
+  * `ensure_service`, which the notify path uses, still ends the command when the service
+    will not come up;
+  * and `yos act` sends each argument as the type the app declared for it — `dismiss id=67`
+    reaches the service as the string "67", because that action publishes `id: string`, while
+    `add_event duration_min=30` still arrives as the number 30.
 """
 
 import contextlib
@@ -50,7 +53,10 @@ def check(label, condition, detail=""):
     if condition:
         print("  ok    %s" % label)
     else:
-        print("  FAIL  %s%s" % (label, ("\n        " + detail) if detail else ""))
+        # `str`, like the MCP bridge's own selftest: a check handed the dict it was comparing
+        # used to die here with a TypeError instead of printing what it saw, which turns a
+        # readable failure into a traceback in the middle of the run.
+        print("  FAIL  %s%s" % (label, ("\n        " + str(detail)) if detail else ""))
         FAILURES.append(label)
 
 
@@ -125,6 +131,43 @@ PAGE = {
     ],
     "next_seq": 3,
     "missed": 0,
+}
+
+# Two surfaces as they really publish themselves, because the types in here are the whole point:
+# the notification ids on a live machine are a decimal counter rendered as a string, and the
+# calendar is where a number and a flag genuinely are a number and a flag.
+NOTIFICATIONS = {
+    "app": "notifications",
+    "summary": "Notifications — 2 showing, 1 unread",
+    "state": {"count": 2, "unread": 1},
+    "revision": "dd6f0b179da77956",
+    "actions": [
+        {"name": "dismiss", "description": "Dismiss one notification by id",
+         "permission": "standard", "settles": "on return",
+         "parameters": {"type": "object", "required": ["id"], "properties": {
+             "id": {"type": "string",
+                    "description": "The notification id, as shown in the list"}}}},
+        {"name": "mark_read", "description": "Clear the unread badge",
+         "permission": "standard", "settles": "on return",
+         "parameters": {"type": "object", "required": [], "properties": {
+             "id": {"type": "string", "description": "One notification, or omit for all"}}}},
+    ],
+}
+
+CALENDAR = {
+    "app": "calendar",
+    "summary": "Calendar — September 2026",
+    "state": {"showing": "September 2026"},
+    "revision": "1234567890123456",
+    "actions": [
+        {"name": "add_event", "description": "Put something on the calendar",
+         "permission": "standard", "settles": "on return",
+         "parameters": {"type": "object", "required": ["title", "date"], "properties": {
+             "title": {"type": "string", "description": ""},
+             "date": {"type": "string", "description": "YYYY-MM-DD"},
+             "duration_min": {"type": "number", "description": "How long it runs, in minutes"},
+             "all_day": {"type": "boolean", "description": "A whole day rather than a time"}}}},
+    ],
 }
 
 
@@ -226,6 +269,76 @@ def main():
         check("the newest observation is shown", "io stalled" in out, out)
         check("and so is every source that could not start, whatever the limit",
               "needs CAP_NET_ADMIN" in out and "needs CAP_SYS_ADMIN" in out, out)
+
+        print("yos act, against the types the app publishes")
+        # `parse_args` ran every value through `json.loads`, so `dismiss id=67` sent the number
+        # 67 to an action that publishes `id: string` and the service answered "missing `id`" —
+        # a mind that had read the id off the list could not dismiss a notification at all.
+
+        def surface(view):
+            """A control surface that describes itself and accepts anything."""
+            def reply(_self, asked):
+                if asked["method"] == "app.describe":
+                    return view
+                return {"summary": view["summary"], "accepted": True, "settled": True,
+                        "revision": view["revision"], "result": {"ok": True}}
+            return reply
+
+        surfaces = {}
+        for view in (NOTIFICATIONS, CALENDAR):
+            service = FakeService(sockets / ("%s.sock" % view["app"]), surface(view))
+            service.start()
+            services.append(service)
+            surfaces[view["app"]] = service
+
+        def last_act(app):
+            acts = [c for c in surfaces[app].calls if c["method"] == "app.act"]
+            return acts[-1]["params"] if acts else None
+
+        def describes(app):
+            return len([c for c in surfaces[app].calls if c["method"] == "app.describe"])
+
+        run(lambda: yos.cmd_act(["notifications", "dismiss", "id=67"]))
+        check("an id bound for a `string` parameter arrives as the text it was typed as",
+              (last_act("notifications") or {}).get("args") == {"id": "67"},
+              last_act("notifications"))
+        check("and the app was asked once what its arguments are",
+              describes("notifications") == 1, describes("notifications"))
+
+        surfaces["notifications"].calls.clear()
+        run(lambda: yos.cmd_act(["notifications", "dismiss", "id=abc"]))
+        check("a value that is not JSON in the first place costs no extra round trip",
+              describes("notifications") == 0, surfaces["notifications"].calls)
+
+        surfaces["notifications"].calls.clear()
+        run(lambda: yos.cmd_act(["notifications", "dismiss", 'id="67"']))
+        check("quoting still says `string` explicitly, without the quotes surviving",
+              (last_act("notifications") or {}).get("args") == {"id": "67"},
+              last_act("notifications"))
+
+        surfaces["notifications"].calls.clear()
+        run(lambda: yos.cmd_act(["notifications", "dismiss", "id=67", "reason=3"]))
+        check("an argument the app does not publish is still read as JSON, as it always was",
+              (last_act("notifications") or {}).get("args") == {"id": "67", "reason": 3},
+              last_act("notifications"))
+
+        surfaces["notifications"].calls.clear()
+        # 16 hex digits, and about one revision in six thousand is all of them decimal. It
+        # guards the call rather than being an argument to it, so no app declares it — and as a
+        # number the runtime reads it with `as_str`, finds nothing, and acts without the guard.
+        run(lambda: yos.cmd_act(["notifications", "dismiss", "id=67",
+                                 "expect_revision=1234567890123456"]))
+        check("a revision made only of digits is still a revision",
+              (last_act("notifications") or {}).get("expect_revision") == "1234567890123456",
+              last_act("notifications"))
+
+        run(lambda: yos.cmd_act(["calendar", "add_event", "title=Dentist", "date=2026-10-02",
+                                 "duration_min=30", "all_day=false"]))
+        check("a number stays a number and a flag stays a flag",
+              (last_act("calendar") or {}).get("args") == {
+                  "title": "Dentist", "date": "2026-10-02",
+                  "duration_min": 30, "all_day": False},
+              last_act("calendar"))
 
         print("yos perception, with no desktop to ask")
         for svc in services:

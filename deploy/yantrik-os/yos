@@ -35,7 +35,12 @@ protocol and prints what came back.
     yos web listen [secs]               what the page SAYS OUT LOUD — records the audio
                                         the machine is playing and transcribes it
 
-Two conventions worth knowing:
+Conventions worth knowing:
+
+  * an `act` argument is read as the app declared it. `describe` publishes a type for every
+    argument, so `dismiss id=67` sends the string "67" to an action whose `id` is text and
+    `add_event duration_min=30` sends the number 30 to one whose parameter is a number.
+    Quoting says it outright — `id="67"` is the string whatever the app declared.
 
   * `describe` and `act` take a short name. `shell` means `app-shell`, `notes` means
     `app-notes`; anything else is used as given, so `yos describe weather` reaches the
@@ -202,21 +207,104 @@ def die(message):
     raise SystemExit(1)
 
 
-def parse_args(pairs):
-    """`name=notes count=3` into a dict, with numbers and booleans as themselves.
+def read_value(text, declared):
+    """One `key=value` value, read the way the parameter it is bound for wants it.
 
-    JSON values pass through untouched, so `args='{"a":1}'` and `text='hello world'`
-    both work — the first because it parses, the second because it does not.
+    This used to be `json.loads` on everything, falling back to the raw text, and that is
+    right for `count=3` and `all_day=true` and wrong for every identifier made of digits.
+    `yos act notifications dismiss id=67` sent the NUMBER 67 to an action that publishes
+    `id: string`; the service read a non-string as no string at all and answered "missing
+    `id`", while `"id": "67"` over the raw socket dismissed it. A mind following the
+    describe exactly could not dismiss a notification at all.
+
+    So the app's own declaration decides. Every action publishes a type per parameter
+    (`Param::text` → `string`), and a value bound for a `string` parameter is kept as the
+    text it arrived as. For anything else the JSON reading IS the meaning — the download
+    manager publishes `Param::number("id")` and wants 3, not "3".
+
+    Quoting still says it explicitly: `id="67"` and `title="  keep the spaces  "` parse to
+    the string inside the quotes whatever the parameter is, which is the only way to send
+    text that would otherwise be read as JSON.
+
+    `declared` is the published type, or None when nothing said — a parameter the app does
+    not list, or an app that would not answer — and then this behaves exactly as it always
+    did, because a guess is worse than the old rule.
     """
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        # Not JSON at all. It was only ever the text, and no declaration changes that.
+        return text
+    if isinstance(parsed, str):
+        return parsed
+    if declared == "string":
+        return text
+    return parsed
+
+
+# `expect_revision` is not an argument to the action — it is the guard around the call — so no
+# app declares it and the lookup below would find nothing. It is always a revision hash, which
+# `View::revision` renders as 16 hex digits: about one in six thousand of them is all digits,
+# and that one would arrive as a number at a runtime that reads it with `as_str` and silently
+# acts without the guard the caller asked for.
+GUARD_TYPES = {"expect_revision": "string"}
+
+
+def declared_types(target, action, pairs):
+    """What the app says these arguments are — asked for only when it changes the answer.
+
+    A value that is not JSON (`text=hello world`, `name=notes`, `date=2026-10-02`) means the
+    same thing whatever it is bound for, and ordinary `yos act` calls are made entirely of
+    those. So the describe happens only when some value would read as something other than
+    text — `id=67`, `on=true`, `args={"a":1}` — which keeps the common act at the one round
+    trip it has always been.
+
+    An app that will not answer leaves everything undeclared, which is the old behaviour; the
+    `act` that follows is about to fail on the same socket and say so properly.
+    """
+    wanted = set()
+    for pair in pairs:
+        key, _, text = pair.partition("=")
+        if key in GUARD_TYPES:
+            continue
+        try:
+            if isinstance(json.loads(text), str):
+                continue
+        except ValueError:
+            continue
+        wanted.add(key)
+    if not wanted:
+        return dict(GUARD_TYPES)
+
+    types = dict(GUARD_TYPES)
+    try:
+        view = request(target, "app.describe")
+    except (Unreachable, OSError, ValueError):
+        return types
+    for published in view.get("actions") or []:
+        if published.get("name") != action:
+            continue
+        properties = ((published.get("parameters") or {}).get("properties")) or {}
+        for name, spec in properties.items():
+            if name in wanted:
+                types[name] = (spec or {}).get("type")
+    return types
+
+
+def parse_args(pairs, types=None):
+    """`name=notes count=3` into a dict, each value read as its parameter is declared.
+
+    `types` maps parameter name to the published JSON Schema type; see `read_value` for what
+    it decides and `declared_types` for where it comes from. Without it every value is read
+    as JSON where it parses, which is what a caller with no app to ask can do.
+    """
+    types = types or {}
     out = {}
     for pair in pairs:
         if "=" not in pair:
             die("arguments look like key=value, got %r" % pair)
         key, value = pair.split("=", 1)
-        try:
-            out[key] = json.loads(value)
-        except ValueError:
-            out[key] = value
+        out[key] = read_value(value, types.get(key))
     return out
 
 
@@ -539,7 +627,8 @@ def cmd_act(argv):
     full = "--full" in argv
     argv = [a for a in argv if a != "--full"]
     target, action = argv[0], argv[1]
-    params = {"action": action, "args": parse_args(argv[2:])}
+    pairs = argv[2:]
+    params = {"action": action, "args": parse_args(pairs, declared_types(target, action, pairs))}
     # An `expect_revision` is lifted out of the args, because it guards the call rather
     # than being an argument to the action.
     if "expect_revision" in params["args"]:

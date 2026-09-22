@@ -398,7 +398,7 @@ def act_pairs(a):
         if isinstance(parsed, dict):
             args = parsed
         else:
-            names = action_parameters(a.get("app"), a.get("action"))
+            names = list(action_parameters(a.get("app"), a.get("action")))
             if len(names) == 1:
                 args = {names[0]: args}
             else:
@@ -440,40 +440,102 @@ def yos(args, timeout):
 
 
 def action_parameters(app, action):
-    """The parameter names one action takes, read from the OS's own description of it."""
+    """What one action takes: parameter name → published type, in the order the app lists them.
+
+    Read from the OS's own description of itself rather than guessed. `describe` prints the
+    signature and then, indented under it, one line per parameter — `id: string — the
+    notification id` — which is where the type comes from. A parameter with no type line (an
+    older app, or a folded family) maps to None, and every caller here treats that as "nothing
+    was said" rather than as a type.
+    """
     if not app or not action:
-        return []
+        return {}
     p = yos(["describe", app], SHELL_CALL_TIMEOUT)
     if p is None or p.returncode != 0:
-        return []
-    for m in re.finditer(r"^\s*act:\s*([A-Za-z0-9_]+)\(([^)]*)\)", p.stdout, re.M):
-        if m.group(1) == action:
-            return [n.strip() for n in m.group(2).split(",") if n.strip()]
-    return []
+        return {}
+    lines = (p.stdout or "").splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*act:\s*([A-Za-z0-9_]+)\(([^)]*)\)", line)
+        if not m or m.group(1) != action:
+            continue
+        found = {n.strip().rstrip("?"): None
+                 for n in m.group(2).split(",") if n.strip()}
+        # The argument lines belong to this action until the next `act:` starts another one.
+        for rest in lines[i + 1:]:
+            if re.match(r"^\s*act:\s", rest):
+                break
+            arg = re.match(r"^ {8,}([A-Za-z0-9_]+)\??:\s*(.+?)\s*(?:[-—]\s.*)?$", rest)
+            if arg and arg.group(1) in found:
+                found[arg.group(1)] = arg.group(2).strip()
+        return found
+    return {}
+
+
+def read_value(text, declared):
+    """One `key=value` value, read the way the parameter it is bound for wants it.
+
+    `yos`'s own rule, and deliberately a copy of it rather than an import: this bridge reaches
+    `yos` by running it, and cannot load it as a module. The two are pinned together in
+    `yos-mcp-selftest.py`, which loads both files and drives this function and `yos.read_value`
+    through the same table — because a bridge that predicted a different value than the CLI
+    produces would bind an approval to something the machine never ran.
+    """
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(parsed, str):
+        return parsed
+    if declared == "string":
+        return text
+    return parsed
+
+
+# `yos.GUARD_TYPES`: the guard around the call rather than an argument to the action, so no app
+# declares it and the CLI knows it on its own. Kept here for the same reason as `read_value` —
+# the two have to predict the same value.
+GUARD_TYPES = {"expect_revision": "string"}
 
 
 def effective_args(a):
     """The arguments as the app will actually receive them.
 
     This matters because a grant is bound to exact values. os_act renders every value to text
-    for `yos act k=v`, and `yos` parses each one back with `json.loads` — a round trip that is
-    lossy in a specific way: "3" arrives as 3, "true" as True. Binding the approval to what the
-    model typed rather than to what the app will run with would mean the card showed one thing
-    and the machine did another, which is the whole failure this feature exists to prevent.
-    So the round trip happens once, here, and the same dict is what the card shows, what the
-    grant binds, and what the call sends.
+    for `yos act k=v` and `yos` reads each one back against the type the app published — a
+    round trip that changes a value in a specific way: for a `number` parameter "3" arrives as
+    3, for a `boolean` "true" as True. Binding the approval to what the model typed rather than
+    to what the app will run with would mean the card showed one thing and the machine did
+    another, which is the whole failure this feature exists to prevent. So the round trip
+    happens once, here, and the same dict is what the card shows, what the grant binds, and
+    what the call sends.
 
     Raises ValueError for arguments that cannot be resolved — the same error, from the same
     helper, that building the command line would have raised a moment later.
     """
+    pairs = act_pairs(a)
+    types = dict(GUARD_TYPES)
+    # A second describe is only worth it when some value would read as something other than
+    # text. `{"title": "Dentist"}` means the same thing however the parameter is declared, and
+    # `yos` skips the same lookup on the same test, so the two stay in step on the cheap path.
+    if any(ambiguous(pair) for pair in pairs):
+        types.update({k: v for k, v in action_parameters(a.get("app"), a.get("action")).items()
+                      if k not in GUARD_TYPES})
     out = {}
-    for pair in act_pairs(a):
+    for pair in pairs:
         key, value = pair.split("=", 1)
-        try:
-            out[key] = json.loads(value)
-        except ValueError:
-            out[key] = value
+        out[key] = read_value(value, types.get(key))
     return out
+
+
+def ambiguous(pair):
+    """Whether this `key=value` needs the app's declaration to be read correctly."""
+    key, _, text = pair.partition("=")
+    if key in GUARD_TYPES:
+        return False
+    try:
+        return not isinstance(json.loads(text), str)
+    except ValueError:
+        return False
 
 
 # ── Keeping private data from walking out ───────────────────────────────────────────────
