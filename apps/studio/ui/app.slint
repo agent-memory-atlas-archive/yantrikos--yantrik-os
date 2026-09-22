@@ -1,0 +1,474 @@
+// Yantrik Studio — image generation as a window.
+//
+// A sentence at the top, the pictures it has made below, and beside them the record of how each
+// one was made: prompt, seed, model, backend, seconds, path. That last pane is the reason this
+// is a window and not a folder of PNGs. A person who cannot see the seed cannot ask for the same
+// picture again, and a person who cannot see which backend made it cannot tell whether the
+// sentence they typed stayed in the building.
+//
+// Every string on screen arrives already written. The window formats nothing, so what a person
+// reads here and what `yos describe studio` prints are built in the same place and cannot drift.
+
+import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppIdentity } from "app_color.slint";
+import { AppHeader } from "app_header.slint";
+import { YButton, YIconButton } from "y_button.slint";
+import { YInput } from "y_input.slint";
+import { Icon, Icons } from "icon.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
+
+export { ThemeMode, AccentPreset }
+
+/// One picture in the gallery.
+///
+/// `meta` is a sentence, not four numbers: "comfyui · sdxl · seed 1234 · 1024×1024 · 8.2 s".
+/// Built in Rust, next to the JSON that `describe` prints from the same record, so a field
+/// added to one shows up in the other.
+export struct ShotRow {
+    name: string,
+    prompt: string,
+    meta: string,
+    path: string,
+    has-thumb: bool,
+    thumb: image,
+    selected: bool,
+}
+
+/// One thing being made, or waiting to be.
+export struct JobRow {
+    label: string,
+    status: string,
+    progress: string,
+}
+
+export component StudioApp inherits Window {
+    title: "Studio";
+    preferred-width: 1180px;
+    preferred-height: 800px;
+    min-width: 800px;
+    min-height: 540px;
+    default-font-family: Theme.font-ui;
+    background: Theme.bg-deep;
+
+    // Which app this window is, and so which colour it draws itself in. On the window, not on
+    // AppHeader, for the reason written in app_color.slint: the header covers the screens that
+    // have one.
+    init => { AppIdentity.id = "studio"; }
+
+    // ── What the app is pointed at ──
+    in property <string> backend-line: "Reading your configuration…";
+    in property <string> facts;
+    in property <string> output-folder;
+    in property <string> notice;
+    in property <string> status;
+    in property <bool> busy;
+    // Whether the window is wide enough for the record pane on the right. Handed in from Rust
+    // rather than read here, because `if root.width > …` inside this layout is a binding loop on
+    // `layoutinfo-h`: the window's own width is derived from the layout's preferred size, so a
+    // condition that reads the width decides the size it was derived from. See `wide` in main.rs.
+    in property <bool> wide;
+
+    // ── The gallery and the queue ──
+    in property <[ShotRow]> shots;
+    in property <[JobRow]> jobs;
+    in property <string> detail;
+
+    // ── What the person is about to ask for ──
+    //
+    // `in-out`, because these belong to whoever is typing. Rust writes them when it has a reason
+    // to — the defaults at startup, and the prompt and seed a `variations` click takes from the
+    // sidecar of the picture that was chosen — and never on a redraw.
+    in-out property <string> prompt;
+    in-out property <string> negative;
+    in-out property <string> want-width: "1024";
+    in-out property <string> want-height: "1024";
+    in-out property <string> want-steps: "30";
+    in-out property <string> want-count: "1";
+
+    callback action(string);
+    callback choose(int);
+
+    public function focus-prompt() { prompt-field.focus(); }
+
+    VerticalLayout {
+        spacing: 0px;
+
+        AppHeader {
+            app-id: "studio";
+            icon: Icons.app("studio");
+            title: "Studio";
+            subtitle: root.backend-line;
+            actions: [
+                { id: "refresh", icon: Icons.refresh, label: "Refresh" },
+                { id: "folder", icon: Icons.folder, label: "Output folder" },
+                { id: "backend", icon: Icons.settings, label: "Where pictures are made" },
+                { id: "generate", icon: Icons.spark, label: "Generate", emphasis: 2 },
+            ];
+            action(id) => { root.action(id); }
+        }
+
+        if root.notice != "" : Rectangle {
+            background: Theme.bg-elevated;
+            // Sized by a layout rather than by `height: text.preferred-height + 20px` with
+            // `width: parent.width - 40px` on the text. Those two read the size of the thing they
+            // sit inside, and the window's own width is derived from this layout's preferred size,
+            // so the pair is a cycle: Slint reported it as a binding loop on `layoutinfo-h` and
+            // says a loop there may panic at runtime.
+            VerticalLayout {
+                padding: 10px;
+                padding-left: 20px;
+                padding-right: 20px;
+                Text {
+                    text: root.notice;
+                    color: Theme.amber;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 0px;
+
+            // ── Left: ask, then look ──
+            VerticalLayout {
+                spacing: 0px;
+                horizontal-stretch: 1;
+
+                Rectangle {
+                    height: 156px;
+                    background: Theme.bg-surface;
+
+                    VerticalLayout {
+                        padding: 14px;
+                        padding-bottom: 12px;
+                        spacing: 8px;
+
+                        prompt-field := YInput {
+                            value <=> root.prompt;
+                            mode: 1;
+                            leading-icon-path: Icons.spark;
+                            placeholder: "Describe the picture you want…";
+                            accepted(_) => { root.action("generate"); }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            height: 30px;
+                            Text {
+                                text: "Keep out";
+                                color: Theme.text-dim;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            YInput {
+                                value <=> root.negative;
+                                horizontal-stretch: 1;
+                                placeholder: "blurry, watermark, text";
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            height: 30px;
+                            Text { text: "Width"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                            YInput { value <=> root.want-width; min-width: 72px; }
+                            Text { text: "Height"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                            YInput { value <=> root.want-height; min-width: 72px; }
+                            Text { text: "Steps"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                            YInput { value <=> root.want-steps; min-width: 60px; }
+                            Text { text: "How many"; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                            YInput { value <=> root.want-count; min-width: 52px; }
+                            Rectangle { horizontal-stretch: 1; }
+                            if root.jobs.length > 0 : YButton {
+                                label: "Cancel";
+                                variant: 2;
+                                size: 0;
+                                clicked => { root.action("cancel"); }
+                            }
+                            YButton {
+                                label: root.busy ? "Working…" : "Generate";
+                                variant: 0;
+                                size: 0;
+                                disabled: root.busy;
+                                clicked => { root.action("generate"); }
+                            }
+                        }
+                    }
+                }
+
+                if root.jobs.length > 0 : Rectangle {
+                    height: 12px + root.jobs.length * 22px;
+                    background: Theme.bg-elevated;
+                    VerticalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 6px;
+                        spacing: 2px;
+                        for job in root.jobs : HorizontalLayout {
+                            height: 20px;
+                            spacing: 10px;
+                            Icon {
+                                commands: Icons.bolt;
+                                size: 12px;
+                                tint: Theme.amber;
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: job.label;
+                                color: Theme.text-primary;
+                                font-size: 12px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: job.progress;
+                                color: Theme.text-dim;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: job.status;
+                                color: Theme.amber;
+                                font-size: 11px;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+
+                    if root.shots.length == 0 : VerticalLayout {
+                        padding: 40px;
+                        alignment: center;
+                        spacing: 14px;
+                        Icon { commands: Icons.app("studio"); size: 44px; tint: AppIdentity.accent; }
+                        Text {
+                            text: "Nothing made yet.";
+                            color: Theme.text-primary;
+                            font-size: 24px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "Type a sentence above and press Generate. The picture is saved as a file in your Pictures folder, with a small record beside it saying exactly how it was made.";
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                            horizontal-alignment: center;
+                            // `max-width`, not `width: min(520px, parent.width)`. An explicit width
+                            // that reads the parent's is the same cycle as the notice bar's was:
+                            // this text is inside the layout the window's width is derived from.
+                            max-width: 520px;
+                        }
+                    }
+
+                    if root.shots.length > 0 : ListView {
+                        vertical-stretch: 1;
+                        for shot[i] in root.shots : Rectangle {
+                            height: 108px;
+                            background: row-touch.has-hover ? Theme.hover-fill : transparent;
+                            row-touch := TouchArea {
+                                clicked => { root.choose(i); }
+                                HorizontalLayout {
+                                    padding: 10px;
+                                    padding-left: 16px;
+                                    padding-right: 12px;
+                                    spacing: 12px;
+
+                                    if shot.selected : Rectangle {
+                                        width: 3px;
+                                        border-radius: 2px;
+                                        background: AppIdentity.accent;
+                                    }
+
+                                    Rectangle {
+                                        width: 84px;
+                                        height: 84px;
+                                        border-radius: 8px;
+                                        clip: true;
+                                        background: Theme.bg-deep;
+                                        if shot.has-thumb : Image {
+                                            source: shot.thumb;
+                                            width: 84px;
+                                            height: 84px;
+                                            image-fit: cover;
+                                        }
+                                        if !shot.has-thumb : Icon {
+                                            commands: Icons.image;
+                                            size: 26px;
+                                            tint: Theme.text-dim;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: shot.prompt;
+                                            color: Theme.text-primary;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: shot.meta;
+                                            color: Theme.text-secondary;
+                                            font-size: 11px;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: shot.path;
+                                            color: Theme.text-dim;
+                                            font-size: 10px;
+                                            font-family: Theme.font-mono;
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 4px;
+                                        alignment: center;
+                                        YIconButton {
+                                            icon-path: Icons.zoom-in;
+                                            variant: 2;
+                                            size: 0;
+                                            clicked => { root.action("upscale:" + shot.path); }
+                                        }
+                                        YIconButton {
+                                            icon-path: Icons.shuffle;
+                                            variant: 2;
+                                            size: 0;
+                                            clicked => { root.action("variations:" + shot.path); }
+                                        }
+                                        YIconButton {
+                                            icon-path: Icons.eye;
+                                            variant: 2;
+                                            size: 0;
+                                            clicked => { root.action("open:" + shot.path); }
+                                        }
+                                        YIconButton {
+                                            icon-path: Icons.trash;
+                                            variant: 3;
+                                            size: 0;
+                                            clicked => { root.action("delete:" + shot.path); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.wide : Rectangle { width: 1px; background: Theme.separator; }
+
+            // ── Right: the record, and where pixels are made ──
+            if root.wide : Rectangle {
+                width: 330px;
+                clip: true;
+                background: Theme.bg-surface;
+
+                ScrollView {
+                    viewport-width: self.visible-width;
+                    VerticalLayout {
+                        alignment: start;
+                        padding: 16px;
+                        spacing: 10px;
+
+                        Text {
+                            text: "WHERE PICTURES ARE MADE";
+                            color: Theme.text-dim;
+                            font-size: 10px;
+                            font-weight: 600;
+                            letter-spacing: 1.6px;
+                            height: 16px;
+                        }
+                        Text {
+                            text: root.facts;
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        YButton {
+                            label: "Change…";
+                            variant: 2;
+                            size: 0;
+                            clicked => { root.action("backend"); }
+                        }
+
+                        Rectangle { height: 1px; background: Theme.separator; }
+
+                        Text {
+                            text: "OUTPUT FOLDER";
+                            color: Theme.text-dim;
+                            font-size: 10px;
+                            font-weight: 600;
+                            letter-spacing: 1.6px;
+                            height: 16px;
+                        }
+                        Text {
+                            text: root.output-folder;
+                            color: Theme.text-dim;
+                            font-size: 11px;
+                            font-family: Theme.font-mono;
+                            wrap: word-wrap;
+                        }
+                        YButton {
+                            label: "Open the folder";
+                            variant: 2;
+                            size: 0;
+                            clicked => { root.action("folder"); }
+                        }
+
+                        Rectangle { height: 1px; background: Theme.separator; }
+
+                        Text {
+                            text: "HOW THIS ONE WAS MADE";
+                            color: Theme.text-dim;
+                            font-size: 10px;
+                            font-weight: 600;
+                            letter-spacing: 1.6px;
+                            height: 16px;
+                        }
+                        Text {
+                            text: root.detail == ""
+                                ? "Choose a picture from the gallery and its record is read back here, from the small JSON file saved beside it."
+                                : root.detail;
+                            color: root.detail == "" ? Theme.text-dim : Theme.text-secondary;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.separator; }
+
+        Rectangle {
+            height: 34px;
+            background: Theme.bg-surface;
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 16px;
+                spacing: 14px;
+                Text {
+                    text: root.status;
+                    color: Theme.text-dim;
+                    font-size: 11px;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+}

@@ -50,6 +50,7 @@ members = [
     "apps/email",
     "apps/calendar",
     "apps/weather",
+    "apps/studio",
     "crates/yantrik-harness",
 ]
 
