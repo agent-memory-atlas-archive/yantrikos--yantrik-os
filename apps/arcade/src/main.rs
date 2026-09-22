@@ -527,6 +527,17 @@ fn view(ui: &ArcadeApp, core: &Core) -> View {
                 .collect::<Vec<_>>(),
         )
         .with("jobs", core.jobs_json())
+        // The grammar, read off the same constants the validator enforces. It lives in the state
+        // as well as in the argument text because a caller that has already been refused once
+        // reads `describe` next, and that read should end the guessing rather than continue it.
+        .with(
+            "spec_grammar",
+            serde_json::json!({
+                "vocabularies": spec::vocabularies(),
+                "ranges": spec::ranges(),
+                "note": "Every enumerated field and its words, and every numeric field and its                          range, exactly as new_character and new_game enforce them.",
+            }),
+        )
 }
 
 fn control(ui: &ArcadeApp, core: Core) {
@@ -569,12 +580,18 @@ fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
     vec![
         (
             Action::new("new_character", "Save a character spec into the library")
-                .arg(Param::text("spec").describe("The character JSON; the validator refuses with a sentence naming the field")),
+                .arg(Param::text("spec").describe(&format!(
+                    "The character JSON. Required: name, archetype, proportions                      (head_body, limb_length, width). Optional: ears, tail, palette                      (base/belly/accent/nose/eye as #rrggbb), expression, stance.                      The enumerated fields take {}. Ranges and the rest are in                      `describe`'s spec_grammar. A value outside any of them is refused with a                      sentence naming the field.",
+                    spec::vocabulary_line("character")
+                ))),
             handler(ui, &core, "new_character"),
         ),
         (
             Action::new("new_game", "Save a game spec into the library")
-                .arg(Param::text("spec").describe("The game JSON; `player.character` may name a saved character or inline one")),
+                .arg(Param::text("spec").describe(&format!(
+                    "The game JSON. Required: title, arena (size, theme), player (character,                      speed), collectible (kind, count), hazards[] (kind, speed, count), lives,                      music. `player.character` may name a saved character or inline a whole one,                      in which case the character vocabulary applies to it too. The enumerated                      fields take {}. Ranges are in `describe`'s spec_grammar.",
+                    spec::vocabulary_line("game")
+                ))),
             handler(ui, &core, "new_game"),
         ),
         (
