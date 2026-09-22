@@ -879,9 +879,38 @@ pub fn publish(
                 // empty one.
                 ui.set_current_screen(id);
                 ui.invoke_navigate(id);
+
+                // And then get in front of whatever is covering it.
+                //
+                // This used to stop at the line above and answer `settled: true`, which was a
+                // claim about a screen nobody could see: with an app window open, `show_screen
+                // about` changed the screen underneath it and the photograph shows the Text
+                // Editor with About peeking out at the edges. The shell is one ordinary
+                // fullscreen toplevel to labwc — see the `<margin>` note in
+                // config/labwc/rc.xml — and a Wayland client cannot raise itself, so it has to
+                // ask, exactly as `control_approvals` asks when a card goes up. Super+D,
+                // Super+E and Super+I are `show_screen` too, so the same omission meant those
+                // three keys did nothing visible from inside any app.
+                //
+                // Raised AFTER navigate, so what comes forward is the screen that was asked for
+                // rather than the previous one changing in front of the person.
                 let mut showing = serde_json::json!({ "showing": want });
                 if !section.is_empty() {
                     showing["section"] = section.into();
+                }
+                match crate::windows::raise_shell() {
+                    Ok(()) => showing["raised"] = true.into(),
+                    // Not an error: the shell IS on that screen, and saying otherwise would
+                    // undo a navigation that happened. What it is not is visible, and a caller
+                    // that has just been told "shown" is owed that difference.
+                    Err(why) => {
+                        showing["raised"] = false.into();
+                        showing["note"] = format!(
+                            "the shell is on `{want}`, but its own window could not be brought \
+                             to the front, so an app window may still be covering it: {why}"
+                        )
+                        .into();
+                    }
                 }
                 Ok(showing)
             },
@@ -920,37 +949,90 @@ pub fn publish(
             },
         )
         .action(
-            // Deferred for the same reason as `open_app`, and slightly worse: this spawns
-            // `wlrctl toplevel focus` and the wiring discards the result with `let _ =`, so on a
-            // machine without wlrctl it succeeds loudly and does nothing at all. Focus is also
-            // the compositor's to grant, not ours to assert — we do not own labwc.
-            Action::new("focus_window", "Bring an open window to the front")
-                .defers()
-                .arg(Param::text("title").describe("Window title, or part of one")),
+            // Deferred for the same reason as `open_app`: focus is the compositor's to grant,
+            // not ours to assert — we do not own labwc, and `wlrctl toplevel focus` returns as
+            // soon as the request has been sent rather than when the window is in front.
+            Action::new(
+                "focus_window",
+                "Bring an open window to the front. `Yantrik OS` is the desktop itself",
+            )
+            .defers()
+            .arg(Param::text("title").describe("Window title, or part of one")),
             move |args| {
                 let ui = focus_ui()?;
-                let want = args["title"].as_str().unwrap_or_default().trim().to_lowercase();
-                let windows = ui.get_window_list();
-                let title = {
-                    use slint::Model;
-                    let rows: Vec<_> =
-                        (0..windows.row_count()).filter_map(|i| windows.row_data(i)).collect();
-                    rows.iter()
-                        .find(|w| w.title.to_lowercase() == want)
-                        .or_else(|| rows.iter().find(|w| w.title.to_lowercase().contains(&want)))
-                        .map(|w| w.title.to_string())
-                        .ok_or_else(|| {
-                            let open: Vec<String> =
-                                rows.iter().map(|w| w.title.to_string()).collect();
-                            if open.is_empty() {
-                                "no windows are open".to_string()
-                            } else {
-                                format!("no open window matches `{want}`; there is: {}", open.join(", "))
-                            }
-                        })?
-                };
+                let want = args["title"].as_str().unwrap_or_default();
+                // The same list `describe` publishes under `windows`, plus the shell's own
+                // toplevel. It used to read the Slint window-switcher model, which leaves the
+                // shell out so that the taskbar does not offer to switch you to the desktop you
+                // are already on — a good reason there and the wrong one here, because the
+                // desktop is the one window a caller cannot reach any other way.
+                // `focus_window title=Yantrik` answering "no open window matches" with the shell
+                // plainly running is what that cost.
+                let open = crate::windows::addressable_titles();
+                let title = crate::windows::window_named(want, &open)?;
                 ui.invoke_switch_window(title.clone().into());
                 Ok(serde_json::json!({ "focused": title }))
+            },
+        )
+        .action(
+            // There is a × on every window and nothing on this surface could press it.
+            //
+            // A person driving the desktop through `yos`, and a mind tidying up after a job, both
+            // ended a session with every window they had opened still open, because the surface
+            // could launch an app and focus it and never close it. So: the compositor's own close
+            // request, which is the × exactly — the app is told the person wants it gone and
+            // decides what to do about it. An editor holding unsaved work puts up its own dialog
+            // and stays, which is right; nothing here kills a process.
+            //
+            // Deferred for that reason. `Ok` means the request was delivered, not that the window
+            // went, and only `describe shell` can say whether it did.
+            Action::new(
+                "close_window",
+                "Ask an open window to close, as pressing its × does. An app with unsaved work \
+                 may put up its own dialog and stay",
+            )
+            .defers()
+            .arg(Param::text("title").describe("Window title, or part of one")),
+            move |args| {
+                let want = args["title"].as_str().unwrap_or_default();
+                let open = crate::windows::addressable_titles();
+                let title = crate::windows::window_to_close(want, &open)?;
+                crate::windows::close(&title)?;
+                Ok(serde_json::json!({
+                    "closing": title,
+                    "note": "the window was asked to close, which is what pressing × does — an \
+                             app with unsaved work may answer with its own dialog and stay. Read \
+                             `windows` in `describe shell` to see whether it went.",
+                }))
+            },
+        )
+        .action(
+            // Out of the way, rather than gone. The other half of what a person does with a
+            // window they are not using, and the gentle one: nothing is asked of the app, nothing
+            // can be lost, and `focus_window` brings it straight back — `present` un-minimizes
+            // before it focuses, so the way back needs no second verb.
+            //
+            // Deferred because the compositor decides, like every other window verb here.
+            Action::new(
+                "minimise_window",
+                "Put an open window out of the way without closing it. `focus_window` brings it \
+                 back",
+            )
+            .defers()
+            .arg(Param::text("title").describe("Window title, or part of one")),
+            move |args| {
+                let want = args["title"].as_str().unwrap_or_default();
+                let open = crate::windows::addressable_titles();
+                let title = crate::windows::window_named(want, &open)?;
+                crate::windows::minimise(&title)?;
+                Ok(serde_json::json!({
+                    "minimised": title,
+                    // Said because it surprises: a minimized toplevel is still a toplevel, so it
+                    // is still in `describe shell`, and a caller checking the list to confirm
+                    // would otherwise read that as the action having done nothing.
+                    "note": "it is still open and still listed under `windows`; it is behind \
+                             everything else now. `focus_window` brings it back.",
+                }))
             },
         )
         .action(
@@ -1232,5 +1314,98 @@ mod do_not_disturb_tests {
              flips the property and throws its save result away, which is how this action came \
              to report a durable preference it had never written. Handler as written:\n{handler}"
         );
+    }
+}
+
+#[cfg(test)]
+mod window_action_tests {
+    use std::path::Path;
+
+    /// One action's declaration and handler, as written above the tests.
+    ///
+    /// The same trick `do_not_disturb_tests` uses, and for the same reason: these handlers need a
+    /// live Slint window and a compositor to run, so the property worth pinning — that the handler
+    /// asks the right thing of the right module — is pinned against the source. The pure parts it
+    /// delegates to are tested for real, in `windows.rs`.
+    fn action(name: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
+        let from = src
+            .find(&format!("\"{name}\""))
+            .unwrap_or_else(|| panic!("the shell no longer publishes `{name}`"));
+        let rest = &src[from..];
+        let end = rest.find(".action(").unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    /// A screen the shell reports as shown has to be a screen somebody can see.
+    ///
+    /// `show_screen about` answered `settled: true` with the Text Editor covering the whole
+    /// display and About peeking out at the edges. The navigation was real; the claim was not,
+    /// because a Wayland client cannot raise itself and nothing here was asking the compositor to.
+    #[test]
+    fn show_screen_raises_the_shell_and_says_so_when_it_could_not() {
+        let handler = action("show_screen");
+        assert!(
+            handler.contains("windows::raise_shell()"),
+            "`show_screen` must ask the compositor to bring the shell's own toplevel forward. \
+             Without it the screen changes underneath whatever app window is in front and the \
+             caller is told it was shown. Handler as written:\n{handler}"
+        );
+        assert!(
+            handler.contains("\"raised\""),
+            "`show_screen` settles on return, so its answer has to carry whether the shell \
+             actually came forward — a caller that reads `settled: true` and sees the Text \
+             Editor has been told nothing it can use. Handler as written:\n{handler}"
+        );
+        assert!(
+            handler.contains("showing[\"note\"]"),
+            "when the raise fails, the answer has to say so in words: the screen DID change, so \
+             this is not an error, but it is not visible either. Handler as written:\n{handler}"
+        );
+    }
+
+    /// Closing a window is asking the app, never ending the process.
+    ///
+    /// An app holding unsaved work is entitled to answer with its own dialog and stay open. That
+    /// is what the × does and it is the only thing this action may do — `kill`, `pkill` and
+    /// `Child::kill` all take that answer away from the person whose work it is.
+    #[test]
+    fn closing_a_window_asks_the_app_rather_than_killing_it() {
+        let handler = action("close_window");
+        assert!(
+            handler.contains("windows::close(&title)"),
+            "`close_window` must go through `windows::close`, which sends the compositor's close \
+             request. Handler as written:\n{handler}"
+        );
+        for killing in ["kill", "SIGTERM", "SIGKILL", "pkill", "terminate"] {
+            assert!(
+                !handler.contains(killing),
+                "`close_window` mentions `{killing}`. Closing a window is a request the app may \
+                 refuse — an editor with unsaved work must get its own say. Handler as \
+                 written:\n{handler}"
+            );
+        }
+    }
+
+    /// Every window verb resolves what a person typed against the windows that are open.
+    ///
+    /// Not politeness: wlrctl's `title:` is an exact, case-sensitive comparison, so
+    /// `title:editor` matches no window called `Editor` and `title:Yantrik` matches no shell
+    /// called `Yantrik OS`. Handing a caller's string straight to wlrctl is a match on nothing,
+    /// and for `focus` a match on nothing exits zero.
+    #[test]
+    fn the_window_verbs_resolve_the_title_before_asking_the_compositor() {
+        for name in ["focus_window", "close_window", "minimise_window"] {
+            let handler = action(name);
+            assert!(
+                handler.contains("windows::addressable_titles()"),
+                "`{name}` must resolve its `title` against the open windows — which include the \
+                 shell's own — before it asks the compositor for anything. Handler as \
+                 written:\n{handler}"
+            );
+        }
     }
 }
