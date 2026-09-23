@@ -95,6 +95,13 @@ So `--no-builtin-tools` is passed unless you set `"builtin_tools": true`. That i
 for coding work in a checkout, Pi's own tools are the whole point, and turning them on is one
 line. Just know which surface you have turned on, because only one of the two is graded.
 
+`bash` comes back anyway, graded. With Pi's own tools off and the bridge offering the agent's
+terminal (it does when Pi runs as one of the person's agents), the extension registers a `bash`
+with Pi's exact parameters on top of the bridge's `run_command`: the model keeps the tool it
+was trained on, and each command runs in the agent's own terminal in its pane on the desktop —
+asked about in `ask` mode, watched, answerable and stoppable there — rather than as an unseen
+child of Pi. With Pi's own tools on, the extension leaves Pi's `bash` alone.
+
 ## The extension
 
 `extension/yantrik-os.ts` asks `yos-mcp` for its tool list at load and registers each one with
@@ -121,6 +128,8 @@ reached at all, a small fallback table keeps the tools existing so Pi still star
   own `main`) is its own `pi --mode rpc` process, started when its first message arrives and
   stopped when the agent is stopped. Its environment carries that agent's
   `YANTRIK_AGENT_TOKEN`, so the `yos-mcp` the extension starts can say which agent is asking.
+- A command of the agent's that finishes after its call returned is told to Pi at the start of
+  the next turn, in front of your message (`[From the desktop, since your last turn: …]`).
 - A tool execution is a card in the agent's pane — its arguments, its output streamed into it,
   ✓ or ✗ when it ends — and still the trail line `⚙️ os_act calendar.add_event` in the text.
 - Pi's thinking goes beside the answer as a folded "thinking" line in the pane, never into the

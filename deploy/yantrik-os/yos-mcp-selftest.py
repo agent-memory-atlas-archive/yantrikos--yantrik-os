@@ -31,9 +31,14 @@ What it is actually checking, in one line each:
   * a card on the person's screen does not stop the bridge answering anything else — the whole
     of the 22 September hang — and a poll that fails is retried, logged, and never throws away a
     question somebody is still looking at;
-  * and, last, that this bridge's copy of the decision table still agrees with the shell's, on
-    every combination of mode, grade, machine ceiling, session rule, browser tool and harness
-    cap — read from `mind-mode-vectors.json`, which the shell's own tests generate.
+  * that this bridge's copy of the decision table still agrees with the shell's, on every
+    combination of mode, grade, machine ceiling, session rule, browser tool and harness cap —
+    read from `mind-mode-vectors.json`, which the shell's own tests generate;
+  * and a bridge started with an agent token (YANTRIK_AGENT_TOKEN): every act carries the token
+    through `yos`'s environment and it is on no command line, argument, card, audit line or
+    answer; `terminal.run` goes to `shell.agent_run` with no window raised; the command tools are
+    listed only with a token, keep the shell's grades, and are given as long as their wait. And
+    without a token, all of that is exactly as it was.
 """
 
 import importlib.util
@@ -95,7 +100,8 @@ def parse_args(pairs, types):
 def declared(target, action):
     """The types this fake desktop publishes for one action's arguments."""
     types, seen = {}, None
-    for line in (DESCRIBE_CALENDAR if target == "calendar" else "").splitlines():
+    text = {"calendar": DESCRIBE_CALENDAR, "shell": SHELL_ACTIONS, "terminal": DESCRIBE_TERMINAL}
+    for line in text.get(target, "").splitlines():
         head = re.match(r"^\s*act:\s*(\w+)\(", line)
         if head:
             seen = head.group(1)
@@ -139,6 +145,38 @@ revision: c0ffee
        Delete an event from the calendar. It is not recoverable.
          id: string - the event's id, as list_events reports it
 """
+# The shell's own actions, as `describe shell` lists them: opening an app, and an agent's terminal
+# (`agent_run` and `agent_input` sensitive, `agent_job` and `agent_kill` standard, as the shell
+# grades them in control_agent_terminal.rs).
+SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
+       Launch an app, or focus it if it is already running.
+  act: agent_run(command, cwd?, wait?)  [sensitive, settles later]
+       Run one command line in a fresh terminal of your own, in your pane.
+         command: string - one command line, as it would be typed
+         cwd?: string - where to run it
+         wait?: number - seconds to wait before answering running
+  act: agent_job(job, wait?)  [standard, settles later]
+       Wait for one of your commands that answered running.
+         job: string - the job id agent_run answered with
+         wait?: number - seconds to wait
+  act: agent_input(job, text)  [sensitive, settles later]
+       Type into one of your running commands.
+         job: string - the job id agent_run answered with
+         text: string - the exact characters to send
+  act: agent_kill(job)  [standard, settles later]
+       Stop one of your commands.
+         job: string - the job id agent_run answered with
+"""
+DESCRIBE_TERMINAL = """Terminal - 1 tab
+revision: 7e57
+{
+  "tabs": 1
+}
+  act: run(command)  [sensitive, settles later]
+       Type a command line into the active shell and press Return.
+         command: string - one command line
+"""
+
 # Two `sensitive` actions, and the difference between them is the sentence under the signature.
 # `move_event` is the routine sensitive surface `auto` exists for; `delete_event` says it cannot
 # be undone, so `auto` asks about it anyway. Before 21 September 2026 there was only the second
@@ -187,11 +225,13 @@ if argv[:1] == ["describe"]:
         print("Yantrik - desktop screen")
         print("revision: c0ffee")
         print(json.dumps(body, indent=2))
-        print("  act: open_app(name)  [standard, settles later]")
-        print("       Launch an app, or focus it if it is already running.")
+        sys.stdout.write(SHELL_ACTIONS)
         raise SystemExit(0)
     if target == "calendar":
         sys.stdout.write(DESCRIBE_CALENDAR)
+        raise SystemExit(0)
+    if target == "terminal" and state.get("terminal_open"):
+        sys.stdout.write(DESCRIBE_TERMINAL)
         raise SystemExit(0)
     die("%s is not open." % target)
 
@@ -209,6 +249,13 @@ if argv[:1] == ["act"]:
     # raise a card of its own; this fake has no card to raise. Both are recorded, because the
     # bridge carrying them is half of what this file checks.
     rest = argv[3:]
+    # Where an agent token travelled, for every act: the environment `yos` reads it from (and the
+    # real `yos` sends it beside the arguments), and the whole command line, which any user on the
+    # machine can read and which must therefore never carry it.
+    state.setdefault("carried", []).append({"action": "%s.%s" % (target, action),
+                                            "env_token": os.environ.get("YANTRIK_AGENT_TOKEN"),
+                                            "argv": argv})
+    save(state)
     grant = None
     if "--grant" in rest:
         at = rest.index("--grant")
@@ -296,6 +343,23 @@ if argv[:1] == ["act"]:
     state.setdefault("acted", []).append({"app": target, "action": action, "args": args,
                                           "grant": grant, "no_ask": no_ask})
     save(state)
+    if target == "shell" and action.startswith("agent_"):
+        # The shell's answer about a command, in the shape `RunAnswer::to_json` gives it.
+        # `agent_running` answers as a command still going when its wait ran out; `echo_token`
+        # prints whatever token the call carried, which is how a test catches the bridge
+        # repeating one.
+        answer = {"job": args.get("job", "job-1a2b"), "agent": "pi:c-7f3a91",
+                  "command": args.get("command", "ls"), "cwd": "/home/me", "elapsed_ms": 1200,
+                  "tail": "hi", "tail_clipped": False, "output_bytes": 3, "truncated_bytes": 0}
+        if state.get("agent_running"):
+            answer.update(running=True, waiting_for_input=False, elapsed_ms=120000,
+                          tail="working", next="still running: `agent_job` waits for it again")
+        else:
+            answer.update(running=False, exit_code=0, cwd_after="/tmp")
+        if state.get("echo_token"):
+            answer["tail"] = "token=%s" % os.environ.get("YANTRIK_AGENT_TOKEN")
+        envelope(answer)
+        raise SystemExit(0)
     envelope({"done": True})
     raise SystemExit(0)
 
@@ -303,14 +367,21 @@ die("unknown command %r" % argv)
 '''
 
 
-def load_mcp(fake, state_path, ceiling="standard", requester="", follow=False, wait=4):
+def load_mcp(fake, state_path, ceiling="standard", requester="", follow=False, wait=4, token=None):
     """A fresh copy of the real yos-mcp, pointed at the fake desktop.
 
     Reloaded per case because the module reads its ceiling and its wait out of the environment
     at import time, which is right for a server started once per session and inconvenient here.
+
+    `token` is the agent token the harness would have started the bridge with, or None for a
+    bridge that runs for nobody in particular — every case before 22.
     """
     os.environ["YOS_BIN"] = str(fake)
     os.environ["FAKE_YOS_STATE"] = str(state_path)
+    if token is None:
+        os.environ.pop("YANTRIK_AGENT_TOKEN", None)
+    else:
+        os.environ["YANTRIK_AGENT_TOKEN"] = token
     # `None` means the harness set no cap at all, which is the ordinary case and the one where
     # the desktop's own mode decides alone. An empty or absent variable and a set one are
     # genuinely different to the bridge, so the test has to be able to produce both.
@@ -349,7 +420,7 @@ def act(module, app, action, args):
 
 def case(tmp, name, answer="granted", machine_ceiling="sensitive", shell_down=False,
          ceiling="standard", requester="", mode="ask", rules=None, no_mode=False,
-         poll_fails=0, poll_hang=0, wait=4):
+         poll_fails=0, poll_hang=0, wait=4, token=None, follow=False, **desktop):
     """A scratch desktop in a known mood, and a yos-mcp pointed at it.
 
     `no_mode` publishes a shell that says nothing about its mode — an older desktop, or one
@@ -357,6 +428,9 @@ def case(tmp, name, answer="granted", machine_ceiling="sensitive", shell_down=Fa
 
     `poll_fails` and `poll_hang` are how the desktop misbehaves once a card is UP: the first few
     approval polls refused, or every one of them slower than the bridge's budget for it.
+
+    `token` starts the bridge as one of the person's agents. Anything else in `desktop` goes into
+    the fake's state as it stands (`terminal_open`, `agent_running`, `echo_token`).
     """
     state_path = tmp / (name + ".json")
     body = {
@@ -367,11 +441,13 @@ def case(tmp, name, answer="granted", machine_ceiling="sensitive", shell_down=Fa
         "poll_fails": poll_fails,
         "poll_hang": poll_hang,
     }
+    body.update(desktop)
     if not no_mode:
         body["mode"] = mode
     fake = tmp / "yos"
     state_path.write_text(json.dumps(body), encoding="utf-8")
-    module = load_mcp(fake, state_path, ceiling=ceiling, requester=requester, wait=wait)
+    module = load_mcp(fake, state_path, ceiling=ceiling, requester=requester, wait=wait,
+                      token=token, follow=follow)
     return module, state_path
 
 
@@ -462,6 +538,28 @@ class Client:
         self.server_out.close()
         self.reader.join(5)
         return self.noise.getvalue()
+
+
+def served(module, *messages):
+    """Drive `main()` over a whole session of messages and hand back its replies, by id.
+
+    Through the real read loop, so what is listed and what a tools/call returns — `_meta` and
+    all — is what a client would receive. `main()` finishes every call before it returns.
+    """
+    lines = [json.dumps(dict({"jsonrpc": "2.0"}, **m)) for m in messages]
+    saved_in, saved_out, saved_err = sys.stdin, sys.stdout, sys.stderr
+    sys.stdin, sys.stdout, sys.stderr = io.StringIO("\n".join(lines) + "\n"), io.StringIO(), io.StringIO()
+    try:
+        module.main()
+        out, err = sys.stdout.getvalue(), sys.stderr.getvalue()
+    finally:
+        sys.stdin, sys.stdout, sys.stderr = saved_in, saved_out, saved_err
+    replies = {}
+    for line in out.splitlines():
+        if line.strip():
+            reply = json.loads(line)
+            replies[reply.get("id")] = reply
+    return replies, out, err
 
 
 def act_aloud(module, app, action, args):
@@ -1123,6 +1221,184 @@ with tempfile.TemporaryDirectory() as d:
     act(module, "calendar", "list_events", {})
     shown = [a["args"].get("name") for a in read(state).get("acted", []) if a.get("action") == "show_app"]
     check("and again when it comes back from another app", shown == ["calendar", "calendar"], shown)
+
+    # ── 22. A bridge that runs as one of the person's agents ────────────────────────────
+    #
+    # design/agents-workspace-2026-09-23.md, decision 3. The harness starts this bridge with the
+    # agent's token in YANTRIK_AGENT_TOKEN. Every act carries it beside the arguments (through
+    # `yos`'s environment — never its command line, never the arguments, never the audit), a
+    # command goes to the agent's own terminal rather than the person's, and the agent is offered
+    # its terminal as tools of its own. Without a token none of that happens.
+    TOKEN = "0123456789abcdef0123456789abcdef"
+    LIST = {"id": 1, "method": "tools/list", "params": {}}
+    COMMAND_TOOLS = ["run_command", "command_status", "command_input", "command_kill"]
+
+    def leaks(state, *extra):
+        """Every place the token must not be: argv, arguments, cards, audit lines, and `extra`."""
+        s = read(state)
+        places = {
+            "a command line": [c["argv"] for c in s.get("carried", [])],
+            "an action's arguments": [a.get("args") for a in s.get("acted", [])],
+            "an approval card": s.get("requests", []),
+            "the unasked-actions record": s.get("audited", []),
+        }
+        places.update({"what the mind was told (%d)" % n: text for n, text in enumerate(extra)})
+        return sorted(where for where, what in places.items()
+                      if TOKEN in json.dumps(what) or "--agent-token" in json.dumps(what))
+
+    # 22a. No token: exactly as before. terminal.run is the person's Terminal, raised as ever.
+    module, state = case(tmp, "notoken-terminal", answer="granted", ceiling=None,
+                         terminal_open=True, follow=True)
+    text, is_error = act(module, "terminal", "run", {"command": "ls"})
+    s = read(state)
+    check("without a token, terminal.run still types into the person's Terminal",
+          not is_error and [(a["app"], a["action"]) for a in s.get("acted", [])
+                            if a["action"] != "show_app"] == [("terminal", "run")], s.get("acted"))
+    check("and the Terminal is brought forward as it always was",
+          [a["args"].get("name") for a in s.get("acted", []) if a["action"] == "show_app"] == ["terminal"],
+          s.get("acted"))
+    check("and no act carries a token",
+          s.get("carried") and all(c["env_token"] is None for c in s["carried"]), s.get("carried"))
+    replies, _, _ = served(module, LIST, {"id": 2, "method": "tools/call",
+                                          "params": {"name": "run_command", "arguments": {"command": "ls"}}})
+    names = [t["name"] for t in replies[1]["result"]["tools"]]
+    check("without a token the command tools are not listed",
+          not set(COMMAND_TOOLS) & set(names) and "os_act" in names, names)
+    check("and cannot be called", "no such tool" in json.dumps(replies[2].get("error")), replies[2])
+    os_act_listed = [t for t in replies[1]["result"]["tools"] if t["name"] == "os_act"][0]
+    check("and os_act is described exactly as it was",
+          os_act_listed["description"] == module.BY_NAME["os_act"]["description"], None)
+
+    # 22b. With a token, terminal.run is the agent's own terminal — asked about, carried and
+    # recorded as what will actually run, `shell.agent_run` — and nothing is raised.
+    module, state = case(tmp, "token-terminal", answer="granted", ceiling=None,
+                         terminal_open=True, follow=True, token=TOKEN)
+    text, is_error, noise = act_aloud(module, "terminal", "run", {"command": "ls -la"})
+    s = read(state)
+    req = (s.get("requests") or [{}])[0]
+    check("with a token, terminal.run goes to the agent's own terminal",
+          not is_error and [(a["app"], a["action"]) for a in s.get("acted", [])] == [("shell", "agent_run")]
+          and s["acted"][0]["args"] == {"command": "ls -la"}, s.get("acted"))
+    check("the card asks about shell.agent_run, sensitive, with the command and nothing else",
+          (req.get("app"), req.get("action"), req.get("grade"), req.get("args_json"))
+          == ("shell", "agent_run", "sensitive", {"command": "ls -la"}), req)
+    check("the grant rides on the agent_run it was minted for",
+          s["acted"][0].get("grant") == "appr-1" and s["acted"][0].get("no_ask"), s.get("acted"))
+    check("no window is raised for it, and the Terminal is never even described",
+          not any(a["action"] == "show_app" for a in s.get("acted", []))
+          and not any(d[:2] == ["describe", "terminal"] for d in s.get("describes", [])),
+          (s.get("acted"), s.get("describes")))
+    check("every act — the card, its polls, the command — carries the token",
+          s.get("carried") and all(c["env_token"] == TOKEN for c in s["carried"]),
+          [(c["action"], c["env_token"]) for c in s.get("carried", [])])
+    check("and it is nowhere a person or another user could read it", not leaks(state, text, noise),
+          leaks(state, text, noise))
+    check("the mind is told where it ran and how it ended",
+          "not in the person's Terminal" in text and "exit code 0" in text and "allowed this once" in text,
+          text)
+
+    # 22c. The command tools, and their grades: run_command and command_input are sensitive, so
+    # in `ask` they put a card up; command_status and command_kill are standard and do not.
+    module, state = case(tmp, "token-grades", answer="granted", ceiling=None, token=TOKEN)
+    for name, args in (("run_command", {"command": "make", "wait_seconds": 5}),
+                       ("command_status", {"job": "job-1a2b", "wait_seconds": 0}),
+                       ("command_input", {"job": "job-1a2b", "text": "y\n"}),
+                       ("command_kill", {"job": "job-1a2b"})):
+        module.call_tool(module.AGENT_BY_NAME[name], args)
+    s = read(state)
+    check("run_command and command_input ask; command_status and command_kill do not",
+          [r.get("action") for r in s.get("requests", [])] == ["agent_run", "agent_input"],
+          s.get("requests"))
+    check("each runs as the shell's own action, with the shell's argument names",
+          [(a["action"], a["args"]) for a in s.get("acted", [])] == [
+              ("agent_run", {"command": "make", "wait": 5}), ("agent_job", {"job": "job-1a2b", "wait": 0}),
+              ("agent_input", {"job": "job-1a2b", "text": "y\n"}), ("agent_kill", {"job": "job-1a2b"})],
+          s.get("acted"))
+    check("and the token travels with all of them and leaks into none",
+          all(c["env_token"] == TOKEN for c in s.get("carried", [])) and not leaks(state), leaks(state))
+
+    # 22d. In `auto` the command runs unasked and is written down — without the token.
+    module, state = case(tmp, "token-auto", mode="auto", ceiling=None, token=TOKEN)
+    text, is_error, meta = module.call_tool(module.AGENT_BY_NAME["run_command"],
+                                            {"command": "make", "cwd": "/tmp"})
+    s = read(state)
+    audited = (s.get("audited") or [{}])[0]
+    check("in auto, run_command runs unasked and lands in the record",
+          not s.get("requests") and (audited.get("app"), audited.get("action"), audited.get("args_json"))
+          == ("shell", "agent_run", {"command": "make", "cwd": "/tmp"}), s)
+    check("and the record never holds the token", not leaks(state, text), leaks(state, text))
+    check("the mind reads how it ended, and a client gets the shell's own answer",
+          text.startswith("Nobody was asked") and "exit code 0 after 1.2 s, in /tmp." in text
+          and meta and meta.get("exit_code") == 0 and meta.get("job") == "job-1a2b", (text, meta))
+
+    # 22e. A command still running when its wait ran out says so, and how to follow it up.
+    module, state = case(tmp, "token-running", mode="auto", ceiling=None, token=TOKEN,
+                         agent_running=True)
+    text, is_error, meta = module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": "make"})
+    check("a command still going answers with its job and the tools to follow it",
+          not is_error and "still running after 2m 00s (job job-1a2b)" in text
+          and "command_status waits for it again" in text and "command_kill stops it" in text
+          and meta.get("running") is True, text)
+
+    # 22f. Listed, called through the real read loop, answered with `_meta`, and scrubbed.
+    module, state = case(tmp, "token-served", mode="auto", ceiling=None, token=TOKEN, echo_token=True)
+    replies, out, err = served(module, LIST, {"id": 2, "method": "tools/call", "params": {
+        "name": "run_command", "arguments": {"command": "env"}}})
+    listed = {t["name"]: t for t in replies[1]["result"]["tools"]}
+    check("with a token the command tools are listed", set(COMMAND_TOOLS) <= set(listed), sorted(listed))
+    check("and os_act says where terminal.run now goes",
+          "terminal of your own" in listed["os_act"]["description"], listed["os_act"]["description"])
+    called = replies[2]["result"]
+    check("a command tool's answer carries the shell's account under _meta",
+          called.get("_meta", {}).get("yantrik/command", {}).get("exit_code") == 0, called)
+    check("and a token the desktop echoed is scrubbed from everything the bridge sends",
+          TOKEN not in out and TOKEN not in err and "token=[agent token]" in out, out)
+
+    # 22g. An `agent_token` a mind puts among the arguments is dropped, not sent: the one that
+    # counts rides beside them, from the bridge's own environment.
+    module, state = case(tmp, "token-forged", mode="auto", ceiling=None, token=TOKEN)
+    act(module, "shell", "agent_run", {"command": "ls", "agent_token": "f" * 32})
+    s = read(state)
+    check("a token among the arguments is never sent, shown or recorded",
+          s["acted"][0]["args"] == {"command": "ls"} and "f" * 32 not in json.dumps(s)
+          and all(c["env_token"] == TOKEN for c in s["carried"]), s)
+
+    # 22h. A command tool is given as long as the command it waits for — more than `yos` gives
+    # the same act, which is more than the shell waits.
+    yos_loader = SourceFileLoader("yos_timeouts", str(HERE / "yos"))
+    yos_spec = importlib.util.spec_from_loader("yos_timeouts", yos_loader)
+    yos_timeouts = importlib.util.module_from_spec(yos_spec)
+    yos_loader.exec_module(yos_timeouts)
+    short = [w for w in (None, 0, 5, 120, 600)
+             if module.agent_timeout(w) <= yos_timeouts.act_timeout(
+                 "agent_run", {} if w is None else {"wait": w})]
+    check("each wait is given longer here than yos gives it", not short, short)
+    # And the clients allow for all of it: the card's wait as shipped (110 s, not this file's 4)
+    # and the command's. The harness library's MCP client is DeepSeek's; pi's extension uses the
+    # same numbers (harnesses/tests/test_pi_extension.py).
+    shipped = module.agent_call_max_seconds(600) - module.APPROVAL_WAIT + 110
+    lib_loader = SourceFileLoader("harness_lib", str(HERE.parent.parent / "harnesses" / "lib" / "yantrik_harness.py"))
+    lib_spec = importlib.util.spec_from_loader("harness_lib", lib_loader)
+    harness_lib = importlib.util.module_from_spec(lib_spec)
+    lib_loader.exec_module(harness_lib)
+    allowed = harness_lib.mcp_timeout("run_command", {"wait_seconds": 600})
+    check("and the harness's MCP client waits out the longest such call (%ds of %ds)"
+          % (allowed, shipped), allowed >= shipped, (allowed, shipped))
+    seen = {}
+    real_run = module.subprocess.run
+
+    def spy(argv, **kw):
+        if argv[1:4] == ["act", "shell", "agent_run"]:
+            seen["timeout"] = kw.get("timeout")
+        return real_run(argv, **kw)
+
+    module.subprocess.run = spy
+    try:
+        module.call_tool(module.AGENT_BY_NAME["run_command"], {"command": "ls", "wait_seconds": 600})
+    finally:
+        module.subprocess.run = real_run
+    check("and run_command's wait reaches the act's own timeout",
+          seen.get("timeout") == 630, seen)
 
 print()
 if failures:

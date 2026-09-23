@@ -141,6 +141,47 @@ act can be recorded against the agent that asked. The limit is stated in the des
 the same user can read each other's environment, so this stops confusion and casual
 impersonation, not a hostile program running as the person.
 
+A harness that attached without a pid the kernel could report (the TCP dev path) vouches for
+nobody: every call carrying one of its tokens is refused, and the refusal says why.
+
+**What the bridge does with it.** A `yos-mcp` started with `YANTRIK_AGENT_TOKEN`:
+
+- carries it on every act, beside the arguments — through `yos`'s environment, which `yos` sends
+  as the top-level `agent_token` of `app.act`. Never on a command line (any user can read another
+  process's), never among the arguments, and so never on an approval card or in
+  `mind-audit.jsonl`; an `agent_token` a model puts into `args` is dropped, and nothing the bridge
+  returns or logs repeats the token;
+- runs `os_act terminal.run {command}` as `shell.agent_run {command}` instead: the command gets a
+  terminal of the agent's own in its pane, the person's Terminal is not opened, typed into or
+  raised, and the answer carries the exit code.
+
+It also offers the agent's terminal as tools of their own, listed only with a token:
+
+| tool | runs | grade |
+|---|---|---|
+| `run_command {command, cwd?, wait_seconds?}` | `shell.agent_run` | sensitive: a card in `ask` mode |
+| `command_status {job, wait_seconds?}` | `shell.agent_job` | standard |
+| `command_input {job, text}` | `shell.agent_input` | sensitive |
+| `command_kill {job}` | `shell.agent_kill` | standard |
+
+`run_command` answers when the command has ended — exit code, the directory it ended in, the end
+of its output — or, still going after `wait_seconds` (120 by default, at most 600), with a `job`
+id. Each answer also carries the shell's own account under `_meta` (`yantrik/command`), for a
+client that wants the exit code as a number. A call that waits for a command can take as long as
+its wait on top of an `os_act`'s own budget, so a client allows `wait_seconds` more than its
+usual timeout (`mcp_timeout` in the Python library does, and so does pi's extension).
+
+Without a token, the bridge behaves exactly as it did.
+
+**Notes for the next turn.** A command still running when its call returned (`running: true`)
+that finishes later is reported to its agent at the start of its next turn: the turn's `context`
+carries `"notes": ["Your command `make` (job …) finished after the call that started it had
+returned: exit code 0, after 2m 14s, in /home/me/proj. Its last lines: …"]`. A note is
+delivered once, an agent holds at most eight, and they end with the agent. Not on `/stop` or
+`/new`, which the harness answers itself; the turn after carries them. A harness whose model sees
+nothing else of the context should show it these: `turn.notes_before(turn.text)` puts them in
+front of the person's message, which is what pi does.
+
 **Stopping.** When the person stops an agent, the turns waiting for it are failed, the one in
 flight is settled for the reader at once, and the harness's next poll carries `cancelled: [turn_id]`
 (stop working on it) and, for a harness with conversations, `ended: [conversation]` (let go of its
@@ -182,6 +223,7 @@ well: every panel that draws no cards, and every reader of the transcript, still
 
 ```python
 turn.conversation, turn.agent_token            # which agent this turn is for
+turn.notes, turn.notes_before(turn.text)        # what the desktop has to tell it since its last turn
 turn.tool_start(call, name, target="", args={}) # also writes the trail line (trail=False not to)
 turn.tool_output(call, delta, stream="stdout")  # cut into pieces under 64 KiB for you
 turn.tool_end(call, ok, summary="", exit_code=None)
@@ -287,6 +329,15 @@ Pi has no MCP client, so the desktop's tools reach it through a Pi extension
 (`harnesses/pi/extension/yantrik-os.ts`) that asks `yos-mcp` for its tool list and proxies every
 call to it. The extension decides nothing: modes, grades, cards and the taint rule stay in the
 bridge, which is the only place they can be kept correct.
+
+Pi's own tools are off (`--no-builtin-tools`) unless the person turns them on, and when they are
+off and the bridge offers `run_command` — Pi is running as one of the person's agents — the
+extension registers a `bash` of its own with Pi's exact shape (`{command, timeout?}`, timeout in
+seconds, none by default) on top of `run_command`. Pi keeps the tool it was trained on, answering
+as Pi's does ("Command exited with code N", "Command timed out after N seconds", the command
+stopped), and the command runs in the agent's terminal in its pane. A command that stops to ask
+for input comes back still running, saying so, rather than hanging: the person can answer it in
+its card. With Pi's built-in tools on, the extension never shadows them.
 
 Three things it taught, all about ending:
 

@@ -17,18 +17,19 @@
 //!
 //! # The contract the shell implements
 //!
-//! [`AgentResolver`] is that check. The shell's implementation is [`Lookup`] over the harness
-//! host (piece 1 of the design):
+//! [`AgentResolver`] is that check. The shell's implementation is [`HostTokens`], over the
+//! harness host (piece 1 of the design): the host says which agent a token names and which
+//! process attached for it, and the kernel says who is calling.
 //!
 //! ```rust,ignore
-//! Lookup(move |token: &str| host.agent_for_token(token))
+//! install_resolver(Arc::new(HostTokens::new(host.clone())));
 //! // Host::agent_for_token(&self, token: &str) -> Option<(AgentId, Option<u32> /* harness pid */)>
 //! ```
 //!
-//! [`Lookup`] refuses an unknown token, a harness with no recorded pid, a caller with no pid, and a
-//! caller that does not descend from the harness. [`TokenTable`] is the same rule over an in-memory
-//! table, for tests; [`NoAgents`] knows no tokens at all, which is the shell's resolver until the
-//! host issues them.
+//! Every resolver refuses an unknown token, a harness with no recorded pid, a caller with no pid,
+//! and a caller that does not descend from the harness. [`Lookup`] is the same rule over any
+//! lookup function, [`TokenTable`] over an in-memory table, for tests; [`NoAgents`] knows no
+//! tokens at all, which is the shell's resolver until the host is wired in.
 //!
 //! # The limit, stated
 //!
@@ -81,6 +82,48 @@ where
     }
 }
 
+/// The shell's resolver: tokens are the harness host's, callers are the kernel's.
+///
+/// [`Host::agent_for_token`](yantrik_harness::Host::agent_for_token) says which live agent a
+/// token names and the pid of the harness process that attached for it (read from `SO_PEERCRED`
+/// at attach); the caller's pid comes from the socket the call arrived on. The token is believed
+/// only when the caller is that harness or runs under it. A harness the host has no pid for — it
+/// attached over a transport that could not say — vouches for nobody, and the refusal says why.
+///
+/// `D` is the process-tree check, [`descends_from`] over `/proc` unless a test supplies its own,
+/// so the rule can be driven with pids that belong to no real process.
+pub struct HostTokens<D = fn(u32, u32) -> bool> {
+    host: yantrik_harness::Host,
+    descends: D,
+}
+
+impl HostTokens {
+    pub fn new(host: yantrik_harness::Host) -> Self {
+        HostTokens { host, descends: descends_from }
+    }
+}
+
+impl<D> HostTokens<D>
+where
+    D: Fn(u32, u32) -> bool + Send + Sync,
+{
+    /// The same rule with the process tree supplied: `descends(caller, harness)` answers whether
+    /// `caller` is `harness` or runs under it.
+    pub fn with_ancestry(host: yantrik_harness::Host, descends: D) -> Self {
+        HostTokens { host, descends }
+    }
+}
+
+impl<D> AgentResolver for HostTokens<D>
+where
+    D: Fn(u32, u32) -> bool + Send + Sync,
+{
+    fn resolve(&self, token: &str, caller_pid: Option<u32>) -> Result<AgentId, String> {
+        let found = if token.trim().is_empty() { None } else { self.host.agent_for_token(token.trim()) };
+        verify_with(token, found, caller_pid, &self.descends)
+    }
+}
+
 /// Tokens held in memory. For tests, and for anything that issues tokens itself.
 #[derive(Default)]
 pub struct TokenTable {
@@ -113,11 +156,21 @@ impl AgentResolver for TokenTable {
     }
 }
 
-/// The one rule every resolver applies to what its lookup found.
+/// The one rule every resolver applies to what its lookup found, against `/proc`.
 fn verify(
     token: &str,
     found: Option<(AgentId, Option<u32>)>,
     caller_pid: Option<u32>,
+) -> Result<AgentId, String> {
+    verify_with(token, found, caller_pid, &descends_from)
+}
+
+/// The rule, with the process-tree check handed in.
+fn verify_with(
+    token: &str,
+    found: Option<(AgentId, Option<u32>)>,
+    caller_pid: Option<u32>,
+    descends: &dyn Fn(u32, u32) -> bool,
 ) -> Result<AgentId, String> {
     if token.trim().is_empty() {
         return Err("no agent token came with this call, so it belongs to no agent. An agent's \
@@ -143,7 +196,7 @@ fn verify(
                     cannot be checked against it; refused."
             .to_string());
     };
-    if !descends_from(caller, harness) {
+    if !descends(caller, harness) {
         return Err(format!(
             "this token was not issued to the process that sent it: pid {caller} does not descend \
              from the harness the token belongs to. A token works only from the process tree its \
@@ -236,6 +289,108 @@ mod tests {
         let err = lookup.resolve("t", Some(std::process::id())).unwrap_err();
         assert!(err.contains("attached without a process"), "{err}");
         assert!(lookup.resolve("u", Some(1)).unwrap_err().starts_with(NO_AGENT));
+    }
+
+    // ── The shell's own resolver, over the harness host ─────────────
+
+    use serde_json::json;
+    use yantrik_harness::{protocol, Host, Turn};
+
+    /// A harness attached over a socket the kernel named (`harness_pid`) — or over one it could
+    /// not (`None`) — with one agent that has been handed a turn: (host, agent, its token).
+    fn host_with_an_agent(harness_pid: Option<u32>) -> (Host, AgentId, String) {
+        let host = Host::new(vec![]);
+        let attached = host
+            .handle_from(protocol::ATTACH, &json!({ "id": "pi", "name": "Pi", "conversations": true }), harness_pid)
+            .unwrap();
+        let session = attached["session"].as_str().unwrap().to_string();
+        let agent = host.start_agent("pi").unwrap();
+        let _answer = host.send_to(&agent, Turn::new("tidy the photos")).unwrap();
+        let handed = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+        (host, agent, handed["agent_token"].as_str().unwrap().to_string())
+    }
+
+    /// A process tree that exists only here: child → parent.
+    fn tree(links: &'static [(u32, u32)]) -> impl Fn(u32, u32) -> bool + Send + Sync {
+        move |pid, ancestor| {
+            let mut at = pid;
+            for _ in 0..ANCESTRY_BOUND {
+                if at == ancestor {
+                    return true;
+                }
+                match links.iter().find(|(child, _)| *child == at) {
+                    Some((_, parent)) => at = *parent,
+                    None => return false,
+                }
+            }
+            false
+        }
+    }
+
+    /// The harness is 4242; `yos` (5002) runs under `yos-mcp` (5001) under pi (5000) under it.
+    /// 6001 is a program the person started from their own terminal.
+    const PI_TREE: &[(u32, u32)] = &[(5002, 5001), (5001, 5000), (5000, 4242), (4242, 1), (6001, 900), (900, 1)];
+
+    #[test]
+    fn the_host_names_the_agent_and_the_process_tree_decides_whether_to_believe_it() {
+        let (host, agent, token) = host_with_an_agent(Some(4242));
+        let resolver = HostTokens::with_ancestry(host.clone(), tree(PI_TREE));
+
+        assert_eq!(resolver.resolve(&token, Some(5002)), Ok(agent.clone()), "yos under the bridge under pi");
+        assert_eq!(resolver.resolve(&token, Some(4242)), Ok(agent.clone()), "the harness itself");
+        assert_eq!(resolver.resolve(&format!("  {token}\n"), Some(5002)), Ok(agent.clone()));
+
+        // The same token from outside the harness's tree: refused, with a sentence naming the pid.
+        let err = resolver.resolve(&token, Some(6001)).unwrap_err();
+        assert!(err.contains("not issued to the process that sent it") && err.contains("pid 6001"), "{err}");
+        // No pid from the kernel, no check, no agent.
+        let err = resolver.resolve(&token, None).unwrap_err();
+        assert!(err.contains("without a process the kernel could name"), "{err}");
+        // A token the host never issued, and one it has taken back.
+        assert!(resolver.resolve(&"0".repeat(32), Some(5002)).unwrap_err().starts_with(NO_AGENT));
+        assert!(resolver.resolve("", Some(5002)).unwrap_err().contains("no agent token came with this call"));
+        host.stop_agent(&agent);
+        assert!(resolver.resolve(&token, Some(5002)).unwrap_err().starts_with(NO_AGENT));
+    }
+
+    #[test]
+    fn the_tree_is_asked_about_the_caller_and_the_harness_the_host_recorded() {
+        let (host, agent, token) = host_with_an_agent(Some(4242));
+        let asked = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let resolver = HostTokens::with_ancestry(host, {
+            let asked = asked.clone();
+            move |pid, ancestor| {
+                asked.lock().unwrap().push((pid, ancestor));
+                pid == 5001
+            }
+        });
+        assert_eq!(resolver.resolve(&token, Some(5001)), Ok(agent));
+        assert!(resolver.resolve(&token, Some(7)).is_err());
+        assert_eq!(*asked.lock().unwrap(), [(5001, 4242), (7, 4242)]);
+    }
+
+    #[test]
+    fn a_harness_the_host_has_no_process_for_vouches_for_nobody_and_says_why() {
+        // Attached over the TCP dev path, where there is no peer to read: fail closed.
+        let (host, agent, token) = host_with_an_agent(None);
+        let resolver = HostTokens::with_ancestry(host, |_: u32, _: u32| true);
+        let err = resolver.resolve(&token, Some(5002)).unwrap_err();
+        assert!(err.contains("attached without a process") && err.contains(&agent.to_string()), "{err}");
+        assert!(err.contains("cannot be checked against the caller"), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_shells_resolver_walks_the_real_proc() {
+        // This test process stands in for the harness, and a child of it for the bridge.
+        let me = std::process::id();
+        let (host, agent, token) = host_with_an_agent(Some(me));
+        let resolver = HostTokens::new(host);
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        assert_eq!(resolver.resolve(&token, Some(child.id())), Ok(agent));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(resolver.resolve(&token, Some(1)).unwrap_err().contains("not issued to the process"));
     }
 
     #[cfg(target_os = "linux")]

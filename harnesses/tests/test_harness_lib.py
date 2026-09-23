@@ -552,6 +552,40 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(sum("does not take harness.event" in m for m in self.logged), 1)
 
 
+class NoteTests(unittest.TestCase):
+    """What the desktop has to tell an agent since its last turn, from the turn's context."""
+
+    def test_notes_are_read_from_the_context_and_nothing_else_is(self):
+        import json
+        context = json.dumps({"machine": {"timezone": "UTC"},
+                              "notes": ["Your command `make` finished: exit code 0.", "  "]})
+        turn, _ = recording_turn("what now?", context)
+        self.assertEqual(turn.notes, ["Your command `make` finished: exit code 0."])
+        self.assertEqual(
+            turn.notes_before(turn.text),
+            "[From the desktop, since your last turn:\n- Your command `make` finished: exit "
+            "code 0.]\n\nwhat now?")
+        # No notes, a context that is not an object, and no context at all: the text alone.
+        for context in (json.dumps({"machine": {}}), "plain words", None, json.dumps(["x"])):
+            turn, _ = recording_turn("hi", context)
+            self.assertEqual((turn.notes, turn.notes_before("hi")), ([], "hi"), context)
+
+    def test_a_note_of_several_lines_stays_inside_its_bullet(self):
+        import json
+        turn, _ = recording_turn("go", json.dumps({"notes": ["ended.\nIts last lines:\nok"]}))
+        self.assertIn("- ended.\n  Its last lines:\n  ok]", turn.notes_before("go"))
+
+    def test_a_command_tool_is_given_as_long_as_the_command_it_waits_for(self):
+        # run_command waits `wait_seconds` for the command on top of everything an os_act can
+        # wait for; a client allowing only the flat budget would cut it off.
+        self.assertEqual(yantrik_harness.mcp_timeout("os_act", {"app": "x"}), 300.0)
+        self.assertEqual(yantrik_harness.mcp_timeout("run_command", {"command": "ls"}), 420.0)
+        self.assertEqual(yantrik_harness.mcp_timeout("run_command", {"wait_seconds": 600}), 900.0)
+        self.assertEqual(yantrik_harness.mcp_timeout("command_status", {"wait_seconds": 5000}), 900.0)
+        self.assertEqual(yantrik_harness.mcp_timeout("command_status", {"wait_seconds": "x"}), 420.0)
+        self.assertEqual(yantrik_harness.mcp_timeout("command_kill", {"job": "j"}), 300.0)
+
+
 class SocketDiscoveryTests(unittest.TestCase):
     def test_an_explicit_socket_is_honoured_and_nothing_else_is_looked_at(self):
         # Pointing a harness at one desktop must never silently fall through to another.

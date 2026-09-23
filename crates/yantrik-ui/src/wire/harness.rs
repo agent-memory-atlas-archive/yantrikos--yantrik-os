@@ -103,6 +103,12 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     let host = Host::new(vec![Arc::new(Companion { bridge: ctx.bridge.clone() })]);
     let _ = HOST.set(host.clone());
 
+    // The agent terminal's side of agents (design/agents-workspace-2026-09-23.md, decision 3):
+    // `agent_run` and the rest believe a token only as this host issued it and only from under
+    // the harness it was issued to, and a command that ends after its call returned is noted
+    // into its agent's next turn.
+    crate::control_agent_terminal::serve_host(&host);
+
     serve_socket(host.clone());
 
     // Choosing a mind, from Settings or from anywhere else that offers it.

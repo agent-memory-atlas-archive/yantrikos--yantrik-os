@@ -15,12 +15,25 @@
  * Dependency-free on purpose: only `typebox` and node built-ins, both of which Pi resolves
  * for an extension. No package.json, no install step, nothing to keep up to date.
  *
+ * When this Pi runs as one of the person's agents (its harness puts the agent's token in
+ * `YANTRIK_AGENT_TOKEN`, which the bridge inherits), the bridge also offers the agent's own
+ * terminal — `run_command`, `command_status`, `command_input`, `command_kill` — and, if Pi's
+ * built-in tools are off, this file registers a `bash` of its own on top of `run_command`, so Pi
+ * keeps the tool it was trained on and the command lands in the agent's pane on the desktop.
+ *
  * ── What is verified and what is not ─────────────────────────────────────────────────────
  * Verified against a real Pi 0.87.0 install: the `ExtensionAPI` import path, `typebox` (not
  * `@sinclair/typebox`), the `export default function (pi)` shape, `pi.registerTool({ name,
  * label, description, parameters, execute(toolCallId, params, signal, onUpdate, ctx) })`,
  * the `{ content: [{ type: "text", text }], details }` result and its optional `isError`,
  * and that node built-ins are importable.
+ *
+ * Read from the same install (dist/core/tools/bash.js, dist/cli/args.js, pi-agent-core's
+ * agent-loop.js): `bash`'s schema `{command, timeout?}` and its "Command exited with code N" /
+ * "Command timed out after N seconds" endings; `--no-builtin-tools` / `-nbt`; and that every
+ * `onUpdate(...)` becomes a `tool_execution_update` event. `harnesses/tests/test_pi_extension.py`
+ * runs this file under node against a fake bridge; it has not been loaded into a real Pi with
+ * the `bash` below.
  *
  * NOT verified offline:
  *  - Whether Pi awaits an async default export. This file therefore does its `tools/list`
@@ -48,6 +61,34 @@ const BRIDGE = process.env.YOS_MCP_BIN || "/opt/yantrik/bin/yos-mcp";
  * the person off mid-decision and reports a timeout for a machine that was working fine.
  */
 const CALL_TIMEOUT_MS = 300_000;
+
+/**
+ * The bridge's command tools — offered when this Pi runs as one of the person's agents, with
+ * `YANTRIK_AGENT_TOKEN` in its environment — also wait for the command itself: `wait_seconds`,
+ * 120 by default, at most 600. They are given that on top of CALL_TIMEOUT_MS, or the client
+ * would cut off the command it asked to wait for.
+ */
+const WAITING_TOOLS: Record<string, number> = { run_command: 120, command_status: 120 };
+const WAIT_MOST_S = 600;
+
+/** How long one call to `name` may take, in milliseconds. */
+export function callTimeoutMs(name: string, params: any): number {
+	const fallback = WAITING_TOOLS[name];
+	if (fallback === undefined) return CALL_TIMEOUT_MS;
+	let wait = Number(params?.wait_seconds ?? fallback);
+	if (!Number.isFinite(wait)) wait = fallback;
+	return CALL_TIMEOUT_MS + Math.min(Math.max(wait, 0), WAIT_MOST_S) * 1000;
+}
+
+/**
+ * How often a call still waiting on the desktop tells Pi it is alive.
+ *
+ * The harness gives up on a turn when Pi has said nothing for 420 seconds
+ * (`yantrik_pi.py`, DEFAULT_SILENCE_TIMEOUT), and a tool call that waits — for a person's card,
+ * for a command's `wait_seconds` — produces no events of its own. An empty update is one: Pi
+ * reports it as `tool_execution_update`, which counts as life and adds nothing to the card.
+ */
+const HEARTBEAT_MS = 30_000;
 
 /** The `initialize`/`tools/list` probe at startup — short, because nothing is waiting on a person. */
 const LIST_TIMEOUT_MS = 20_000;
@@ -212,6 +253,15 @@ function label(name: string): string {
 	return name.replace(/_/g, " ");
 }
 
+/**
+ * Whether Pi was started with its own tools off. The harness passes `--no-builtin-tools` unless
+ * the person turned them on (`builtin_tools` in pi.json). Read from Pi's own command line
+ * because an extension cannot ask Pi for its tools while it is being loaded.
+ */
+function builtinToolsOff(argv: string[] = process.argv): boolean {
+	return argv.includes("--no-builtin-tools") || argv.includes("-nbt");
+}
+
 export default function (pi: ExtensionAPI) {
 	const bridge = new Bridge();
 	const discovered = listToolsSync();
@@ -229,6 +279,38 @@ export default function (pi: ExtensionAPI) {
 			console.error(`yantrik-os: could not register ${tool.name}: ${err?.message || err}`);
 		}
 	}
+
+	// Pi's own `bash`, run in this agent's terminal on the desktop — only when the bridge offers
+	// one (this Pi is one of the person's agents) and Pi's built-in `bash` is off, so it never
+	// shadows the real one.
+	if (builtinToolsOff() && discovered.some((t) => t.name === "run_command")) {
+		try {
+			registerBash(pi, bridge);
+		} catch (err: any) {
+			console.error(`yantrik-os: could not register bash: ${err?.message || err}`);
+		}
+	}
+}
+
+/** One call to the bridge, with Pi told it is alive while it waits. */
+async function callBridge(
+	bridge: Bridge,
+	name: string,
+	params: unknown,
+	signal?: AbortSignal,
+	onUpdate?: (update: any) => void,
+): Promise<JsonRpc> {
+	const beat = onUpdate ? setInterval(() => onUpdate({ content: [], details: {} }), HEARTBEAT_MS) : undefined;
+	try {
+		return await bridge.request("tools/call", { name, arguments: params ?? {} }, callTimeoutMs(name, params), signal);
+	} finally {
+		if (beat) clearInterval(beat);
+	}
+}
+
+function textOf(msg: JsonRpc): string {
+	const parts = Array.isArray(msg.result?.content) ? msg.result.content : [];
+	return parts.map((p: any) => (p?.type === "text" ? String(p.text ?? "") : "")).join("");
 }
 
 function registerOne(pi: ExtensionAPI, bridge: Bridge, tool: McpTool, schema: Record<string, unknown>) {
@@ -239,18 +321,17 @@ function registerOne(pi: ExtensionAPI, bridge: Bridge, tool: McpTool, schema: Re
 		// The desktop's schemas are plain JSON Schema and TypeBox objects are JSON Schema, so
 		// this hands Pi exactly what the bridge published rather than a translation of it.
 		parameters: Type.Unsafe(schema as any),
-		async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
+		async execute(_toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: (update: any) => void) {
 			let msg: JsonRpc;
 			try {
-				msg = await bridge.request("tools/call", { name: tool.name, arguments: params ?? {} }, CALL_TIMEOUT_MS, signal);
+				msg = await callBridge(bridge, tool.name, params, signal, onUpdate);
 			} catch (err: any) {
 				return { content: [{ type: "text", text: String(err?.message || err) }], isError: true, details: {} };
 			}
 			if (msg.error) {
 				return { content: [{ type: "text", text: String(msg.error?.message || msg.error) }], isError: true, details: {} };
 			}
-			const parts = Array.isArray(msg.result?.content) ? msg.result.content : [];
-			const text = parts.map((p: any) => (p?.type === "text" ? String(p.text ?? "") : "")).join("");
+			const text = textOf(msg);
 			// isError comes straight from the bridge and is not second-guessed here. A REFUSED
 			// answer arrives UNFLAGGED on purpose: the desktop ran, it was healthy, and it said
 			// no. Flagging it would teach a model to retry a refusal, and clients that count
@@ -260,6 +341,132 @@ function registerOne(pi: ExtensionAPI, bridge: Bridge, tool: McpTool, schema: Re
 				isError: Boolean(msg.result?.isError),
 				details: {},
 			};
+		},
+	});
+}
+
+// ── Pi's `bash`, in the agent's own terminal ────────────────────────────────────────────
+//
+// Pi's models are trained on a `bash` tool: `{command, timeout?}` (timeout in seconds, none by
+// default), answering with the output, and failing with "Command exited with code N" or
+// "Command timed out after N seconds" (pi 0.87, dist/core/tools/bash.js). This is that tool,
+// with the command run by the desktop's `run_command` instead of a child of Pi — so it lands in
+// the agent's own terminal in its pane, where the person can watch it, answer a prompt in it,
+// and stop it, and it is graded and asked about like any other act.
+//
+// The one place it cannot be the same: a command that stops to wait for input. Pi's own bash
+// has no terminal and would hang; here the person can answer it in the card, so the call returns
+// with the command still running and says how to follow it up.
+
+/** How long each wait for a command is, when no timeout bounds it. The shell's default. */
+const BASH_SLICE_S = 120;
+
+type Command = {
+	job?: string;
+	running?: boolean;
+	waiting_for_input?: boolean;
+	exit_code?: number;
+	signal?: number;
+	signal_name?: string;
+	tail?: string;
+	tail_clipped?: boolean;
+};
+
+/** The shell's own account of a command, which the bridge carries beside its sentence. */
+function commandOf(msg: JsonRpc): Command | undefined {
+	const meta = msg.result?._meta?.["yantrik/command"];
+	return meta && typeof meta === "object" ? (meta as Command) : undefined;
+}
+
+function outputOf(command: Command): string {
+	const tail = String(command.tail ?? "").replace(/\n+$/, "");
+	const text = tail || "(no output)";
+	return command.tail_clipped ? `${text}\n\n[Showing the last lines; the whole output is in your pane on the desktop]` : text;
+}
+
+function withStatus(text: string, status: string): string {
+	return `${text ? `${text}\n\n` : ""}${status}`;
+}
+
+function registerBash(pi: ExtensionAPI, bridge: Bridge) {
+	pi.registerTool({
+		name: "bash",
+		label: "bash",
+		description:
+			"Execute a bash command in your own terminal on the Yantrik OS desktop, shown in your pane there. " +
+			"Returns its output (the end of it, as the terminal shows it). The working directory carries from one command to the next; " +
+			"exported variables and other shell state do not. Optionally provide a timeout in seconds. " +
+			"It runs as the person, so in `ask` mode they allow each command first.",
+		// Pi's own schema, word for word, so the model meets the tool it was trained on.
+		parameters: Type.Object({
+			command: Type.String({ description: "Shell command to execute" }),
+			timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+		}),
+		async execute(_toolCallId: string, params: any, signal?: AbortSignal, onUpdate?: (update: any) => void) {
+			const fail = (text: string) => ({ content: [{ type: "text", text }], isError: true, details: {} });
+			const command = String(params?.command ?? "");
+			const timeout = params?.timeout;
+			if (timeout !== undefined && !(typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0)) {
+				return fail("Invalid timeout: must be a finite number of seconds");
+			}
+			const deadline = timeout === undefined ? Infinity : Date.now() + timeout * 1000;
+			// Each wait is at most a slice, and never past the timeout. The first is the timeout
+			// itself when that is shorter, so the command's own card says what was asked for.
+			const slice = () => Math.max(0, Math.min(WAIT_MOST_S, BASH_SLICE_S, (deadline - Date.now()) / 1000));
+			const first = Math.min(WAIT_MOST_S, BASH_SLICE_S, timeout ?? Infinity);
+
+			let job: string | undefined;
+			const stop = async () => {
+				if (!job) return undefined;
+				try {
+					return commandOf(await callBridge(bridge, "command_kill", { job }));
+				} catch {
+					return undefined;
+				}
+			};
+
+			let msg: JsonRpc;
+			try {
+				msg = await callBridge(bridge, "run_command", { command, wait_seconds: first }, signal, onUpdate);
+				for (;;) {
+					if (msg.error) return fail(String(msg.error?.message || msg.error));
+					const now = commandOf(msg);
+					// A refusal, a card the person said no to, a desktop that could not be reached:
+					// the bridge's own words, flagged exactly as it flagged them.
+					if (!now) return { content: [{ type: "text", text: textOf(msg) || "(the tool returned nothing)" }], isError: Boolean(msg.result?.isError), details: {} };
+					job = now.job ?? job;
+					if (!now.running) {
+						const text = outputOf(now);
+						if (now.exit_code === 0) return { content: [{ type: "text", text }], details: {} };
+						if (typeof now.exit_code === "number") return fail(withStatus(text, `Command exited with code ${now.exit_code}`));
+						return fail(withStatus(text, `Command terminated by ${now.signal_name || "a signal"}`));
+					}
+					if (now.waiting_for_input) {
+						return {
+							content: [{
+								type: "text",
+								text: withStatus(outputOf(now),
+									`[Still running in your terminal on the desktop, and it looks like it is waiting for input (job ${job}). ` +
+									`The person can answer it in its card; command_input sends it text; command_status waits for it; command_kill stops it.]`),
+							}],
+							details: {},
+						};
+					}
+					if (Date.now() >= deadline) {
+						const last = (await stop()) ?? now;
+						return fail(withStatus(String(last.tail ?? "").replace(/\n+$/, ""), `Command timed out after ${timeout} seconds`));
+					}
+					// Still going: show what it has printed so far, and wait again.
+					onUpdate?.({ content: [{ type: "text", text: String(now.tail ?? "") }], details: {} });
+					msg = await callBridge(bridge, "command_status", { job, wait_seconds: slice() }, signal, onUpdate);
+				}
+			} catch (err: any) {
+				if (signal?.aborted) {
+					const last = await stop();
+					return fail(withStatus(String(last?.tail ?? "").replace(/\n+$/, ""), "Command aborted"));
+				}
+				return fail(String(err?.message || err));
+			}
 		},
 	});
 }

@@ -28,7 +28,8 @@ Two things it does that a naive pipe would not:
 
 The desktop's tools reach Pi through `extension/yantrik-os.ts`, passed with `-e`. Pi's own
 `bash`/`read`/`write`/`edit` tools are off by default — see the README for why that is a decision
-and not an oversight.
+and not an oversight — and with them off, the extension gives Pi a `bash` of its own that runs in
+the agent's terminal on the desktop.
 """
 
 from __future__ import annotations
@@ -313,7 +314,10 @@ class PiMind(Handler):
             self._calls = {}
         try:
             self.proc.start()
-            self.proc.send({"type": "prompt", "message": turn.text})
+            # Pi is shown nothing else of the turn's context, so what the desktop has to tell this
+            # agent — a command that finished after its call returned — goes in front of the
+            # person's message, once.
+            self.proc.send({"type": "prompt", "message": turn.notes_before(turn.text)})
         except RuntimeError:
             with self._lock:
                 self._turn = None

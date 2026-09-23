@@ -162,6 +162,12 @@ pub struct Assignment {
     /// `{"machine": {"place": {"city", "region", "country"}, "timezone"}}`, each part present only
     /// when known. Facts about the machine, never configuration for the harness. Optional, and
     /// safe to ignore.
+    ///
+    /// It may also carry `"notes": ["…"]`: what the desktop has to tell this agent since its last
+    /// turn that none of its own calls carried — a command that finished after the call that
+    /// started it had returned, with its exit code and last lines. Each note is a sentence meant
+    /// for the model, delivered once; a harness that shows the model nothing else of the context
+    /// should show it these (pi puts them in front of the person's message).
     #[serde(default)]
     pub context: Option<String>,
     /// Which conversation this turn belongs to: an id the desktop issued (`c-7f3a91`), or `main`.
