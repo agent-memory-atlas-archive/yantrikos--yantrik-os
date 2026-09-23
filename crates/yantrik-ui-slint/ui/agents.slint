@@ -1,0 +1,968 @@
+// Agents — one pane per agent, with its work inside it (screen 34).
+//
+// One view over one list, filtered by state: Active · Needs you · Complete · All. Selecting a row
+// shows that agent's session in the middle — the person's prompts, the mind's text, and each tool
+// call as a card with its own output inside it — and its details on the right. Pop out opens the
+// same session in a window of its own (AgentWindow, below), drawn from the same store.
+//
+// Everything here reads one global, AgentsState, which the shell fills from
+// crates/yantrik-ui/src/wire/agents.rs. A popped-out window has its own instance of the global, so
+// the same components draw the screen and every window. See design/agents-workspace-2026-09-23.md.
+
+import { Theme } from "theme.slint";
+import { Icon, Icons } from "components/icon.slint";
+import { YButton } from "components/y_button.slint";
+import { YInput } from "components/y_input.slint";
+import { ToolCallData, ToolCallCard } from "components/tool_call.slint";
+
+export struct AgentTabData {
+    id: string,        // active | needs_you | complete | all
+    label: string,
+    count: int,
+}
+
+export struct AgentRowData {
+    id: string,        // <harness>:<conversation>
+    mind: string,
+    title: string,     // the first prompt, cut
+    state: string,     // thinking | running_tool | waiting_for_you | idle | done | failed | harness_gone
+    label: string,     // "running a tool"
+    since: string,     // "2m" while it works, "21:02" once it is done
+    parent: string,    // the agent that started this one, if any
+}
+
+// One run of same-looking cells in a command's terminal.
+export struct AgentRunData {
+    text: string,
+    row: int,
+    col: int,
+    columns: int,
+    fg: color,
+    bg: color,
+    bold: bool,
+}
+
+// One thing in a session: a prompt, the mind's text, its thinking, a note from the shell, or a card.
+export struct AgentItemData {
+    kind: string,          // prompt | text | thinking | note | card
+    key: string,           // stable across redraws; what `toggle` names
+    text: string,
+    call: ToolCallData,    // a card's call, as ToolCallCard draws it
+    badge: string,         // "verified · exit 0" / "reported"
+    explain: string,       // shown open: how it ended, or why the shell made the card itself
+    expanded: bool,
+    live: bool,            // running: its output shows under the line even while folded
+    output-kind: string,   // "" | text | terminal
+    output: string,        // text output shown under the line while it runs
+    more: string,          // "the last 8 of 212 lines"
+    can-open-all: bool,
+    runs: [AgentRunData],
+    rows: int,
+}
+
+export struct AgentHeaderData {
+    id: string,
+    mind: string,
+    title: string,
+    state: string,
+    label: string,
+    since: string,
+    status: string,        // the agent's own account of what it is doing
+    note: string,          // "pi holds one conversation at a time — the one the Lens talks to."
+    can-send: bool,
+    send-hint: string,     // why the prompt box is closed, when it is
+    can-stop: bool,
+}
+
+export struct AgentDetailsData {
+    mind: string,
+    model: string,
+    since: string,
+    turns: string,
+    calls: string,
+    commands: string,
+    command-lines: string,
+    files: string,
+    file-lines: string,
+    approvals: string,
+    tokens: string,
+    cost: string,
+    refused: string,
+    basis: string,
+}
+
+export struct AgentMindData {
+    id: string,
+    name: string,
+    detail: string,
+}
+
+export global AgentsState {
+    // The list.
+    in-out property <[AgentTabData]> tabs: [];
+    in-out property <string> tab: "active";
+    in-out property <[AgentRowData]> rows: [];
+    in-out property <string> selected: "";
+    // Whether the pointer is over the list. Rows do not move under it.
+    in-out property <bool> list-hovered: false;
+    // The agent shown: the selected one on the screen, the window's own in a popped-out window.
+    in-out property <bool> has-agent: false;
+    in-out property <AgentHeaderData> header;
+    in-out property <[AgentItemData]> items: [];
+    in-out property <AgentDetailsData> details;
+    in-out property <bool> popped: false;
+    // New agent.
+    in-out property <[AgentMindData]> minds: [];
+    in-out property <bool> new-open: false;
+    in-out property <string> new-mind: "";
+    in-out property <string> new-note: "";
+    in-out property <string> new-error: "";
+    // What the last press came to, when it did not go as asked.
+    in-out property <string> notice: "";
+    // Close, while work is running: the agent waiting for a yes.
+    in-out property <string> confirm-close: "";
+
+    callback select-tab(string);
+    callback select(string);
+    callback pop-out(string);
+    callback stop(string);
+    callback close(string);
+    callback close-confirmed(string);
+    callback close-cancelled();
+    callback toggle(string, bool);
+    callback open-all(string);
+    callback pick-mind(string);
+    callback start(string, string);
+    callback send(string, string);
+    callback dismiss-notice();
+}
+
+component StateDot inherits Rectangle {
+    in property <string> state;
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: root.state == "waiting_for_you" ? Theme.amber
+        : root.state == "thinking" || root.state == "running_tool" ? Theme.accent
+        : root.state == "done" ? Theme.color-success
+        : root.state == "failed" ? Theme.color-danger
+        : Theme.text-dim;
+}
+
+component TabChip inherits Rectangle {
+    in property <AgentTabData> tab;
+    in property <bool> active;
+    callback clicked;
+    width: chip.preferred-width;
+    height: 32px;
+    border-radius: 8px;
+    background: root.active ? Theme.accent-glow : ta.has-hover ? Theme.hover-fill : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    chip := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 6px;
+        Text {
+            text: root.tab.label;
+            color: root.active ? Theme.text-primary : Theme.text-secondary;
+            font-size: Theme.fs-caption;
+            font-weight: root.active ? 600 : 400;
+            vertical-alignment: center;
+        }
+        if root.tab.id != "all" : Text {
+            text: root.tab.count;
+            color: root.tab.id == "needs_you" && root.tab.count > 0 ? Theme.amber : Theme.text-dim;
+            font-size: Theme.fs-caption;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component AgentRow inherits Rectangle {
+    in property <AgentRowData> data;
+    in property <bool> selected;
+    callback clicked;
+    callback double-clicked;
+    height: 62px;
+    border-radius: 8px;
+    background: root.selected ? Theme.accent-glow : ta.has-hover ? Theme.hover-fill : transparent;
+    border-width: root.selected ? 1px : 0px;
+    border-color: Theme.accent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        VerticalLayout {
+            padding-top: 9px;
+            alignment: start;
+            StateDot { state: root.data.state; }
+        }
+        VerticalLayout {
+            spacing: 1px;
+            alignment: center;
+            Text {
+                text: root.data.parent == "" ? root.data.mind : root.data.mind + " · started by " + root.data.parent;
+                color: Theme.text-primary;
+                font-size: Theme.fs-caption;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.data.title;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                overflow: elide;
+            }
+            Text {
+                text: root.data.since == "" ? root.data.label : root.data.label + " · " + root.data.since;
+                color: root.data.state == "waiting_for_you" ? Theme.amber : Theme.text-dim;
+                font-size: Theme.fs-micro;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// A command's terminal, drawn from cells — the Terminal app's canvas, at card size. Only cells are
+// drawn: a command cannot set this window's title, write the clipboard or draw a link.
+component TerminalCells inherits Rectangle {
+    in property <[AgentRunData]> runs;
+    in property <int> rows;
+    property <length> cell-w: measure.preferred-width / 100;
+    property <length> cell-h: 15px;
+    height: max(1, root.rows) * root.cell-h + 12px;
+    background: #10171e;
+    border-radius: 4px;
+    clip: true;
+    measure := Text {
+        text: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM";
+        font-family: Theme.font-mono;
+        font-size: 11px;
+        visible: false;
+    }
+    for run in root.runs : Rectangle {
+        x: 6px + run.col * root.cell-w;
+        y: 6px + run.row * root.cell-h;
+        width: run.columns * root.cell-w;
+        height: root.cell-h;
+        background: run.bg;
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            text: run.text;
+            color: run.fg;
+            font-family: Theme.font-mono;
+            font-size: 11px;
+            font-weight: run.bold ? 700 : 400;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component ItemView inherits Rectangle {
+    in property <AgentItemData> item;
+    VerticalLayout {
+        padding-top: 2px;
+        padding-bottom: 2px;
+
+        if root.item.kind == "prompt" : Rectangle {
+            border-radius: 10px;
+            background: Theme.bg-elevated;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            HorizontalLayout {
+                padding: 8px;
+                padding-left: 12px;
+                spacing: 10px;
+                Text {
+                    text: "you";
+                    width: 30px;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-caption;
+                }
+                Text {
+                    text: root.item.text;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        if root.item.kind == "text" : Text {
+            text: root.item.text;
+            color: Theme.text-primary;
+            font-size: Theme.fs-body;
+            wrap: word-wrap;
+        }
+
+        // The mind's reasoning, folded to one line until asked for.
+        if root.item.kind == "thinking" : Rectangle {
+            HorizontalLayout {
+                spacing: 6px;
+                VerticalLayout {
+                    padding-top: 3px;
+                    alignment: start;
+                    Icon {
+                        commands: root.item.expanded ? Icons.chevron-down : Icons.chevron-right;
+                        size: 12px;
+                        tint: Theme.text-dim;
+                    }
+                }
+                Text {
+                    text: "thinking";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-caption;
+                    font-italic: true;
+                }
+                Text {
+                    text: root.item.text;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-caption;
+                    wrap: root.item.expanded ? TextWrap.word-wrap : TextWrap.no-wrap;
+                    overflow: root.item.expanded ? TextOverflow.clip : TextOverflow.elide;
+                    horizontal-stretch: 1;
+                }
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { AgentsState.toggle(root.item.key, !root.item.expanded); }
+            }
+        }
+
+        if root.item.kind == "note" : Text {
+            text: root.item.text;
+            color: Theme.text-dim;
+            font-size: Theme.fs-caption;
+            font-italic: true;
+            wrap: word-wrap;
+        }
+
+        // A call: the one card every view of a mind's calls shares (#125), with the call's own
+        // output under it — its terminal while it runs, all of it when opened.
+        if root.item.kind == "card" : ToolCallCard {
+            call: root.item.call;
+            badge: root.item.badge;
+            expanded: root.item.expanded;
+            toggled(open) => { AgentsState.toggle(root.item.key, open); }
+
+            if root.item.expanded && root.item.explain != "" : Text {
+                text: root.item.explain;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+            if root.item.output-kind == "terminal" && (root.item.expanded || root.item.live) : TerminalCells {
+                runs: root.item.runs;
+                rows: root.item.rows;
+            }
+            if root.item.output-kind == "text" && root.item.live && !root.item.expanded && root.item.output != "" : Rectangle {
+                background: Theme.bg-input;
+                border-radius: 4px;
+                HorizontalLayout {
+                    padding: 6px;
+                    Text {
+                        text: root.item.output;
+                        color: Theme.text-primary;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+            if root.item.more != "" && (root.item.expanded || root.item.live) : HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: root.item.more;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                }
+                if root.item.can-open-all : Rectangle {
+                    width: open-all.preferred-width;
+                    open-all := Text {
+                        text: "Open all in Editor";
+                        color: Theme.accent;
+                        font-size: Theme.fs-micro;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { AgentsState.open-all(root.item.key); }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+    }
+}
+
+// One agent's session: who and what, then everything that happened, then a box to say more.
+export component AgentSession inherits Rectangle {
+    background: Theme.bg-card;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.border-subtle;
+    clip: true;
+
+    // Follow the newest line while the person is at the bottom; stay put once they scroll up.
+    property <length> content-h: items-col.preferred-height;
+    property <bool> follow: true;
+    property <string> shown: AgentsState.header.id;
+    changed content-h => {
+        if (root.follow) {
+            flick.viewport-y = min(0px, flick.height - root.content-h);
+        }
+    }
+    changed shown => {
+        root.follow = true;
+        flick.viewport-y = min(0px, flick.height - root.content-h);
+    }
+
+    VerticalLayout {
+        padding: Theme.sp-3;
+        spacing: Theme.sp-2;
+
+        HorizontalLayout {
+            spacing: 8px;
+            height: 26px;
+            VerticalLayout {
+                alignment: center;
+                StateDot { state: AgentsState.header.state; }
+            }
+            Text {
+                text: AgentsState.header.mind + " · " + AgentsState.header.title;
+                color: Theme.text-primary;
+                font-size: Theme.fs-body-strong;
+                font-weight: 600;
+                overflow: elide;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+            Text {
+                text: AgentsState.header.since == "" ? AgentsState.header.label : AgentsState.header.label + " · " + AgentsState.header.since;
+                color: AgentsState.header.state == "waiting_for_you" ? Theme.amber : Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                vertical-alignment: center;
+            }
+        }
+        if AgentsState.header.status != "" : Text {
+            text: AgentsState.header.status;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-caption;
+            overflow: elide;
+        }
+        if AgentsState.header.note != "" : Text {
+            text: AgentsState.header.note;
+            color: Theme.text-dim;
+            font-size: Theme.fs-micro;
+            wrap: word-wrap;
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.separator;
+        }
+
+        flick := Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: items-col.preferred-height;
+            flicked => {
+                root.follow = self.viewport-y <= self.height - self.viewport-height + 8px;
+            }
+            // A Rectangle between the Flickable and the layout, on purpose: a Flickable whose
+            // child is a layout takes that layout's max-height as its own, and a session of three
+            // cards would then cap the whole screen at the height of three cards.
+            Rectangle {
+                width: flick.width;
+                height: items-col.preferred-height;
+                items-col := VerticalLayout {
+                    spacing: 6px;
+                    padding-right: 6px;
+                    for item in AgentsState.items : ItemView {
+                        item: item;
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            composer := YInput {
+                horizontal-stretch: 1;
+                disabled: !AgentsState.header.can-send;
+                placeholder: AgentsState.header.can-send ? "type to " + AgentsState.header.mind + "…" : AgentsState.header.send-hint;
+                accepted(text) => {
+                    AgentsState.send(AgentsState.header.id, text);
+                    self.value = "";
+                }
+            }
+            YButton {
+                label: "Send";
+                icon-path: Icons.send;
+                variant: 0;
+                size: 1;
+                disabled: !AgentsState.header.can-send;
+                clicked => {
+                    AgentsState.send(AgentsState.header.id, composer.value);
+                    composer.value = "";
+                }
+            }
+        }
+    }
+
+    if !AgentsState.has-agent : Rectangle {
+        background: Theme.bg-card;
+        VerticalLayout {
+            padding: Theme.sp-6;
+            alignment: center;
+            spacing: Theme.sp-2;
+            Text {
+                text: "No agent selected.";
+                color: Theme.text-primary;
+                font-size: Theme.fs-body-strong;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Start one with New agent, or ask a mind something in the Lens — each mind's conversation shows up here, with every call it makes as a card.";
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+        }
+    }
+}
+
+component DetailRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    height: 20px;
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: root.label;
+            width: 76px;
+            color: Theme.text-dim;
+            font-size: Theme.fs-caption;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.value == "" ? "—" : root.value;
+            color: Theme.text-primary;
+            font-size: Theme.fs-caption;
+            overflow: elide;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Details, and the two acts: Stop, and Close.
+export component AgentDetailsColumn inherits Rectangle {
+    background: Theme.bg-card;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.border-subtle;
+    clip: true;
+
+    VerticalLayout {
+        padding: Theme.sp-3;
+        spacing: 4px;
+        Text {
+            text: "DETAILS";
+            color: Theme.text-dim;
+            font-size: Theme.fs-micro;
+            letter-spacing: 2px;
+        }
+        DetailRow { label: "Mind"; value: AgentsState.details.mind; }
+        DetailRow { label: "Model"; value: AgentsState.details.model; }
+        DetailRow { label: "Since"; value: AgentsState.details.since; }
+        DetailRow { label: "Turns"; value: AgentsState.details.turns; }
+        DetailRow { label: "Calls"; value: AgentsState.details.calls; }
+        DetailRow { label: "Commands"; value: AgentsState.details.commands; }
+        DetailRow { label: "Files"; value: AgentsState.details.files; }
+        DetailRow { label: "Approvals"; value: AgentsState.details.approvals; }
+        DetailRow { label: "Tokens"; value: AgentsState.details.tokens; }
+        DetailRow { label: "Cost"; value: AgentsState.details.cost; }
+        if AgentsState.details.refused != "" : DetailRow { label: "Refused"; value: AgentsState.details.refused; }
+        if AgentsState.details.command-lines != "" : Text {
+            text: AgentsState.details.command-lines;
+            color: Theme.text-secondary;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-micro;
+            wrap: word-wrap;
+        }
+        if AgentsState.details.file-lines != "" : Text {
+            text: AgentsState.details.file-lines;
+            color: Theme.text-secondary;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-micro;
+            wrap: word-wrap;
+        }
+        if AgentsState.details.basis != "" : Text {
+            text: AgentsState.details.basis;
+            color: Theme.text-dim;
+            font-size: Theme.fs-micro;
+            wrap: word-wrap;
+        }
+        Rectangle { vertical-stretch: 1; }
+        HorizontalLayout {
+            spacing: 8px;
+            YButton {
+                label: "Stop";
+                icon-path: Icons.stop;
+                variant: 1;
+                size: 0;
+                disabled: !AgentsState.header.can-stop;
+                clicked => { AgentsState.stop(AgentsState.header.id); }
+            }
+            if !AgentsState.popped : YButton {
+                label: "Close";
+                icon-path: Icons.close;
+                variant: 2;
+                size: 0;
+                disabled: !AgentsState.has-agent;
+                clicked => { AgentsState.close(AgentsState.header.id); }
+            }
+        }
+    }
+}
+
+component NoticeBar inherits Rectangle {
+    height: 34px;
+    border-radius: 8px;
+    background: Theme.bg-elevated;
+    border-width: 1px;
+    border-color: Theme.border-subtle;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 6px;
+        spacing: 8px;
+        Text {
+            text: AgentsState.notice;
+            color: Theme.text-primary;
+            font-size: Theme.fs-caption;
+            overflow: elide;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+        YButton {
+            label: "Dismiss";
+            icon-path: Icons.close;
+            icon-only: true;
+            variant: 2;
+            size: 0;
+            clicked => { AgentsState.dismiss-notice(); }
+        }
+    }
+}
+
+component MindChip inherits Rectangle {
+    in property <AgentMindData> mind;
+    in property <bool> chosen;
+    callback clicked;
+    width: chip.preferred-width;
+    height: 34px;
+    border-radius: 8px;
+    background: root.chosen ? Theme.accent-glow : ta.has-hover ? Theme.hover-fill : Theme.bg-input;
+    border-width: 1px;
+    border-color: root.chosen ? Theme.accent : Theme.border-default;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    chip := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        Text {
+            text: root.mind.name;
+            color: Theme.text-primary;
+            font-size: Theme.fs-caption;
+            font-weight: root.chosen ? 600 : 400;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The Agents screen: the tabs, the list, the selected agent's session and its details.
+export component AgentsScreen inherits Rectangle {
+    background: Theme.bg-surface;
+
+    VerticalLayout {
+        padding: Theme.sp-4;
+        spacing: Theme.sp-3;
+
+        HorizontalLayout {
+            height: 34px;
+            spacing: 4px;
+            for tab in AgentsState.tabs : TabChip {
+                tab: tab;
+                active: tab.id == AgentsState.tab;
+                clicked => { AgentsState.select-tab(tab.id); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            YButton {
+                label: "New agent";
+                icon-path: Icons.plus;
+                variant: 0;
+                size: 0;
+                clicked => {
+                    AgentsState.new-error = "";
+                    AgentsState.new-open = true;
+                }
+            }
+            YButton {
+                label: "Pop out";
+                icon-path: Icons.window;
+                variant: 1;
+                size: 0;
+                disabled: !AgentsState.has-agent;
+                clicked => { AgentsState.pop-out(AgentsState.selected); }
+            }
+        }
+
+        if AgentsState.notice != "" : NoticeBar { }
+
+        HorizontalLayout {
+            spacing: Theme.sp-3;
+            vertical-stretch: 1;
+
+            Rectangle {
+                width: 270px;
+                border-radius: 12px;
+                background: Theme.bg-card;
+                border-width: 1px;
+                border-color: Theme.border-subtle;
+                clip: true;
+                list-area := TouchArea {
+                    VerticalLayout {
+                        padding: Theme.sp-2;
+                        spacing: 4px;
+                        if AgentsState.rows.length == 0 : Text {
+                            text: AgentsState.tab == "needs_you" ? "Nothing is waiting on you."
+                                : AgentsState.tab == "complete" ? "Nothing has finished yet."
+                                : "No agents yet. New agent starts one; a question in the Lens to an attached mind shows up here too.";
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            wrap: word-wrap;
+                        }
+                        rows-flick := Flickable {
+                            vertical-stretch: 1;
+                            viewport-height: rows-col.preferred-height;
+                            // Not the layout directly, for the same reason as the session's.
+                            Rectangle {
+                                width: rows-flick.width;
+                                height: rows-col.preferred-height;
+                                rows-col := VerticalLayout {
+                                    spacing: 4px;
+                                    for row in AgentsState.rows : AgentRow {
+                                        data: row;
+                                        selected: row.id == AgentsState.selected;
+                                        clicked => { AgentsState.select(row.id); }
+                                        double-clicked => { AgentsState.pop-out(row.id); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            AgentSession {
+                horizontal-stretch: 1;
+            }
+
+            AgentDetailsColumn {
+                width: 250px;
+            }
+        }
+    }
+
+    // Tell the shell while the pointer is over the list, so a row that needs the person waits to
+    // move until it has gone.
+    property <bool> hovering: list-area.has-hover;
+    changed hovering => { AgentsState.list-hovered = self.hovering; }
+
+    // New agent: a mind, and what it is to do.
+    if AgentsState.new-open : Rectangle {
+        background: #00000080;
+        TouchArea { }
+        Rectangle {
+            width: min(540px, parent.width - 48px);
+            height: dialog.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.bg-elevated;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            dialog := VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                Text {
+                    text: "New agent";
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-headline;
+                    font-weight: 600;
+                }
+                Text {
+                    text: AgentsState.minds.length == 0
+                        ? "No mind is attached right now. Start one in Settings → Harnesses, then come back."
+                        : "Pick a mind, and say what it is to do.";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    for mind in AgentsState.minds : MindChip {
+                        mind: mind;
+                        chosen: mind.id == AgentsState.new-mind;
+                        clicked => { AgentsState.pick-mind(mind.id); }
+                    }
+                }
+                if AgentsState.new-note != "" : Text {
+                    text: AgentsState.new-note;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    wrap: word-wrap;
+                }
+                Rectangle {
+                    height: 110px;
+                    border-radius: 8px;
+                    background: Theme.bg-input;
+                    border-width: 1px;
+                    border-color: prompt.has-focus ? Theme.accent-dim : Theme.border-default;
+                    prompt := TextInput {
+                        x: 10px;
+                        y: 8px;
+                        width: parent.width - 20px;
+                        height: parent.height - 16px;
+                        single-line: false;
+                        wrap: word-wrap;
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-body;
+                    }
+                    if prompt.text == "" : Text {
+                        x: 10px;
+                        y: 8px;
+                        text: "What should it do? — e.g. tidy the photos folder, duplicates into Trash";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-body;
+                    }
+                }
+                if AgentsState.new-error != "" : Text {
+                    text: AgentsState.new-error;
+                    color: Theme.color-danger;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    YButton {
+                        label: "Cancel";
+                        variant: 2;
+                        clicked => { AgentsState.new-open = false; }
+                    }
+                    YButton {
+                        label: "Start";
+                        icon-path: Icons.play;
+                        variant: 0;
+                        disabled: AgentsState.new-mind == "";
+                        clicked => { AgentsState.start(AgentsState.new-mind, prompt.text); }
+                    }
+                }
+            }
+        }
+    }
+
+    // Close, while the agent is still working: asked, never assumed.
+    if AgentsState.confirm-close != "" : Rectangle {
+        background: #00000080;
+        TouchArea { }
+        Rectangle {
+            width: min(440px, parent.width - 48px);
+            height: confirm.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.bg-elevated;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            confirm := VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                Text {
+                    text: "Close this agent?";
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-headline;
+                    font-weight: 600;
+                }
+                Text {
+                    text: "It is still working. Closing stops it and takes it off the list, with its saved session.";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    YButton {
+                        label: "Keep it";
+                        variant: 1;
+                        clicked => { AgentsState.close-cancelled(); }
+                    }
+                    YButton {
+                        label: "Stop and close";
+                        variant: 3;
+                        clicked => { AgentsState.close-confirmed(AgentsState.confirm-close); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One agent in a window of its own: the same session and details, from the same store. Closing
+// the window closes the view, never the agent.
+export component AgentWindow inherits Window {
+    in property <string> agent-title;
+    title: root.agent-title;
+    default-font-family: Theme.font-ui;
+    preferred-width: 1000px;
+    preferred-height: 680px;
+    min-width: 560px;
+    min-height: 360px;
+    background: Theme.bg-surface;
+
+    VerticalLayout {
+        padding: Theme.sp-3;
+        spacing: Theme.sp-2;
+        if AgentsState.notice != "" : NoticeBar { }
+        HorizontalLayout {
+            spacing: Theme.sp-3;
+            AgentSession {
+                horizontal-stretch: 1;
+            }
+            AgentDetailsColumn {
+                width: 250px;
+            }
+        }
+    }
+}

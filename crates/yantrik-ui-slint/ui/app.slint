@@ -33,6 +33,10 @@ import { DeviceDashboardScreen, UsbDeviceData, PciDeviceData, InputDeviceData, S
 import { PermissionDashboardScreen, UserData, GroupData, PermFileData } from "permission_dashboard.slint";
 import { ToastBanner, ToastData, ToastActionData } from "components/toast_banner.slint";
 import { ProblemReportScreen, ProblemRow } from "problem_report.slint";
+// Agents (screen 34), and the window one agent pops out into. The window and the global it reads
+// are exported so the shell can create a window per agent and fill each one.
+import { AgentsScreen } from "agents.slint";
+export { AgentWindow, AgentsState, AgentTabData, AgentRowData, AgentRunData, AgentItemData, AgentHeaderData, AgentDetailsData, AgentMindData } from "agents.slint";
 import { CommandItem } from "components/command_palette.slint";
 import { ContentBlock, MessageData } from "components/message_bubble.slint";
 import { ToolCallData } from "components/tool_call.slint";
@@ -2640,6 +2644,38 @@ export component App inherits Window {
             }
         }
 
+        // Agents — one pane per agent, with its work inside it. Everything on it reads the
+        // AgentsState global; see agents.slint and crates/yantrik-ui/src/wire/agents.rs.
+        if current-screen == 34 : WindowFrame {
+            x: root.window-maximized ? 0px : root.window-x;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
+            width: root.window-maximized ? parent.width : root.window-w;
+            height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
+            is-maximized <=> root.window-maximized;
+            win-x <=> root.window-x;
+            win-y <=> root.window-y;
+            win-w <=> root.window-w;
+            win-h <=> root.window-h;
+            icon-path: Icons.people;
+            icon-color: Theme.accent;
+            title: Tr.title-agents;
+            close => {
+                if (root.minimized-screen == 34) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 34;
+                root.minimized-title = Tr.title-agents;
+                root.minimized-app-id = "agents";
+                root.current-screen = 1; root.navigate(1);
+            }
+            animate x, y, width, height { duration: 200ms; easing: ease-out; }
+
+            AgentsScreen {
+                width: 100%; height: 100%;
+            }
+        }
+
         // Spreadsheet
         // ── Document Editor (screen 30) ──
         // Presentation (screen 31)
@@ -2715,7 +2751,7 @@ export component App inherits Window {
             }
         }
 
-        if current-screen == 1 || (current-screen >= 4 && current-screen <= 31) : Rectangle {
+        if current-screen == 1 || (current-screen >= 4 && current-screen <= 31) || current-screen == 33 || current-screen == 34 : Rectangle {
             width: 100%;
             height: parent.height;
             y: 0;

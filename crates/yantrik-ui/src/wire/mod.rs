@@ -7,11 +7,13 @@
 //! main.rs stays untouched.
 
 mod about;
+// The Agents screen and every agent popped out into its own window.
+pub mod agents;
 mod app_grid;
 pub mod dep_check;
 mod callbacks;
 mod files;
-mod chat;
+pub(crate) mod chat;
 mod clipboard;
 pub mod dock;
 pub mod harness;
@@ -86,6 +88,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     device_dashboard::wire(ui, ctx);
     permission_dashboard::wire(ui, ctx);
     problem_report::wire(ui, ctx);
+    agents::wire(ui, ctx);
     about::wire(ui, ctx);
     version::wire(ui, ctx);
     morning_brief::wire(ui, ctx);

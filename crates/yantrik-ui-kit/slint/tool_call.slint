@@ -35,6 +35,10 @@ export component ToolCallCard inherits Rectangle {
     // Open: the arguments and output in full, and the summary wrapped rather than cut. A host
     // that wants a call open from the start binds this.
     in-out property <bool> expanded: false;
+    // A few words a host puts on the one line, before the status: where the card came from and
+    // how a command exited — "verified · exit 2". The Agents screen uses it; the chat leaves it
+    // empty.
+    in property <string> badge: "";
     callback toggled(bool);
 
     property <bool> has-more: root.call.arguments != "" || root.call.output != "";
@@ -71,6 +75,12 @@ export component ToolCallCard inherits Rectangle {
                     wrap: root.expanded ? TextWrap.word-wrap : TextWrap.no-wrap;
                     overflow: root.expanded ? TextOverflow.clip : TextOverflow.elide;
                     horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                if root.badge != "" : Text {
+                    text: root.badge;
+                    color: Theme.text-dim;
+                    font-size: Theme.font-caption;
                     vertical-alignment: center;
                 }
                 if root.call.status != "" : Text {

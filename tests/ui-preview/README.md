@@ -74,3 +74,17 @@ for measuring the deployed process's CPU and memory.
 The app probe also switches Notes side panels, saves with the assistant open,
 and resizes from a wide window with both panels to a compact window. It checks
 that the writing area is not squeezed between both panels at compact widths.
+
+## Agents
+
+`verify-agents` draws the production Agents screen (and an agent's own window) from
+fixture data — two agents, pi's session with a finished command's terminal opened, a
+reported call, a running command's live output and a failed one — and sends real
+pointer events: the list reports the pointer over it and leaving it (so rows hold
+still under it), a row selects, a tab filters, Stop reaches the agent shown and a card
+opens from its line. It writes the screen, the screen in the light theme, and the
+window beside the output path.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/agents.png 1280 800 verify-agents
+```

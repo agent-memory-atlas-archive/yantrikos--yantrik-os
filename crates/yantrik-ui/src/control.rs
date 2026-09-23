@@ -131,6 +131,7 @@ const SCREENS: &[(&str, i32)] = &[
     ("devices", 27),
     ("permissions", 28),
     ("problems", 33),
+    ("agents", 34),
 ];
 
 /// What `describe` calls the screen the shell is on.
@@ -481,6 +482,9 @@ pub fn publish(
                 // What went wrong on this machine, newest first: the local records a person
                 // or a mind can choose to send with `report_problem`. Reading them sends nothing.
                 .with("problems", crate::wire::problem_report::for_describe())
+                // Every agent, one conversation with one mind: its state, what it has run and
+                // what it is waiting on, with the counts the Agents screen's tabs show.
+                .with("agents", crate::agents::for_describe())
                 // The owner's standing policy for callers on the socket, so a bridge can read
                 // it instead of provoking a `CEILING:` refusal to find out. An approval cannot
                 // exceed this, and a question the machine will refuse to answer should never
@@ -1041,7 +1045,7 @@ pub fn publish(
             Action::new("show_screen", "Switch the shell to one of its screens")
                 .arg(
                     Param::text("screen")
-                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media, problems — or launchpad, the launcher, which opens over the desktop"),
+                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media, problems, agents — or launchpad, the launcher, which opens over the desktop"),
                 )
                 .arg(
                     Param::text("section")

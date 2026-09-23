@@ -125,6 +125,8 @@ fn dispatch(
     let answer = host.send(
         yantrik_harness::Turn::new(text.to_string()).with_context(desktop_context(&super::settings::place())),
     );
+    // The same turn, recorded as this mind's agent on the Agents screen; the answer passes through.
+    let answer = crate::agents::feed::lens_turn(&host.active_id(), text, answer);
     let (tx, rx) = crossbeam_channel::unbounded::<String>();
     let bridge = bridge.clone();
     let asked = text.to_string();
