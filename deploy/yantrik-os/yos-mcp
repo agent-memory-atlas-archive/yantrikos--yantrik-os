@@ -51,9 +51,11 @@ SHELL_CALL_TIMEOUT = 20      # one `yos act shell …` or `yos describe …`
 # request the person had just allowed.
 APPROVAL_WAIT = int(os.environ.get("YOS_MCP_APPROVAL_WAIT", "110"))
 APPROVAL_POLL = 2.0
-# describe the app + describe the shell + request + poll + consume + the action + the audit line.
+# describe the app + describe the shell + request + poll + the action + the audit line. The grant
+# is spent by the action itself now (issue #116), so the budget that was `consume_approval` is
+# slack; it stays, because a client that had already allowed for it should not be told less.
 OS_ACT_MAX_SECONDS = (2 * SHELL_CALL_TIMEOUT      # action_detail, shell_state
-                      + 2 * SHELL_CALL_TIMEOUT    # request_approval, consume_approval
+                      + 2 * SHELL_CALL_TIMEOUT    # request_approval, and slack
                       + SHELL_CALL_TIMEOUT        # record_unasked_action, on the unasked path
                       + APPROVAL_WAIT
                       + ACT_TIMEOUT)
@@ -1019,13 +1021,17 @@ def shell_call(action, args, timeout=None):
 def ask_the_person(app, action, grade, purpose, args, requester):
     """Put one action in front of the person, wait, and report exactly what happened.
 
-    Returns `(allowed, message)`. The message is the whole account the mind gets, and it is
-    written to be reported onwards as-is: a person who asked for something ordinary should hear
-    what their machine did, not a paraphrase of a status code.
+    Returns `(allowed, message, grant)`. The message is the whole account the mind gets, and it
+    is written to be reported onwards as-is: a person who asked for something ordinary should
+    hear what their machine did, not a paraphrase of a status code. The grant is the request id
+    the person allowed, to be carried on the `yos act` that follows.
 
-    The three steps are the shell's, and none of them decides anything: `request_approval` puts
-    a card up, `approval_status` reads an answer somebody else gave, `consume_approval` spends a
-    grant that only a click created. There is no action anywhere on this desktop that grants.
+    The steps are the shell's, and none of them decides anything: `request_approval` puts a card
+    up, `approval_status` reads an answer somebody else gave. The grant is SPENT by the app's own
+    dispatch when the action runs (issue #116) — this bridge used to call `consume_approval`
+    itself, which put the check in the caller; now every door's call is checked the same way,
+    and this bridge's part is to carry the grant it was given. There is no action anywhere on
+    this desktop that grants.
     """
     request, err = shell_call("request_approval", {
         "app": app,
@@ -1040,7 +1046,7 @@ def ask_the_person(app, action, grade, purpose, args, requester):
             "%s.%s is graded %s, above this session's %s ceiling, so it needs the person at the "
             "machine to allow it — and they could not be asked: %s. Nothing was run and nothing "
             "was changed. Tell them what you were trying to do and let them decide."
-            % (app, action, grade, CEILING, err))
+            % (app, action, grade, CEILING, err)), None
 
     # The desktop decided nobody needed asking. That is not a refusal and not a failure: it
     # happens when this bridge's OWN cap (YOS_MCP_MAX_PERMISSION) is stricter than the desktop's
@@ -1053,13 +1059,13 @@ def ask_the_person(app, action, grade, purpose, args, requester):
             "%s — but the desktop's current mode (%s) runs this without asking anybody, so no "
             "card was put in front of the person and nobody was disturbed. Report it as "
             "something you did."
-            % (app, action, CEILING, request.get("mode", "its current mode")))
+            % (app, action, CEILING, request.get("mode", "its current mode"))), None
 
     request_id = request.get("request_id")
     if not request_id:
         return False, (
             "the desktop was asked to put an approval card up for %s.%s and did not say which "
-            "request it was, so there is nothing to wait on. Nothing was run." % (app, action))
+            "request it was, so there is nothing to wait on. Nothing was run." % (app, action)), None
 
     # Polled rather than pushed: this bridge has no way to be called back, and a person cannot
     # answer inside the first poll interval anyway.
@@ -1108,32 +1114,25 @@ def ask_the_person(app, action, grade, purpose, args, requester):
             break
 
     if status == "granted":
-        spent, err = shell_call("consume_approval", {
-            "request_id": request_id, "app": app, "action": action, "args_json": args,
-        })
-        if spent is None:
-            # The grant exists and this call could not spend it. Not running is the only safe
-            # reading: the refusal may be precisely that the arguments do not match what the
-            # person was shown.
-            return False, (
-                "the person allowed %s.%s, but the grant could not be spent: %s. Nothing was "
-                "run. Tell them it did not go through." % (app, action, err))
+        # Not spent here. The action's own dispatch spends it — bound to this app, this action
+        # and these exact arguments — and refuses if any of that differs from what the person
+        # was shown; `run_tool` turns that refusal into the "could not be spent" account.
         return True, (
             "The person at the machine was asked and allowed this once, just now, for exactly "
-            "these arguments. The grant has been spent and cannot be used again — a further "
-            "call at this grade will ask them again.")
+            "these arguments. The grant is spent by the action and cannot be used again — a "
+            "further call at this grade will ask them again."), request_id
 
     if status == "denied":
         return False, (
             "the person at the machine was asked to allow %s.%s and said no. Nothing was run "
             "and nothing was changed. This is an answer, not an error: do not ask again and do "
             "not look for another route to the same effect. Say what you were going to do and "
-            "leave it with them." % (app, action))
+            "leave it with them." % (app, action)), None
 
     if status == "consumed":
         return False, (
             "the grant for %s.%s had already been spent, so nothing was run. A grant covers one "
-            "action once; ask again if it still needs doing." % (app, action))
+            "action once; ask again if it still needs doing." % (app, action)), None
 
     if not heard:
         # The card went up and then not one poll came back, for the whole wait. This is the only
@@ -1145,7 +1144,7 @@ def ask_the_person(app, action, grade, purpose, args, requester):
             "stopped answering: %s. It was asked again every %gs for %ds and never replied. "
             "Nothing was run here. They may have allowed it; this bridge cannot tell, and it "
             "will not run it on a guess."
-            % (app, action, silence, APPROVAL_POLL, APPROVAL_WAIT))
+            % (app, action, silence, APPROVAL_POLL, APPROVAL_WAIT)), None
 
     # `expired`, or still `pending` when the wait ran out. From the person's side these are the
     # same thing — they did not answer — and saying so is better than reporting a timeout that
@@ -1154,15 +1153,17 @@ def ask_the_person(app, action, grade, purpose, args, requester):
         "the person at the machine was asked to allow %s.%s and did not answer within %ds, so "
         "nothing was run. They were probably away from the keyboard. Tell them what you were "
         "trying to do; they can ask you to try it again."
-        % (app, action, APPROVAL_WAIT))
+        % (app, action, APPROVAL_WAIT)), None
 
 
 def guard_act(args):
     """Decide whether this action runs, asking the person when the desktop's mode says to.
 
-    Returns `(refusal, note, audit)`: a refusal to hand back instead of running; or no refusal, a
-    note to carry back beside the action's own output, and — when it ran without anybody being
-    asked — the record to report to the shell once the outcome is known.
+    Returns `(refusal, note, audit, grant)`: a refusal to hand back instead of running; or no
+    refusal, a note to carry back beside the action's own output, — when it ran without anybody
+    being asked — the record to report to the shell once the outcome is known, and — when the
+    person was asked and said yes — the grant to carry on the `yos act`, which the app's own
+    dispatch spends.
 
     This used to be a wall. `delete_event` is graded `sensitive`, this bridge's ceiling is
     `standard`, and somebody who typed "delete the dentist appointment from my calendar" was told
@@ -1173,7 +1174,7 @@ def guard_act(args):
     app, action = args.get("app"), args.get("action")
     if not app or not action:
         return ("os_act needs both an app and an action — see os_describe for what an app "
-                "offers."), None, None
+                "offers."), None, None, None
 
     level, purpose = action_detail(app, action)
     if level is None:
@@ -1182,13 +1183,13 @@ def guard_act(args):
             return ("%s is not open, so %s was not run — nothing is wrong with the request. "
                     "Open it with os_act on shell: open_app name=%s (os_apps lists the exact "
                     "name to open each app by), then call this again."
-                    % (app, action, app)), None, None
+                    % (app, action, app)), None, None, None
         return ("%s.%s was not run, because how the OS grades it could not be read: %s"
-                % (app, action, why or "os_describe %s would not answer." % app)), None, None
+                % (app, action, why or "os_describe %s would not answer." % app)), None, None, None
     if level not in LADDER:
         # The table's own words, and no read of the desktop first: nothing it could say would
         # make a grade this OS does not define into one it does.
-        return decide(level, app, action, False, "ask", [], None)[1], None, None
+        return decide(level, app, action, False, "ask", [], None)[1], None, None, None
 
     # One read of the shell, before every action, answers all of it: the machine's standing
     # ceiling, the mode the person set, the rules they granted this session, and the name to put
@@ -1209,7 +1210,7 @@ def guard_act(args):
     try:
         bound = effective_args(args)
     except ValueError as e:
-        return str(e), None, None
+        return str(e), None, None, None
 
     # The app's own sentence about the action, read off the same `describe` the grade came from.
     # It is an input to the table now: in `auto`, something the app says cannot be undone is
@@ -1223,12 +1224,12 @@ def guard_act(args):
     verdict, detail = decide(level, app, action, cannot_undo, mode, rules, machine, cap=cap)
 
     if verdict.startswith("refuse"):
-        return join(unreadable, detail), None, None
+        return join(unreadable, detail), None, None, None
 
     if verdict == "run":
         unasked = bool(detail)
         if not unasked:
-            return None, (unreadable or None), None
+            return None, (unreadable or None), None, None
         # The same test the table made. A rule does not cover what the app says cannot be
         # undone, so it must not be NAMED as the thing that let this through either: here that
         # can only be a bypass, and "Bypass ended" counts what the bypass itself bought. (Only
@@ -1248,7 +1249,7 @@ def guard_act(args):
                 "something you were permitted."
                 % (mode, " and they have allowed %s.%s for this session" % (app, action)
                    if covered else ""))
-        return None, join(unreadable, note), audit
+        return None, join(unreadable, note), audit, None
 
     # Why there is a card at all, when the mode the person chose would otherwise have run this.
     #
@@ -1266,11 +1267,11 @@ def guard_act(args):
             "look for another route to the same effect."
             % (mode, level, app, action))
 
-    allowed, message = ask_the_person(
+    allowed, message, grant = ask_the_person(
         app, action, level, purpose, bound, requester_name(state))
     if allowed:
-        return None, join(unreadable, join(asked_anyway, message)), None
-    return join(unreadable, join(asked_anyway, message)), None, None
+        return None, join(unreadable, join(asked_anyway, message)), None, grant
+    return join(unreadable, join(asked_anyway, message)), None, None, None
 
 
 def join(prefix, text):
@@ -1369,6 +1370,9 @@ def run_tool(tool, args):
     # Set when this ran without anybody being asked, and reported to the shell after it has run,
     # because the outcome is half of what is worth writing down.
     audit = None
+    # Set when the person was asked and allowed it: the request id, carried on the call for the
+    # app's dispatch to spend.
+    grant = None
 
     if tool["name"] == "os_act":
         # os_describe lists actions as `act: new_note()`, and a model copying that sends
@@ -1376,7 +1380,7 @@ def run_tool(tool, args):
         # punctuation cost a whole confirmed turn on the third live drive.
         args = dict(args)
         args["action"] = str(args["action"]).strip().split("(", 1)[0].strip()
-        refusal, note, audit = guard_act(args)
+        refusal, note, audit, grant = guard_act(args)
         if refusal is not None:
             return policy_answer(refusal), False
 
@@ -1395,6 +1399,15 @@ def run_tool(tool, args):
         argv = [YOS] + tool["argv"](args)
     except ValueError as e:
         return "refused: %s" % e, True
+    if tool["name"] == "os_act":
+        # This bridge has already asked, or decided nobody needed asking. `yos act` would
+        # otherwise raise a card of its own on a refusal — the same card, but with nobody's name
+        # on it and a wait longer than this call's budget — so it is told not to, and the
+        # refusal comes back here to be reported in words. The grant, when there is one, rides
+        # on the call for the app's own dispatch to spend.
+        argv.append("--no-ask")
+        if grant:
+            argv += ["--grant", grant]
     timeout = tool["timeout"]
     if callable(timeout):
         timeout = timeout(args)
@@ -1432,6 +1445,18 @@ def run_tool(tool, args):
         return (prefix(note, "%s is not running, so it cannot be described or acted on yet. "
                             "Open it first with os_act: app \"shell\", action \"open_app\", "
                             "args {\"name\": \"%s\"}; then describe it." % (app, app))), True
+    if p.returncode != 0 and tool["name"] == "os_act" and "GRANT:" in err:
+        # The app's own dispatch refused: the grant did not hold, or — when this bridge had
+        # decided nobody needed asking — the desktop's mode as the app read it disagreed. A
+        # policy answer, not a fault: the machine is healthy and said no, in words.
+        why = re.sub(r"^yos: ", "", err.strip())
+        if grant:
+            # Not running is the only safe reading: the refusal may be precisely that the
+            # arguments do not match what the person was shown.
+            return policy_answer(
+                "the person allowed %s.%s, but the grant could not be spent: %s Nothing was "
+                "run. Tell them it did not go through." % (app, args.get("action"), why)), False
+        return policy_answer(why), False
     if p.returncode != 0:
         # The note goes on a failure as well. A person who has just pressed Allow and then hears
         # only "failed (exit 1)" has been told the wrong half of what happened — and worse, the

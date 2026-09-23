@@ -69,6 +69,27 @@
 //! because the two paths do not meet. (Who exactly *is* on the socket is issue #43; until then
 //! every socket caller gets the one machine-wide ceiling.)
 //!
+//! # The mode, and the grant
+//!
+//! Under the ceiling the person has a *mode* — plan, ask, auto or bypass — that says what may run
+//! without asking them. For a while that lived only in the MCP bridge: it read the mode, raised
+//! the approval card when the mode said to, and acted once the person pressed Allow. `yos act`
+//! and a raw client on the socket ran the same `sensitive` action in `ask` mode with no card and
+//! no record (issues #49 and #116). Now the dispatch reads the mode the way it reads the ceiling
+//! — the shell publishes it beside `settings.yaml` — and a call above what the mode allows must
+//! carry a **grant**: the `request_id` that `request_approval` minted and a person's Allow turned
+//! into one, which the dispatch spends through the shell before the handler runs. Every door
+//! meets the same question; `yos act` and the bridge ask for the card on the caller's behalf.
+//! `describe` needs nothing, and the ceiling stays above every mode and every grant.
+//!
+//! One line the dispatch does not draw: plan mode's refusal of `standard`. The desktop's own
+//! processes cross this socket with `standard` calls — an app asking the shell to `start_service`
+//! the service it needs, a second launch handing its file to the open window — and until callers
+//! carry an identity (#43) the dispatch cannot tell those from a mind. So every mode runs
+//! `standard` here ([`SOCKET_FLOOR`]); plan's refusal of it stays the bridge's, as it always was,
+//! and plan still refuses everything above it on every door, because the shell raises no card in
+//! plan and so no grant can exist.
+//!
 //! # Threading
 //!
 //! Both closures run on the UI thread, because that is the only thread allowed to touch a Slint
@@ -105,11 +126,12 @@
 
 use std::cell::RefCell;
 use std::sync::mpsc;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use yantrik_ipc_contracts::email::ServiceError;
 use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
+use yantrik_ipc_transport::SyncRpcClient;
 
 /// How long the RPC thread waits for the UI thread to answer.
 ///
@@ -279,6 +301,268 @@ fn ceiling_from(text: &str) -> String {
     DEFAULT_CEILING.to_string()
 }
 
+// ── The mode, and the grant that stands in for it ───────────────────
+//
+// The ceiling is the machine's wall. Under it the PERSON has a mode — plan, ask, auto or bypass
+// — that says what a caller may do without being asked, and for a while the mode lived only in
+// the shell and the MCP bridge: the bridge read it off `describe shell`, raised a card when the
+// mode said to, and ran the action once the person had pressed Allow. Nothing else did. `yos
+// act` and a raw JSON-RPC client on the socket ran a `sensitive` action in `ask` mode with no
+// card and no record (issues #49 and #116), because the one function every call crosses —
+// `Registry::act` below — knew the ceiling and nothing else.
+//
+// So the mode is read here too, the way the ceiling is: the shell writes it to a small file
+// beside `settings.yaml` whenever it changes (`mind_mode::publish_policy_file` in the shell), and
+// every dispatch reads it per call. A call above what the mode allows must carry a GRANT — the
+// `request_id` the shell's `request_approval` minted and a person's Allow turned into one — and
+// the dispatch spends it through the shell's `consume_approval` before the handler runs. The
+// bridge and `yos act` ask for the card on the caller's behalf; a raw client can do the same
+// three steps itself. Whichever door a call came through, it meets the same question.
+//
+// What an app learns from all of this is one bit: a grant was, or was not, attached. The card,
+// the countdown and the store are the shell's.
+
+/// The file the shell publishes the mode in, beside the settings file.
+pub const MODE_FILE: &str = "mind-mode.json";
+
+/// The modes a desktop can be in, strictest first, and what each runs without asking: the
+/// highest grade on [`LADDER`] a caller may use with no grant. One column of the table in the
+/// shell's `mind_mode::Modes::decide` and the bridge's `decide`, which stay the definition.
+pub const MODES: [(&str, &str); 4] =
+    [("plan", "safe"), ("ask", "standard"), ("auto", "sensitive"), ("bypass", "dangerous")];
+
+/// What the dispatch runs without a grant in every mode, plan included.
+///
+/// Plan mode's own column says `safe`, and the bridge enforces that for a mind on it. The
+/// dispatch cannot: the desktop's own processes call `standard` actions on this socket to work at
+/// all — every app's notifications and Calendar's and Email's services are started on demand
+/// through the shell's `start_service`, and a second launch of an editor hands its file to the
+/// open window with `open` — and nothing here can tell those callers from a mind until the
+/// socket carries identity (#43). Refusing them would stop the person's own desktop working the
+/// moment they chose plan for the mind. Everything above this still needs a grant in plan, and
+/// the shell mints none there.
+pub const SOCKET_FLOOR: &str = "standard";
+
+/// The mode assumed when the shell has published nothing usable: `ask`, the strictest mode that
+/// still lets ordinary work happen and the one the shell itself boots into. A missing file is not
+/// a permission, so this fails closed, exactly as the bridge does when `describe shell` says
+/// nothing about the mode.
+pub const DEFAULT_MODE: &str = "ask";
+
+/// Where the shell publishes the mode.
+pub fn mode_path() -> std::path::PathBuf {
+    crate::theme::settings_path().with_file_name(MODE_FILE)
+}
+
+/// The mode as the shell last published it: its name, and the session rules beside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mode {
+    pub name: String,
+    /// `(app, action)` pairs a person allowed for the rest of the session from the card's
+    /// "Allow for this session". A rule covers any arguments, but only its own action.
+    pub session_rules: Vec<(String, String)>,
+}
+
+impl Mode {
+    pub fn named(name: &str) -> Mode {
+        Mode { name: name.to_string(), session_rules: Vec::new() }
+    }
+
+    /// The highest grade this mode runs unasked, as a position on [`LADDER`]. A name that is
+    /// not a mode reads as `ask`, never as something looser.
+    fn allows(&self) -> usize {
+        MODES
+            .iter()
+            .find(|(name, _)| *name == self.name)
+            .and_then(|(_, top)| grade(top))
+            .unwrap_or_else(|| grade("standard").unwrap())
+    }
+
+    fn covers(&self, app: &str, action: &str) -> bool {
+        self.session_rules.iter().any(|(a, x)| a == app && x == action)
+    }
+}
+
+/// The mode right now, from the file the shell writes. Read per call for the reason the ceiling
+/// is: a person changes the mode from the chip while apps are running, and a dispatch that read
+/// it once at launch would be enforcing a mode the chip no longer shows.
+pub fn configured_mode() -> Mode {
+    let Ok(text) = std::fs::read_to_string(mode_path()) else {
+        return Mode::named(DEFAULT_MODE);
+    };
+    mode_from(&text, unix_now())
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Read the mode out of what the shell wrote. Public so the shell's own test can prove that
+/// what it writes is what every app will read.
+///
+/// `now_unix` is for a bypass. The shell folds an expired bypass back on its own tick and
+/// rewrites the file, but a shell that crashed mid-bypass leaves a file saying `bypass` with
+/// nobody left to fold it — so the file carries when the bypass ends and this honours it. A
+/// bypass "until restart" carries no end and is trusted until the next shell start rewrites it.
+pub fn mode_from(text: &str, now_unix: u64) -> Mode {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
+        tracing::warn!("{MODE_FILE} is not JSON; using {DEFAULT_MODE}");
+        return Mode::named(DEFAULT_MODE);
+    };
+    let is_mode = |name: &str| MODES.iter().any(|(m, _)| *m == name);
+    let mut name = doc["mode"].as_str().unwrap_or("").to_string();
+    if !is_mode(&name) {
+        tracing::warn!(mode = %name, "{MODE_FILE} names no mode this OS defines; using {DEFAULT_MODE}");
+        name = DEFAULT_MODE.to_string();
+    }
+    if name == "bypass" {
+        if let Some(until) = doc["bypass_expires_unix"].as_u64() {
+            if now_unix >= until {
+                let previous = doc["previous"].as_str().unwrap_or(DEFAULT_MODE);
+                name = if is_mode(previous) && previous != "bypass" {
+                    previous.to_string()
+                } else {
+                    DEFAULT_MODE.to_string()
+                };
+            }
+        }
+    }
+    let session_rules = doc["session_rules"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|r| {
+                    Some((r["app"].as_str()?.to_string(), r["action"].as_str()?.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Mode { name, session_rules }
+}
+
+// ── Spending a grant ────────────────────────────────────────────────
+
+/// How this process spends a grant: the token and the exact triple in, and either it is burned
+/// or the reason it was not.
+type Spender = dyn Fn(&str, &str, &str, &serde_json::Value) -> Result<(), String> + Send + Sync;
+
+static SPENDER: OnceLock<Box<Spender>> = OnceLock::new();
+
+/// How long a dispatch waits for the shell to spend a grant. One hop to the shell's UI thread
+/// and back; anything slower is a shell that is not answering, and the honest outcome then is
+/// a refusal that says so, not a handler that ran on a grant nobody checked.
+const GRANT_ROUNDTRIP: Duration = Duration::from_secs(5);
+
+/// Install the function this process spends grants with.
+///
+/// The shell calls this once, with its own `approvals::consume`, because the shell IS the store
+/// — and asking itself over its own socket from its own RPC thread is a call that cannot be
+/// answered until the call returns. Every other app leaves it unset and spends grants over the
+/// shell's socket. A second call changes nothing: the store does not move.
+pub fn spend_grants_with(
+    spend: impl Fn(&str, &str, &str, &serde_json::Value) -> Result<(), String>
+        + Send
+        + Sync
+        + 'static,
+) {
+    let _ = SPENDER.set(Box::new(spend));
+}
+
+/// Burn `id` for exactly `app.action(args)`, or say why it could not be.
+///
+/// Through the shell's published `consume_approval`, which is what the bridge used to call
+/// itself before running the action. The check is the shell's — granted, unspent, unexpired,
+/// bound to this app, this action and these arguments — and the refusal is the shell's own
+/// sentence, which already names the part that differed.
+fn spend_grant(id: &str, app: &str, action: &str, args: &serde_json::Value) -> Result<(), String> {
+    if let Some(spend) = SPENDER.get() {
+        return spend(id, app, action, args);
+    }
+    let shell = SyncRpcClient::for_service(&service_id_for("shell")).with_timeout(GRANT_ROUNDTRIP);
+    shell
+        .call(
+            "app.act",
+            serde_json::json!({
+                "action": "consume_approval",
+                "args": { "request_id": id, "app": app, "action": action, "args_json": args },
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| e.message)
+}
+
+/// What the RPC thread established about one call before handing it to the UI thread: the
+/// ceiling and the mode as the files say them, and whether a grant was attached and spent.
+///
+/// Built off the UI thread because all three are IO — two file reads and, with a grant, a
+/// round trip to the shell — and enforced on it, inside [`Registry::act`], for the reason the
+/// ceiling always was: the check and the dispatch have to be one turn of the event loop.
+#[derive(Debug)]
+struct Authority {
+    ceiling: String,
+    mode: Mode,
+    /// A grant was attached to the call and the shell spent it. Never true for a grant the
+    /// shell refused: that refusal ends the call before it reaches the UI thread.
+    granted: bool,
+}
+
+/// Everything the dispatch may assume about one call, or the refusal that ends it.
+///
+/// A grant is spent here, before the grade is even looked at. It cannot be otherwise: the grade
+/// lives on the UI thread and the shell does not, and a grant checked after the dispatch has
+/// begun is a window in which the same grant covers two calls. The cost is one wasted grant for
+/// a caller that attached one to an action that needed none, which nothing on this desktop
+/// does — the shell answers `not_needed` rather than minting a grant the mode makes pointless.
+fn authority_for(
+    app_id: &str,
+    action: &str,
+    args: &serde_json::Value,
+    grant: Option<&str>,
+) -> Result<Authority, String> {
+    let ceiling = configured_ceiling();
+    let mode = configured_mode();
+    let granted = match grant {
+        None => false,
+        Some(id) => {
+            spend_grant(id, app_id, action, args).map_err(|why| {
+                format!(
+                    "GRANT: `{id}` does not authorise {app_id}.{action} — {why} Nothing was run; \
+                     a grant covers one action, once, with the arguments the person was shown."
+                )
+            })?;
+            true
+        }
+    };
+    Ok(Authority { ceiling, mode, granted })
+}
+
+/// The refusal for a call above what the mode allows, with no grant to stand in for it.
+///
+/// It says how to get one, because the caller reading it is usually a program — `yos`, or a
+/// mind with a terminal — and "no" without a way forward is what teaches a program to look for
+/// another door. `GRANT:` in front so a caller can branch on it the way it branches on
+/// `CEILING:` and `STALE:`; `yos act` does, and asks on the caller's behalf.
+fn grant_refusal(app: &str, action: &str, graded: &str, mode: &Mode) -> String {
+    if mode.name == "plan" {
+        return format!(
+            "GRANT: {app}.{action} is graded `{graded}` and this machine is in plan mode, which \
+             raises no card for anything above `{SOCKET_FLOOR}` — so it was not run. Say what \
+             you would do and let the person decide; they switch the mode from the chip in the \
+             status bar."
+        );
+    }
+    format!(
+        "GRANT: {app}.{action} is graded `{graded}` and this machine is in {mode} mode, which \
+         runs nothing above `{allowed}` without asking — so it was not run. Ask the shell for \
+         approval first (`request_approval` with this app, action and these exact arguments, \
+         poll `approval_status`, then send the granted request_id as `grant` on app.act — \
+         `yos act` does all of that for you), or have the person at the machine press Allow \
+         when the card appears.",
+        mode = mode.name,
+        allowed = LADDER[mode.allows().max(grade(SOCKET_FLOOR).unwrap())],
+    )
+}
+
 // ── What an app reports ─────────────────────────────────────────────
 //
 // The vocabulary itself — `View`, `Param`, `Action`, the action JSON schema and the
@@ -343,17 +627,18 @@ impl Registry {
     /// it. Here nothing runs in between, because there is no in between: this is the thread that
     /// would have to run it.
     ///
-    /// `ceiling` arrives as an argument, already read from settings by the RPC thread (see
-    /// [`configured_ceiling`]), so the boundary is enforced in the dispatch itself — the one
-    /// function every `app.act` crosses, whoever sent it — while the file IO stays off the UI
-    /// thread and tests can pin the ceiling instead of inheriting the developer's.
+    /// `authority` arrives as an argument — the ceiling and the mode already read from their
+    /// files by the RPC thread, and any grant already spent (see [`authority_for`]) — so the
+    /// boundary is enforced in the dispatch itself, the one function every `app.act` crosses,
+    /// whoever sent it, while the IO stays off the UI thread and tests can pin the ceiling and
+    /// the mode instead of inheriting the developer's.
     fn act(
         &self,
         name: &str,
         args: &serde_json::Value,
         expect_revision: Option<&str>,
         action_id: &str,
-        ceiling: &str,
+        authority: &Authority,
     ) -> Result<serde_json::Value, String> {
         let Some((spec, run)) = self.actions.iter().find(|(a, _)| a.name == name) else {
             let known: Vec<&str> = self.actions.iter().map(|(a, _)| a.name.as_str()).collect();
@@ -380,7 +665,7 @@ impl Registry {
                 LADDER.join(" < ")
             ));
         };
-        let cap = grade(ceiling).unwrap_or_else(|| grade(DEFAULT_CEILING).unwrap());
+        let cap = grade(&authority.ceiling).unwrap_or_else(|| grade(DEFAULT_CEILING).unwrap());
         if level > cap {
             return Err(format!(
                 "CEILING: {app}.{name} is graded `{perm}`, above this machine's `{ceiling}` \
@@ -388,8 +673,20 @@ impl Registry {
                  run. An action at that grade needs a person to authorise it directly — raise \
                  the ceiling in Settings if that is the intent.",
                 app = self.app_id,
-                perm = published
+                perm = published,
+                ceiling = authority.ceiling
             ));
+        }
+
+        // The mode, and the grant that stands in for it. After the ceiling — no mode and no
+        // grant reaches past that — and before the arguments, for the reason the ceiling is:
+        // "may this caller use this action at all" comes before anything about this call. A
+        // session rule is the person's standing answer for this one action and covers it the
+        // way a grant would. Nothing here asks anybody: raising the card is the shell's, and
+        // the caller's job is to have done it (`yos act` does it for a caller that has not).
+        let unasked = authority.mode.allows().max(grade(SOCKET_FLOOR).unwrap());
+        if level > unasked && !authority.granted && !authority.mode.covers(&self.app_id, name) {
+            return Err(grant_refusal(&self.app_id, name, published, &authority.mode));
         }
 
         // Checked here rather than in every handler: a missing argument is the most common way a
@@ -723,6 +1020,9 @@ where
 
 struct ControlRpc {
     service_id: String,
+    /// The id the registry publishes under — what a grant is bound to, which is not the
+    /// socket's `app-` name.
+    app_id: String,
 }
 
 impl ServiceHandler for ControlRpc {
@@ -786,15 +1086,30 @@ impl ControlRpc {
                     .get("expect_revision")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                // A grant, when the caller holds one: the `request_id` the shell answered
+                // `request_approval` with, once a person has pressed Allow. Optional for the
+                // same reason `expect_revision` is — most calls need none — and checked before
+                // anything else when it is there, because a grant that does not hold is the
+                // whole answer to the call.
+                let grant = params
+                    .get("grant")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|g| !g.is_empty())
+                    .map(str::to_string);
                 let action_id = next_action_id(&self.service_id);
 
-                // Read on this thread, enforced on the UI one: the settings file is IO and the
-                // dispatch closure is a turn of the event loop.
-                let ceiling = configured_ceiling();
+                // Read on this thread, enforced on the UI one: the settings and mode files are
+                // IO, spending a grant is a round trip, and the dispatch closure is a turn of
+                // the event loop.
+                let authority = authority_for(&self.app_id, &action, &args, grant.as_deref())
+                    .map_err(|m| ServiceError { code: -32602, message: m })?;
                 tracing::info!(
                     action = %action,
                     id = %action_id,
-                    ceiling = %ceiling,
+                    ceiling = %authority.ceiling,
+                    mode = %authority.mode.name,
+                    granted = authority.granted,
                     // Logged as a pair so a line in the journal says who as well as what. The
                     // audit log is the shell's job; this is the runtime's own record.
                     caller_pid = who.map(|c| c.pid).unwrap_or(0),
@@ -803,7 +1118,7 @@ impl ControlRpc {
                 );
                 let id = action_id.clone();
                 let outcome = on_ui_thread(who, move |reg| {
-                    reg.act(&action, &args, expect.as_deref(), &id, &ceiling)
+                    reg.act(&action, &args, expect.as_deref(), &id, &authority)
                 })
                 .map_err(|m| ServiceError { code: -32000, message: m })?;
 
@@ -873,7 +1188,8 @@ impl App {
 fn serve_rpc(app_id: &str, action_count: usize) {
     {
         let service_id = service_id_for(app_id);
-        link_other_names(app_id);
+        let app_id = app_id.to_string();
+        link_other_names(&app_id);
         std::thread::Builder::new()
             .name(format!("{service_id}-rpc"))
             .spawn(move || {
@@ -895,7 +1211,7 @@ fn serve_rpc(app_id: &str, action_count: usize) {
                         "Control surface listening (app.describe / app.act)"
                     );
                     if let Err(e) = RpcServer::new(&address)
-                        .serve(Arc::new(ControlRpc { service_id: service_id.clone() }))
+                        .serve(Arc::new(ControlRpc { service_id: service_id.clone(), app_id }))
                         .await
                     {
                         tracing::warn!(error = %e, "Control surface stopped");
@@ -1013,9 +1329,24 @@ mod tests {
     use super::*;
 
     /// A ceiling that binds nothing, for the tests that are about everything *except* the
-    /// ceiling. The boundary has its own tests below, with the ceiling pinned per case rather
-    /// than inherited from whatever `settings.yaml` the machine running them happens to have.
+    /// boundary. The boundary has its own tests below, with the ceiling and the mode pinned per
+    /// case rather than inherited from whatever files the machine running them happens to have.
     const OPEN: &str = "dangerous";
+
+    /// Authority that binds nothing: the ceiling and the mode both at the top of the ladder.
+    fn open() -> Authority {
+        Authority { ceiling: OPEN.into(), mode: Mode::named("bypass"), granted: false }
+    }
+
+    /// A machine at `ceiling`, in a mode that asks about nothing under it: the ceiling tests.
+    fn under(ceiling: &str) -> Authority {
+        Authority { ceiling: ceiling.into(), mode: Mode::named("bypass"), granted: false }
+    }
+
+    /// An open ceiling and the mode under test, with or without a grant spent for the call.
+    fn in_mode(mode: &str, granted: bool) -> Authority {
+        Authority { ceiling: OPEN.into(), mode: Mode::named(mode), granted }
+    }
 
     #[test]
     fn service_ids_do_not_collide_with_services() {
@@ -1147,7 +1478,7 @@ mod tests {
             )],
         };
 
-        let err = reg.act("open_note", &serde_json::json!({}), None, "t#1", OPEN).unwrap_err();
+        let err = reg.act("open_note", &serde_json::json!({}), None, "t#1", &open()).unwrap_err();
         assert!(err.contains("title"), "the error must name the missing argument: {err}");
     }
 
@@ -1165,7 +1496,7 @@ mod tests {
         // The real call that exposed this: a title was passed to an action that does not take
         // one, the argument was dropped, and the caller was told the action succeeded.
         let err = reg
-            .act("open_note", &serde_json::json!({"title": "a", "colour": "red"}), None, "t#1", OPEN)
+            .act("open_note", &serde_json::json!({"title": "a", "colour": "red"}), None, "t#1", &open())
             .unwrap_err();
         assert!(err.contains("colour"), "the error must name the argument it did not know: {err}");
         assert!(err.contains("title"), "and list what it does take: {err}");
@@ -1185,13 +1516,13 @@ mod tests {
         // This is verbatim the call made on the deployed VM. It used to answer accepted:true
         // and write a note called "Untitled".
         let err = reg
-            .act("new_note", &serde_json::json!({"title": "Handover"}), None, "t#1", OPEN)
+            .act("new_note", &serde_json::json!({"title": "Handover"}), None, "t#1", &open())
             .unwrap_err();
         assert!(err.contains("takes no arguments"), "{err}");
         assert!(err.contains("title"), "{err}");
 
         // And the no-argument call it was always meant to accept still works.
-        assert!(reg.act("new_note", &serde_json::json!({}), None, "t#2", OPEN).is_ok());
+        assert!(reg.act("new_note", &serde_json::json!({}), None, "t#2", &open()).is_ok());
     }
 
     #[test]
@@ -1205,7 +1536,7 @@ mod tests {
             )],
         };
 
-        let err = reg.act("nope", &serde_json::json!({}), None, "t#1", OPEN).unwrap_err();
+        let err = reg.act("nope", &serde_json::json!({}), None, "t#1", &open()).unwrap_err();
         assert!(err.contains("open_note"), "a wrong guess should be correctable: {err}");
     }
 
@@ -1249,7 +1580,7 @@ mod tests {
     #[test]
     fn acting_never_answers_with_a_bare_success() {
         let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "Kernel answers" }), None, "notes#1", OPEN)
+            .act("rename", &serde_json::json!({ "to": "Kernel answers" }), None, "notes#1", &open())
             .unwrap();
 
         // The three things a caller has to be able to tell apart.
@@ -1275,7 +1606,7 @@ mod tests {
             )],
         };
 
-        let answer = reg.act("build", &serde_json::json!({}), None, "builder#1", OPEN).unwrap();
+        let answer = reg.act("build", &serde_json::json!({}), None, "builder#1", &open()).unwrap();
         assert_eq!(answer["accepted"], true);
         assert_eq!(answer["settled"], false, "a dispatched build has not built anything yet");
 
@@ -1296,7 +1627,7 @@ mod tests {
         let stale = View::new("Notes \u{2014} Kernel asks").with("open_note", "Kernel asks").revision();
 
         let err = notes_at("Shopping list")
-            .act("rename", &serde_json::json!({ "to": "x" }), Some(&stale), "notes#1", OPEN)
+            .act("rename", &serde_json::json!({ "to": "x" }), Some(&stale), "notes#1", &open())
             .unwrap_err();
 
         assert!(err.starts_with("STALE:"), "a caller has to be able to branch on this: {err}");
@@ -1312,7 +1643,7 @@ mod tests {
         let current = View::new("Notes \u{2014} Kernel asks").with("open_note", "Kernel asks").revision();
 
         let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), Some(&current), "notes#1", OPEN)
+            .act("rename", &serde_json::json!({ "to": "ok" }), Some(&current), "notes#1", &open())
             .unwrap();
         assert_eq!(answer["accepted"], true);
         assert_eq!(answer["result"]["renamed_to"], "ok");
@@ -1324,7 +1655,7 @@ mod tests {
         // Requiring a revision would only teach callers to echo back whatever they last saw,
         // which is a guard that always passes.
         let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", OPEN)
+            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", &open())
             .unwrap();
         assert_eq!(answer["accepted"], true);
     }
@@ -1346,7 +1677,7 @@ mod tests {
             })],
         };
 
-        let err = reg.act("go", &serde_json::json!({}), Some("0000000000000000"), "n#1", OPEN);
+        let err = reg.act("go", &serde_json::json!({}), Some("0000000000000000"), "n#1", &open());
         assert!(err.is_err());
         assert!(!ran.get(), "the handler must not have run");
     }
@@ -1377,7 +1708,7 @@ mod tests {
         let reg = delete_surface(ran.clone());
 
         let err = reg
-            .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", "sensitive")
+            .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", &under("sensitive"))
             .unwrap_err();
 
         assert!(err.starts_with("CEILING:"), "a caller has to be able to branch on this: {err}");
@@ -1395,7 +1726,7 @@ mod tests {
         // smaller mistake looks like progress toward a call that was never going to run.
         let reg = delete_surface(std::rc::Rc::new(std::cell::Cell::new(false)));
 
-        let err = reg.act("files_delete", &serde_json::json!({}), None, "shell#1", "sensitive").unwrap_err();
+        let err = reg.act("files_delete", &serde_json::json!({}), None, "shell#1", &under("sensitive")).unwrap_err();
         assert!(err.starts_with("CEILING:"), "not the missing-argument error: {err}");
         assert!(!err.contains("needs argument"), "{err}");
     }
@@ -1406,14 +1737,14 @@ mod tests {
         let ran = std::rc::Rc::new(std::cell::Cell::new(false));
         let reg = delete_surface(ran.clone());
         let answer = reg
-            .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", "dangerous")
+            .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", &under("dangerous"))
             .unwrap();
         assert_eq!(answer["accepted"], true);
         assert!(ran.get());
 
         // And the everyday case: a `standard` action under the shipped `sensitive` default.
         let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", "sensitive")
+            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", &under("sensitive"))
             .unwrap();
         assert_eq!(answer["accepted"], true);
     }
@@ -1423,7 +1754,7 @@ mod tests {
         // The setting has to actually tighten, not only refuse the graded-dangerous few: every
         // action floors at `standard`, so `safe` closes the door to programmatic callers entirely.
         let err = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", "safe")
+            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", &under("safe"))
             .unwrap_err();
         assert!(err.starts_with("CEILING:"), "{err}");
         assert!(err.contains("standard"), "the refusal names the action's own grade: {err}");
@@ -1442,7 +1773,7 @@ mod tests {
             )],
         };
 
-        let err = reg.act("nuke", &serde_json::json!({}), None, "notes#1", OPEN).unwrap_err();
+        let err = reg.act("nuke", &serde_json::json!({}), None, "notes#1", &open()).unwrap_err();
         assert!(err.starts_with("CEILING:"), "{err}");
         assert!(err.contains("not a level this OS defines"), "{err}");
     }
@@ -1512,7 +1843,7 @@ mod tests {
         REGISTRY.with(|cell| {
             let installed = cell.borrow();
             let registry = installed.as_ref().unwrap();
-            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#1", "standard").is_ok());
+            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#1", &under("standard")).is_ok());
         });
 
         assert_eq!(regrade("generate", "sensitive").unwrap(), "sensitive");
@@ -1524,11 +1855,11 @@ mod tests {
             // The same call, the same arguments, the same ceiling: refused now, and refused for the
             // grade rather than for anything about the arguments.
             let err = registry
-                .act("generate", &serde_json::json!({}), None, "studio#2", "standard")
+                .act("generate", &serde_json::json!({}), None, "studio#2", &under("standard"))
                 .unwrap_err();
             assert!(err.starts_with("CEILING:"), "{err}");
             assert!(err.contains("graded `sensitive`"), "{err}");
-            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#3", "sensitive").is_ok());
+            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#3", &under("sensitive")).is_ok());
             // And `describe` — what a caller reads before deciding — reports the new grade, so the
             // card a person is shown is the card the dispatch will enforce.
             let described = registry.describe();
@@ -1540,7 +1871,7 @@ mod tests {
         REGISTRY.with(|cell| {
             let installed = cell.borrow();
             let registry = installed.as_ref().unwrap();
-            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#4", "standard").is_ok());
+            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#4", &under("standard")).is_ok());
         });
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
         OVERRIDES.with(|cell| cell.borrow_mut().clear());
@@ -1623,7 +1954,7 @@ mod tests {
             let installed = cell.borrow();
             let registry = installed.as_ref().unwrap();
             registry
-                .act("set_backend", &serde_json::json!({}), None, "studio#1", "sensitive")
+                .act("set_backend", &serde_json::json!({}), None, "studio#1", &under("sensitive"))
                 .expect("set_backend must not take the app down")
         });
         assert_eq!(answered["accepted"], serde_json::json!(true));
@@ -1634,7 +1965,7 @@ mod tests {
             let installed = cell.borrow();
             let registry = installed.as_ref().unwrap();
             let err = registry
-                .act("generate", &serde_json::json!({}), None, "studio#2", "standard")
+                .act("generate", &serde_json::json!({}), None, "studio#2", &under("standard"))
                 .unwrap_err();
             assert!(err.starts_with("CEILING:") && err.contains("graded `sensitive`"), "{err}");
             let described = registry.describe();
@@ -1644,6 +1975,250 @@ mod tests {
 
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
         OVERRIDES.with(|cell| cell.borrow_mut().clear());
+    }
+
+    // ── The mode, and the grant ──
+
+    /// Blender's `render`, graded `sensitive`, over a flag that says whether it ran — the action
+    /// the account from inside VM 520 found running through `yos act` with no card.
+    fn render_surface(ran: std::rc::Rc<std::cell::Cell<bool>>) -> Registry {
+        Registry {
+            app_id: "blender".into(),
+            describe: Some(Box::new(|| View::new("Blender \u{2014} cube.blend"))),
+            actions: vec![(
+                Action::new("render", "Render the scene").risk("sensitive").arg(Param::text("out")),
+                Box::new(move |args| {
+                    ran.set(true);
+                    Ok(serde_json::json!({ "rendered_to": args["out"].clone() }))
+                }),
+            )],
+        }
+    }
+
+    /// The defect of #116 and #49: `blender.render` is `sensitive`, the machine was in `ask`,
+    /// and through `yos act` it ran in 1.72 s with no card and no record, because only the MCP
+    /// bridge knew the mode. The dispatch is the one function every door crosses, so it is
+    /// where the refusal has to live — and the refusal has to say how to get a grant, or a
+    /// program reading it goes looking for another door.
+    #[test]
+    fn a_sensitive_act_without_a_grant_is_refused_in_ask_mode() {
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let reg = render_surface(ran.clone());
+
+        let err = reg
+            .act("render", &serde_json::json!({"out": "x.png"}), None, "blender#1", &in_mode("ask", false))
+            .unwrap_err();
+
+        assert!(err.starts_with("GRANT:"), "a caller has to be able to branch on this: {err}");
+        assert!(err.contains("graded `sensitive`"), "the refusal names the grade: {err}");
+        assert!(err.contains("ask mode"), "and the mode it was over: {err}");
+        assert!(err.contains("request_approval") && err.contains("press Allow"), "and how to get a grant: {err}");
+        assert!(!ran.get(), "the handler must not have run");
+    }
+
+    /// On the grade alone, before the arguments — as the ceiling refuses. A caller over the
+    /// mode gets one answer whatever else is wrong with its call; otherwise fixing the smaller
+    /// mistake looks like progress toward a call that was never going to run unasked.
+    #[test]
+    fn the_mode_refuses_before_the_arguments_are_looked_at() {
+        let reg = render_surface(std::rc::Rc::new(std::cell::Cell::new(false)));
+        let err = reg.act("render", &serde_json::json!({}), None, "blender#1", &in_mode("ask", false)).unwrap_err();
+        assert!(err.starts_with("GRANT:"), "not the missing-argument error: {err}");
+        assert!(!err.contains("needs argument"), "{err}");
+    }
+
+    /// `auto` exists for routine sensitive work, and bypass says "it does not ask" on a red
+    /// panel with a countdown. A card in either would make the mode chip a lie.
+    #[test]
+    fn a_sensitive_act_runs_in_auto_mode() {
+        for mode in ["auto", "bypass"] {
+            let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+            let answer = render_surface(ran.clone())
+                .act("render", &serde_json::json!({"out": "x.png"}), None, "blender#1", &in_mode(mode, false))
+                .unwrap_or_else(|e| panic!("{mode}: {e}"));
+            assert_eq!(answer["accepted"], true, "{mode}");
+            assert!(ran.get(), "{mode}: the handler ran");
+        }
+    }
+
+    /// A grant is a person's Allow for this exact call, and that answer stands whatever the
+    /// mode — including plan, where the shell raises no card at all, so a grant there can only
+    /// have come from somewhere a person said yes.
+    #[test]
+    fn a_grant_lets_a_sensitive_act_run_in_any_mode() {
+        for mode in ["plan", "ask", "auto", "bypass"] {
+            let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+            let answer = render_surface(ran.clone())
+                .act("render", &serde_json::json!({"out": "x.png"}), None, "blender#1", &in_mode(mode, true))
+                .unwrap_or_else(|e| panic!("{mode}: {e}"));
+            assert_eq!(answer["accepted"], true, "{mode}");
+            assert!(ran.get(), "{mode}: the handler ran");
+        }
+    }
+
+    /// The everyday case has to stay everyday: a `standard` action asks nobody, in any mode.
+    /// Plan included, because the desktop's own processes cross this dispatch with `standard`
+    /// calls — every app starts its services on demand through the shell's `start_service` —
+    /// and a dispatch that refused them in plan would stop the person's desktop working the
+    /// moment they chose plan for the mind. Plan's refusal of `standard` is the bridge's.
+    #[test]
+    fn a_standard_act_needs_no_grant_in_any_mode() {
+        for mode in ["plan", "ask", "auto", "bypass"] {
+            let answer = notes_at("Kernel asks")
+                .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", &in_mode(mode, false))
+                .unwrap_or_else(|e| panic!("{mode}: {e}"));
+            assert_eq!(answer["accepted"], true, "{mode}");
+        }
+    }
+
+    /// Plan raises no card, so above the floor it refuses outright — in words that say no card
+    /// is coming, or `yos act` would promise one the shell will not put up.
+    #[test]
+    fn plan_mode_refuses_a_sensitive_act_and_says_no_card_is_coming() {
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let err = render_surface(ran.clone())
+            .act("render", &serde_json::json!({"out": "x.png"}), None, "blender#1", &in_mode("plan", false))
+            .unwrap_err();
+        assert!(err.starts_with("GRANT:") && err.contains("plan mode"), "{err}");
+        assert!(err.contains("raises no card"), "plan must not promise a card: {err}");
+        assert!(!ran.get());
+    }
+
+    /// "Allow for this session" is the person's standing answer for one action: it covers any
+    /// arguments of that action and nothing beside it — not the app's other actions, not
+    /// another app's action of the same name.
+    #[test]
+    fn a_session_rule_covers_the_action_it_names_and_no_other() {
+        let with_rule = |app: &str, action: &str| {
+            let mut mode = Mode::named("ask");
+            mode.session_rules.push((app.to_string(), action.to_string()));
+            Authority { ceiling: OPEN.into(), mode, granted: false }
+        };
+        let args = serde_json::json!({"out": "anything.png"});
+
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        render_surface(ran.clone()).act("render", &args, None, "b#1", &with_rule("blender", "render")).unwrap();
+        assert!(ran.get());
+
+        for (app, action) in [("blender", "bake"), ("studio", "render")] {
+            let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+            let err = render_surface(ran.clone())
+                .act("render", &args, None, "b#2", &with_rule(app, action))
+                .unwrap_err();
+            assert!(err.starts_with("GRANT:"), "a rule for {app}.{action} is not a rule for blender.render: {err}");
+            assert!(!ran.get());
+        }
+    }
+
+    /// The ceiling is the machine's wall and nothing reaches past it: not bypass, not a grant,
+    /// not both. The shell will not even raise a card above it, so a grant there is a grant
+    /// from a ceiling that has since been tightened — and the tightening wins.
+    #[test]
+    fn the_ceiling_still_refuses_dangerous_whatever_the_grant_or_mode() {
+        for (mode, granted) in [("bypass", false), ("ask", true), ("bypass", true)] {
+            let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+            let authority = Authority { ceiling: "sensitive".into(), mode: Mode::named(mode), granted };
+            let err = delete_surface(ran.clone())
+                .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", &authority)
+                .unwrap_err();
+            assert!(err.starts_with("CEILING:"), "{mode}, granted={granted}: {err}");
+            assert!(!ran.get(), "{mode}, granted={granted}: the handler must not have run");
+        }
+    }
+
+    /// `describe` takes no authority — the signature is the proof — and it reports the grade a
+    /// call would be asked for, so a caller can see the cost before paying it.
+    #[test]
+    fn describe_needs_nothing() {
+        let described = render_surface(std::rc::Rc::new(std::cell::Cell::new(false))).describe();
+        assert_eq!(described["actions"][0]["name"], serde_json::json!("render"));
+        assert_eq!(described["actions"][0]["permission"], serde_json::json!("sensitive"));
+    }
+
+    /// A stand-in for the shell's store: `fresh-*` ids are grants that hold once, for exactly
+    /// `blender.render {"out": "x.png"}`; anything else is refused in the shell's own words.
+    /// Installed once per test binary, because the spender is process-wide as the shell's is,
+    /// and only by the tests that spend — every other test never attaches a grant.
+    fn spend_through_a_stand_in_shell() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
+            spend_grants_with(move |id, app, action, args| {
+                if !id.starts_with("fresh-") {
+                    return Err(format!("no approval request `{id}` — it may have been dropped when the shell restarted. Ask again."));
+                }
+                if app != "blender" || action != "render" || *args != serde_json::json!({"out": "x.png"}) {
+                    return Err(format!(
+                        "`{id}` was approved for `blender.render` with arguments {{\"out\":\"x.png\"}}, and this call carries {args}. Nothing was authorised."
+                    ));
+                }
+                let mut spent = spent.lock().unwrap_or_else(|e| e.into_inner());
+                if !spent.insert(id.to_string()) {
+                    return Err(format!("`{id}` was already used. A grant authorises one action once; this second use authorises nothing."));
+                }
+                Ok(())
+            });
+        });
+    }
+
+    /// A grant is spent on the RPC thread, before anything reaches the UI thread: a spent one,
+    /// one bound to other arguments, and one that never existed each end the call there, with
+    /// the shell's reason in the refusal. Without this, "with a grant it runs" would be "with
+    /// any string called grant it runs".
+    #[test]
+    fn a_spent_or_wrong_grant_is_refused_before_anything_is_dispatched() {
+        spend_through_a_stand_in_shell();
+        let args = serde_json::json!({"out": "x.png"});
+
+        let first = authority_for("blender", "render", &args, Some("fresh-1")).expect("a fresh grant holds");
+        assert!(first.granted);
+
+        let err = authority_for("blender", "render", &args, Some("fresh-1")).unwrap_err();
+        assert!(err.starts_with("GRANT:") && err.contains("already used"), "replayed: {err}");
+
+        let err = authority_for("blender", "render", &serde_json::json!({"out": "y.png"}), Some("fresh-2")).unwrap_err();
+        assert!(err.starts_with("GRANT:") && err.contains("this call carries"), "swapped: {err}");
+
+        let err = authority_for("blender", "render", &args, Some("made-up")).unwrap_err();
+        assert!(err.starts_with("GRANT:") && err.contains("no approval request"), "invented: {err}");
+
+        // No grant at all is not a refusal: it is a call for the mode to judge.
+        assert!(!authority_for("blender", "render", &args, None).unwrap().granted);
+    }
+
+    /// Same file, same shape as the shell writes (see `mind_mode::policy_json`), and the same
+    /// fallback as the bridge: anything unreadable is `ask`, never something looser. The
+    /// shell's own test drives its writer through this reader.
+    #[test]
+    fn the_mode_comes_from_the_file_the_shell_writes() {
+        let now = 1_800_000_000;
+        assert_eq!(mode_from(r#"{"mode":"auto","session_rules":[]}"#, now).name, "auto");
+        let with_rule = mode_from(
+            r#"{"mode":"ask","session_rules":[{"app":"calendar","action":"move_event"}]}"#,
+            now,
+        );
+        assert_eq!(with_rule.name, "ask");
+        assert_eq!(with_rule.session_rules, vec![("calendar".to_string(), "move_event".to_string())]);
+
+        // Missing, empty, not JSON, or a mode this OS does not define: `ask`.
+        for text in ["", "{}", "mode: auto", r#"{"mode":"yolo"}"#, r#"{"mode":"BYPASS"}"#] {
+            assert_eq!(mode_from(text, now).name, DEFAULT_MODE, "{text:?}");
+        }
+
+        // A bypass with an end honours it: live before, back to what it was after — and a
+        // "previous" of bypass, which the shell never writes, comes back as `ask`.
+        let bypass = format!(r#"{{"mode":"bypass","previous":"auto","bypass_expires_unix":{}}}"#, now + 60);
+        assert_eq!(mode_from(&bypass, now).name, "bypass");
+        assert_eq!(mode_from(&bypass, now + 60).name, "auto");
+        let odd = format!(r#"{{"mode":"bypass","previous":"bypass","bypass_expires_unix":{}}}"#, now);
+        assert_eq!(mode_from(&odd, now).name, DEFAULT_MODE);
+        assert_eq!(mode_from(r#"{"mode":"bypass","previous":"ask","bypass_expires_unix":null}"#, now).name, "bypass");
+
+        // And each mode's column of the table: what it runs unasked.
+        for (mode, top) in MODES {
+            assert_eq!(LADDER[Mode::named(mode).allows()], top, "{mode}");
+        }
+        assert_eq!(LADDER[Mode::named("yolo").allows()], "standard", "an unknown mode reads as ask");
     }
 
     // ── Who is calling ──

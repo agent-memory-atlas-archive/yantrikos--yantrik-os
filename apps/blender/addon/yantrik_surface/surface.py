@@ -8,9 +8,13 @@ that drift.
 
 The order of dispatch, exactly as `Registry::act` runs it:
 
+  0. a grant, when the call carries one, is spent through the shell (said as GRANT when it
+     does not hold) — before anything else, as the runtime spends it on its RPC thread;
   1. unknown action;
   2. an action graded off the ladder (a bug, said as CEILING);
   3. an action above this machine's ceiling (a policy, said as CEILING);
+  3b. an action above what the desktop's mind mode runs unasked, with no grant and no session
+     rule (a policy, said as GRANT — issue #116);
   4. a missing required argument;
   5. an argument the action does not take;
   6. STALE — the caller acted on a revision the app has moved past;
@@ -24,10 +28,18 @@ can move the scene between "is this revision current" and "here is what your act
 The ceiling is read per call from `tool_permission` in ~/.config/yantrik/settings.yaml,
 defaulting to `sensitive` exactly like the runtime: a missing or malformed setting is a
 machine that has not said `dangerous` is allowed, not one that has.
+
+The mode is read per call from `mind-mode.json` beside it, which the shell writes, defaulting
+to `ask` exactly like the runtime. This app is where issue #116 was found: `blender.render`
+through the MCP bridge raised a card, and through `yos act` it ran in 1.72 s with nobody asked,
+because the mode lived only in the bridge. It lives in every dispatch now, this one included.
 """
 
+import json
 import os
+import socket
 import threading
+import time
 
 from . import wire
 from .bridge import BridgeTimeout
@@ -36,6 +48,18 @@ from .scene import Refusal
 LADDER = ("safe", "standard", "sensitive", "dangerous")
 DEFAULT_CEILING = "sensitive"
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".config", "yantrik", "settings.yaml")
+
+# The mode, as `control::MODES` / `MODE_FILE` / `DEFAULT_MODE` / `SOCKET_FLOOR` have it: what each
+# mode runs without a grant, the file the shell publishes it in, what an unreadable file means,
+# and the grade every mode runs unasked on a socket (the desktop's own processes call `standard`
+# actions to work at all — see the runtime's `SOCKET_FLOOR` for why plan's `safe` is the
+# bridge's to enforce, not the dispatch's).
+MODES = {"plan": "safe", "ask": "standard", "auto": "sensitive", "bypass": "dangerous"}
+MODE_FILE = "mind-mode.json"
+DEFAULT_MODE = "ask"
+SOCKET_FLOOR = "standard"
+# One hop to the shell's UI thread and back, as the runtime's `GRANT_ROUNDTRIP`.
+GRANT_ROUNDTRIP = 5.0
 
 # How long the main thread gets per kind of turn. A render is the outlier by design: the
 # honest timeout for "draw this scene" is "however long the scene takes", and 30 minutes is
@@ -215,7 +239,8 @@ class Surface:
     ceiling, revision guard, wording — is all here, and all of it ported.
     """
 
-    def __init__(self, scene, bridge, app_id="blender", settings_path=None):
+    def __init__(self, scene, bridge, app_id="blender", settings_path=None, mode_path=None,
+                 spend_grant=None):
         self.scene = scene
         self.bridge = bridge
         self.app_id = app_id
@@ -223,6 +248,11 @@ class Surface:
         self.actions = ACTIONS
         self._by_name = {a.name: a for a in ACTIONS}
         self._settings_path = settings_path or SETTINGS_PATH
+        self._mode_path = mode_path or os.path.join(
+            os.path.dirname(self._settings_path), MODE_FILE)
+        # How a grant is spent: through the shell's `consume_approval`, unless a test hands in
+        # a stand-in for the shell's store.
+        self._spend_grant = spend_grant or spend_through_shell
         self._counter_lock = threading.Lock()
         self._action_counter = 0
 
@@ -265,6 +295,22 @@ class Surface:
         if expect_revision is not None and not isinstance(expect_revision, str):
             expect_revision = str(expect_revision)
 
+        # 0. A grant, spent before anything else — the runtime spends it in `authority_for`, on
+        # the RPC thread, before the dispatch reaches the main thread. A grant checked after the
+        # dispatch had begun would be a window in which one grant covers two calls.
+        grant = params.get("grant")
+        grant = grant.strip() if isinstance(grant, str) else ""
+        granted = False
+        if grant:
+            try:
+                self._spend_grant(grant, self.app_id, name, args)
+            except GrantRefused as why:
+                self._refuse(
+                    "GRANT: `%s` does not authorise %s.%s — %s Nothing was run; a grant covers "
+                    "one action, once, with the arguments the person was shown."
+                    % (grant, self.app_id, name, why))
+            granted = True
+
         # 1. Unknown action.
         spec = self._by_name.get(name)
         if spec is None:
@@ -287,6 +333,15 @@ class Surface:
                 "An action at that grade needs a person to authorise it directly — raise "
                 "the ceiling in Settings if that is the intent."
                 % (self.app_id, name, spec.permission, ceiling))
+
+        # 3b. Above what the mode runs unasked, with no grant and no session rule: the refusal
+        # that says how to get one. After the ceiling — nothing reaches past that — and before
+        # the arguments, as the ceiling is.
+        mode, rules = self.configured_mode()
+        unasked = max(LADDER.index(MODES[mode]), LADDER.index(SOCKET_FLOOR))
+        if (LADDER.index(spec.permission) > unasked and not granted
+                and (self.app_id, name) not in rules):
+            self._refuse(grant_refusal(self.app_id, name, spec.permission, mode))
 
         # 4. Missing required arguments, in schema order.
         for p in spec.params:
@@ -364,6 +419,20 @@ class Surface:
             self._action_counter += 1
             return "%s#%d" % (self.service_id, self._action_counter)
 
+    def configured_mode(self, now=None):
+        """`configured_mode()` / `mode_from()` in Python: `(mode, session_rules)`.
+
+        Anything unreadable is `ask`, never something looser. A bypass whose deadline has
+        passed reads as the mode before it, so a shell that died mid-bypass does not leave
+        this app trusting it past the minute the person was promised.
+        """
+        try:
+            with open(self._mode_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            return DEFAULT_MODE, set()
+        return mode_from(text, time.time() if now is None else now)
+
     def configured_ceiling(self):
         """`ceiling_from()` in Python: the first `tool_permission:` line wins; a value off
         the ladder, a missing file or an unreadable one all fall back to `sensitive`."""
@@ -377,3 +446,67 @@ class Surface:
         except OSError:
             pass
         return DEFAULT_CEILING
+
+
+# ── the mode, and the grant ──────────────────────────────────────────────────
+
+
+class GrantRefused(Exception):
+    """The shell would not spend a grant; the message is the shell's own sentence."""
+
+
+def mode_from(text, now):
+    """`control::mode_from` in Python: what the shell wrote, read the way every app reads it."""
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return DEFAULT_MODE, set()
+    if not isinstance(doc, dict):
+        return DEFAULT_MODE, set()
+    mode = doc.get("mode") if isinstance(doc.get("mode"), str) else ""
+    if mode not in MODES:
+        mode = DEFAULT_MODE
+    if mode == "bypass":
+        until = doc.get("bypass_expires_unix")
+        if isinstance(until, int) and not isinstance(until, bool) and now >= until:
+            previous = doc.get("previous")
+            mode = previous if previous in MODES and previous != "bypass" else DEFAULT_MODE
+    rules = set()
+    for rule in doc.get("session_rules") or []:
+        if isinstance(rule, dict) and isinstance(rule.get("app"), str) \
+                and isinstance(rule.get("action"), str):
+            rules.add((rule["app"], rule["action"]))
+    return mode, rules
+
+
+def grant_refusal(app, action, graded, mode):
+    """`control::grant_refusal` in Python, to the punctuation."""
+    if mode == "plan":
+        return ("GRANT: %s.%s is graded `%s` and this machine is in plan mode, which raises no "
+                "card for anything above `%s` — so it was not run. Say what you would do and let "
+                "the person decide; they switch the mode from the chip in the status bar."
+                % (app, action, graded, SOCKET_FLOOR))
+    allowed = LADDER[max(LADDER.index(MODES[mode]), LADDER.index(SOCKET_FLOOR))]
+    return ("GRANT: %s.%s is graded `%s` and this machine is in %s mode, which runs nothing "
+            "above `%s` without asking — so it was not run. Ask the shell for approval first "
+            "(`request_approval` with this app, action and these exact arguments, poll "
+            "`approval_status`, then send the granted request_id as `grant` on app.act — "
+            "`yos act` does all of that for you), or have the person at the machine press Allow "
+            "when the card appears." % (app, action, graded, mode, allowed))
+
+
+def spend_through_shell(grant, app, action, args):
+    """Burn `grant` for exactly `app.action(args)` through the shell's `consume_approval`.
+
+    The runtime's `spend_grant`: the check is the shell's — granted, unspent, unexpired, bound
+    to this app, this action and these arguments — and a refusal carries the shell's sentence.
+    """
+    try:
+        reply = wire.call_once(wire.default_socket_path("shell"), "app.act", {
+            "action": "consume_approval",
+            "args": {"request_id": grant, "app": app, "action": action, "args_json": args},
+        }, timeout=GRANT_ROUNDTRIP)
+    except (OSError, ValueError) as e:
+        raise GrantRefused("the shell could not be asked to spend it (%s)." % e)
+    if "error" in reply:
+        raise GrantRefused((reply["error"] or {}).get("message", "the shell refused it."))
