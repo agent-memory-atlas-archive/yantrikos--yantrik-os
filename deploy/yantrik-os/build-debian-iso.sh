@@ -140,7 +140,7 @@ echo
 
 # ── Verify prerequisites ──
 MISSING=""
-for cmd in debootstrap xorriso mksquashfs grub-mkrescue; do
+for cmd in debootstrap xorriso mksquashfs grub-mkrescue setcap getcap; do
     command -v "$cmd" &>/dev/null || MISSING="$MISSING $cmd"
 done
 if [ -n "$MISSING" ]; then
@@ -367,6 +367,20 @@ tar --zstd -xf "$RELEASE_TARBALL" -C "$UNPACK" --strip-components=1 \
 sudo mkdir -p "$ROOTFS/opt/yantrik/bin" "$ROOTFS/opt/yantrik/models"
 sudo cp -a "$UNPACK/bin/." "$ROOTFS/opt/yantrik/bin/"
 sudo chmod +x "$ROOTFS/opt/yantrik/bin/"*
+
+# perception-service is the one program here that needs privilege, and only for two calls at
+# startup: `fanotify_init` (CAP_SYS_ADMIN) and joining the process connector (CAP_NET_ADMIN).
+# It then applies Landlock and drops every capability, irreversibly - main.rs explains the
+# ordering and why each step is load-bearing. Nothing granted them: the shell starts it as the
+# user, so `fanotify_init` failed and the service came up on PSI alone, and `os_perception`
+# answered fourteen requests with one apology. File capabilities on the binary are the grant:
+# the kernel raises them on exec whoever runs it, the service hands them back before it serves,
+# and no other binary in bin/ carries any. mksquashfs keeps xattrs and yantrik-install.sh copies
+# with rsync -X, so they survive into the image and onto the disk.
+sudo setcap cap_sys_admin,cap_net_admin=ep "$ROOTFS/opt/yantrik/bin/perception-service" \
+    || fail "setcap failed on perception-service"
+sudo getcap "$ROOTFS/opt/yantrik/bin/perception-service" | grep -q cap_sys_admin \
+    || fail "perception-service carries no file capabilities after setcap - the image would ship it blind"
 
 # The session's own furniture: compositor config, theme, fonts, desktop entries. `yantrik-session`
 # installs these into the person's session at every login. The image used to leave them out and
@@ -1177,7 +1191,7 @@ sudo cp "$INITRD" "$ISO_DIR/live/initrd"
 # ── Create squashfs ──
 info "Compressing rootfs (this takes a while)..."
 sudo mksquashfs "$ROOTFS" "$ISO_DIR/live/filesystem.squashfs" \
-    -comp xz -Xbcj x86 -noappend -quiet \
+    -comp xz -Xbcj x86 -noappend -quiet -xattrs \
     -e "$ROOTFS/boot/vmlinuz-*" \
     -e "$ROOTFS/boot/initrd.img-*"
 
