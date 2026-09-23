@@ -3,6 +3,7 @@ mod production_models;
 mod files_tests;
 mod settings_tests;
 mod agents_tests;
+mod mind_panel_tests;
 use slint::{
     platform::{
         software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
@@ -30,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-settings") { return settings_tests::run(&window, output, width, height); }
     if args.iter().any(|a| a == "verify-files") { return files_tests::run(&window); }
     if args.iter().any(|a| a == "verify-agents") { return agents_tests::run(&window, output); }
+    if args.iter().any(|a| a == "verify-mind-panel") { return mind_panel_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-idle") {
         let probe = TerminalProbe::new()?;
         probe.show()?;

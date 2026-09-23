@@ -537,6 +537,9 @@ pub fn publish(
                 // replace the cards with something, or `auto` is only a quieter way of not
                 // knowing. See `mind_mode`'s audit section.
                 .with("mind_audit_recent", crate::control_approvals::mind_audit_for_describe())
+                // The mind panel at the right edge: where it is, whether it is open, the choice
+                // each place keeps, and how much it is showing. `set_mind_panel` changes it.
+                .with("mind_panel", crate::mind_panel::for_describe(&ui))
                 // Whether the credential vault is actually protected, and when it is not, why.
                 //
                 // Published because the honest answer on most machines is "no", and a machine
@@ -678,6 +681,7 @@ pub fn publish(
     let pin_ui = ui_for.clone();
     let pin_catalogue = ctx.installed_apps.clone();
     let read_ui = ui_for.clone();
+    let panel_ui = ui_for.clone();
     let lock_ui = ui_for;
 
     let surface = ControlSurface::new("shell")
@@ -1322,6 +1326,35 @@ pub fn publish(
             },
         )
         .action(
+            // The mind panel's chevron, for a caller. `safe`: it changes how much of one panel is
+            // drawn and remembers that in the panel's own file; nothing is sent, run or granted.
+            // Settles on return: the file is written first and the screen after, so an error
+            // means the panel is as the caller found it.
+            Action::new(
+                "set_mind_panel",
+                "Open the mind panel at the right edge, or fold it to its strip. Kept across restarts, one choice for the desktop and one for everywhere else",
+            )
+            .risk("safe")
+            .arg(Param::flag("expanded").describe("true to open the panel, false for the strip"))
+            .arg(
+                Param::text("where")
+                    .describe("`desktop` or `elsewhere`. Left out, wherever the shell is now")
+                    .optional(),
+            ),
+            move |args| {
+                let ui = panel_ui()?;
+                let expanded = args["expanded"].as_bool().ok_or("`expanded` must be true or false")?;
+                let place = match args["where"].as_str().map(str::trim).filter(|w| !w.is_empty()) {
+                    Some(w) => crate::mind_panel::Place::parse(w)
+                        .ok_or_else(|| format!("`where` is `desktop` or `elsewhere`, not `{w}`"))?,
+                    None => crate::mind_panel::Place::of_screen(ui.get_current_screen()),
+                };
+                crate::mind_panel::set(&ui, place, expanded)?;
+                // Read back, the way `pin_app` answers with the pinned list.
+                Ok(crate::mind_panel::for_describe(&ui))
+            },
+        )
+        .action(
             // Locking is not a view change: the person has to type their way back in. It gets its
             // own action and its own risk rather than hiding inside `show_screen`.
             Action::new("lock", "Lock the session").risk("sensitive"),
@@ -1743,9 +1776,13 @@ mod bond_not_loaded_tests {
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
     }
 
-    /// The Slint side: the default the property starts with, and what the rail draws from it.
+    /// The Slint side: the default the property starts with, and no screen inventing a level.
+    ///
+    /// The machine rail's Bond row, which this test used to read too, went with the rail's
+    /// companion section when the mind panel replaced it; the bond is on the Bond screen and in
+    /// `describe shell`, both of which read `loaded` (the describe half is the test below).
     #[test]
-    fn before_the_first_push_the_rail_says_not_loaded_not_stranger() {
+    fn before_the_first_push_nothing_says_stranger() {
         let app = slint("app.slint");
         let start = app
             .find("in property <BondData> bond-data: {")
@@ -1760,16 +1797,7 @@ mod bond_not_loaded_tests {
             "the default is not a level anybody measured; it must not name one. As written:\n{default}"
         );
 
-        let rail = slint("components/machine_rail.slint");
-        let bond_row = rail
-            .find("key: \"Bond\"")
-            .map(|i| &rail[i..i + rail[i..].find('}').unwrap_or(rail.len() - i)])
-            .expect("the machine rail has a Bond row");
-        assert!(
-            bond_row.contains("bond-loaded"),
-            "the rail's Bond row must consult whether the bond is loaded before drawing a level. As written:\n{bond_row}"
-        );
-        for file in ["components/machine_rail.slint", "desktop.slint"] {
+        for file in ["components/mind_panel.slint", "desktop.slint", "bond.slint"] {
             assert!(
                 !slint(file).contains("bond-level: \"Stranger\""),
                 "{file} still defaults the level to Stranger — the made-up value the rail showed for the window between boot and the first push"

@@ -35,7 +35,7 @@ import { ToastBanner, ToastData, ToastActionData } from "components/toast_banner
 import { ProblemReportScreen, ProblemRow } from "problem_report.slint";
 // Agents (screen 34), and the window one agent pops out into. The window and the global it reads
 // are exported so the shell can create a window per agent and fill each one.
-import { AgentsScreen } from "agents.slint";
+import { AgentsScreen, AgentsState } from "agents.slint";
 export { AgentWindow, AgentsState, AgentTabData, AgentRowData, AgentRunData, AgentItemData, AgentHeaderData, AgentDetailsData, AgentMindData } from "agents.slint";
 import { CommandItem } from "components/command_palette.slint";
 import { ContentBlock, MessageData } from "components/message_bubble.slint";
@@ -50,7 +50,9 @@ import { AppGridItem } from "components/app_grid.slint";
 import { WindowItem } from "components/window_switcher.slint";
 import { DockItem } from "components/app_dock.slint";
 import { CategoryItem } from "components/app_grid.slint";
-import { ServiceItem } from "components/machine_rail.slint";
+// The mind panel: shell furniture at the right edge, instantiated below beside the taskbar.
+import { ServiceItem, MindPanel, MindPanelState, MindPanelNow, MindPanelAgent, MindPanelRecipe, MindPanelAct } from "components/mind_panel.slint";
+export { MindPanelState, MindPanelNow, MindPanelAgent, MindPanelRecipe, MindPanelAct }
 import { WindowFrame } from "components/window_frame.slint";
 import { YSidebarItem, YSidebarSection } from "components/y_sidebar.slint";
 import { YTabItem } from "components/y_tabs.slint";
@@ -181,6 +183,35 @@ export component App inherits Window {
     callback mind-mode-chosen(string);
     callback mind-bypass-chosen(string);
     callback mind-rule-revoked(string, string);
+
+    // ── The mind panel: where it is drawn, how open, and the room it takes ──
+    //
+    // Furniture, like the status bar and the taskbar: on every screen the taskbar is on, and the
+    // room it takes is taken on every one of those screens — the desktop insets its content by it
+    // and a maximized shell window stops short of it. The machine rail it replaces was declared in
+    // desktop.slint and so existed on one screen only; that mistake is not repeated here.
+    //
+    // Open on the desktop, the strip everywhere else, until the person chooses otherwise; each
+    // place keeps its own choice (MindPanelState, filled from ~/.config/yantrik/mind-panel.json by
+    // crates/yantrik-ui/src/mind_panel.rs). Focus mode keeps it to the strip.
+    property <bool> mind-panel-shown: root.current-screen == 1
+        || (root.current-screen >= 4 && root.current-screen <= 31)
+        || root.current-screen == 33 || root.current-screen == 34;
+    property <bool> mind-panel-open: root.mind-panel-shown
+        && !(root.current-screen == 1 && root.focus-mode)
+        && (root.current-screen == 1 ? MindPanelState.desktop-expanded : MindPanelState.elsewhere-expanded);
+    // Below this width the open card floats over the screen instead of taking its room, so a
+    // compact display keeps its working area and can still open the panel to look.
+    property <bool> mind-panel-docks: root.width >= 1100px;
+    // 302 for the card and 16 either side of it; 44 for the strip.
+    property <length> mind-panel-reserve: !root.mind-panel-shown ? 0px
+        : root.mind-panel-open && root.mind-panel-docks ? 334px : 44px;
+    // The desktop's own overlays use the right edge too — the Lens docks there — so the panel
+    // steps out of the way while one is up rather than drawing over it. Its room is kept, so
+    // nothing underneath moves.
+    property <bool> mind-panel-covered: root.current-screen == 1
+        && (root.lens-open || root.app-grid-open || root.quick-settings-open || root.power-menu-open
+            || root.window-switcher-open || root.command-palette-open || root.clip-panel-open);
 
     // Desktop state
     in property <[UrgeCardData]> urges: [];
@@ -1363,18 +1394,9 @@ export component App inherits Window {
             width: 100%; height: 100%;
             agent-mode: root.agent-mode;
             ambient-interval-ms: root.ambient-interval-ms;
-            bar-cpu-percent: root.bar-cpu-percent;
-            bar-mem-text: root.bar-mem-text;
+            // The room the mind panel takes at the right edge (see `mind-panel-reserve`).
+            right-inset: root.mind-panel-reserve;
             date-text: root.date-text;
-            bar-mem-percent: root.bar-mem-percent;
-            bar-swap-percent: root.bar-swap-percent;
-            bar-swap-text: root.bar-swap-text;
-            bar-disk-percent: root.bar-disk-percent;
-            bar-disk-text: root.bar-disk-text;
-            services: root.services;
-            bond-loaded: root.bond-data.loaded;
-            bond-level: root.bond-data.bond-level;
-            bond-score: root.bond-data.bond-score;
             grid-categories: root.grid-categories;
             grid-active-category: root.grid-active-category;
             grid-category-selected(id) => { root.grid-category-selected(id); }
@@ -1395,12 +1417,10 @@ export component App inherits Window {
             wallpaper-image: root.wallpaper-image;
             // V61 — AI privacy mode
             ai-privacy-mode: root.ai-privacy-mode;
-            ai-provider-label: root.ai-active-provider-label;
             ai-fallback-banner: root.ai-fallback-banner;
             ai-privacy-clicked => { root.ai-quick-switcher-open = !root.ai-quick-switcher-open; }
             active-harness-id: root.active-harness-id;
             active-harness-name: root.active-harness-name;
-            active-harness-detail: root.active-harness-detail;
             // Straight to the section, not to the front door of Settings.
             active-mind-clicked => {
                 root.settings-category = 8;
@@ -1440,7 +1460,6 @@ export component App inherits Window {
             urges: root.urges;
             // Whisper Cards
             whisper-cards: root.whisper-cards;
-            whisper-hint-count: root.whisper-hint-count;
             whisper-card-dismissed(id) => { root.whisper-card-dismissed(id); }
             whisper-card-action(id) => { root.whisper-card-action(id); }
             whisper-hint-clicked => { root.whisper-hint-clicked(); }
@@ -1509,7 +1528,7 @@ export component App inherits Window {
             content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -1559,7 +1578,7 @@ export component App inherits Window {
             content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -1614,7 +1633,7 @@ export component App inherits Window {
             content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -1666,7 +1685,7 @@ export component App inherits Window {
         if current-screen == 7 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -1829,7 +1848,7 @@ export component App inherits Window {
         if current-screen == 8 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -1941,7 +1960,7 @@ export component App inherits Window {
             content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2000,7 +2019,7 @@ export component App inherits Window {
             content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2069,7 +2088,7 @@ export component App inherits Window {
             content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2153,7 +2172,7 @@ export component App inherits Window {
             content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2258,7 +2277,7 @@ export component App inherits Window {
         if current-screen == 13 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2334,7 +2353,7 @@ export component App inherits Window {
             content-has-controls: true;
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2411,7 +2430,7 @@ export component App inherits Window {
         if current-screen == 21 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2485,7 +2504,7 @@ export component App inherits Window {
         if current-screen == 27 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2547,7 +2566,7 @@ export component App inherits Window {
         if current-screen == 28 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2613,7 +2632,7 @@ export component App inherits Window {
         if current-screen == 33 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2655,7 +2674,7 @@ export component App inherits Window {
         if current-screen == 34 : WindowFrame {
             x: root.window-maximized ? 0px : root.window-x;
             y: root.window-maximized ? Theme.status-bar-height : root.window-y;
-            width: root.window-maximized ? parent.width : root.window-w;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
             height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
             is-maximized <=> root.window-maximized;
             win-x <=> root.window-x;
@@ -2803,6 +2822,67 @@ export component App inherits Window {
             // The glow hint that used to sit here belonged to the auto-hide dock: a thin line
             // teasing that something was down there. Nothing is hidden any more, so there is
             // nothing to hint at.
+        }
+
+        // ── The mind panel, at the right edge of every screen the taskbar is on ──
+        //
+        // Declared here, with the status bar and the taskbar, and not in desktop.slint: furniture
+        // declared inside one screen exists on that screen only while its room is reserved on all
+        // of them (the taskbar and the status bar both had that bug). After the screens, so it
+        // draws over them; before the overlays below, so a card, a toast or the mode menu draws
+        // over it. Between the two bars: the compositor's own margins (config/labwc/rc.xml, top 32
+        // and bottom 40) are the bars', and this stays inside them.
+        if root.mind-panel-shown : MindPanel {
+            width: root.mind-panel-open ? 334px : 44px;
+            x: parent.width - self.width;
+            y: Theme.status-bar-height;
+            height: parent.height - Theme.status-bar-height - Theme.taskbar-height;
+            visible: !root.mind-panel-covered;
+            open: root.mind-panel-open;
+            agent-mode: root.agent-mode;
+            ambient-interval-ms: root.ambient-interval-ms;
+            // The chip's own data, not a copy of it: the panel and the status bar cannot disagree.
+            mode: root.mind-mode;
+            mode-label: root.mind-mode-label;
+            ceiling: root.mind-ceiling;
+            cpu-percent: root.bar-cpu-percent;
+            mem-percent: root.bar-mem-percent;
+            mem-text: root.bar-mem-text;
+            swap-percent: root.bar-swap-percent;
+            swap-text: root.bar-swap-text;
+            disk-percent: root.bar-disk-percent;
+            disk-text: root.bar-disk-text;
+            toggle(open) => {
+                MindPanelState.set-expanded(root.current-screen == 1 ? "desktop" : "elsewhere", open);
+            }
+            // Into the Agents screen with that agent selected, on the Active tab it is listed in.
+            open-agent(id) => {
+                root.current-screen = 34;
+                root.navigate(34);
+                AgentsState.select-tab("active");
+                AgentsState.select(id);
+            }
+            open-agents => {
+                root.current-screen = 34;
+                root.navigate(34);
+            }
+            // Straight to Settings > Harnesses, as the status bar's mind chip does.
+            open-mind => {
+                root.settings-category = 8;
+                root.current-screen = 7;
+                root.navigate(7);
+            }
+            open-mode => {
+                root.mind-menu-open = !root.mind-menu-open;
+                root.mind-menu-confirming = false;
+                root.mind-menu-audit-open = false;
+            }
+            // The full list the rows are the head of: the mode menu's audit.
+            open-audit => {
+                root.mind-menu-open = true;
+                root.mind-menu-confirming = false;
+                root.mind-menu-audit-open = true;
+            }
         }
 
         // Voice overlay

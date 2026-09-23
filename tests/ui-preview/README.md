@@ -99,3 +99,17 @@ window beside the output path.
 ```sh
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/agents.png 1280 800 verify-agents
 ```
+
+## Mind panel
+
+`verify-mind-panel` draws the whole shell — app.slint's `App`, every screen, the status bar,
+the taskbar and the mind panel — from fixture data (two agents, one waiting for the person, a
+recipe in flight, three recent actions; the names are fixtures, not a running machine) and sends
+real pointer events: an agent's row opens the Agents screen on the Active tab with that agent
+selected, the strip is present over the Agents and Files screens and opens the panel there, and
+the chevron folds it. It writes the desktop (dark, light, agent mode, and with nothing known yet)
+and the Agents screen with the strip and with the panel open, beside the output path.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/mind-panel.png 1280 800 verify-mind-panel
+```

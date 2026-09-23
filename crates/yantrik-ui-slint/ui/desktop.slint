@@ -36,7 +36,6 @@ import { QuickSettings } from "components/quick_settings.slint";
 import { ClipboardPanel, ClipboardEntryData } from "components/clipboard_panel.slint";
 import { PowerMenu } from "components/power_menu.slint";
 import { AppGrid, AppGridItem, CategoryItem } from "components/app_grid.slint";
-import { MachineRail, ServiceItem } from "components/machine_rail.slint";
 import { WindowSwitcher, WindowItem } from "components/window_switcher.slint";
 import { CommandPalette, CommandItem } from "components/command_palette.slint";
 import { MorningBriefCard, BriefSection } from "components/morning_brief.slint";
@@ -58,19 +57,12 @@ export component DesktopScreen inherits Rectangle {
     in property <int> pending-count: 0;
     in property <bool> settings-incognito-mode: false;
     in property <bool> dnd-mode: false;
-    // Panel readouts — load from the observer poll, date from the clock timer
-    in property <int> bar-cpu-percent: 0;
-    in property <string> bar-mem-text: "";
+    // The date, from the clock timer. The load readouts, the services and the bond went with the
+    // machine rail: the mind panel (app.slint) holds the right edge on every screen now.
     in property <string> date-text: "";
-    in property <int> bar-mem-percent: 0;
-    in property <int> bar-swap-percent: 0;
-    in property <string> bar-swap-text: "";
-    in property <int> bar-disk-percent: 0;
-    in property <string> bar-disk-text: "";
-    in property <[ServiceItem]> services: [];
-    in property <bool> bond-loaded: false;
-    in property <string> bond-level: "";
-    in property <float> bond-score: 0.0;
+    // The room the mind panel takes at the right edge. Everything on this screen that used to
+    // measure itself against the rail measures against this instead.
+    in property <length> right-inset: 0px;
     // Launcher categories
     in property <[CategoryItem]> grid-categories: [];
     in property <string> grid-active-category: "all";
@@ -129,7 +121,6 @@ export component DesktopScreen inherits Rectangle {
 
     // Whisper Cards (floating notifications)
     in property <[WhisperCardItem]> whisper-cards: [];
-    in property <int> whisper-hint-count: 0;
     callback whisper-card-dismissed(string);
     callback whisper-card-action(string);
     callback whisper-hint-clicked();
@@ -196,13 +187,11 @@ export component DesktopScreen inherits Rectangle {
 
     // V61 — AI privacy indicator state
     in property <string> ai-privacy-mode: "local";
-    in property <string> ai-provider-label: "";
     in property <string> ai-fallback-banner: "";
     callback ai-privacy-clicked();
 
     in property <string> active-harness-id: "";
     in property <string> active-harness-name: "";
-    in property <string> active-harness-detail: "";
     callback active-mind-clicked();
 
     // Callbacks
@@ -218,11 +207,12 @@ export component DesktopScreen inherits Rectangle {
     // How much room the hero takes at the top of the centre column. One number, because the
     // ask bar and the column below it both have to start under it.
     property <length> hero-h: 84px;
-    // Rails yield to the working area on laptop and compact displays.
+    // The work rail yields to the working area on laptop and compact displays.
     property <bool> show-work-rail: root.width >= 1360px && (root.active-project != "" || root.lens-recents.length > 0);
-    property <bool> show-machine-rail: root.width >= 1360px;
-    property <length> content-left: root.show-work-rail ? 316px : max(24px, (root.width - (root.show-machine-rail ? 338px : 0px) - 860px) / 2);
-    property <length> content-right: root.show-machine-rail ? 338px : root.content-left;
+    // The centre column: 860 wide, centred in what the mind panel leaves; or, beside the work
+    // rail, everything between the rail and the panel with the gap the machine rail used to get.
+    property <length> content-left: root.show-work-rail ? 316px : max(24px, (root.width - root.right-inset - 860px) / 2);
+    property <length> content-right: root.right-inset + (root.show-work-rail ? 4px : root.content-left);
 
     property <bool> desktop-menu-open: false;
     property <length> desktop-menu-x: 0;
@@ -356,9 +346,10 @@ export component DesktopScreen inherits Rectangle {
 
         // Everyday mode shares the same real launch and history callbacks as the Lens.
         if !root.agent-mode && !root.focus-mode : DesktopHome {
-            x: (parent.width - self.width) / 2;
+            // Centred in what the mind panel leaves, not under it.
+            x: (parent.width - root.right-inset - self.width) / 2;
             y: parent.height < 720px ? 24px : 56px;
-            width: min(760px, parent.width - 48px);
+            width: min(760px, parent.width - root.right-inset - 48px);
             height: max(0px, parent.height - self.y - Theme.taskbar-height - 24px);
             greeting: root.greeting-text;
             date: root.date-text;
@@ -888,30 +879,10 @@ export component DesktopScreen inherits Rectangle {
             }
         }
 
-        // ── Machine rail (right, hidden in focus mode) ──
-        if root.agent-mode && root.show-machine-rail && !root.focus-mode : MachineRail {
-            mind-name: root.active-harness-name;
-            mind-detail: root.active-harness-detail;
-            x: parent.width - self.width - Theme.sp-4;
-            y: Theme.sp-4;
-            height-ceiling: parent.height - Theme.taskbar-height - Theme.sp-4 * 2;
-            cpu-percent: root.bar-cpu-percent;
-            mem-percent: root.bar-mem-percent;
-            mem-text: root.bar-mem-text;
-            swap-percent: root.bar-swap-percent;
-            swap-text: root.bar-swap-text;
-            disk-percent: root.bar-disk-percent;
-            disk-text: root.bar-disk-text;
-            services: root.services;
-            bond-loaded: root.bond-loaded;
-            bond-level: root.bond-level;
-            bond-score: root.bond-score;
-            companion-online: root.companion-online;
-            companion-status: root.companion-status;
-            provider-label: root.ai-provider-label;
-            memory-count: root.memory-count;
-            whisper-count: root.whisper-hint-count;
-        }
+        // ── The right edge ──
+        // The machine rail stood here, in agent mode only and on this screen only. The mind panel
+        // replaced it and is the shell's, not the desktop's: see `MindPanel` in app.slint. Its
+        // LOAD and SERVICES went into the panel's MACHINE section, still agent mode only.
 
         // ── Taskbar (bottom edge) ──
         // The taskbar is the shell's now, not the desktop's — it is drawn once in app.slint so
@@ -995,7 +966,8 @@ export component DesktopScreen inherits Rectangle {
 
     // ── Layer 2.6: Whisper Cards (floating, top-right) ──
     WhisperCardStack {
-        x: root.width - 316px;
+        // Beside the mind panel rather than under it.
+        x: root.width - root.right-inset - 316px;
         y: Theme.status-bar-height + 8px;
         cards: root.whisper-cards;
         card-dismissed(id) => { root.whisper-card-dismissed(id); }
@@ -1014,7 +986,7 @@ export component DesktopScreen inherits Rectangle {
         // Agent mode: the foot of the centre column, above the taskbar. Clear of both rails,
         // clear of the hero, and where a transient card belongs — it is an announcement, not
         // part of the layout.
-        x: root.agent-mode ? 296px + Theme.sp-5 : parent.width - self.width - 24px;
+        x: root.agent-mode ? 296px + Theme.sp-5 : parent.width - root.right-inset - self.width - 24px;
         y: root.agent-mode
             ? parent.height - Theme.taskbar-height - self.height - Theme.sp-4
             : Theme.status-bar-height + 16px;
