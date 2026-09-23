@@ -22,7 +22,7 @@ use yantrik_ml::ClaudeCliLLM;
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 use crate::ambient::AmbientState;
-use crate::{App, UrgeCardData};
+use crate::{App, BondData, UrgeCardData};
 
 /// Commands from the UI thread to the companion worker.
 pub enum CompanionCommand {
@@ -38,6 +38,12 @@ pub enum CompanionCommand {
         /// most needs to be right.
         job: Option<String>,
     },
+    /// Count a conversation turn that an attached harness answered.
+    ///
+    /// The built-in scores its own turns inside `SendMessage`. A turn Hermes or Pi answered
+    /// never comes through that arm — the shell relays it from the harness host straight to the
+    /// chat panel — so this is how it reaches the bond store, which lives on this thread.
+    ScoreConversationTurn { text: String },
     /// Reload the LLM backend from a new provider config.
     /// Used when user adds/edits a provider in settings.
     ReloadLLM {
@@ -493,6 +499,11 @@ impl CompanionBridge {
         token_rx
     }
 
+    /// Count a turn another mind answered toward the bond.
+    pub fn score_conversation_turn(&self, text: String) {
+        let _ = self.cmd_tx.send(CompanionCommand::ScoreConversationTurn { text });
+    }
+
     /// Request bond data.
     pub fn request_bond(&self) -> Receiver<BondSnapshot> {
         let (reply_tx, reply_rx) = crossbeam_channel::unbounded();
@@ -715,6 +726,11 @@ fn worker_loop(
     // Sync initial bond level
     tracing::debug!("Worker startup: syncing bond level");
     cached_bond.store(companion.bond_level().as_u8(), Ordering::Relaxed);
+    // And the bond itself. `describe shell` and the desktop's machine rail read the `bond_data`
+    // property, and the only thing that ever wrote it was opening the Bond screen — so a shell
+    // nobody had opened that screen on answered "Stranger, 0.0" over a store that said
+    // Partner-in-Crime, 176 interactions. The worker owns the store; it keeps the property.
+    push_bond(&companion, &ui_weak);
 
 
 
@@ -945,6 +961,7 @@ fn worker_loop(
                 push_state(&companion, &ui_weak, online.load(Ordering::Relaxed));
                 // V15: Update cached bond level for UI features
                 cached_bond.store(companion.bond_level().as_u8(), Ordering::Relaxed);
+                push_bond(&companion, &ui_weak);
 
                 // If tasks are pending (maybe user just queued one), signal the task processor
                 if yantrik_companion::task_queue::TaskQueue::active_count(&companion.db.conn()) > 0 {
@@ -961,22 +978,7 @@ fn worker_loop(
                 }
             }
             Ok(CompanionCommand::GetBondState { reply_tx }) => {
-                let bond = BondTracker::get_state(&companion.db.conn());
-                let humor_rate = if bond.humor_attempts > 0 {
-                    bond.humor_successes as f64 / bond.humor_attempts as f64
-                } else {
-                    0.0
-                };
-                let _ = reply_tx.send(BondSnapshot {
-                    bond_score: bond.bond_score,
-                    bond_level: bond.bond_level.name().to_string(),
-                    total_interactions: bond.total_interactions,
-                    days_together: bond.days_together as i64,
-                    current_streak: bond.current_streak_days,
-                    humor_rate,
-                    vulnerability_events: bond.vulnerability_events,
-                    shared_references: bond.shared_references,
-                });
+                let _ = reply_tx.send(bond_snapshot(&companion));
             }
             Ok(CompanionCommand::GetEvolution { reply_tx }) => {
                 let style = Evolution::get_style(&companion.db.conn());
@@ -1078,6 +1080,11 @@ fn worker_loop(
             Ok(CompanionCommand::SetIncognitoMode { enabled }) => {
                 companion.set_incognito(enabled);
                 tracing::info!(incognito = enabled, "Incognito mode toggled");
+            }
+            Ok(CompanionCommand::ScoreConversationTurn { text }) => {
+                companion.score_conversation_turn(&text);
+                cached_bond.store(companion.bond_level().as_u8(), Ordering::Relaxed);
+                push_bond(&companion, &ui_weak);
             }
             Ok(CompanionCommand::ReloadLLM { provider_type, base_url, api_key, model }) => {
                 tracing::info!(provider = %provider_type, model = %model, "Reloading LLM backend");
@@ -2684,6 +2691,50 @@ fn build_snapshot(companion: &CompanionService) -> StateSnapshot {
     }
 }
 
+/// The bond as the store has it right now.
+fn bond_snapshot(companion: &CompanionService) -> BondSnapshot {
+    let bond = BondTracker::get_state(&companion.db.conn());
+    let humor_rate = if bond.humor_attempts > 0 {
+        bond.humor_successes as f64 / bond.humor_attempts as f64
+    } else {
+        0.0
+    };
+    BondSnapshot {
+        bond_score: bond.bond_score,
+        bond_level: bond.bond_level.name().to_string(),
+        total_interactions: bond.total_interactions,
+        days_together: bond.days_together as i64,
+        current_streak: bond.current_streak_days,
+        humor_rate,
+        vulnerability_events: bond.vulnerability_events,
+        shared_references: bond.shared_references,
+    }
+}
+
+/// Push the bond to the Slint UI thread.
+///
+/// Called whenever the store moves and once at startup, so `bond_data` says what the store
+/// says rather than what the Bond screen last fetched. Everything that shows the bond without
+/// opening that screen — `describe shell`, the machine rail — reads this property.
+fn push_bond(companion: &CompanionService, ui_weak: &slint::Weak<App>) {
+    let bond = bond_snapshot(companion);
+    let weak = ui_weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_bond_data(BondData {
+                bond_score: bond.bond_score as f32,
+                bond_level: bond.bond_level.into(),
+                total_interactions: bond.total_interactions as i32,
+                days_together: bond.days_together as i32,
+                current_streak: bond.current_streak as i32,
+                humor_rate: bond.humor_rate as f32,
+                vulnerability_events: bond.vulnerability_events as i32,
+                shared_references: bond.shared_references as i32,
+            });
+        }
+    });
+}
+
 /// Push pending urges to the Slint UI thread.
 fn push_urges(companion: &CompanionService, ui_weak: &slint::Weak<App>) {
     let urges = companion.urge_queue.get_pending(&companion.db.conn(), 10);
@@ -2989,4 +3040,59 @@ fn pick_serendipity_memory(db: &yantrikdb_core::YantrikDB) -> Option<String> {
         % candidates.len();
 
     Some(candidates[idx].text.clone())
+}
+
+#[cfg(test)]
+mod bond_property_tests {
+    use std::path::Path;
+
+    /// This file above the tests, as written.
+    ///
+    /// The worker needs a companion, a model and a Slint event loop to run, so what is pinned
+    /// here is the property that matters and that no type could check: that the bond reaches
+    /// the UI property from the thread that owns the store, and not only when a screen asks.
+    fn worker() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bridge.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        whole.split("#[cfg(test)]").next().unwrap_or_default().to_string()
+    }
+
+    fn between<'a>(src: &'a str, from: &str, to: &str) -> &'a str {
+        let start = src.find(from).unwrap_or_else(|| panic!("`{from}` is no longer in bridge.rs"));
+        let rest = &src[start..];
+        &rest[..rest.find(to).unwrap_or(rest.len())]
+    }
+
+    /// One arm of the worker's command loop: from its pattern to the next arm's.
+    fn arm<'a>(src: &'a str, variant: &str) -> &'a str {
+        let head = format!("Ok(CompanionCommand::{variant}");
+        let start = src.find(&head).unwrap_or_else(|| panic!("the worker no longer handles `{variant}`"));
+        let rest = &src[start + head.len()..];
+        &rest[..rest.find("Ok(CompanionCommand::").unwrap_or(rest.len())]
+    }
+
+    /// `describe shell` and the machine rail read `bond_data`. It used to be written by one
+    /// thing — opening the Bond screen — so a shell on which nobody had reported "Stranger, 0.0"
+    /// for forty minutes over a store that said Partner-in-Crime, 176 interactions.
+    #[test]
+    fn the_worker_keeps_the_bond_property_current() {
+        let src = worker();
+        let startup = between(&src, "Worker startup: syncing bond level", "Companion worker ready for commands");
+        assert!(
+            startup.contains("push_bond("),
+            "the worker must push the bond once the store is open, or every describe before \
+             somebody opens the Bond screen answers with the Slint default. Startup as written:\n{startup}"
+        );
+        let builtin_turn = arm(&src, "SendMessage");
+        assert!(
+            builtin_turn.contains("push_bond("),
+            "a turn the built-in answered moves the store; the property has to follow"
+        );
+        let harness_turn = arm(&src, "ScoreConversationTurn");
+        assert!(
+            harness_turn.contains("score_conversation_turn(&text)") && harness_turn.contains("push_bond("),
+            "a turn a harness answered is scored on this thread and the property follows. Arm as written:\n{harness_turn}"
+        );
+    }
 }
