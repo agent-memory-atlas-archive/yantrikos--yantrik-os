@@ -43,12 +43,12 @@ mod tests {
     use super::accounts::{self, Account};
     use super::connect::{self, Attempt};
     use super::google;
-    use super::state::{self, Draft, GoogleOutcome, MailState, MessageRow, Triage};
+    use super::state::{self, Draft, FolderCounts, GoogleOutcome, MailState, MessageRow, Triage};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use yantrik_ipc_contracts::email::{
         without_secret, without_secrets, AccountSettings, AccountsResult, EmailAccountSummary,
-        OAuthBeginResult, OAuthStatus,
+        EmailFolder, OAuthBeginResult, OAuthStatus,
     };
 
     static ID: AtomicUsize = AtomicUsize::new(0);
@@ -311,6 +311,85 @@ mod tests {
         for t in [Triage::All, Triage::Unread, Triage::Flagged] {
             assert_eq!(Triage::from_index(t.index()), Some(t));
         }
+    }
+
+    // ── What the header says about the open folder ───────────────────
+    //
+    // "Email — INBOX, 9 unread of 21" over a folder list saying INBOX held 35 with none unread:
+    // the header counted the page in hand, the list carried the server's count, and one reply
+    // gave two answers to one question (#74, #123). The header now reads the list.
+
+    fn listed() -> Vec<EmailFolder> {
+        vec![
+            EmailFolder { name: "INBOX".into(), unread_count: 12, total_count: 35 },
+            EmailFolder { name: "[Gmail]/Spam".into(), unread_count: 29, total_count: 29 },
+            EmailFolder { name: "[Gmail]/Sent Mail".into(), unread_count: 0, total_count: 5 },
+        ]
+    }
+
+    #[test]
+    fn the_header_and_the_folder_list_are_the_same_numbers() {
+        // One page of the inbox is in hand — 21 rows, 9 of them unread — and the list says the
+        // folder holds 35, 12 unread. The header says what the list says.
+        let counts = FolderCounts::of(&listed(), "INBOX", 9, 21);
+        assert_eq!(counts, FolderCounts { unread: 12, total: 35 });
+        let line = state::folder_summary("INBOX", counts, None);
+        assert_eq!(line, "Email — INBOX, 12 unread of 35");
+        assert!(!line.contains("21"), "{line} counts the page, not the folder");
+    }
+
+    #[test]
+    fn the_folder_is_found_however_it_was_capitalised() {
+        assert_eq!(FolderCounts::of(&listed(), "inbox", 0, 0).total, 35);
+    }
+
+    #[test]
+    fn a_folder_the_server_did_not_list_is_counted_from_what_is_in_hand() {
+        // No entry, so no server count, and nothing in the list for the header to contradict.
+        let counts = FolderCounts::of(&listed(), "Receipts", 2, 7);
+        assert_eq!(counts, FolderCounts { unread: 2, total: 7 });
+    }
+
+    #[test]
+    fn reading_a_message_takes_one_off_the_folders_unread() {
+        let counts = FolderCounts { unread: 12, total: 35 };
+        assert_eq!(counts.after_read_change(false, true), FolderCounts { unread: 11, total: 35 });
+        assert_eq!(counts.after_read_change(true, false), FolderCounts { unread: 13, total: 35 });
+        // Marking read what was read already changes nothing.
+        assert_eq!(counts.after_read_change(true, true), counts);
+        assert_eq!(counts.after_read_change(false, false), counts);
+    }
+
+    #[test]
+    fn a_message_that_leaves_the_folder_leaves_both_counts() {
+        let counts = FolderCounts { unread: 12, total: 35 };
+        assert_eq!(counts.after_removal(false), FolderCounts { unread: 11, total: 34 });
+        assert_eq!(counts.after_removal(true), FolderCounts { unread: 12, total: 34 });
+        assert_eq!(counts.after_arrival(false), FolderCounts { unread: 13, total: 36 });
+        assert_eq!(counts.after_arrival(true), FolderCounts { unread: 12, total: 36 });
+    }
+
+    #[test]
+    fn a_count_does_not_go_below_nothing() {
+        // The list said none unread and a row in hand was unread anyway — an older service, or
+        // a folder that changed under us. The header must not say -1.
+        let counts = FolderCounts { unread: 0, total: 1 };
+        assert_eq!(counts.after_read_change(false, true).unread, 0);
+        assert_eq!(counts.after_removal(false), FolderCounts { unread: 0, total: 0 });
+        assert_eq!(counts.after_removal(true).total, 0);
+    }
+
+    #[test]
+    fn with_a_search_on_the_header_describes_the_results_not_the_folder() {
+        let counts = FolderCounts { unread: 12, total: 35 };
+        assert_eq!(
+            state::folder_summary("INBOX", counts, Some(("invoice", 3))),
+            "Email — INBOX, 3 results for \u{201c}invoice\u{201d}"
+        );
+        assert_eq!(
+            state::folder_summary("INBOX", counts, Some(("invoice", 1))),
+            "Email — INBOX, 1 result for \u{201c}invoice\u{201d}"
+        );
     }
 
     // ── The draft ────────────────────────────────────────────────────

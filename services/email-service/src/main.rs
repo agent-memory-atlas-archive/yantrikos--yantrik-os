@@ -30,6 +30,7 @@
 mod accounts;
 mod connect;
 mod envelope;
+mod folders;
 mod google;
 mod oauth;
 
@@ -652,25 +653,24 @@ fn imap_list_folders(account: &Account) -> Result<Vec<EmailFolder>, ServiceError
     for folder in folders.iter() {
         let name = folder.name().to_string();
 
-        // Get unread/total counts
-        let (unread, total) = match session.examine(&name) {
-            Ok(mailbox) => {
-                let total = mailbox.exists as i32;
-                // UNSEEN requires STATUS command
-                let unread = session
-                    .status(&name, "(UNSEEN)")
-                    .ok()
-                    .and_then(|s| s.unseen)
-                    .unwrap_or(0) as i32;
-                (unread, total)
-            }
-            Err(_) => (0, 0),
-        };
+        // One STATUS per folder, and the answer read from where the `imap` crate puts it: the
+        // unsolicited channel, not the `Mailbox` it returns. `status(..).unseen` was read before
+        // and was always `None`, which `.unwrap_or(0)` made "unread: 0" for every folder on every
+        // machine. `folders.rs` has the whole of it.
+        //
+        // A folder the server refuses to report — Gmail's `\Noselect` `[Gmail]` — still goes in
+        // the list, with zeros, because the wire has no way to say "not known". Such a folder
+        // cannot hold messages, so for it the zeros are at least true.
+        let counts = session
+            .status(&name, folders::STATUS_ITEMS)
+            .ok()
+            .and_then(|_| folders::counts_for(&name, session.unsolicited_responses.try_iter()))
+            .unwrap_or_default();
 
         result.push(EmailFolder {
             name,
-            unread_count: unread,
-            total_count: total,
+            unread_count: counts.unread as i32,
+            total_count: counts.total as i32,
         });
     }
 
@@ -686,26 +686,20 @@ fn imap_list_messages(
 ) -> Result<Vec<EmailSummary>, ServiceError> {
     let mut session = imap_connect(account)?;
 
-    session.select(folder).map_err(|e| ServiceError {
+    let mailbox = session.select(folder).map_err(|e| ServiceError {
         code: -32000,
         message: format!("IMAP SELECT {folder} failed: {e}"),
     })?;
 
-    // Fetch recent messages (by sequence number, newest first)
-    let total = session.select(folder).map(|m| m.exists).unwrap_or(0);
-    if total == 0 {
+    // The newest `per_page` messages by sequence number, and exactly that many: the range used
+    // to be inclusive at both ends, so a page of twenty came back as twenty-one, and the app's
+    // header said "of 21" for a folder the folder list said held 35.
+    let Some((start, end)) = folders::page_range(mailbox.exists, page, per_page) else {
         let _ = session.logout();
         return Ok(Vec::new());
-    }
+    };
 
-    let start = total.saturating_sub((page * per_page) as u32);
-    let end = total.saturating_sub(((page - 1) * per_page) as u32);
-    if start >= end {
-        let _ = session.logout();
-        return Ok(Vec::new());
-    }
-
-    let range = format!("{}:{}", start.max(1), end);
+    let range = format!("{start}:{end}");
     let messages = session
         .fetch(&range, "(UID FLAGS ENVELOPE BODYSTRUCTURE)")
         .map_err(|e| ServiceError {
