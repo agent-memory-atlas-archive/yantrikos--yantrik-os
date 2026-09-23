@@ -170,11 +170,17 @@ jobs:
 
       - name: Package the release bundle
         id: bundle
+        env:
+          # The build that was published before this one, so the bundle's CHANGELOG.md is
+          # "what changed since the last image" rather than a guess.
+          YANTRIK_PREVIOUS: ${{ needs.decide.outputs.previous }}
         run: |
           TARGET_DIR="$PWD/target/release" deploy/yantrik-os/build-release.sh --no-build --out "$PWD/dist"
           # Absolute: the next step changes directory before it reads this path.
           bundle="$(find "$PWD/dist" -maxdepth 1 -type f -name 'yantrik-os-*-linux-amd64.tar.zst' | head -1)"
           [ -f "$bundle" ] || { echo "::error::build-release.sh produced no bundle"; ls -la dist; exit 1; }
+          # The same changelog the image carries, on the run's summary page.
+          tar --use-compress-program='zstd -d' -xOf "$bundle" --wildcards '*/share/CHANGELOG.md' >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           build="$(tar --use-compress-program='zstd -d' -xOf "$bundle" --wildcards '*/BUILD' | tr -d '\r')"
           echo "$build"
           {

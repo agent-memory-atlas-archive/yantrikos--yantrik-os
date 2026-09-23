@@ -88,6 +88,8 @@ export component AboutScreen inherits Rectangle {
 
     // Component versions — installed only.
     in property <[ComponentVersionData]> components: [];
+    // The bundle's CHANGELOG.md, one line per change. Empty on a build that shipped none.
+    in property <[string]> changes: [];
 
     // ── Updates ──
     //
@@ -462,6 +464,45 @@ export component AboutScreen inherits Rectangle {
                     }
                 }
 
+                // ── WHAT CHANGED section header ──
+                //
+                // The changelog the release bundle carries at share/CHANGELOG.md: the commit
+                // subjects since the build published before this one. Shown only when the
+                // bundle had one, so an old install does not get an empty heading.
+                if root.changes.length > 0 : HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 3px; height: 14px;
+                        border-radius: 1.5px;
+                        background: Theme.accent;
+                        drop-shadow-blur: 4px;
+                        drop-shadow-color: Theme.accent-glow;
+                    }
+                    Text {
+                        text: "WHAT CHANGED IN THIS BUILD";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        letter-spacing: 2px;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.changes.length > 0 : Rectangle {
+                    background: Theme.bg-card;
+                    border-radius: Theme.radius-card;
+                    border-width: 1px;
+                    border-color: Theme.separator;
+                    height: chg-col.preferred-height;
+                    chg-col := VerticalLayout {
+                        padding: 16px;
+                        spacing: 6px;
+                        for line in root.changes : Text {
+                            text: "•  " + line;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-body;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
                 // ── AI READINESS section header ──
                 HorizontalLayout {
                     spacing: 8px;
