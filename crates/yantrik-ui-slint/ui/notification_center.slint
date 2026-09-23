@@ -39,6 +39,11 @@ export struct NotificationData {
     // me this" is the first question about a notification from a program nobody remembers
     // installing.
     source: string,
+    // Who sent it, in the approval card's two voices on one line: what the caller called
+    // itself, and what the kernel-stamped pid on the socket resolved to. A notification that
+    // said `Yantrik` and something false had no second voice (#114). Empty when the store
+    // recorded nothing — an old record, or one from the freedesktop door — and then not drawn.
+    sender-line: string,
 }
 
 export component NotificationCenter inherits Rectangle {
@@ -283,6 +288,18 @@ export component NotificationCenter inherits Rectangle {
                                 color: Theme.text-dim;
                                 font-size: Theme.fs-caption;
                                 wrap: word-wrap;
+                            }
+
+                            // Who sent it — the same "says the caller" / "verified by this
+                            // machine" the approval card draws, because the name on the row
+                            // is only what the sender said. One elided line, at the card's
+                            // size for it, so a long command line cannot push the buttons.
+                            if notif.sender-line != "" : Text {
+                                text: notif.sender-line;
+                                color: Theme.text-dim;
+                                font-size: Theme.fs-micro;
+                                wrap: no-wrap;
+                                overflow: elide;
                             }
 
                             // The sender's own buttons. For a freedesktop notification, pressing

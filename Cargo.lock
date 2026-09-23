@@ -5201,6 +5201,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
  "yantrik-service-sdk",
  "zbus",
 ]

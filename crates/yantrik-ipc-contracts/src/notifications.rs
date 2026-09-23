@@ -216,8 +216,46 @@ pub struct Notification {
     /// The id this one replaced, when the sender asked to update rather than add.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces_id: Option<String>,
+    /// Who this machine established sent it — beside `app`, which is only what was said.
+    ///
+    /// Optional on read so a store written before this existed still loads, and absent on a
+    /// freedesktop notification, whose door has not asked the bus who was behind it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<Sender>,
     /// The store revision at which this notification last changed. `since` compares against it.
     pub revision: u64,
+}
+
+/// Who sent a notification, as this machine established it — kept beside `app`, which is only
+/// what the sender said.
+///
+/// Found on 22 September 2026 (#114): a mind posted `app: "Yantrik"` with a body that was false
+/// in every particular, and the stored record had nothing in it but what that caller had
+/// written. The approval card had already been through this (#43) and answers with two lines it
+/// refuses to merge — the name the caller gave itself, and the program the kernel says opened
+/// the socket. A notification now carries the same two, and the shell draws them in the same
+/// words.
+///
+/// None of this is set by the request. The service fills it in from `SO_PEERCRED` at the
+/// moment the call arrives, which is the only moment the peer is certainly still there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Sender {
+    /// `app` exactly as the caller gave it. `None` when it gave none and `app` was filled in
+    /// from the verified program — so a reader can tell "it called itself Downloads" from "it
+    /// was download-manager".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed: Option<String>,
+    /// The program that opened the socket, as the shell's approval card prints it: the first
+    /// thing in its ancestry a person would recognise, with its pid — or `could not be
+    /// identified`, never a blank and never a guess.
+    pub verified: String,
+    /// The pid that line is about. `0` when nothing was established.
+    #[serde(default)]
+    pub pid: i32,
+    /// Its `/proc/<pid>/exe`, empty when unknown. The line shows the command line, which says
+    /// more; this is the path a person checks afterwards.
+    #[serde(default)]
+    pub exe: String,
 }
 
 /// What a sender posts.
@@ -280,6 +318,29 @@ mod tests {
             serde_json::from_str::<Urgency>("\"low\"").unwrap(),
             Urgency::Low
         );
+    }
+
+    #[test]
+    fn a_record_written_before_the_sender_existed_still_loads() {
+        // `~/.local/share/yantrik/notifications.json` on every machine that took the update
+        // holds records with exactly these fields and nothing about who sent them. A field that
+        // failed to parse would empty the whole store at the next start.
+        let old = r#"{"id":"134","app":"Yantrik","title":"Studio finished","body":"","urgency":"normal","created_at":"2026-09-23T00:43:53Z","read":true,"dismissed":true,"actions":[],"source":"yantrik","revision":237}"#;
+        let n: Notification = serde_json::from_str(old).expect("an old record parses");
+        assert_eq!(n.sender, None);
+        // And it is written back without inventing one.
+        assert!(!serde_json::to_string(&n).unwrap().contains("sender"));
+
+        let mut n = n;
+        n.sender = Some(Sender {
+            claimed: Some("Yantrik".into()),
+            verified: "python -m hermes_cli.main gateway run (pid 689)".into(),
+            pid: 689,
+            exe: "/home/yantrik/.hermes/hermes-agent/venv/bin/python".into(),
+        });
+        let text = serde_json::to_string(&n).unwrap();
+        let back: Notification = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.sender, n.sender);
     }
 
     #[test]

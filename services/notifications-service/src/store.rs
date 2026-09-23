@@ -130,8 +130,19 @@ impl Store {
         &self.path
     }
 
-    /// Post a notification, or replace one. Answers the notification as stored.
+    /// Post a notification, or replace one, from a door that established nothing about the
+    /// sender. Answers the notification as stored.
     pub fn add(&self, req: AddRequest) -> Notification {
+        self.add_from(req, None)
+    }
+
+    /// The same, recording who this machine established sent it.
+    ///
+    /// The sender is a separate argument and not a field of the request on purpose: a request
+    /// is what the caller wrote, and this is the one thing about a notification the caller must
+    /// not be able to write. The socket handler fills it in from the kernel's peer credentials;
+    /// the freedesktop door passes `None`, because it has not asked the bus (#114).
+    pub fn add_from(&self, req: AddRequest, sender: Option<Sender>) -> Notification {
         let mut state = self.lock();
         state.revision += 1;
         let revision = state.revision;
@@ -165,6 +176,9 @@ impl Store {
                 existing.urgency = req.urgency;
                 existing.actions = actions;
                 existing.source = req.source;
+                // Whoever replaced it is who is speaking now. "downloading…" from the download
+                // manager and "finished" from something else are not one line about one file.
+                existing.sender = sender;
                 existing.created_at = now;
                 existing.read = false;
                 existing.dismissed = false;
@@ -194,6 +208,7 @@ impl Store {
             actions,
             source: req.source,
             replaces_id: req.replaces_id,
+            sender,
             revision,
         };
         state.notifications.push(notification.clone());
@@ -650,6 +665,58 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(store.unread(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn who_sent_it_is_stored_beside_what_they_said_and_survives_a_restart() {
+        // Notification 134 on 22 September had `app: "Yantrik"` and nothing else about its
+        // sender; the mind that posted it was in `ps` the whole time. Both facts are kept now,
+        // and a replacement carries its own sender rather than inheriting the first one's.
+        let (store, path) = temp_store();
+        let hermes = Sender {
+            claimed: Some("Yantrik".into()),
+            verified: "python -m hermes_cli.main gateway run (pid 689)".into(),
+            pid: 689,
+            exe: "/home/yantrik/.hermes/hermes-agent/venv/bin/python".into(),
+        };
+        let first = store.add_from(req("hermes_cli.main", "Studio finished"), Some(hermes.clone()));
+        assert_eq!(first.sender.as_ref(), Some(&hermes));
+
+        let shell = Sender {
+            claimed: Some("Yantrik".into()),
+            verified: "yantrik-ui config.yaml (pid 7456)".into(),
+            pid: 7456,
+            exe: "/opt/yantrik/bin/yantrik-ui".into(),
+        };
+        let replaced = store.add_from(
+            AddRequest { replaces_id: Some(first.id.clone()), ..req("Yantrik", "Update available") },
+            Some(shell.clone()),
+        );
+        assert_eq!(replaced.id, first.id);
+        assert_eq!(replaced.sender.as_ref(), Some(&shell));
+        drop(store);
+
+        let reopened = Store::open(path.clone());
+        assert_eq!(reopened.list()[0].sender.as_ref(), Some(&shell));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_store_written_before_senders_existed_still_loads_whole() {
+        // The file on every machine that took the update. One unknown-field error here would
+        // start the store empty and report the person's whole history as unparseable.
+        let (_store, path) = temp_store();
+        std::fs::write(
+            &path,
+            r#"{"revision":237,"next_id":135,"notifications":[{"id":"134","app":"Yantrik","title":"Studio finished","body":"","urgency":"normal","created_at":"2026-09-23T00:43:53Z","read":false,"dismissed":false,"actions":[],"source":"yantrik","revision":237}]}"#,
+        )
+        .unwrap();
+        let store = Store::open(path.clone());
+        assert_eq!(store.load_notice(), None);
+        let list = store.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].sender, None, "nothing is invented about an old record");
         let _ = std::fs::remove_file(path);
     }
 
