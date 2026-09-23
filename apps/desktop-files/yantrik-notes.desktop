@@ -7,3 +7,6 @@ Exec=/opt/yantrik/bin/yantrik-notes
 Icon=yantrik
 Categories=Office;TextEditor;
 Keywords=notes;markdown;write;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=notes
+X-Yantrik-Purpose=quick markdown notes kept in the notes library, not files you name

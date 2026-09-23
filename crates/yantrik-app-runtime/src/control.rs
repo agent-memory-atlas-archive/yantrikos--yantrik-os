@@ -191,7 +191,7 @@ pub fn service_id_for(app_id: &str) -> String {
 /// else calls it, and then asked it to describe itself, was refused — and had no way to learn
 /// better from the refusal.
 ///
-/// So the other names are written down once, here, and [`App::serve`] links each of them at the
+/// So the other names were written down once, here, and [`App::serve`] links each of them at the
 /// socket the app binds. The ids are the apps' own and are not changed by this: the id an app
 /// publishes is still what `describe` reports and what `yos ls` lists. What changes is that the
 /// other names reach it.
@@ -200,39 +200,15 @@ pub fn service_id_for(app_id: &str) -> String {
 /// `container_manager`, `Container Manager` and `container-manager` one question, so a caller's
 /// punctuation is not part of the name.
 ///
-/// An app with no other name still belongs in this table: it is what makes the table a complete
-/// answer to "is this a surface of this desktop", which is what the shell's route table is
-/// checked against (`every_launchable_name_reaches_a_surface` in `wire::dock`). Adding a route
-/// spelling without a name here fails that test rather than shipping another refusal.
+/// Every app's row has moved into its own `.desktop` file (`X-Yantrik-Surface`,
+/// `X-Yantrik-Aliases`), which is where an app somebody else wrote declares the same things; the
+/// shell reads those files and links every alias at the app's socket itself, for any surface —
+/// one on this runtime, a Python one, Blender's addon (design/surface-sdk-2026-09-23.md §4). What
+/// is left is the one surface no `.desktop` file describes: the desktop's own.
 const SURFACES: &[(&str, &[&str])] = &[
-    ("arcade", &[]),
-    // Not one of ours: Blender is a program this desktop opens, and its surface is served by a
-    // Python addon inside it (apps/blender/addon), a port of this module's dispatch rather than
-    // a user of this runtime. It belongs in the table for the same reason as any other row —
-    // the table is the complete answer to "is this a surface of this desktop".
-    ("blender", &[]),
-    ("calendar", &[]),
-    ("containers", &["container-manager"]),
-    ("documents", &["document-editor"]),
-    ("download-manager", &["downloads"]),
-    ("editor", &["text-editor"]),
-    ("email", &[]),
-    // Both, because the launcher now opens it under `image` and a caller holding the older
-    // `images` must still reach the same surface.
-    ("image-viewer", &["images", "image"]),
-    ("network", &["network-manager"]),
-    ("notes", &[]),
-    ("presentation", &["slides"]),
     // Nothing "opens" the desktop, so it is in no launcher table; it does publish a surface, and
     // its own notifications' buttons and approval cards have to reach it.
     ("shell", &[]),
-    ("snippets", &["snippet-manager"]),
-    // No other name: "images" is the image viewer's alias, and inventing a second one for the app
-    // that makes them would be a guess about how people will ask.
-    ("studio", &[]),
-    ("system-monitor", &["sysmonitor"]),
-    ("terminal", &[]),
-    ("weather", &[]),
 ];
 
 /// One spelling of a name, so the separator a caller arrived with is not part of the question.
@@ -1263,71 +1239,19 @@ mod tests {
         assert_ne!(service_id_for("notes"), "notes");
     }
 
-    /// Where the guide's table of surfaces starts and ends. Between them is [`SURFACES`] written
-    /// out, and nothing else.
-    const GUIDE_TABLE_BEGIN: &str = "<!-- surfaces: generated from control::SURFACES by \
-        `YANTRIK_WRITE_DOCS=1 cargo test -p yantrik-app-runtime --lib the_guide_lists_every_surface` -->";
-    const GUIDE_TABLE_END: &str = "<!-- /surfaces -->";
+    // The guide's table of surfaces is generated from the apps' `.desktop` files now, by
+    // `surfaces::tests::the_guide_lists_every_surface_this_desktop_has` in yantrik-ui.
 
-    fn surfaces_table() -> String {
-        let mut out = String::from("\n| Surface | Socket | Also answers to |\n| --- | --- | --- |\n");
-        for (id, others) in SURFACES {
-            let also = if others.is_empty() {
-                "—".to_string()
-            } else {
-                others.iter().map(|o| format!("`{o}`")).collect::<Vec<_>>().join(", ")
-            };
-            out.push_str(&format!("| `{id}` | `{}.sock` | {also} |\n", service_id_for(id)));
-        }
-        out
-    }
-
-    /// `docs/app-control.md` lists the surfaces this desktop has, and the list is this table
-    /// rather than one somebody keeps by hand — the hand-kept one had nine rows when there were
-    /// eighteen surfaces. Adding a surface here and not regenerating fails; so does editing the
-    /// guide's copy.
-    #[test]
-    fn the_guide_lists_every_surface_this_desktop_has() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/app-control.md");
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let start = text.find(GUIDE_TABLE_BEGIN).expect("the guide marks where its table starts")
-            + GUIDE_TABLE_BEGIN.len();
-        let end = text.find(GUIDE_TABLE_END).expect("the guide marks where its table ends");
-        let table = surfaces_table();
-        if std::env::var("YANTRIK_WRITE_DOCS").as_deref() == Ok("1") {
-            let written = format!("{}{table}{}", &text[..start], &text[end..]);
-            std::fs::write(&path, written).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            return;
-        }
-        assert_eq!(
-            &text[start..end],
-            table,
-            "docs/app-control.md's table of surfaces is not control::SURFACES. Regenerate it:\n  \
-             YANTRIK_WRITE_DOCS=1 cargo test -p yantrik-app-runtime --lib the_guide_lists_every_surface"
-        );
-    }
-
-    /// The name the container manager is called everywhere else reaches the id it publishes.
-    ///
-    /// This is the refusal the table was written for: `yos ls` said `app-containers`, the app was
-    /// `container-manager` in `/opt/yantrik/bin`, in the launcher and in `open_app`, and
-    /// `describe container-manager` answered "no socket for 'container-manager'".
+    /// The desktop's own surface answers to its name however it is spelled, and an app's names are
+    /// not this table's any more: they are its `.desktop` file's, read by the shell.
     #[test]
     fn every_name_an_app_is_known_by_reaches_the_id_it_publishes() {
-        for spelling in [
-            "container-manager", "container_manager", "Container Manager", "CONTAINER-MANAGER",
-            "  containers  ", "containers",
-        ] {
-            assert_eq!(surface_id(spelling), Some("containers"), "{spelling}");
+        for spelling in ["shell", "  Shell  ", "SHELL"] {
+            assert_eq!(surface_id(spelling), Some("shell"), "{spelling}");
         }
-        assert_eq!(surface_id("sysmonitor"), Some("system-monitor"));
-        assert_eq!(surface_id("downloads"), Some("download-manager"));
-        assert_eq!(surface_id("text-editor"), Some("editor"));
-        assert_eq!(surface_id("slides"), Some("presentation"));
-        // An app with one name answers to it, and nothing answers for an app this desktop does
-        // not have. "No such app" and "that app is closed" are different answers and a caller
-        // acts differently on them.
-        assert_eq!(surface_id("notes"), Some("notes"));
+        assert!(other_names("shell").is_empty());
+        // "No such name here" is not "that app is closed": the catalogue answers for apps.
+        assert_eq!(surface_id("containers"), None);
         assert_eq!(surface_id("no-such-app"), None);
         assert_eq!(surface_id(""), None);
     }
@@ -1356,20 +1280,21 @@ mod tests {
         let socket = dir.join("app-containers.sock");
         std::fs::write(&socket, b"stands in for the bound socket").unwrap();
 
-        let linked = link_names(&dir, "containers", other_names("containers"));
+        let others: &[&str] = &["container-manager"];
+        let linked = link_names(&dir, "containers", others);
         assert_eq!(linked, vec!["container-manager".to_string()]);
         let link = dir.join("app-container-manager.sock");
         assert_eq!(std::fs::read_link(&link).unwrap().to_str(), Some("app-containers.sock"));
         assert_eq!(std::fs::read(&link).unwrap(), std::fs::read(&socket).unwrap());
 
         // Run twice, as a reopened app does: the second link is the same link, not an error.
-        assert_eq!(link_names(&dir, "containers", other_names("containers")).len(), 1);
+        assert_eq!(link_names(&dir, "containers", others).len(), 1);
 
         // A real file under that name, left by a release that bound it for real, is replaced —
         // otherwise the other name would go on answering out of a socket nothing is behind.
         std::fs::remove_file(&link).unwrap();
         std::fs::write(&link, b"an older release bound this name").unwrap();
-        assert_eq!(link_names(&dir, "containers", other_names("containers")).len(), 1);
+        assert_eq!(link_names(&dir, "containers", others).len(), 1);
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
 
         let _ = std::fs::remove_dir_all(&dir);

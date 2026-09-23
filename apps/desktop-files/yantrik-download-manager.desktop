@@ -7,3 +7,7 @@ Exec=/opt/yantrik/bin/yantrik-download-manager
 Icon=yantrik
 Categories=Network;FileTransfer;
 Keywords=download;transfer;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=download-manager
+X-Yantrik-Purpose=fetch a URL to a file, with progress
+X-Yantrik-Aliases=downloads

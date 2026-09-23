@@ -316,13 +316,17 @@ fn invoke_action(weak: &slint::Weak<App>, id: &str, action_id: &str) {
 /// been closed. If the app is not one of ours, or its surface never answers, that is logged and
 /// nothing else happens — the alternative is a button that reports success it did not observe.
 fn forward_to_app(ui: &App, app: &str, action: &str, args: Option<serde_json::Value>) {
-    let Some(surface) = surface_for(app) else {
+    let installed = crate::apps::Catalogue::shared().get();
+    let Some((surface, opens_as)) = button_route(app, &installed) else {
         tracing::warn!(app, action, "a notification button named an app this desktop does not open");
         return;
     };
     let address = format!("app-{surface}");
     if !yantrik_app_runtime::service::is_up(&address) {
-        ui.invoke_launch_app(launch_name_for(app).unwrap_or_else(|| app.to_lowercase()).into());
+        match opens_as {
+            Some(name) => ui.invoke_launch_app(name.into()),
+            None => tracing::warn!(app, action, "the app a notification button belongs to is closed and cannot be opened"),
+        }
     }
 
     let action = action.to_string();
@@ -358,45 +362,54 @@ fn forward_to_app(ui: &App, app: &str, action: &str, args: Option<serde_json::Va
         });
 }
 
-/// The name an app's control surface answers to, from the shell's own route table — "Downloads"
-/// is opened as `downloads` and described as `download-manager`, and only that table knows.
+/// Where one of our notifications' buttons goes: the surface the call is made on, and the name to
+/// open the app by first when it is closed (`None` when there is nothing to open).
 ///
-/// It used to read the published `openable()` listing, which names each app once, so only the
-/// first spelling of an app resolved: a notification whose `app` was `container-manager` — the
-/// name that app carries everywhere but on its socket — lost its buttons to "an app this desktop
-/// does not open".
-fn surface_for(app: &str) -> Option<String> {
-    let key = app.to_lowercase();
-    // The shell sends under its own name and is not in the dock's route table, because nothing
-    // "opens" the desktop. It does have a control surface, though, and its own notifications'
-    // buttons have to reach it: without this, "See what it did" on a lapsed bypass would be a
-    // control that does nothing, which is the exact failure the download-manager button was
-    // routed to avoid.
-    if key == "yantrik" {
-        return Some("shell".to_string());
-    }
-    crate::wire::dock::surface_for(&key).map(str::to_string)
+/// Through the same catalogue `open_app` and `describe shell` read, so any app that declares a
+/// surface in its `.desktop` file gets its buttons carried out — a third-party app exactly as
+/// ours. It used to be the dock's route table alone, so only this OS's own apps could have a
+/// working button; and before that the published listing, which names each app once, so a
+/// notification whose `app` was `container-manager` — the name that app carries everywhere but on
+/// its socket — lost its buttons to "an app this desktop does not open". "Downloads", the name
+/// Download Manager sends under, is its `Name=` and an alias.
+///
+/// The shell sends under `Yantrik`, which is the desktop's own surface: without that, "See what it
+/// did" on a lapsed bypass would be a control that does nothing. Nothing opens the desktop, so
+/// there is no name to launch.
+fn button_route(
+    app: &str,
+    installed: &[crate::apps::DesktopEntry],
+) -> Option<(String, Option<String>)> {
+    let surface = crate::wire::dock::surface_for(app, installed)?;
+    Some((surface, launch_name_for(app, installed)))
 }
 
-/// The name `launch_app` takes for this sender, if the shell can open it at all.
-fn launch_name_for(app: &str) -> Option<String> {
-    let key = app.to_lowercase();
-    crate::wire::dock::builtin_app_ids()
-        .find(|name| *name == key)
-        .map(str::to_string)
+/// The name `launch_app` takes for this sender, if the shell can open it at all: one of the
+/// shell's own routes, or an app that declares a surface. Not any program with a .desktop file —
+/// a foreign app that did not declare a surface did not route this notification, and opening a
+/// second copy of it would be a guess.
+fn launch_name_for(app: &str, installed: &[crate::apps::DesktopEntry]) -> Option<String> {
+    let key = app.trim().to_lowercase();
+    let ours = crate::wire::dock::route(&key).is_some()
+        || crate::surfaces::find(&key, installed).is_some();
+    let opens = !matches!(
+        crate::wire::dock::resolve(&key, installed),
+        crate::wire::dock::Resolved::Unknown | crate::wire::dock::Resolved::Shelved(_)
+    );
+    (ours && opens).then_some(key)
 }
 
-/// Bring the app that sent a notification to the front, when it is one of ours and it is
-/// installed. Anything else does nothing, and says nothing, because there is nothing honest to
-/// do: we cannot raise a foreign window from a notification we did not route.
+/// Bring the app that sent a notification to the front, when it is one this desktop routes — one
+/// of its own screens, or an app that declares a surface — and it is installed. Anything else does
+/// nothing, and says nothing, because there is nothing honest to do: we cannot raise a foreign
+/// window from a notification we did not route.
 fn open_sender(ui: &App, id: &str) {
     let Some(app) = with_mirror(|m| m.get(id).map(|n| n.app.clone())).flatten() else {
         return;
     };
-    let key = app.to_lowercase();
-    if crate::wire::dock::builtin_app_ids().any(|name| name == key) {
-        ui.invoke_launch_app(key.clone().into());
-        tracing::debug!(app = %key, "opened the app a notification came from");
+    if let Some(name) = launch_name_for(&app, &crate::apps::Catalogue::shared().get()) {
+        ui.invoke_launch_app(name.clone().into());
+        tracing::debug!(app = %name, "opened the app a notification came from");
     }
 }
 
@@ -1343,5 +1356,50 @@ mod tests {
             std::sync::atomic::Ordering::Relaxed,
         );
         assert!(!answer_in_flight(), "an answer older than the ceiling is not in flight");
+    }
+}
+
+/// Where a notification's button goes, for our apps and anybody else's alike.
+#[cfg(test)]
+mod button_route_tests {
+    use super::button_route;
+
+    fn installed() -> Vec<crate::apps::DesktopEntry> {
+        let mut installed = crate::surfaces::shipped_catalogue();
+        installed.push(
+            crate::apps::parse_desktop_text(
+                "org.example.Mailer",
+                "[Desktop Entry]\nType=Application\nName=Mailer\nExec=/usr/bin/mailer\n\
+                 X-Yantrik-Surface=mailer\nX-Yantrik-Aliases=post\n",
+            )
+            .unwrap(),
+        );
+        installed.push(
+            crate::apps::parse_desktop_text(
+                "firefox",
+                "[Desktop Entry]\nType=Application\nName=Firefox\nExec=/usr/bin/firefox %u\n",
+            )
+            .unwrap(),
+        );
+        installed
+    }
+
+    #[test]
+    fn a_button_reaches_any_app_that_declares_a_surface() {
+        let installed = installed();
+        let route = |app: &str| button_route(app, &installed);
+        // Ours, under the names they send as.
+        assert_eq!(route("Downloads"), Some(("download-manager".into(), Some("downloads".into()))));
+        assert_eq!(route("Calendar"), Some(("calendar".into(), Some("calendar".into()))));
+        assert_eq!(route("container-manager"), Some(("containers".into(), Some("container-manager".into()))));
+        // Somebody else's, by its Name and by its alias, opened by that name when it is closed.
+        assert_eq!(route("Mailer"), Some(("mailer".into(), Some("mailer".into()))));
+        assert_eq!(route("post"), Some(("mailer".into(), Some("post".into()))));
+        // The desktop's own buttons reach the desktop, which nothing opens.
+        assert_eq!(route("Yantrik"), Some(("shell".into(), None)));
+        // A program that declared nothing did not route this notification: no surface to call.
+        assert_eq!(route("Firefox"), None);
+        assert_eq!(route("browser"), None, "the browser publishes nothing");
+        assert_eq!(route("no-such-app"), None);
     }
 }

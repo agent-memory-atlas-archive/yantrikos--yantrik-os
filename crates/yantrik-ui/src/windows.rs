@@ -1233,6 +1233,44 @@ mod app_name_tests {
         );
     }
 
+    /// And one surface, declared where the name is: every app this OS ships says in its `.desktop`
+    /// file which surface it publishes, and the id its window carries here is one of the names
+    /// that surface answers to on the socket bus.
+    ///
+    /// The same four places as above, one step further. The .desktop entry is what lists an app
+    /// while it is closed (`X-Yantrik-Surface`, `crate::surfaces`), so an entry without it is an
+    /// app a mind cannot find until somebody opens it; and a window id that is not among the
+    /// surface's names is a taskbar button whose app `describe` cannot reach by that word.
+    #[test]
+    fn every_shipped_app_declares_its_surface_under_the_names_the_shell_knows() {
+        let root = repo_root();
+        let mut wrong = Vec::new();
+        for (stem, id) in STEM_TO_ID {
+            if crate::wire::dock::shelved(stem).is_some() {
+                continue;
+            }
+            let path = root.join(format!("apps/desktop-files/yantrik-{stem}.desktop"));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            let entry = crate::apps::parse_desktop_text(&format!("yantrik-{stem}"), &text)
+                .unwrap_or_else(|| panic!("{} is not an application entry", path.display()));
+            let Some(surface) = entry.surface.as_deref() else {
+                wrong.push(format!("{stem}: no X-Yantrik-Surface"));
+                continue;
+            };
+            if entry.purpose.trim().is_empty() {
+                wrong.push(format!("{stem}: no X-Yantrik-Purpose"));
+            }
+            if surface != *id && !entry.aliases.iter().any(|a| a == id) {
+                wrong.push(format!(
+                    "{stem}: its window is `{id}`, and `{surface}` does not answer to that \
+                     (add it to X-Yantrik-Aliases)"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "shipped apps that a mind cannot find by name:\n  {}", wrong.join("\n  "));
+    }
+
     /// An app the shell did not launch still gets a readable name rather than an id.
     #[test]
     fn a_foreign_app_is_title_cased_not_left_raw() {

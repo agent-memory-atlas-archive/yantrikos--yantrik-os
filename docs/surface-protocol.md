@@ -79,6 +79,17 @@ A socket file outlives a crashed process. A client that finds a file nobody is l
 - **Resolving a name.** A client folds what it was given — trim, lowercase, `_` and space become
   `-` — and tries `app-<name>` before `<name>`, so a name reaches the window when it is open and
   the service behind it when it is not. `shell` is `app-shell`.
+- **Declaring a surface.** A surface that is to be found while it is not running — listed in
+  `describe shell` → `apps`, opened by `open_app`, reached by a notification button, approved while
+  its window is shut — SHOULD declare itself in the `[Desktop Entry]` group of its application's
+  `.desktop` file: `X-Yantrik-Surface=<id>` (required for the rest to count; a value that is not a
+  name as above declares nothing), `X-Yantrik-Purpose=<one line>`, `X-Yantrik-Aliases=<a>;<b>`
+  (each linked at the socket by the shell, as above, unless the desktop or another surface already
+  holds the name) and `X-Yantrik-Adapter=<command>` (a separate process the shell starts beside the
+  app with `YANTRIK_SURFACE` and `YANTRIK_APP_PID` set, and stops with SIGTERM when the app exits).
+  [app-control.md](app-control.md#findable-while-closed-the-desktop-keys) has the detail. A surface
+  that declares nothing is still a surface while it answers; it is only invisible while it does
+  not.
 - **Owned names.** A name belongs to the process answering on it:
   - A server MUST NOT bind over a live socket. Before binding it connects to whatever is at its
     path and sends `rpc.ping`. If anything answers — or accepts the connection and stays silent
@@ -411,4 +422,5 @@ protocol:
 - **1** (this document): what the surfaces already did, written down, plus `protocol: 1` in
   `describe`; the "cannot be undone" rule and "no session rule in plan" moved into the dispatch so
   every door decides alike; owned names (bind only over a dead socket; the shell's peer checked
-  before a grant is spent).
+  before a grant is spent); surfaces declared in `.desktop` files, so they are found while closed
+  (§3).

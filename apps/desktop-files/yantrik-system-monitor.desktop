@@ -7,3 +7,7 @@ Exec=/opt/yantrik/bin/yantrik-system-monitor
 Icon=yantrik
 Categories=System;Monitor;
 Keywords=cpu;memory;disk;processes;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=system-monitor
+X-Yantrik-Purpose=CPU, memory, disk and processes
+X-Yantrik-Aliases=sysmonitor

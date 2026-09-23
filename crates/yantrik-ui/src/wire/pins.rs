@@ -209,9 +209,14 @@ mod tests {
     /// when clicked would be the first thing a new person tried.
     #[test]
     fn every_default_pin_launches() {
+        // The shell's own routes, and the apps this OS ships through their .desktop files.
+        let shipped = crate::surfaces::shipped_catalogue();
         for pin in DEFAULT_PINS {
             assert!(
-                super::super::dock::route(pin).is_some(),
+                !matches!(
+                    super::super::dock::resolve(pin, &shipped),
+                    super::super::dock::Resolved::Unknown | super::super::dock::Resolved::Shelved(_)
+                ),
                 "default pin `{pin}` is not an app the shell knows how to launch"
             );
         }

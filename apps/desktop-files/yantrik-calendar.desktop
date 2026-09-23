@@ -7,3 +7,6 @@ Exec=/opt/yantrik/bin/yantrik-calendar
 Icon=yantrik
 Categories=Office;Calendar;
 Keywords=calendar;events;schedule;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=calendar
+X-Yantrik-Purpose=events and appointments

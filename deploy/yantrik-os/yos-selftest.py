@@ -46,6 +46,11 @@ What it is checking, in one line each:
   * the describe schema `yos check` carries is docs/schema/describe.schema.json, the envelopes the
     Rust builders make (surface-vectors.json) match both schemas, and the revision, the phrase
     list and every revision the spec quotes are the gate's;
+  * an app that declares a surface in its `.desktop` file is found while it is closed: the keys
+    are read as the shell reads them, an alias or the app's name reaches its socket without the
+    shell's link, a closed one is named as closed with how to open it, and `yos ls` lists it as
+    `(closed)` with what it is for — from the shell's listing, or from the files when no desktop
+    answers;
   * `yos` writes nothing to `app-shell.sock` unless a `yantrik-ui` binary is what listens there;
   * and the socket-directory chain is the transport's, in its order.
 """
@@ -800,6 +805,97 @@ def main():
             re.findall(r'"revision": "([0-9a-f]{16})"', spec))
         check("every revision the spec quotes is one the code generated",
               quoted and quoted <= generated, sorted(quoted - generated))
+
+        print("a closed app is found by its .desktop file: listed, resolved by alias, and named "
+              "when it is closed")
+        # The keys an app declares itself with (docs/app-control.md, "Findable while closed"),
+        # in a scratch applications directory: one app somebody else wrote, one of ours.
+        apps_dir = pathlib.Path(tmp) / "applications"
+        apps_dir.mkdir()
+        (apps_dir / "org.example.Howdy.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=Howdy\nExec=/usr/bin/hello\n"
+            "X-Yantrik-Surface=howdy\nX-Yantrik-Purpose=say hello to someone, by name\n"
+            "X-Yantrik-Aliases=hi;Greeter;shell;../x\n", "utf-8")
+        (apps_dir / "yantrik-system-monitor.desktop").write_text(
+            (repo / "apps" / "desktop-files" / "yantrik-system-monitor.desktop").read_text("utf-8"),
+            "utf-8")
+        (apps_dir / "org.example.Quiet.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=Quiet\nExec=/usr/bin/quiet\n"
+            "X-Yantrik-Surface=quiet\nX-Yantrik-Purpose=nothing to see here, very quietly\n"
+            "X-Yantrik-Aliases=hush\n", "utf-8")
+        (apps_dir / "vim.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=Vim\nExec=vim %F\n", "utf-8")
+        (apps_dir / "hidden.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=Hidden\nExec=h\nNoDisplay=true\n"
+            "X-Yantrik-Surface=hidden\n", "utf-8")
+        declared = yos.declared_surfaces([str(apps_dir)])
+        check("the .desktop keys are read the way the shell reads them",
+              declared == [
+                  {"id": "howdy", "title": "Howdy", "purpose": "say hello to someone, by name",
+                   "aliases": ["hi", "greeter"], "entry": "org.example.Howdy"},
+                  {"id": "quiet", "title": "Quiet", "purpose": "nothing to see here, very quietly",
+                   "aliases": ["hush"], "entry": "org.example.Quiet"},
+                  {"id": "system-monitor", "title": "System Monitor",
+                   "purpose": "CPU, memory, disk and processes", "aliases": ["sysmonitor"],
+                   "entry": "yantrik-system-monitor"}],
+              declared)
+        saved_dirs = yos.application_dirs
+        yos.application_dirs = lambda: [str(apps_dir)]
+        hello_up = FakeService(sockets / "app-howdy.sock", lambda _s, asked: (
+            {"app": "howdy", "summary": "Howdy — nobody greeted yet", "state": {}, "actions": []}
+            if asked["method"] == "app.describe" else {}))
+        hello_up.start()
+        services.append(hello_up)
+        try:
+            found = yos.socket_candidates("hi")
+            check("an alias reaches the surface without the shell's link, from its .desktop file",
+                  found == [str(sockets / "app-howdy.sock")], found)
+            check("and so does what the app is called",
+                  yos.socket_candidates("Howdy") == [str(sockets / "app-howdy.sock")],
+                  yos.socket_candidates("Howdy"))
+            out, err, code = run(lambda: yos.cmd_describe(["greeter"]))
+            check("`describe greeter` answers as howdy", code is None and "nobody greeted" in out,
+                  (out, err))
+            out, err, code = run(lambda: yos.cmd_describe(["sysmonitor"]))
+            check("an alias of a closed window reaches the service that answers for it",
+                  code is None and "System — CPU" in out, (out, err))
+            out, err, code = run(lambda: yos.cmd_describe(["hush"]))
+            check("a closed app is named as closed, with its id, its purpose and how to open it",
+                  code == 1 and "is closed" in err and "quiet: nothing to see here" in err
+                  and "open_app name=quiet" in err and "no socket for" in err, err)
+
+            print("yos ls, with a desktop that lists what it can open")
+            listing = [
+                {"name": "howdy", "opens": "app", "describe_as": "howdy", "running": True,
+                 "for": "say hello to someone, by name", "aliases": ["hi", "greeter"]},
+                {"name": "system-monitor", "opens": "app", "describe_as": "system-monitor",
+                 "running": False, "for": "CPU, memory, disk and processes",
+                 "aliases": ["sysmonitor"], "title": "System Monitor"},
+                {"name": "files", "opens": "a screen of the desktop itself", "describe_as": "shell"},
+            ]
+            shell.reply = lambda _s, asked: (
+                {"app": "shell", "summary": "Yantrik", "state": {"apps": listing}, "actions": []}
+                if asked["method"] == "app.describe" else {"accepted": True, "settled": True})
+            out, err, code = run(lambda: yos.cmd_ls([]))
+            check("a closed app is listed as (closed), with what it is for and its other names",
+                  re.search(r"^    system-monitor +\(closed\)  CPU, memory, disk and processes  "
+                            r"\(also sysmonitor\)$", out, re.M) is not None, out)
+            check("under the heading harnesses read it by",
+                  "Can be opened with `act shell open_app name=<name>`" in out, out)
+            check("and an open one is not listed as closed",
+                  "howdy " in out and not re.search(r"^    howdy +\(closed\)", out, re.M), out)
+
+            print("yos ls, with no desktop answering")
+            shell_reply_before = shell.reply
+            shell.reply = lambda _s, asked: None  # accepts and says nothing: not a listing
+            out, err, code = run(lambda: yos.cmd_ls([]))
+            shell.reply = shell_reply_before
+            check("closed apps are still listed, read from the .desktop files, and it says so",
+                  "read from the .desktop files" in out
+                  and re.search(r"^    system-monitor +\(closed\)  CPU, memory", out, re.M), out)
+        finally:
+            yos.application_dirs = saved_dirs
+            shell.reply = asking_shell_reply
 
         print("the shell's name is the shell's: yos talks to app-shell only when yantrik-ui is "
               "what answers")

@@ -7,3 +7,6 @@ Exec=/opt/yantrik/bin/yantrik-weather
 Icon=yantrik
 Categories=Utility;
 Keywords=weather;forecast;temperature;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=weather
+X-Yantrik-Purpose=current conditions and forecast

@@ -643,6 +643,12 @@ def apps_from_listing(text: str) -> List[Tuple[str, str, str]]:
         parts = bare.split(None, 1)
         name = parts[0]
         purpose = parts[1].strip() if len(parts) > 1 else ""
+        # A closed app's row says so first and ends with the other names it answers to
+        # (`calendar  (closed)  events and appointments  (also cal)`); neither is what it is for.
+        if purpose.startswith("(closed)"):
+            purpose = purpose[len("(closed)"):].strip()
+        if purpose.endswith(")") and "  (also " in purpose:
+            purpose = purpose.rsplit("  (also ", 1)[0].rstrip()
         if where == "closed" and "(then describe " in purpose:
             purpose, _, tail = purpose.partition("(then describe ")
             described = tail.split(")", 1)[0].strip()

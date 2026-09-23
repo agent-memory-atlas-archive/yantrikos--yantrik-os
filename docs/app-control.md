@@ -248,15 +248,54 @@ hand the rest of the answer to `control::answer_later`.
 notes; the app is the window someone is looking at. They must not share a socket.
 
 The id is the app's own name, not its binary's: Container Manager publishes `containers`. It is
-also `container-manager` in `/opt/yantrik/bin`, in the launcher and in `open_app`, so
-`control::SURFACES` holds every app's other names, `serve` links each of them at the socket the app
-binds, and `yos ls` shows them beside the app. A symlink rather than a second listener, because it
-is one surface.
+also `container-manager` in `/opt/yantrik/bin`, in the launcher and in `open_app`, so its
+`.desktop` file says so (`X-Yantrik-Aliases`, below), the shell links each alias at the socket the
+app binds, and `yos ls` shows them beside the app. A symlink rather than a second listener, because
+it is one surface.
 
 A name belongs to whoever is answering on it. A second copy of an app, or a service started twice,
 used to take the socket from the running one; now the bind pings first and refuses to start while
 anything answers, saying which instance owns the name. Only a socket left by a crashed process is
 replaced.
+
+## Findable while closed: the `.desktop` keys
+
+A running surface is found by its socket. A closed one is found by its `.desktop` file — the file
+every Debian app already ships — with four keys in its `[Desktop Entry]` group:
+
+```ini
+X-Yantrik-Surface=libreoffice
+X-Yantrik-Purpose=Documents, spreadsheets and slides: open, read, edit and export them
+X-Yantrik-Aliases=writer;calc;impress
+X-Yantrik-Adapter=/usr/lib/yantrik/adapters/libreoffice
+```
+
+- **`X-Yantrik-Surface`** — the id the surface publishes as `app` and binds as `app-<id>.sock`:
+  lowercase words of letters and digits joined by `-`. Anything else is refused (and logged), not
+  rewritten.
+- **`X-Yantrik-Purpose`** — what the app is *for*, in one line. It is what a mind reads when it
+  chooses between apps it cannot see, so write it against the app it is most likely to be confused
+  with: Studio's says it *makes* pictures, Images' that it *views* them.
+- **`X-Yantrik-Aliases`** — other names, `;`-separated. The shell links each one at the surface's
+  socket (`app-<alias>.sock` → `app-<id>.sock`), so `yos describe <alias>` works for any surface,
+  whatever it was written with. A name the desktop answers to (`shell`, a screen, a section of
+  Settings) or that another app already holds is not handed out twice: ids are settled before
+  aliases, and between two apps the first in the catalogue's order keeps a name.
+- **`X-Yantrik-Adapter`** — a command that provides the surface for an app that cannot host one
+  (LibreOffice through UNO, GIMP through its Python). When the shell launches the app it starts
+  the adapter beside it with `YANTRIK_SURFACE=<id>` and `YANTRIK_APP_PID=<pid>` in its environment,
+  and sends it SIGTERM when that process exits. It is not started while anything already answers
+  on `app-<id>.sock`. An adapter should also exit on its own when the app it drives goes away.
+
+With those keys the app is listed in `describe shell` → `apps` whether or not it is running (name,
+`describe_as`, `for`, `aliases`, `title`, `running`), `open_app` opens it by its id, any alias or its
+`Name`, a button on one of its notifications reaches it (opening it first if it is closed), an
+approval can be asked for its actions, and `yos ls` / `os_apps` show it as `(closed)` with its
+purpose. The shell notices a new or changed entry within a few seconds; `act shell refresh_apps`
+rescans at once. This OS's own apps declare themselves with exactly these keys
+(`apps/desktop-files/`), and get nothing more — the shell's own table is left with only what no
+`.desktop` file can say: its screens and sections, the launcher, "whichever browser is installed",
+and Blender's addon-and-display check.
 
 ## Checking one
 
@@ -293,31 +332,31 @@ RPC → worker → tool registry gate → app socket → the window's own callba
 
 ## Surfaces today
 
-Every surface this desktop has, and the other names it answers to — generated from
-`control::SURFACES`, so it is the list the code holds. What each one publishes right now is
-`yos describe <name>`; whether it keeps the protocol, `yos check <name>`.
+Every surface this desktop ships, the other names it answers to and what it is for — generated
+from the `X-Yantrik-*` keys in `apps/desktop-files`, so it is the list the shell reads. What each one
+publishes right now is `yos describe <name>`; whether it keeps the protocol, `yos check <name>`.
 
-<!-- surfaces: generated from control::SURFACES by `YANTRIK_WRITE_DOCS=1 cargo test -p yantrik-app-runtime --lib the_guide_lists_every_surface` -->
-| Surface | Socket | Also answers to |
-| --- | --- | --- |
-| `arcade` | `app-arcade.sock` | — |
-| `blender` | `app-blender.sock` | — |
-| `calendar` | `app-calendar.sock` | — |
-| `containers` | `app-containers.sock` | `container-manager` |
-| `documents` | `app-documents.sock` | `document-editor` |
-| `download-manager` | `app-download-manager.sock` | `downloads` |
-| `editor` | `app-editor.sock` | `text-editor` |
-| `email` | `app-email.sock` | — |
-| `image-viewer` | `app-image-viewer.sock` | `images`, `image` |
-| `network` | `app-network.sock` | `network-manager` |
-| `notes` | `app-notes.sock` | — |
-| `presentation` | `app-presentation.sock` | `slides` |
-| `shell` | `app-shell.sock` | — |
-| `snippets` | `app-snippets.sock` | `snippet-manager` |
-| `studio` | `app-studio.sock` | — |
-| `system-monitor` | `app-system-monitor.sock` | `sysmonitor` |
-| `terminal` | `app-terminal.sock` | — |
-| `weather` | `app-weather.sock` | — |
+<!-- surfaces: generated from the X-Yantrik-* keys in apps/desktop-files by `YANTRIK_WRITE_DOCS=1 cargo test -p yantrik-ui --bin yantrik-ui the_guide_lists_every_surface` -->
+| Surface | Socket | Also answers to | For |
+| --- | --- | --- | --- |
+| `arcade` | `app-arcade.sock` | — | game making: small JSON specs in, one playable HTML game out |
+| `blender` | `app-blender.sock` | — | 3D scenes: model them, light them, render them |
+| `calendar` | `app-calendar.sock` | — | events and appointments |
+| `containers` | `app-containers.sock` | `container-manager` | Docker or Podman containers |
+| `documents` | `app-documents.sock` | `document-editor` | written documents — reports, letters, plans — saved as files in ~/Documents |
+| `download-manager` | `app-download-manager.sock` | `downloads` | fetch a URL to a file, with progress |
+| `editor` | `app-editor.sock` | `text-editor` | plain-text and code files, opened and saved by path |
+| `email` | `app-email.sock` | — | read and send mail |
+| `image-viewer` | `app-image-viewer.sock` | `images`, `image` | view pictures |
+| `network` | `app-network.sock` | `network-manager` | this machine's connections, Wi-Fi and firewall state |
+| `notes` | `app-notes.sock` | — | quick markdown notes kept in the notes library, not files you name |
+| `presentation` | `app-presentation.sock` | `slides` | slide decks |
+| `shell` | `app-shell.sock` | — | the desktop itself: screens, windows, files, opening apps, approvals |
+| `snippets` | `app-snippets.sock` | `snippet-manager` | reusable pieces of code and text |
+| `studio` | `app-studio.sock` | — | make pictures from a sentence, on your own GPU or a hosted service; they land as files |
+| `system-monitor` | `app-system-monitor.sock` | `sysmonitor` | CPU, memory, disk and processes |
+| `terminal` | `app-terminal.sock` | — | a shell: run commands |
+| `weather` | `app-weather.sock` | — | current conditions and forecast |
 <!-- /surfaces -->
 
 Beside them, five services answer `app.describe` on their own sockets — `weather`,
@@ -325,5 +364,6 @@ Beside them, five services answer `app.describe` on their own sockets — `weath
 Blender's surface is served by a Python addon inside Blender (`apps/blender/addon`), a port of the
 runtime's dispatch.
 
-Windows from other applications are not in this list and never will be: they publish through
-AT-SPI instead, and `a11y-service` reads whatever the toolkit chose to expose.
+Windows from other applications are not in this list unless their `.desktop` file declares a
+surface (above) — an adapter is how one gets there. The rest publish through AT-SPI, and
+`a11y-service` reads whatever the toolkit chose to expose.

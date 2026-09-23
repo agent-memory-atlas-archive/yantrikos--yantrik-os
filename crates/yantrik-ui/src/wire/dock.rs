@@ -3,13 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use slint::ComponentHandle;
-use yantrik_app_runtime::control;
 
 use crate::app_context::AppContext;
 use crate::apps::DesktopEntry;
 use crate::App;
 
-/// What opening one of the shell's own apps does.
+/// What opening one of the shell's own things does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Launch {
     /// One of the shell's own screens. Compiled into the shell, so always there.
@@ -21,52 +20,42 @@ pub enum Launch {
     /// The Apps launcher. Not a screen of its own: it is an overlay drawn over the desktop
     /// screen, so opening it means going to the desktop and opening the grid there.
     Launchpad,
-    /// A program shipped beside the shell, registered as `id` while it runs.
-    Program { id: &'static str, bin: &'static str },
     /// Whichever web browser this machine has.
     Browser,
     /// Blender, opened with the Yantrik addon so its control surface comes up with it.
     Blender,
 }
 
-/// Every app the shell opens by name, and what opening it does.
+/// What the shell opens by name that no `.desktop` file can say, and what opening it does.
 ///
-/// The first name in each row is the one the app is listed by; the rest are the spellings the
-/// same app arrives under — the name its binary carries, the id it publishes on its control
-/// surface — after `canonical_id` has folded their punctuation.
+/// The first name in each row is the one it is listed by; the rest are other spellings, after
+/// `canonical_id` has folded their punctuation.
 ///
-/// This table IS the dispatch. There used to be a match in `wire()` and, beside it, a list of the
-/// ids that match accepted, with a comment asking the two to agree. They did not: ten arms were
-/// missing from the list, and the launcher's About and Skills tiles had no arm at all, so
-/// clicking them logged "Unknown app" while `open_app` answered "launching". One table cannot
-/// disagree with itself.
+/// This table IS the dispatch for what is in it. There used to be a match in `wire()` and, beside
+/// it, a list of the ids that match accepted, with a comment asking the two to agree. They did
+/// not: ten arms were missing from the list, and the launcher's About and Skills tiles had no arm
+/// at all, so clicking them logged "Unknown app" while `open_app` answered "launching". One table
+/// cannot disagree with itself.
 ///
-/// Three rows carry history worth keeping:
+/// It used to hold every app this OS ships as well — a row per program with its binary and every
+/// spelling of its name — and so did two more tables beside it (the purposes below, the apps'
+/// alias table in the runtime). That made our apps the only ones a mind could find while they
+/// were closed. Each app now declares itself in its own `.desktop` file (`X-Yantrik-Surface`,
+/// `-Purpose`, `-Aliases`, `-Adapter`; see `crate::surfaces`), which is also how an app somebody
+/// else wrote does it, and what is left here is what a `.desktop` file cannot express:
 ///
-/// - `text_editor` is the name the binary carries and the name a person would try; `editor` is
-///   what the arm was always called. Both open the native Text Editor, which forwards repeated file opens to its existing window.
-/// - The image viewer was routed to screen 11 because the standalone binary, although shipped,
-///   could not open a picture: no argument handling, no control surface, and navigation
-///   callbacks that only logged. Routing around it kept the shell screen working and left
-///   24 MB in /opt/yantrik/bin that nothing could reach. The app opens files now, so the route
-///   is the app, and the file browser hands it the path.
-/// - `network_manager` was accepted by the guard — a .desktop entry matched — and then reached
-///   no arm, so open_app answered "launching" and nothing happened.
+/// - the shell's own screens, the sections of Settings and the launcher overlay — parts of this
+///   process, not programs;
+/// - `browser`, which is "whichever browser this machine has", with the flags that let `yos web`
+///   drive it;
+/// - `blender`, which is a program with a `.desktop` file of its own but is opened only after
+///   three checks no Exec line can make: the addon is there, and there is an X display for it
+///   (#96). Its surface's purpose still comes from `yantrik-blender.desktop`.
 const ROUTES: &[(&[&str], Launch)] = &[
-    (&["terminal"], Launch::Program { id: "terminal", bin: "yantrik-terminal" }),
     (&["browser"], Launch::Browser),
     (&["blender"], Launch::Blender),
     (&["files"], Launch::Screen(8)),
     (&["settings"], Launch::Screen(7)),
-    (&["notes"], Launch::Program { id: "notes", bin: "yantrik-notes" }),
-    (&["arcade"], Launch::Program { id: "arcade", bin: "yantrik-arcade" }),
-    (&["editor", "text_editor"], Launch::Program { id: "editor", bin: "yantrik-text-editor" }),
-    // `image`, not `images`, and the extra spelling is kept only as an alias. The id a route
-    // launches under is the key `merge_windows` pairs the launch registry against the
-    // compositor's snapshot by, and every other table in the shell calls this app `image`
-    // (APP_NAMES, STEM_TO_ID, the icon map). While they disagreed, one open viewer was two
-    // windows in `describe shell` and two buttons in the taskbar — #93.
-    (&["image_viewer", "images", "image"], Launch::Program { id: "image", bin: "yantrik-image-viewer" }),
     (&["bond"], Launch::Screen(4)),
     (&["personality"], Launch::Screen(5)),
     (&["memory"], Launch::Screen(6)),
@@ -76,26 +65,12 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["about"], Launch::Screen(16)),
     // "Install companion skills" is a section of Settings, not a screen of its own.
     (&["skills"], Launch::SettingsSection(7)),
-    (&["email"], Launch::Program { id: "email", bin: "yantrik-email" }),
-    (&["calendar"], Launch::Program { id: "calendar", bin: "yantrik-calendar" }),
     (&["packages"], Launch::Screen(21)),
-    (&["network", "network_manager"], Launch::Program { id: "network", bin: "yantrik-network-manager" }),
-    (&["sysmonitor", "system_monitor"], Launch::Program { id: "sysmonitor", bin: "yantrik-system-monitor" }),
-    (&["weather"], Launch::Program { id: "weather", bin: "yantrik-weather" }),
-    (&["downloads", "download_manager"], Launch::Program { id: "downloads", bin: "yantrik-download-manager" }),
-    (&["snippets", "snippet_manager"], Launch::Program { id: "snippets", bin: "yantrik-snippet-manager" }),
-    (&["containers", "container_manager"], Launch::Program { id: "containers", bin: "yantrik-container-manager" }),
     (&["devices", "device_dashboard"], Launch::Screen(27)),
     (&["permissions", "permission_dashboard"], Launch::Screen(28)),
     (&["problems", "report_problem", "report_a_problem"], Launch::Screen(33)),
     (&["agents", "agent"], Launch::Screen(34)),
     (&["recipes", "recipe"], Launch::Screen(35)),
-    (&["documents", "document_editor"], Launch::Program { id: "documents", bin: "yantrik-document-editor" }),
-    (&["presentation", "slides"], Launch::Program { id: "presentation", bin: "yantrik-presentation" }),
-    // One spelling, because the app publishes `studio` and the binary is `yantrik-studio`: every
-    // name a caller could hold already reaches it. `images` is the image viewer's, and the app
-    // that makes pictures must not answer to the name of the one that looks at them.
-    (&["studio"], Launch::Program { id: "studio", bin: "yantrik-studio" }),
     (&["launchpad"], Launch::Launchpad),
 ];
 
@@ -201,70 +176,72 @@ pub fn route(app: &str) -> Option<Launch> {
     ROUTES.iter().find(|(names, _)| names.contains(&id.as_str())).map(|(_, launch)| *launch)
 }
 
-/// The name an opened app answers to on the control surface, given any name it opens under.
+/// The surface a route's thing answers on: `shell` for a part of the desktop, Blender's addon for
+/// Blender, and nothing for the browser.
+///
+/// The browser is a window we did not write. It publishes nothing, and the desktop's own surface
+/// is not a stand-in for it: a notification button that named the browser and was answered by
+/// `shell` would run somebody else's action on this desktop. Blender is not ours either, but it
+/// does publish — the addon the route starts it with binds app-blender.sock.
+pub fn route_surface(launch: Launch) -> Option<&'static str> {
+    match launch {
+        Launch::Browser => None,
+        Launch::Blender => Some("blender"),
+        Launch::Screen(_) | Launch::SettingsSection(_) | Launch::Editor | Launch::Launchpad => {
+            Some("shell")
+        }
+    }
+}
+
+/// The name an app answers to on the control surface, given any name it is known by.
 ///
 /// A driver opens `sysmonitor` and then has to describe `system-monitor`; opens `downloads` and
 /// describes `download-manager`. Nothing said so anywhere a driver could read, so the second
 /// step of the most ordinary job on this desktop — open an app, look at it — was a guess.
 ///
-/// Every spelling in a row reaches the same answer, which is the half that was missing: the
-/// container manager was routed under both `containers` and `container_manager` and only the
-/// first of them resolved, so a mind holding the name off the binary or the launcher's second
-/// spelling was refused by an app that was open in front of it.
-///
-/// The names are the apps' own and are not decided here. Which id an app publishes, and what
-/// else that id answers to, is `yantrik_app_runtime::control::SURFACES` — one table, read by the
-/// apps when they bind their socket and by the shell here when it is asked what to call one.
-/// A screen of the desktop is described as `shell`, because that is the surface it is part of.
-pub fn surface_for(app: &str) -> Option<&'static str> {
-    match route(app)? {
-        Launch::Program { id, .. } => Some(control::surface_id(id).unwrap_or(id)),
-        // The browser is a window we did not write. It publishes nothing, and the desktop's own
-        // surface is not a stand-in for it: a notification button that named the browser and was
-        // answered by `shell` would run somebody else's action on this desktop.
-        Launch::Browser => None,
-        // Blender is not ours either, but unlike the browser it does publish: the addon the
-        // launcher starts it with binds app-blender.sock, so the name resolves through the
-        // apps' own table rather than being asserted here.
-        Launch::Blender => control::surface_id("blender"),
-        _ => Some("shell"),
+/// The names are the apps' own and are not decided here: each app's `.desktop` file declares the
+/// id it publishes and the other names it answers to, and `crate::surfaces::find` reads them —
+/// for an app somebody else wrote exactly as for ours. `shell` and `yantrik` (the name the shell
+/// sends its own notifications under) are the desktop, and a screen of the desktop is described
+/// as `shell`, because that is the surface it is part of.
+pub fn surface_for(app: &str, installed: &[DesktopEntry]) -> Option<String> {
+    let key = canonical_id(app);
+    if key.is_empty() {
+        return None;
     }
+    if key == "shell" || key == "yantrik" {
+        return Some("shell".to_string());
+    }
+    if let Some(launch) = route(app) {
+        return route_surface(launch).map(str::to_string);
+    }
+    crate::surfaces::find(app, installed).map(|(surface, _)| surface.id)
 }
 
-/// What each app is FOR, in a few words, for a reader choosing between them.
+/// The id the shell registers a `.desktop` entry's window under, which is what `APP_NAMES`, the
+/// taskbar and the icon set call it: `sysmonitor` for `yantrik-system-monitor`, the entry id
+/// itself for anybody else's.
+pub fn window_id(app_id: &str) -> String {
+    super::app_grid::icon_id_for(app_id)
+}
+
+/// What the shell's own things are FOR, in a few words, for a reader choosing between them.
 ///
 /// Three different models — a local 27B and two hosted ones — were each asked to "write a
 /// short document titled Launch Plan and save it", and each wrote a note. They were shown a
 /// list of names: `notes` was open with a summary that fitted, and `documents` was one word in
 /// a row of closed apps. A name is not a description. When every model makes the same choice,
 /// the choice was made here.
+///
+/// Only the routes' rows. An app's purpose is its `X-Yantrik-Purpose`, written in its own
+/// `.desktop` file beside its name — the words above for Notes and yDoc moved there unchanged.
 const PURPOSES: &[(&str, &str)] = &[
-    ("terminal", "a shell: run commands"),
-    ("notes", "quick markdown notes kept in the notes library, not files you name"),
-    ("editor", "plain-text and code files, opened and saved by path"),
-    ("image", "view pictures"),
     ("problems", "what went wrong on this machine, and the report you can choose to send"),
     ("agents", "every agent at work — each mind's conversation, its tool calls and their output, in one list"),
     ("recipes", "every recipe the companion holds, as its stages while it runs — answer the one waiting on you, pause, resume or cancel"),
-    // Written against `images` on purpose: the two are one word apart and a model choosing between
-    // them has only these few words. Looking and making are the difference, and where the pixels
-    // come from is the second thing a caller has to know before it asks.
-    ("studio", "make pictures from a sentence, on your own GPU or a hosted service; they land as files"),
-    ("email", "read and send mail"),
-    ("calendar", "events and appointments"),
-    ("network", "this machine's connections, Wi-Fi and firewall state"),
-    ("sysmonitor", "CPU, memory, disk and processes"),
-    ("weather", "current conditions and forecast"),
-    ("downloads", "fetch a URL to a file, with progress"),
-    ("snippets", "reusable pieces of code and text"),
-    ("containers", "Docker or Podman containers"),
-    ("documents", "written documents — reports, letters, plans — saved as files in ~/Documents"),
-    ("presentation", "slide decks"),
     ("files", "browse, move, rename and delete files"),
     ("settings", "this desktop's settings"),
     ("browser", "the web"),
-    ("arcade", "game making: small JSON specs in, one playable HTML game out"),
-    ("blender", "3D scenes: model them, light them, render them"),
     ("launchpad", "every app on this machine, by category, searchable"),
 ];
 
@@ -274,17 +251,24 @@ const PURPOSES: &[(&str, &str)] = &[
 /// `download-manager` — while windows are titled from the launcher's id (`sysmonitor`,
 /// `downloads`). `show_app` takes whichever the caller has.
 ///
-/// Read out of the route table rather than from a second list of pairs beside it, so every
-/// spelling a row carries arrives at the same window: `container-manager` used to fall through
-/// unchanged and `present_app` then looked for a window titled after a name no window carries.
+/// Read from the entry that opens the app, so every name it answers to arrives at the same
+/// window: `container-manager` used to fall through unchanged and `present_app` then looked for a
+/// window titled after a name no window carries.
 pub fn launcher_id(name: &str) -> String {
+    launcher_id_in(name, &crate::apps::Catalogue::shared().get())
+}
+
+/// [`launcher_id`], against a catalogue the caller holds.
+pub fn launcher_id_in(name: &str, installed: &[DesktopEntry]) -> String {
     let want = name.trim().to_lowercase();
-    match route(&want) {
-        // The id the window is registered and titled under, which is the route's own, not the
-        // first spelling in its row: the image viewer is routed as `image_viewer` and every
-        // window of it is `images`.
-        Some(Launch::Program { id, .. }) => id.to_string(),
-        _ => want,
+    if route(&want).is_some() {
+        return want;
+    }
+    match crate::surfaces::find(&want, installed) {
+        // The id the window is registered and titled under — what the launch hands the registry
+        // (`resolve` → `Resolved::Catalogue::id`) — not the surface's.
+        Some((_, entry)) => super::app_grid::icon_id_for(&entry.app_id),
+        None => want,
     }
 }
 
@@ -292,11 +276,33 @@ pub fn launcher_id(name: &str) -> String {
 ///
 /// `open_app(name)` took a name and the shell's state listed none, so a mind had to guess what
 /// this desktop calls its apps — and a wrong guess reads, from outside, exactly like a model
-/// inventing things. Each entry is the name to pass, what opening it does, and, for a program,
-/// the name to `describe` it by once it is open. Shelved apps are left out: they cannot be
-/// opened, and `open_app` says why if one is asked for by name.
+/// inventing things. Each entry is the name to pass, what opening it does, and, for an app, the
+/// name to `describe` it by, what it is for, the other names it answers to and whether it is
+/// running. Shelved apps are left out: they cannot be opened, and `open_app` says why if one is
+/// asked for by name.
+///
+/// Every app whose `.desktop` file declares a surface is here, closed or open — this OS's own and
+/// anybody else's alike — listed by its surface id, so the name that opens it is the name that
+/// describes it.
 pub fn openable() -> Vec<serde_json::Value> {
-    ROUTES
+    openable_in(&crate::apps::Catalogue::shared().get())
+}
+
+/// [`openable`], against a catalogue the caller holds.
+pub fn openable_in(installed: &[DesktopEntry]) -> Vec<serde_json::Value> {
+    openable_with(installed, &|surface| {
+        yantrik_app_runtime::service::is_up(&format!("app-{surface}"))
+    })
+}
+
+/// [`openable_in`], with the question "is this surface's window answering right now" asked of
+/// `running` rather than of the socket directory.
+pub fn openable_with(
+    installed: &[DesktopEntry],
+    running: &dyn Fn(&str) -> bool,
+) -> Vec<serde_json::Value> {
+    let declared = crate::surfaces::declared(installed);
+    let mut listed: Vec<serde_json::Value> = ROUTES
         .iter()
         .filter_map(|(names, launch)| {
             let name = *names.first()?;
@@ -307,16 +313,22 @@ pub fn openable() -> Vec<serde_json::Value> {
                 PURPOSES.iter().find(|(app, _)| *app == id || *app == name).map(|(_, what)| *what)
             };
             let mut entry = match launch {
-                Launch::Program { id, .. } => {
-                    let surface = control::surface_id(id).unwrap_or(*id);
-                    serde_json::json!({ "name": name, "opens": "app", "describe_as": surface })
-                }
                 Launch::Browser => serde_json::json!({ "name": name, "opens": "web browser" }),
                 // An app, and listed as one: opening it brings up a surface a caller can
-                // describe and act on, which is the whole reason the route exists.
+                // describe and act on, which is the whole reason the route exists. What it is
+                // for, and what else it is called, is its own `.desktop` file's to say.
                 Launch::Blender => {
-                    let surface = control::surface_id("blender").unwrap_or("blender");
-                    serde_json::json!({ "name": name, "opens": "app", "describe_as": surface })
+                    let mut entry = serde_json::json!({
+                        "name": name,
+                        "opens": "app",
+                        "describe_as": "blender",
+                        "running": running("blender"),
+                    });
+                    let installed_blender = declared.iter().find(|d| d.id == "blender").cloned();
+                    if let Some(surface) = installed_blender.or_else(shipped_blender) {
+                        describe_declared(&mut entry, &surface);
+                    }
+                    entry
                 }
                 // Listed as what it is. It was "a screen of the desktop itself", which is what
                 // `yos ls` printed, so the next thing a caller tried was `show_screen
@@ -339,32 +351,78 @@ pub fn openable() -> Vec<serde_json::Value> {
                 }),
                 _ => serde_json::json!({ "name": name, "opens": "a screen of the desktop itself", "describe_as": "shell" }),
             };
-            let id = match launch {
-                Launch::Program { id, .. } => *id,
-                _ => name,
-            };
-            if let Some(what) = purpose(id) {
-                entry["for"] = serde_json::Value::String(what.to_string());
+            if entry.get("for").is_none() {
+                if let Some(what) = purpose(name) {
+                    entry["for"] = serde_json::Value::String(what.to_string());
+                }
             }
             Some(entry)
         })
-        .collect()
+        .collect();
+
+    // Every surface a .desktop file declares, whether it is running or not. A route already
+    // listed one (Blender) under the same id; it is not listed twice.
+    for surface in &declared {
+        if route(&surface.id).is_some() {
+            continue;
+        }
+        let mut entry = serde_json::json!({
+            "name": surface.id,
+            "opens": "app",
+            "describe_as": surface.id,
+            "running": running(&surface.id),
+        });
+        describe_declared(&mut entry, surface);
+        listed.push(entry);
+    }
+    listed
 }
 
-/// Every name the shell's own apps answer to.
+/// Blender's declaration as this OS ships it, for a machine where its entry is not installed.
+///
+/// The route is listed whether or not Blender is on the disk (`open_app` then says what is
+/// missing), and its row should still say what it is for. Read from the shipped file itself
+/// rather than copied here, so the purpose has one home.
+fn shipped_blender() -> Option<crate::surfaces::Declared> {
+    const SHIPPED: &str = include_str!("../../../../apps/desktop-files/yantrik-blender.desktop");
+    let entry = crate::apps::parse_desktop_text("yantrik-blender", SHIPPED)?;
+    crate::surfaces::declared(&[entry]).into_iter().next()
+}
+
+/// What a `.desktop` file says about a surface, added to its row in the listing.
+fn describe_declared(entry: &mut serde_json::Value, surface: &crate::surfaces::Declared) {
+    entry["title"] = serde_json::Value::String(surface.title.clone());
+    if !surface.purpose.trim().is_empty() {
+        entry["for"] = serde_json::Value::String(surface.purpose.clone());
+    }
+    if !surface.aliases.is_empty() {
+        entry["aliases"] = serde_json::json!(surface.aliases);
+    }
+}
+
+/// Every name the shell's own routes answer to.
 pub fn builtin_app_ids() -> impl Iterator<Item = &'static str> {
     ROUTES.iter().flat_map(|(names, _)| names.iter().copied())
 }
 
 /// What `open_app` will do for a name. Decided here, once, and read by the dispatch — so a
 /// test can ask the question without a window, a catalogue thread or a spawn.
+#[derive(Debug)]
 pub enum Resolved {
     /// In the tree, not in this build; carries why.
     Shelved(&'static Shelved),
-    /// One of the shell's own: a screen, a program it knows how to start, Blender with its addon.
+    /// One of the shell's own: a screen, the launcher, the browser, Blender with its addon.
     Route(Launch),
-    /// A program the shell has no account of, from its .desktop entry: the binary and its args.
-    Catalogue { id: String, bin: String, args: Vec<String> },
+    /// A program from its .desktop entry: the id its window is registered under, the binary and
+    /// its args — and, when the entry declares a surface, which one, and the adapter that
+    /// provides it if the app cannot.
+    Catalogue {
+        id: String,
+        bin: String,
+        args: Vec<String>,
+        surface: Option<String>,
+        adapter: Option<String>,
+    },
     /// Nothing answers to that name.
     Unknown,
 }
@@ -381,8 +439,10 @@ pub enum Resolved {
 /// had been reported as done. A window a mind can only photograph: the exact thing the launch
 /// arm's own comment promises not to open (#96).
 ///
-/// The route is the shell's account of how to open a thing it knows. The catalogue is for
-/// things it does not know. `availability()` already asked in this order; now the launch does.
+/// The route is the shell's account of how to open a thing that is part of it. The catalogue is
+/// for programs, and within it a declared surface is asked first — by its id, any alias, or what
+/// the app is called — so `open_app name=sysmonitor` finds System Monitor through the name its
+/// own `.desktop` file gives it, exactly as a third-party app's alias finds that app.
 pub fn resolve(app: &str, installed: &[DesktopEntry]) -> Resolved {
     if let Some(shelf) = shelved(app) {
         return Resolved::Shelved(shelf);
@@ -390,17 +450,28 @@ pub fn resolve(app: &str, installed: &[DesktopEntry]) -> Resolved {
     if let Some(launch) = route(app) {
         return Resolved::Route(launch);
     }
-    if let Some(entry) = catalogue_entry(app, installed) {
+    let entry = crate::surfaces::find(app, installed)
+        .map(|(_, entry)| entry)
+        .or_else(|| catalogue_entry(app, installed));
+    if let Some(entry) = entry {
         if let Some(shelf) = shelved_exec(&entry.exec) {
             return Resolved::Shelved(shelf);
         }
         if entry.exec != "__builtin__" {
             let mut parts = entry.exec.split_whitespace().map(str::to_string);
             if let Some(bin) = parts.next() {
+                // The surface as the catalogue settled it, not merely as the file wrote it: a
+                // declaration that lost its name to the desktop or to another app declares nothing.
+                let surface = crate::surfaces::declared(installed)
+                    .into_iter()
+                    .find(|d| entry.surface.as_deref() == Some(d.id.as_str()))
+                    .map(|d| d.id);
                 return Resolved::Catalogue {
                     id: super::app_grid::icon_id_for(&entry.app_id),
                     bin,
                     args: parts.collect(),
+                    adapter: surface.as_ref().and(entry.adapter.clone()),
+                    surface,
                 };
             }
         }
@@ -433,30 +504,21 @@ pub enum Availability {
 /// known — it had an arm — and the arm ran `chromium`, which the installer does not put on the
 /// disk. So START showed Browser, `open_app browser` answered "launching", and a click did
 /// nothing but log ENOENT. Anything that lists an app or promises to open one asks this instead,
-/// which checks the same two sources the dispatch uses, in the same order, down to whether the
-/// program they would run exists.
+/// which is the dispatch's own decision (`resolve`), followed down to whether the program it
+/// would run exists — so the answer and the launch cannot take different paths. (They did:
+/// this asked the catalogue before the routes while the launch asked the routes first, so a
+/// distribution's `blender.desktop` answered "ready" for a Blender the route would have refused.)
 pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
-    // Asked first, and before the catalogue, so a stale .desktop file and a stale binary left on
-    // disk by an earlier release cannot answer Ready for something this build does not ship.
-    if let Some(shelf) = shelved(app) {
-        return Availability::Shelved(shelf);
-    }
-    if let Some(entry) = catalogue_entry(app, installed) {
-        if let Some(shelf) = shelved_exec(&entry.exec) {
-            return Availability::Shelved(shelf);
-        }
-        if entry.exec != "__builtin__" {
-            return program_availability(&entry.exec);
-        }
-        // A built-in catalogue entry is launched by its route, like the dispatch does.
-    }
-    match route(app) {
-        None => Availability::Unknown,
-        Some(Launch::Program { bin, .. }) => match find_program(bin) {
-            Some(_) => Availability::Ready,
-            None => Availability::Missing(bin.to_string()),
-        },
-        Some(Launch::Browser) => match find_browser() {
+    // The shelf is `resolve`'s first question, so a stale .desktop file and a stale binary left
+    // on disk by an earlier release cannot answer Ready for something this build does not ship.
+    let launch = match resolve(app, installed) {
+        Resolved::Shelved(shelf) => return Availability::Shelved(shelf),
+        Resolved::Unknown => return Availability::Unknown,
+        Resolved::Catalogue { bin, .. } => return program_availability(&bin),
+        Resolved::Route(launch) => launch,
+    };
+    match launch {
+        Launch::Browser => match find_browser() {
             Some(_) => Availability::Ready,
             None => Availability::Missing(format!(
                 "a web browser (looked for {})",
@@ -466,7 +528,7 @@ pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
         // Both halves are checked: a Blender without the addon is a window a mind can only
         // photograph, and an addon without Blender has nothing to run inside. The refusal
         // names the half that is missing, because the fix is different for each.
-        Some(Launch::Blender) => match find_program("blender") {
+        Launch::Blender => match find_program("blender") {
             None => Availability::Missing("blender".to_string()),
             Some(_) => match blender_bootstrap() {
                 None => Availability::Missing(
@@ -478,7 +540,7 @@ pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
                 },
             },
         },
-        Some(Launch::Screen(_) | Launch::SettingsSection(_) | Launch::Editor | Launch::Launchpad) => {
+        Launch::Screen(_) | Launch::SettingsSection(_) | Launch::Editor | Launch::Launchpad => {
             Availability::Ready
         }
     }
@@ -526,13 +588,20 @@ pub fn entry_is_launchable(entry: &DesktopEntry) -> bool {
     program_availability(&entry.exec) == Availability::Ready
 }
 
-/// The names of the apps that will open on this machine, for telling a caller what it can ask for.
-pub fn launchable_app_ids(installed: &[DesktopEntry]) -> Vec<&'static str> {
-    ROUTES
+/// The names of the apps that will open on this machine, for telling a caller what it can ask for:
+/// the shell's own, then every declared surface, by the name the listing gives it.
+pub fn launchable_app_ids(installed: &[DesktopEntry]) -> Vec<String> {
+    let mut ids: Vec<String> = ROUTES
         .iter()
-        .map(|(names, _)| names[0])
+        .map(|(names, _)| names[0].to_string())
         .filter(|id| is_launchable(id, installed))
-        .collect()
+        .collect();
+    for surface in crate::surfaces::declared(installed) {
+        if !ids.contains(&surface.id) && is_launchable(&surface.id, installed) {
+            ids.push(surface.id);
+        }
+    }
+    ids
 }
 
 /// The web browsers the Browser pin will open, in order of preference, with what each needs.
@@ -698,6 +767,9 @@ fn is_executable(path: &Path) -> bool {
 pub fn wire(ui: &App, ctx: &AppContext) {
     let catalogue = ctx.installed_apps.clone();
     let ui_weak = ui.as_weak();
+    // The catalogue follows the application directories from here on, and every declared alias
+    // is linked at its surface's socket — see `crate::surfaces::watch`.
+    crate::surfaces::watch(catalogue.clone());
 
     ui.on_launch_app(move |app_id| {
         let app = app_id.to_string();
@@ -720,9 +792,12 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 );
                 return;
             }
-            Resolved::Catalogue { id, bin, args } => {
+            Resolved::Catalogue { id, bin, args, surface, adapter } => {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                spawn_app_with_args(&id, &bin, &args);
+                // An app that cannot host its own surface has its adapter started beside it,
+                // and stopped with it.
+                let adapter = surface.as_deref().zip(adapter.as_deref());
+                spawn_launch(&id, &bin, &args, None, adapter);
                 return;
             }
             Resolved::Unknown => {
@@ -761,7 +836,6 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                     ui.set_app_grid_open(true);
                 }
             }
-            Launch::Program { id, bin } => spawn_app(id, bin),
             // A browser is a window like any other, so it goes through the one launcher: the
             // registry learns it is open, the reaper notices if it dies at once, and it gets the
             // session's display environment. The old arm set WAYLAND_DISPLAY and XDG_RUNTIME_DIR
@@ -844,7 +918,10 @@ pub fn spawn_app_with_args(app_id: &str, bin: &str, args: &[&str]) {
 /// The toolkit hints are the other half of the same thought. GTK and Qt both take a
 /// preference LIST, so a Wayland-native app uses Wayland and one that cannot falls back to
 /// Xwayland on its own. Neither is forced, and an app that already sets them keeps its choice.
-fn session_env() -> Vec<(&'static str, String)> {
+///
+/// An app's adapter gets the same environment (`crate::surfaces::start_adapter`): it drives the
+/// app, and has to be able to reach whatever the app reaches.
+pub(crate) fn session_env() -> Vec<(&'static str, String)> {
     let mut env = Vec::new();
 
     if std::env::var_os("DISPLAY").is_none() {
@@ -879,6 +956,21 @@ fn x_display() -> Option<String> {
 }
 
 pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::path::Path>) {
+    spawn_launch(app_id, bin, args, dir, None)
+}
+
+/// The body of every launch, with the adapter a `.desktop` file may declare for the app.
+///
+/// `adapter` is `(surface, command)`: started once the app process exists, told which process it
+/// serves, and stopped when that process exits — by the same reaper that already watches the app,
+/// so an adapter cannot outlive its app on one launch path and not another.
+fn spawn_launch(
+    app_id: &str,
+    bin: &str,
+    args: &[&str],
+    dir: Option<&std::path::Path>,
+    adapter: Option<(&str, &str)>,
+) {
     let path = resolve_app_binary(bin);
     let mut command = std::process::Command::new(&path);
     if let Some(dir) = dir {
@@ -904,6 +996,9 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
             // before the reaper thread starts, so a describe that lands in the same instant sees
             // it.
             let owns_window = crate::running::mark_launched(app_id, pid, bin);
+            if let Some((surface, command)) = adapter {
+                crate::surfaces::start_adapter(surface, command, pid);
+            }
             // Reap it when it exits. Without a wait, every app the shell ever launched lingers
             // as a zombie until the shell itself quits — and a zombie still has a /proc entry,
             // which is enough to confuse anything that checks "is that pid alive". The same wait
@@ -918,6 +1013,9 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
             crate::running::clear_launch_failure(&id);
             let started = std::time::Instant::now();
             std::thread::spawn(move || {
+                // Whether this exit was a second copy handing over to a window already open,
+                // which leaves that window's adapter where it is.
+                let mut second_copy = false;
                 match child.wait() {
                     Ok(status) => {
                         let lived = started.elapsed();
@@ -940,6 +1038,7 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
                             && !owns_window
                             && status.success())
                         {
+                            second_copy = true;
                             tracing::info!(
                                 app = %name, lived_ms, brought_forward = handed_over,
                                 "A second copy handed over to the window already open"
@@ -960,6 +1059,7 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
                     }
                     Err(e) => tracing::warn!(app = %name, error = %e, "Could not wait for app"),
                 }
+                crate::surfaces::app_exited(pid, second_copy);
                 crate::running::mark_exited(&id, pid);
             });
         }
@@ -1037,23 +1137,29 @@ mod tests {
         None
     }
 
+    /// The catalogue as a machine that installed this build has it: the shell's own screens and
+    /// every `.desktop` file this OS ships, minus the shelf.
+    fn shipped() -> Vec<DesktopEntry> {
+        crate::surfaces::shipped_catalogue()
+    }
+
     #[test]
     fn every_app_with_a_control_surface_opens_by_the_id_it_publishes() {
+        let shipped = shipped();
         for (dir, id) in published_ids() {
             assert!(
-                is_known_app(&id, &[]),
+                is_known_app(&id, &shipped),
                 "apps/{dir} publishes `{id}`, so an agent will ask for it by that name"
             );
-            assert!(
-                route(&id).is_some(),
-                "`{id}` normalises to `{}`, which no route answers to",
-                canonical_id(&id)
+            assert_eq!(
+                surface_for(&id, &shipped).as_deref(),
+                Some(id.as_str()),
+                "apps/{dir} publishes `{id}` and the catalogue does not know it by that name"
             );
         }
     }
 
-    /// The other way round, and the one nobody was checking: every name that opens an app also
-    /// describes it.
+    /// Every name that opens an app also describes it, and is a name its socket answers to.
     ///
     /// The container manager was opened as `containers` or as `container_manager`, was
     /// `yantrik-container-manager` in `/opt/yantrik/bin`, and published `containers`. `yos ls`
@@ -1062,78 +1168,96 @@ mod tests {
     /// everything else calls it and then asked it to describe itself was refused by an app that
     /// was open in front of it.
     ///
-    /// Every spelling is checked against the app's own name table rather than against this file,
-    /// because that table is what the app reads when it binds its socket: a name that resolves
-    /// here is a name that answers there. A new spelling in ROUTES with nothing in that table
-    /// fails here instead of shipping the same refusal under a different word.
+    /// The names are the app's own `.desktop` file's now, and what reaches a socket is the id and
+    /// the aliases (the shell links each alias there). So the name on the binary and the id the
+    /// shell registers the window under must each be one of those: a name that opens the app and
+    /// is not linked at its socket is the refusal above under a different word.
     #[test]
     fn every_launchable_name_reaches_a_surface() {
-        for (names, launch) in ROUTES {
-            let Launch::Program { id, bin } = launch else { continue };
-            let (id, bin) = (*id, *bin);
-            let surface = surface_for(id).expect("a routed program resolves to something");
-            // The name in /opt/yantrik/bin is one of the app's names too: it is what a caller
-            // reads off `ps`, off a log line, or off the directory itself.
-            let program = bin.strip_prefix("yantrik-").unwrap_or(bin);
-            for name in names.iter().copied().chain(std::iter::once(program)) {
-                assert_eq!(
-                    surface_for(name),
-                    Some(surface),
-                    "`open_app name={name}` opens the app that publishes `{surface}`, and \
-                     `describe {name}` has to reach it"
+        let shipped = shipped();
+        let declared = crate::surfaces::declared(&shipped);
+        assert!(declared.len() > 10, "only {} shipped surfaces were read", declared.len());
+        for surface in &declared {
+            let entry = shipped.iter().find(|e| e.app_id == surface.entry).expect("its entry");
+            let program = entry.exec.split_whitespace().next().unwrap_or_default();
+            let program = program.rsplit('/').next().unwrap_or(program);
+            let program = program.strip_prefix("yantrik-").unwrap_or(program);
+            let window = super::super::app_grid::icon_id_for(&entry.app_id);
+            let on_the_socket = |name: &str| {
+                let name = crate::apps::fold_name(name);
+                surface.id == name || surface.aliases.contains(&name)
+            };
+            for name in [program, window.as_str()] {
+                assert!(
+                    on_the_socket(name),
+                    "`{name}` opens `{}` and is not among its names on the socket bus, so \
+                     `describe {name}` is refused. Add it to X-Yantrik-Aliases in {}.desktop.",
+                    surface.id,
+                    surface.entry
                 );
+            }
+            for name in std::iter::once(&surface.id)
+                .chain(surface.aliases.iter())
+                .map(String::as_str)
+                .chain([program, window.as_str(), entry.name.as_str(), entry.app_id.as_str()])
+            {
                 assert_eq!(
-                    control::surface_id(name),
-                    Some(surface),
-                    "`{name}` opens `{surface}` and the app's own name table does not know the \
-                     name, so its socket answers to `{surface}` alone and `describe {name}` is \
-                     refused. Add it beside `{surface}` in yantrik_app_runtime::control::SURFACES."
+                    surface_for(name, &shipped).as_deref(),
+                    Some(surface.id.as_str()),
+                    "`open_app name={name}` opens the app that publishes `{}`, and `describe` \
+                     has to reach it",
+                    surface.id
                 );
             }
         }
-        // And a screen of the desktop is part of the desktop's own surface, which is what a
-        // caller has to describe to see it.
-        assert_eq!(surface_for("files"), Some("shell"));
-        assert_eq!(surface_for("settings"), Some("shell"));
-        assert_eq!(surface_for("no-such-app"), None);
+        // A screen of the desktop is part of the desktop's own surface, which is what a caller
+        // has to describe to see it.
+        assert_eq!(surface_for("files", &shipped).as_deref(), Some("shell"));
+        assert_eq!(surface_for("settings", &shipped).as_deref(), Some("shell"));
+        assert_eq!(surface_for("yantrik", &shipped).as_deref(), Some("shell"));
+        assert_eq!(surface_for("no-such-app", &shipped), None);
         // Chromium is not one of ours and the desktop's own surface does not answer for it.
-        assert_eq!(surface_for("browser"), None);
+        assert_eq!(surface_for("browser", &shipped), None);
         // Blender is not one of ours either, but it does answer: the addon the route starts it
-        // with binds app-blender.sock, and the name is in the apps' table like any other.
-        assert_eq!(surface_for("blender"), Some("blender"));
-        assert_eq!(control::surface_id("blender"), Some("blender"));
+        // with binds app-blender.sock.
+        assert_eq!(surface_for("blender", &shipped).as_deref(), Some("blender"));
         assert_eq!(route("blender"), Some(Launch::Blender));
         // The mismatches this is really about, spelled out, so the intent survives a refactor.
-        assert_eq!(surface_for("container-manager"), Some("containers"));
-        assert_eq!(surface_for("sysmonitor"), Some("system-monitor"));
-        assert_eq!(surface_for("text_editor"), Some("editor"));
+        assert_eq!(surface_for("container-manager", &shipped).as_deref(), Some("containers"));
+        assert_eq!(surface_for("sysmonitor", &shipped).as_deref(), Some("system-monitor"));
+        assert_eq!(surface_for("text_editor", &shipped).as_deref(), Some("editor"));
+        assert_eq!(surface_for("Downloads", &shipped).as_deref(), Some("download-manager"));
+        assert_eq!(surface_for("yDoc", &shipped).as_deref(), Some("documents"));
     }
 
-    /// Nothing is written down twice: the id an app publishes is the id the apps' name table
-    /// says it publishes, and every other name in that table is a name this shell would open.
+    /// Nothing is written down twice: every app under `apps/` that publishes a surface declares
+    /// that id in its own `.desktop` file, and the file declares nothing else.
     ///
-    /// The table decides which names an app links at its socket, so a table that disagreed with
-    /// the app about what it is called would hand out names that reach nothing — this bug again,
-    /// from the other end.
+    /// The id is read from the app's `App::new(…)`, and the file is what the shell lists the app
+    /// by while it is closed — two statements of one fact, held to each other here, which is
+    /// what the apps' old alias table in the runtime and the route table in this file were, with
+    /// a third copy of every purpose beside them.
     #[test]
-    fn the_apps_name_table_and_the_route_table_know_the_same_names() {
+    fn every_app_that_publishes_a_surface_declares_it_in_its_desktop_file() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop-files");
         for (dir, id) in published_ids() {
-            let surface = control::surface_id(&id).unwrap_or_else(|| {
-                panic!(
-                    "apps/{dir} publishes `{id}` and no app of that name is in \
-                     yantrik_app_runtime::control::SURFACES, so every other name it is called by \
-                     reaches nothing"
-                )
-            });
-            assert_eq!(surface, id, "apps/{dir} publishes `{id}` and the table calls it `{surface}`");
-            for name in control::other_names(surface) {
-                assert!(
-                    route(name).is_some(),
-                    "the apps' name table says `{surface}` also answers to `{name}`, and this \
-                     shell would not open anything called that"
-                );
-                assert_eq!(surface_for(name), Some(surface), "`{name}`");
-            }
+            let file = root.join(format!("yantrik-{dir}.desktop"));
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("apps/{dir} publishes `{id}` and {} is unreadable: {e}", file.display()));
+            let entry = crate::apps::parse_desktop_text(&format!("yantrik-{dir}"), &text)
+                .unwrap_or_else(|| panic!("{} is not an application entry", file.display()));
+            assert_eq!(
+                entry.surface.as_deref(),
+                Some(id.as_str()),
+                "apps/{dir} publishes `{id}`; {} must say X-Yantrik-Surface={id}, or the app is \
+                 not listed while it is closed",
+                file.display()
+            );
+            assert!(
+                entry.purpose.chars().count() > 8,
+                "{} does not say what the app is for (X-Yantrik-Purpose)",
+                file.display()
+            );
         }
     }
 
@@ -1151,47 +1275,54 @@ mod tests {
         "weather",
     ];
 
+    /// Whether `open_app` would launch a program for this name, on a machine with this build.
+    fn opens_a_program(name: &str, installed: &[DesktopEntry]) -> bool {
+        matches!(resolve(name, installed), Resolved::Catalogue { .. })
+    }
+
     #[test]
     fn every_app_we_ship_opens_by_the_name_of_its_binary() {
+        let shipped = shipped();
         for app in SHIPPED_APPS {
             if shelved(app).is_some() {
                 continue;
             }
             assert!(
-                route(app).is_some(),
+                opens_a_program(app, &shipped),
                 "apps/{app} ships a binary that `open_app name={app}` cannot launch"
             );
         }
     }
 
-    /// The id a route launches under is the id the rest of the shell must know it by.
+    /// The id an app launches under is the id the rest of the shell must know it by.
     ///
     /// `windows::merge_windows` pairs the launch registry against the compositor's snapshot by
-    /// app id: the registry names a window by the id `ROUTES` launched it under, and the snapshot
+    /// app id: the registry names a window by the id it was launched under, and the snapshot
     /// names it by resolving the window's title through `APP_NAMES`. When those two disagree the
     /// merge sees two applications and keeps both, so one open window becomes two rows in
     /// `describe shell` and two buttons in the taskbar.
     ///
     /// That is not hypothetical. The image viewer launched under `images` while every other table
     /// — `APP_NAMES`, `STEM_TO_ID`, the icon map — called it `image`, and it was listed twice for
-    /// as long as it was open (#93). One row, wrong for months, and nothing here noticed.
-    ///
-    /// Aliases are free: a route may answer to as many spellings as it likes. It is the id it
-    /// *launches under* that has to be the one name the shell knows.
+    /// as long as it was open (#93). Whatever name an app is opened by, it launches under the id
+    /// its entry maps to, and that id has to be one the shell knows.
     #[test]
-    fn a_route_launches_under_a_name_the_rest_of_the_shell_knows() {
+    fn an_app_launches_under_a_name_the_rest_of_the_shell_knows() {
         let known: Vec<&str> = crate::windows::APP_NAMES.iter().map(|(id, _)| *id).collect();
-        for (names, launch) in ROUTES {
-            let Launch::Program { id, bin } = launch else {
-                continue;
-            };
-            assert!(
-                known.contains(id),
-                "`{bin}` launches under id `{id}`, which no APP_NAMES row matches. \
-                 The shell would list one of its windows twice. Either add `{id}` to APP_NAMES, \
-                 or launch under the name that is already there — and keep `{id}` in this row's \
-                 aliases ({names:?}) so callers holding the old spelling still reach it."
-            );
+        let shipped = shipped();
+        for surface in crate::surfaces::declared(&shipped) {
+            for name in std::iter::once(&surface.id).chain(surface.aliases.iter()) {
+                match resolve(name, &shipped) {
+                    Resolved::Catalogue { id, bin, .. } => assert!(
+                        known.contains(&id.as_str()),
+                        "`{bin}` launches under id `{id}` (opened as `{name}`), which no APP_NAMES \
+                         row matches. The shell would list one of its windows twice."
+                    ),
+                    // Blender opens through its route, which registers it as `blender`.
+                    Resolved::Route(Launch::Blender) => {}
+                    other => panic!("`{name}` is a declared surface and resolves to {other:?}"),
+                }
+            }
         }
     }
 
@@ -1201,13 +1332,14 @@ mod tests {
     /// is in neither, or in both, is the drift this whole table exists to prevent.
     #[test]
     fn an_app_is_either_shipped_or_shelved() {
+        let shipped = shipped();
         for app in SHIPPED_APPS {
             let on_shelf = shelved(app).is_some();
-            let routed = route(app).is_some();
+            let opens = opens_a_program(app, &shipped);
             assert!(
-                on_shelf != routed,
+                on_shelf != opens,
                 "apps/{app} is {}",
-                if on_shelf { "both shelved and routed" } else { "neither shelved nor routed" }
+                if on_shelf { "both shelved and opened" } else { "neither shelved nor opened" }
             );
         }
         // And every shelf entry names an app that is really there. A shelf row for something
@@ -1219,6 +1351,153 @@ mod tests {
                 shelf.binary
             );
         }
+    }
+
+    // ── An app somebody else wrote, declared the same way ──
+
+    /// A LibreOffice-shaped app that declares a surface, an alias per program and an adapter.
+    fn third_party() -> Vec<DesktopEntry> {
+        let mut installed = shipped();
+        let entry = |stem: &str, text: &str| crate::apps::parse_desktop_text(stem, text).unwrap();
+        installed.push(entry(
+            "libreoffice-writer",
+            "[Desktop Entry]\nType=Application\nName=LibreOffice Writer\nExec=/opt/yantrik-test-nowhere/libreoffice --writer %U\n\
+             X-Yantrik-Surface=libreoffice\nX-Yantrik-Purpose=Documents, spreadsheets and slides: open, read, edit and export them\n\
+             X-Yantrik-Aliases=writer;office\nX-Yantrik-Adapter=/usr/lib/yantrik/adapters/libreoffice\n",
+        ));
+        installed.push(entry(
+            "libreoffice-calc",
+            "[Desktop Entry]\nType=Application\nName=LibreOffice Calc\nExec=/opt/yantrik-test-nowhere/libreoffice --calc %U\n\
+             X-Yantrik-Surface=libreoffice\nX-Yantrik-Aliases=calc\nX-Yantrik-Adapter=/usr/lib/yantrik/adapters/libreoffice\n",
+        ));
+        // And one that reaches for names that are not its to take. Between two apps, an alias
+        // goes to the first in the catalogue's order (by name, as the scan sorts it), so this one
+        // sorts last and loses `writer` to LibreOffice as well.
+        installed.push(entry(
+            "greedy",
+            "[Desktop Entry]\nType=Application\nName=Zz Greedy\nExec=/usr/bin/greedy\n\
+             X-Yantrik-Surface=greedy\nX-Yantrik-Aliases=files;notes;shell;writer;sysmonitor;greed\n",
+        ));
+        installed.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        installed
+    }
+
+    /// A third-party surface is listed while it is closed, with what the author wrote about it,
+    /// exactly as ours are.
+    #[test]
+    fn a_third_party_surface_is_listed_while_closed_like_ours() {
+        let installed = third_party();
+        let listed = openable_with(&installed, &|surface| surface == "notes");
+        let lo = listed.iter().find(|a| a["name"] == "libreoffice").expect("libreoffice is listed");
+        assert_eq!(lo["opens"], "app");
+        assert_eq!(lo["describe_as"], "libreoffice");
+        assert_eq!(lo["running"], false);
+        assert_eq!(lo["title"], "LibreOffice Calc", "the first entry in the catalogue's order names it");
+        assert!(lo["for"].as_str().is_some_and(|f| f.starts_with("Documents")), "{lo}");
+        assert_eq!(lo["aliases"], serde_json::json!(["calc", "writer", "office"]), "{lo}");
+        // One row per surface, however many entries declare it.
+        assert_eq!(listed.iter().filter(|a| a["describe_as"] == "libreoffice").count(), 1);
+        // Ours, in the same shape.
+        let notes = listed.iter().find(|a| a["name"] == "notes").expect("notes is listed");
+        assert_eq!(notes["running"], true);
+        assert_eq!(notes["describe_as"], "notes");
+        // Names that belong to the desktop or to another app are not handed out.
+        let greedy = listed.iter().find(|a| a["name"] == "greedy").expect("greedy is listed");
+        assert_eq!(greedy["aliases"], serde_json::json!(["greed"]), "{greedy}");
+    }
+
+    /// It opens by its id, by any alias, and by the program each alias names — with its adapter.
+    #[test]
+    fn a_third_party_surface_opens_by_its_id_and_every_alias() {
+        let installed = third_party();
+        for (name, program_arg) in [
+            ("libreoffice", "--calc"),
+            ("calc", "--calc"),
+            ("writer", "--writer"),
+            ("Office", "--writer"),
+            ("LibreOffice Writer", "--writer"),
+        ] {
+            match resolve(name, &installed) {
+                Resolved::Catalogue { bin, args, surface, adapter, .. } => {
+                    assert_eq!(bin, "/opt/yantrik-test-nowhere/libreoffice", "{name}");
+                    assert_eq!(args.first().map(String::as_str), Some(program_arg), "{name}");
+                    assert_eq!(surface.as_deref(), Some("libreoffice"), "{name}");
+                    assert_eq!(adapter.as_deref(), Some("/usr/lib/yantrik/adapters/libreoffice"), "{name}");
+                }
+                other => panic!("`{name}` resolves to {other:?}"),
+            }
+            assert_eq!(surface_for(name, &installed).as_deref(), Some("libreoffice"), "{name}");
+            // Not installed here, so known-but-missing, which is how `open_app` says so.
+            assert_eq!(
+                availability(name, &installed),
+                Availability::Missing("/opt/yantrik-test-nowhere/libreoffice".into()),
+                "{name}"
+            );
+        }
+        // The names it tried to take still open what they opened before.
+        assert!(matches!(resolve("files", &installed), Resolved::Route(Launch::Screen(8))));
+        assert_eq!(surface_for("notes", &installed).as_deref(), Some("notes"));
+        assert_eq!(surface_for("sysmonitor", &installed).as_deref(), Some("system-monitor"));
+        assert_eq!(surface_for("writer", &installed).as_deref(), Some("libreoffice"));
+        // And the refusal lists it among what can be asked for, once it is on the disk.
+        assert!(!launchable_app_ids(&installed).contains(&"libreoffice".to_string()));
+    }
+
+    /// A surface installed while the shell runs is found without a restart: the directory's
+    /// fingerprint moves, the rescan reads the new entry, and the listing and `open_app` have it.
+    #[cfg(unix)]
+    #[test]
+    fn a_surface_installed_while_the_shell_runs_is_found_on_the_next_scan() {
+        use std::os::unix::fs::PermissionsExt;
+        let xdg = std::env::temp_dir().join(format!("yantrik-dock-xdg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&xdg);
+        let apps = xdg.join("applications");
+        std::fs::create_dir_all(&apps).unwrap();
+        let program = xdg.join("hello-app");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dirs = vec![apps.clone()];
+
+        let before = crate::apps::fingerprint(&dirs);
+        let scanned: Vec<DesktopEntry> =
+            crate::apps::scan_in(&dirs).into_iter().filter(entry_is_launchable).collect();
+        assert!(!openable_in(&scanned).iter().any(|a| a["name"] == "hello"));
+        assert!(matches!(resolve("hi", &scanned), Resolved::Unknown));
+
+        std::fs::write(
+            apps.join("org.example.Hello.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Hello\nExec={} --window\n\
+                 X-Yantrik-Surface=hello\nX-Yantrik-Purpose=say hello to someone, by name\n\
+                 X-Yantrik-Aliases=hi;greeter\n",
+                program.display()
+            ),
+        )
+        .unwrap();
+        assert_ne!(crate::apps::fingerprint(&dirs), before, "the watcher would see this");
+
+        // What `Catalogue::refresh` does: scan, keep what can run.
+        let rescanned: Vec<DesktopEntry> =
+            crate::apps::scan_in(&dirs).into_iter().filter(entry_is_launchable).collect();
+        let listed = openable_in(&rescanned);
+        let hello = listed.iter().find(|a| a["name"] == "hello").expect("hello is listed after the rescan");
+        assert_eq!(hello["describe_as"], "hello");
+        assert_eq!(hello["aliases"], serde_json::json!(["hi", "greeter"]));
+        assert_eq!(hello["for"], "say hello to someone, by name");
+        assert_eq!(availability("hi", &rescanned), Availability::Ready);
+        match resolve("greeter", &rescanned) {
+            Resolved::Catalogue { id, bin, args, surface, .. } => {
+                assert_eq!(bin, program.display().to_string());
+                assert_eq!(args, vec!["--window".to_string()]);
+                assert_eq!(surface.as_deref(), Some("hello"));
+                // A third-party entry keeps its own id for the window registry.
+                assert_eq!(id, "org.example.Hello");
+            }
+            other => panic!("`greeter` resolves to {other:?}"),
+        }
+        assert!(launchable_app_ids(&rescanned).contains(&"hello".to_string()));
+        assert_eq!(launcher_id_in("hi", &rescanned), "org.example.Hello");
+        let _ = std::fs::remove_dir_all(&xdg);
     }
 
     #[test]
@@ -1235,11 +1514,12 @@ mod tests {
     fn the_guard_accepts_everything_the_dispatch_handles() {
         // These all have arms in `wire()` and were all refused by `is_known_app` as unknown,
         // which is the failure mode this list's own comment claimed to prevent.
+        let shipped = shipped();
         for id in [
             "containers", "downloads", "snippets", "documents", "presentation",
             "sysmonitor", "devices", "permissions", "slides", "text_editor", "image_viewer",
         ] {
-            assert!(is_known_app(id, &[]), "the dispatch launches `{id}` but the guard refuses it");
+            assert!(is_known_app(id, &shipped), "the dispatch launches `{id}` but the guard refuses it");
         }
     }
 
@@ -1305,6 +1585,7 @@ mod tests {
             comment: String::new(),
             app_id: "thing".into(),
             icon_char: String::new(),
+            ..Default::default()
         };
         assert!(entry_is_launchable(&entry("/bin/sh -c true")));
         assert!(entry_is_launchable(&entry("sh")), "a bare name is looked up on PATH");
@@ -1379,6 +1660,7 @@ mod tests {
             comment: String::new(),
             app_id: app_id.into(),
             icon_char: String::new(),
+            ..Default::default()
         }
     }
 
@@ -1479,19 +1761,17 @@ mod tests {
     /// No route points at a shelved binary, and no shelved name is offered as something to open.
     #[test]
     fn nothing_routes_to_a_shelved_app() {
-        for (names, launch) in ROUTES {
+        for (names, _) in ROUTES {
             for name in *names {
                 assert!(shelved(name).is_none(), "`{name}` is both routed and shelved");
             }
-            if let Launch::Program { bin, .. } = launch {
-                assert!(
-                    shelved_exec(bin).is_none(),
-                    "a route runs {bin}, which is a shelved binary"
-                );
-            }
+        }
+        // No shipped entry that declares a surface runs a shelved binary.
+        for surface in crate::surfaces::declared(&shipped()) {
+            assert!(shelved(&surface.id).is_none(), "`{}` is declared and shelved", surface.id);
         }
         // The list a refusal hands back must not name something that would itself be refused.
-        let offered = launchable_app_ids(&[]);
+        let offered = launchable_app_ids(&shipped());
         for id in &offered {
             assert!(shelved(id).is_none(), "`{id}` is offered as launchable and is shelved");
         }
@@ -1520,10 +1800,11 @@ mod tests {
     /// The apps that ship are untouched by the shelf.
     #[test]
     fn un_shelved_apps_are_unaffected() {
+        let shipped = shipped();
         for id in ["notes", "terminal", "files", "calendar", "email", "documents", "presentation"] {
             assert!(shelved(id).is_none(), "`{id}` is not shelved");
-            assert!(route(id).is_some(), "`{id}` still routes");
-            assert!(is_known_app(id, &[]), "`{id}` is still known");
+            assert!(!matches!(resolve(id, &shipped), Resolved::Unknown), "`{id}` still opens");
+            assert!(is_known_app(id, &shipped), "`{id}` is still known");
         }
     }
 
@@ -1535,19 +1816,31 @@ mod tests {
     /// an entry the script does not know about would ship the app it just refused to open.
     #[test]
     fn what_can_be_opened_is_listed_by_the_name_that_opens_it() {
-        let apps = openable();
+        let shipped = shipped();
+        let apps = openable_with(&shipped, &|_| false);
         let names: Vec<&str> = apps.iter().map(|a| a["name"].as_str().unwrap()).collect();
         for name in &names {
-            assert!(route(name).is_some(), "`{name}` is listed as openable and open_app would not open it");
+            assert!(
+                !matches!(resolve(name, &shipped), Resolved::Unknown),
+                "`{name}` is listed as openable and open_app would not open it"
+            );
         }
         for shelf in SHELVED {
             for id in shelf.ids {
                 assert!(!names.contains(id), "`{id}` is shelved and is listed as openable");
             }
         }
-        // Opened under one name, described under another: the listing has to say which.
-        let monitor = apps.iter().find(|a| a["name"] == "sysmonitor").expect("sysmonitor is openable");
+        // Listed by the name that describes it, with every other name it answers to beside it —
+        // the launcher's `sysmonitor` among them — and whether it is open.
+        let monitor = apps.iter().find(|a| a["name"] == "system-monitor").expect("system-monitor is openable");
         assert_eq!(monitor["describe_as"], "system-monitor");
+        assert_eq!(monitor["aliases"], serde_json::json!(["sysmonitor"]));
+        assert_eq!(monitor["title"], "System Monitor");
+        assert_eq!(monitor["running"], false);
+        // Every app this OS ships is listed while it is closed.
+        for (dir, id) in published_ids() {
+            assert!(names.contains(&id.as_str()), "apps/{dir} publishes `{id}` and is not listed while closed");
+        }
         let notes = apps.iter().find(|a| a["name"] == "notes").expect("notes is openable");
         assert_eq!(notes["describe_as"], "notes");
         assert!(apps.iter().filter(|a| a["opens"] == "app").all(|a| a["describe_as"].is_string()));
@@ -1590,7 +1883,7 @@ mod tests {
         assert_eq!(route("launchpad"), Some(Launch::Launchpad));
         assert_eq!(availability("launchpad", &[]), Availability::Ready);
         // Part of the desktop's own surface, which is where `describe` reports it open.
-        assert_eq!(surface_for("launchpad"), Some("shell"));
+        assert_eq!(surface_for("launchpad", &[]).as_deref(), Some("shell"));
 
         let apps = openable();
         let launcher = apps.iter().find(|a| a["name"] == "launchpad").expect("launchpad is openable");

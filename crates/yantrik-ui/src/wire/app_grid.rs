@@ -113,43 +113,22 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             ui.set_app_grid_open(false);
         }
 
-        // Built-in Yantrik apps → navigate to screen via launch-app callback
+        // Every tile opens through the dock's one dispatch, `launch_app`, whatever it is.
+        //
+        // Program tiles used to be spawned here, from the Exec line, and that was a third launch
+        // path beside the dock's and `open_app`'s. It had already been brought into the shell's
+        // one launcher once — it had spawned a bare Command that inherited SLINT_FULLSCREEN=1, so
+        // an app opened from the grid came up fullscreen with no way out ("I opened notes app
+        // and now its showing no option to close") — but it still chose its own registry id
+        // (the file name without `yantrik-`, so System Monitor registered as `system-monitor`
+        // while APP_NAMES and every other launch call it `sysmonitor`) and it could not start an
+        // app's adapter. Through `launch_app` the tile opens exactly what `open_app` with the same
+        // name would, under the same id, with the same adapter; Blender's tile gets its route.
         let installed = catalogue.get();
         if let Some(entry) = installed.iter().find(|e| e.app_id == app_id_str) {
-            if entry.exec == "__builtin__" {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.invoke_launch_app(app_id);
-                }
-                return;
-            }
             tracing::info!(app = %entry.name, exec = %entry.exec, "Launching app from grid");
-            let exec_clean = entry
-                .exec
-                .split_whitespace()
-                .filter(|w| !w.starts_with('%'))
-                .collect::<Vec<_>>();
-            if let Some(cmd) = exec_clean.first() {
-                // Through the shell's one launcher, not a bare Command.
-                //
-                // This spawned directly, so it inherited the shell's whole environment --
-                // including SLINT_FULLSCREEN=1, which the session sets because the shell IS the
-                // OS and must not be a window. An app that inherits it opens fullscreen with no
-                // titlebar, no taskbar and no way out: "I opened notes app and now its showing
-                // no option to close".
-                //
-                // spawn_app_in already removed that variable, registered the launch and reaped
-                // the child. Its own doc comment says the paths were unified "so the registry,
-                // the environment scrubbing and the reaper cannot end up applying to one launch
-                // path and not the other". This was a third path, and it was never brought in.
-                // Registered under the canonical id, not the .desktop basename.
-                //
-                // The catalogue keys entries by filename, so this OS's own apps come through as
-                // "yantrik-notes" while APP_NAMES — the single naming source the taskbar, the
-                // dock and the window list all read — says "notes". Passing the filename made
-                // the taskbar fall through to its title-casing fallback and label the window
-                // "Yantrik notes", beside a titlebar saying "Notes".
-                let canonical = app_id_str.strip_prefix("yantrik-").unwrap_or(&app_id_str);
-                super::dock::spawn_app_with_args(canonical, cmd, &exec_clean[1..]);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.invoke_launch_app(app_id);
             }
         }
     });

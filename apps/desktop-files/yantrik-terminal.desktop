@@ -7,3 +7,6 @@ Exec=/opt/yantrik/bin/yantrik-terminal
 Icon=yantrik
 Categories=System;TerminalEmulator;
 Keywords=terminal;shell;command;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=terminal
+X-Yantrik-Purpose=a shell: run commands

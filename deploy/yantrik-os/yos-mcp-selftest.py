@@ -47,7 +47,10 @@ What it is actually checking, in one line each:
     passes only the shell's names, is given as long as its wait (and the harness's client allows
     it), taints the session when it waited for the role's answer, and an agent held to a role's
     reach hears the reach's refusal as a policy answer and is never shown asking the person for an
-    act outside it.
+    act outside it;
+  * os_describe names the apps this machine declares in their .desktop files, with what each is
+    for, and no list of its own; os_apps says closed apps are listed; and the bridge reads the
+    keys exactly as `yos` does.
 """
 
 import importlib.util
@@ -1725,6 +1728,52 @@ with tempfile.TemporaryDirectory() as d:
     check("in auto, hand_off runs unasked and lands in the record, without the token",
           not s.get("requests") and (audited.get("app"), audited.get("action"), audited.get("args_json"))
           == ("shell", "hand_off", {"role": "reviewer", "task": "tidy"}) and not leaks(state), s)
+
+    # 25. os_describe names the apps this machine declares, from their .desktop files — anybody's
+    # as well as ours — and names none of its own. os_apps says a closed app is listed.
+    module, state = case(tmp, "surfaces")
+    apps_dir = tmp / "applications"
+    apps_dir.mkdir()
+    (apps_dir / "org.example.Howdy.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Howdy\nExec=/usr/bin/howdy\n"
+        "X-Yantrik-Surface=howdy\nX-Yantrik-Purpose=say hello to someone, by name\n"
+        "X-Yantrik-Aliases=hi;greeter;shell\n", encoding="utf-8")
+    (apps_dir / "yantrik-system-monitor.desktop").write_text(
+        (HERE.parent.parent / "apps" / "desktop-files" / "yantrik-system-monitor.desktop")
+        .read_text(encoding="utf-8"), encoding="utf-8")
+    (apps_dir / "vim.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Vim\nExec=vim %F\n", encoding="utf-8")
+    text = module.os_describe_text([str(apps_dir)])
+    check("os_describe names each declared app with what it is for",
+          "'howdy' (say hello to someone, by name)" in text
+          and "'system-monitor' (CPU, memory, disk and processes)" in text, text)
+    check("and still offers the desktop itself", "'shell' (the desktop" in text, text)
+    check("and an app that declares nothing is not offered", "vim" not in text.lower(), text)
+    bare = module.os_describe_text([str(tmp / "nowhere")])
+    check("with nothing declared it names no app at all — the old list is gone",
+          not any(("'%s'" % name) in bare
+                  for name in ("system-monitor", "weather", "network", "notes", "calendar", "email")),
+          bare)
+    saved_dirs = module.application_dirs
+    module.application_dirs = lambda: [str(apps_dir)]
+    try:
+        listed = module.listing(module.BY_NAME["os_describe"])["description"]
+    finally:
+        module.application_dirs = saved_dirs
+    check("tools/list publishes that description, read when the tools are listed",
+          "'howdy' (say hello" in listed, listed)
+    check("os_apps says a closed app is listed, marked as closed",
+          "(closed)" in module.BY_NAME["os_apps"]["description"], module.BY_NAME["os_apps"]["description"])
+    # One reading of the keys, however many scripts carry it: the bridge's copy agrees with yos's.
+    loader = SourceFileLoader("yos_for_surfaces", str(HERE / "yos"))
+    spec = importlib.util.spec_from_loader("yos_for_surfaces", loader)
+    real_yos = importlib.util.module_from_spec(spec)
+    loader.exec_module(real_yos)
+    theirs = [{k: s[k] for k in ("id", "purpose", "aliases")}
+              for s in real_yos.declared_surfaces([str(apps_dir)])]
+    ours = module.declared_surfaces([str(apps_dir)])
+    check("the bridge reads the .desktop keys exactly as yos does", ours == theirs and len(ours) == 2,
+          (ours, theirs))
 
 print()
 if failures:
