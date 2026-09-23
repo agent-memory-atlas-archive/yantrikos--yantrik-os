@@ -35,7 +35,9 @@ harness stopped; the pane survives both.
 
 ```
 ┌ Agents ───────────────────────────────────────────────────────────────────────────────┐
-│ + New agent          │ pi · "tidy the photos folder"                  ● running 2m14s │
+│ Active 2 · Needs you 1 · Complete 4 · All          + New agent         ⧉ Pop out      │
+│──────────────────────┬────────────────────────────────────────────────────────────────│
+│                      │ pi · "tidy the photos folder"                  ● running 2m14s │
 │                      │────────────────────────────────────────────────┬───────────────│
 │ ● pi                 │ you  tidy the photos folder, dupes into Trash  │ Mind   pi     │
 │   tidy the photos…   │                                                │ Model  qwen…  │
@@ -52,10 +54,19 @@ harness stopped; the pane survives both.
 └──────────────────────┴───────────────────────────────────────────────┴───────────────┘
 ```
 
-- **Left: the agents.** One row per agent: its mind, the task (its first prompt, cut), and its
-  state — *thinking*, *running a tool*, *waiting for you*, *idle*, *done*, *failed* — with how
-  long. **New agent** picks a mind and takes the first prompt. Rows needing the person sort to the
-  top.
+- **One view, filtered by state.** Tabs across the top — **Active**, **Needs you**, **Complete**,
+  **All** — each with its count, over a single list (Pranab, 23 Sep: "a single [view] with active,
+  complete etc. and a list, or launch a pop-up shell of that agent, or show inside if selected").
+- **Left: the list.** One row per agent: its mind, the task (its first prompt, cut), and its state
+  — *thinking*, *running a tool*, *waiting for you*, *idle*, *done*, *failed* — with how long.
+  **New agent** picks a mind and takes the first prompt. Rows needing the person sort to the top
+  of Active.
+- **Selecting a row shows that agent inside the view**, or **Pop out** (⧉, or double-click the
+  row) opens it in **its own window**: the same session, live, titled with the agent, movable
+  beside other windows like a terminal of that agent. One window per agent; popping out an agent
+  that already has one raises it. Closing the window closes the view, not the agent — the agent
+  keeps working and stays in the list. The popped-out window is drawn from the same store as the
+  view, so the two cannot disagree.
 - **Middle: the agent's session.** The person's prompts, the mind's text, and each tool call as a
   **card**: its name, what it touched, its arguments on one line (all of them a click away — #125's
   rendering, reused), its state (running / ✓ / ✗ with the exit code), and its **output inside the
@@ -236,7 +247,7 @@ rule on every door; this only decides where the question is drawn.
 | 0 | This doc + `event.rs` | — | `crates/yantrik-harness` |
 | 1 | **Wire**: `harness.event` with the lifecycle and caps, conversations with host-issued ids and agent tokens, one turn at a time per conversation, FIFO, `Chunk::Event`, `Host::agent_for_token`; Python lib emitters; pi (process per conversation) and DeepSeek (history per conversation); tests | rebases over #125 | `crates/yantrik-harness`, `harnesses/lib`, `harnesses/pi`, `harnesses/deepseek`, `wire/chat.rs` |
 | 2 | **Agent terminal**: per-command PTYs in the shell (wrapper for `pwd`, process groups, built environment, caps, input, silence detection), `agent_run / agent_job / agent_input / agent_kill`, token check against the verified caller; then `yos-mcp` routing and pi's `bash` | #116 merged (for `yos-mcp`) | new `crates/yantrik-ui/src/agent_terminal.rs`, `control.rs`, `yos-mcp`, `harnesses/pi/extension` |
-| 3 | **Agents screen**: the store (agents, sessions, cards), the Slint screen, the card with embedded output, details, New agent, Stop/Close | 0 (a fake feed until 1 lands) | new `crates/yantrik-ui/src/agents/`, new `agents.slint`, `app.slint`, `control.rs`, `dock.rs` |
+| 3 | **Agents screen**: the store (agents, sessions, cards), the Slint screen with the status tabs and list, the session inside when selected, **Pop out** into an agent window, the card with embedded output, details, New agent, Stop/Close | 0 (a fake feed until 1 lands) | new `crates/yantrik-ui/src/agents/`, new `agents.slint`, `app.slint`, `control.rs`, `dock.rs` |
 | 4 | **Glue**: Lens "open in Agents"; notifications "pi finished" / "deepseek needs you"; `describe shell` → `agents`; `new_agent / send_to_agent / stop_agent`; the built-in companion as an agent | 1–3 | `wire/`, `control.rs`, `notifications.rs` |
 
 ## The red-team, and what it changed
