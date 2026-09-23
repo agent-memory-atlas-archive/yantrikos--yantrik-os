@@ -223,7 +223,9 @@ run at once. `/stop` and `/new` act on their own conversation only. Against a de
   (`⚙️ name...`, `⚙️ name: "preview"`, and the verbose `⚙️ name([...])` with the arguments on the
   line after), so a harness that already writes its calls down does not need this form. Anything
   a line carries is what the panel can show: Hermes in its default mode sends the name alone
-  for an MCP tool, and the panel shows the name alone.
+  for an MCP tool, and the panel shows the name alone. A harness that also sends
+  `harness.event` (above) keeps writing this line: the event is the call's card in the Agents
+  view, the line is the call in the text, and `turn.tool_start` writes both.
 
 ## Five harnesses exist
 
