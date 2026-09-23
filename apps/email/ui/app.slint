@@ -69,6 +69,8 @@ export component EmailApp inherits Window {
     in property <string> email-sync-status <=> client.email-sync-status;
     in property <int> email-folder-total <=> client.email-folder-total;
     in property <int> email-folder-unread <=> client.email-folder-unread;
+    in property <bool> email-folder-counts-known <=> client.email-folder-counts-known;
+    in property <string> email-folder-counts-reason <=> client.email-folder-counts-reason;
 
     // ── Compose ──
     in-out property <string> compose-to <=> client.compose-to;

@@ -43,7 +43,9 @@ mod tests {
     use super::accounts::{self, Account};
     use super::connect::{self, Attempt};
     use super::google;
-    use super::state::{self, Draft, FolderCounts, GoogleOutcome, MailState, MessageRow, Triage};
+    use super::state::{
+        self, Counted, Draft, FolderCounts, GoogleOutcome, MailState, MessageRow, Triage,
+    };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use yantrik_ipc_contracts::email::{
@@ -319,11 +321,15 @@ mod tests {
     // the header counted the page in hand, the list carried the server's count, and one reply
     // gave two answers to one question (#74, #123). The header now reads the list.
 
+    const REFUSED: &str = "the mail server did not report it: No Response: STATUS failed";
+
     fn listed() -> Vec<EmailFolder> {
         vec![
-            EmailFolder { name: "INBOX".into(), unread_count: 12, total_count: 35 },
-            EmailFolder { name: "[Gmail]/Spam".into(), unread_count: 29, total_count: 29 },
-            EmailFolder { name: "[Gmail]/Sent Mail".into(), unread_count: 0, total_count: 5 },
+            EmailFolder::counted("INBOX", 12, 35),
+            EmailFolder::counted("[Gmail]/Spam", 29, 29),
+            EmailFolder::counted("[Gmail]/Sent Mail", 0, 5),
+            EmailFolder::uncounted("Archive", REFUSED),
+            EmailFolder::counted("Drafts", 0, 0),
         ]
     }
 
@@ -331,23 +337,80 @@ mod tests {
     fn the_header_and_the_folder_list_are_the_same_numbers() {
         // One page of the inbox is in hand — 21 rows, 9 of them unread — and the list says the
         // folder holds 35, 12 unread. The header says what the list says.
-        let counts = FolderCounts::of(&listed(), "INBOX", 9, 21);
-        assert_eq!(counts, FolderCounts { unread: 12, total: 35 });
-        let line = state::folder_summary("INBOX", counts, None);
+        let counts = Counted::of(&listed(), "INBOX", 9, 21);
+        assert_eq!(counts, Counted::Known(FolderCounts { unread: 12, total: 35 }));
+        let line = state::folder_summary("INBOX", &counts, None);
         assert_eq!(line, "Email — INBOX, 12 unread of 35");
         assert!(!line.contains("21"), "{line} counts the page, not the folder");
     }
 
     #[test]
     fn the_folder_is_found_however_it_was_capitalised() {
-        assert_eq!(FolderCounts::of(&listed(), "inbox", 0, 0).total, 35);
+        assert_eq!(Counted::of(&listed(), "inbox", 0, 0).known().map(|c| c.total), Some(35));
     }
 
     #[test]
     fn a_folder_the_server_did_not_list_is_counted_from_what_is_in_hand() {
         // No entry, so no server count, and nothing in the list for the header to contradict.
-        let counts = FolderCounts::of(&listed(), "Receipts", 2, 7);
-        assert_eq!(counts, FolderCounts { unread: 2, total: 7 });
+        let counts = Counted::of(&listed(), "Receipts", 2, 7);
+        assert_eq!(counts, Counted::Known(FolderCounts { unread: 2, total: 7 }));
+    }
+
+    // ── A folder the server would not count ──────────────────────────
+    //
+    // The list wrote `0/0` for a folder whose STATUS the server refused or never answered, and
+    // the header built from it said "0 unread of 0": a transient failure presented as a fact
+    // about the mailbox, and the same fact an empty folder presents (#131).
+
+    #[test]
+    fn a_folder_the_server_would_not_count_is_not_an_empty_folder() {
+        // The list has Archive, uncounted, and 7 rows of it are in hand. The header does not
+        // say "0 unread of 0", and it does not offer the page in hand as the server's answer
+        // either: the server was asked and did not say.
+        let counts = Counted::of(&listed(), "Archive", 2, 7);
+        assert_eq!(counts, Counted::Unavailable { reason: REFUSED.into() });
+        assert_eq!(counts.known(), None);
+        let line = state::folder_summary("Archive", &counts, None);
+        assert!(!line.contains("0 unread of 0"), "{line} reports a refusal as an empty folder");
+        assert!(line.contains("counts unavailable"), "{line} does not say the counts are missing");
+        assert!(line.contains("STATUS failed"), "{line} does not say why");
+    }
+
+    #[test]
+    fn a_folder_the_server_counted_as_empty_is_empty() {
+        // Zero from the server is zero; only zero invented for a missing answer is the defect.
+        let counts = Counted::of(&listed(), "Drafts", 0, 0);
+        assert_eq!(counts, Counted::Known(FolderCounts { unread: 0, total: 0 }));
+        assert_eq!(state::folder_summary("Drafts", &counts, None), "Email — Drafts, 0 unread of 0");
+    }
+
+    #[test]
+    fn counts_that_were_never_read_stay_unread_after_a_change() {
+        // A message in an uncounted folder was read. One fewer than "not known" is still not
+        // known; the header must not turn that into "-1 unread of -1" or into "0 unread of 0".
+        let counts = Counted::Unavailable { reason: REFUSED.into() };
+        let after = counts.clone().after(|c| c.after_read_change(false, true));
+        assert_eq!(after, counts);
+        let known = Counted::Known(FolderCounts { unread: 12, total: 35 });
+        assert_eq!(
+            known.after(|c| c.after_removal(false)),
+            Counted::Known(FolderCounts { unread: 11, total: 34 })
+        );
+    }
+
+    #[test]
+    fn the_wire_says_uncounted_as_null_and_a_reason_not_as_zeros() {
+        // What `email.list_folders` sends and `describe` prints: `counts: null` with a reason,
+        // and never `{"unread": 0, "total": 0}` for a folder that was not counted.
+        let wire = serde_json::to_value(EmailFolder::uncounted("Archive", REFUSED)).unwrap();
+        assert_eq!(wire["counts"], serde_json::Value::Null);
+        assert_eq!(wire["reason"], REFUSED);
+        let wire = serde_json::to_value(EmailFolder::counted("Drafts", 0, 0)).unwrap();
+        assert_eq!(wire["counts"], serde_json::json!({ "unread": 0, "total": 0 }));
+        assert!(wire.get("reason").is_none(), "a counted folder has no reason: {wire}");
+        // And it reads back as it was sent.
+        let back: EmailFolder = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, EmailFolder::counted("Drafts", 0, 0));
     }
 
     #[test]
@@ -381,13 +444,13 @@ mod tests {
 
     #[test]
     fn with_a_search_on_the_header_describes_the_results_not_the_folder() {
-        let counts = FolderCounts { unread: 12, total: 35 };
+        let counts = Counted::Known(FolderCounts { unread: 12, total: 35 });
         assert_eq!(
-            state::folder_summary("INBOX", counts, Some(("invoice", 3))),
+            state::folder_summary("INBOX", &counts, Some(("invoice", 3))),
             "Email — INBOX, 3 results for \u{201c}invoice\u{201d}"
         );
         assert_eq!(
-            state::folder_summary("INBOX", counts, Some(("invoice", 1))),
+            state::folder_summary("INBOX", &counts, Some(("invoice", 1))),
             "Email — INBOX, 1 result for \u{201c}invoice\u{201d}"
         );
     }

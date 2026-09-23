@@ -23,7 +23,8 @@
 use std::path::{Path, PathBuf};
 
 use yantrik_ipc_contracts::email::{
-    AccountSettings, AccountsResult, EmailAccountSummary, EmailFolder, GoogleSignIn, OAuthStatus,
+    AccountSettings, AccountsResult, EmailAccountSummary, EmailFolder,
+    FolderCounts as WireCounts, GoogleSignIn, OAuthStatus,
 };
 
 // ── The three states ─────────────────────────────────────────────────
@@ -188,21 +189,69 @@ pub struct FolderCounts {
     pub total: i32,
 }
 
-impl FolderCounts {
+impl From<WireCounts> for FolderCounts {
+    fn from(c: WireCounts) -> Self {
+        FolderCounts { unread: c.unread, total: c.total }
+    }
+}
+
+/// What the header can say about the open folder: its two numbers, or that it has none.
+///
+/// A folder whose counts the mail server would not give — a STATUS it refused, a reply that did
+/// not come — used to reach the header as `0 unread of 0`, which is what an empty folder says
+/// too, so a failure to read the mailbox was reported as a fact about it (#131). The list now
+/// carries "not counted" as its own value, and the header carries it through rather than
+/// inventing a zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Counted {
+    /// The server's numbers — or, for a folder the list does not carry, what is in hand.
+    Known(FolderCounts),
+    /// The folder is listed and the server did not count it this time; `reason` is why, in the
+    /// list's own words.
+    Unavailable { reason: String },
+}
+
+impl Counted {
     /// The counts for `folder`, off the list the server gave.
     ///
     /// A folder the list does not have — a mailbox opened by a name LIST did not return — has no
     /// server count, and then the page in hand is all there is: `loaded` messages, `loaded_unread`
     /// of them unread. A lower bound, and the only honest number left; there is no row in the
-    /// list for it to contradict.
+    /// list for it to contradict. A folder the list *does* have, uncounted, is a different thing:
+    /// the server was asked and did not say, and the page in hand is not offered in place of an
+    /// answer it refused.
     pub fn of(folders: &[EmailFolder], folder: &str, loaded_unread: usize, loaded: usize) -> Self {
-        folders
-            .iter()
-            .find(|f| f.name.eq_ignore_ascii_case(folder))
-            .map(|f| FolderCounts { unread: f.unread_count, total: f.total_count })
-            .unwrap_or(FolderCounts { unread: loaded_unread as i32, total: loaded as i32 })
+        match folders.iter().find(|f| f.name.eq_ignore_ascii_case(folder)) {
+            Some(EmailFolder { counts: Some(counts), .. }) => Counted::Known((*counts).into()),
+            Some(EmailFolder { reason, .. }) => Counted::Unavailable {
+                reason: reason
+                    .clone()
+                    .unwrap_or_else(|| "the mail server did not count this folder".to_string()),
+            },
+            None => Counted::Known(FolderCounts { unread: loaded_unread as i32, total: loaded as i32 }),
+        }
     }
 
+    /// The counts, if there are any.
+    pub fn known(&self) -> Option<FolderCounts> {
+        match self {
+            Counted::Known(counts) => Some(*counts),
+            Counted::Unavailable { .. } => None,
+        }
+    }
+
+    /// The same folder after a change the server agreed to, when there are numbers to change.
+    /// Counts that were never read stay unread: one message fewer than "not known" is still not
+    /// known.
+    pub fn after(self, change: impl FnOnce(FolderCounts) -> FolderCounts) -> Self {
+        match self {
+            Counted::Known(counts) => Counted::Known(change(counts)),
+            unavailable => unavailable,
+        }
+    }
+}
+
+impl FolderCounts {
     /// The same folder after one of its messages was marked read or unread, and the mail server
     /// agreed. Reading a message marks it read; a Refresh asks the server again and replaces
     /// this, but between the two the header must not say twelve unread over a list with eleven
@@ -238,13 +287,20 @@ impl FolderCounts {
 ///
 /// With a search on, the list under the header is the results and not the folder, and the
 /// header says so rather than putting the folder's counts over a list they do not describe.
-pub fn folder_summary(folder: &str, counts: FolderCounts, search: Option<(&str, usize)>) -> String {
-    match search {
-        Some((query, hits)) => format!(
+/// With no counts, it says that — and why — rather than "0 unread of 0", which is a different
+/// claim and, for this folder, an unverified one.
+pub fn folder_summary(folder: &str, counts: &Counted, search: Option<(&str, usize)>) -> String {
+    match (search, counts) {
+        (Some((query, hits)), _) => format!(
             "Email — {folder}, {hits} {} for \u{201c}{query}\u{201d}",
             if hits == 1 { "result" } else { "results" }
         ),
-        None => format!("Email — {folder}, {} unread of {}", counts.unread, counts.total),
+        (None, Counted::Known(counts)) => {
+            format!("Email — {folder}, {} unread of {}", counts.unread, counts.total)
+        }
+        (None, Counted::Unavailable { reason }) => {
+            format!("Email — {folder}, counts unavailable ({reason})")
+        }
     }
 }
 
