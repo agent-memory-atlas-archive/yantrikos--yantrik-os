@@ -448,6 +448,11 @@ fn refresh(ui: &App, state: &Shared, force: bool) {
             g.set_tabs(model);
         }
 
+        let empty = empty_note(st.tab, s.counts());
+        if g.get_empty_note() != empty.as_str() {
+            g.set_empty_note(empty.into());
+        }
+
         let hold = (hovering && !st.order.is_empty()).then_some(st.order.as_slice());
         let order = s.list(st.tab, hold);
         let rows: Vec<AgentRowData> = order.iter().filter_map(|id| s.agent(id)).map(row_of).collect();
@@ -771,7 +776,7 @@ fn items_of(a: &Agent, expanded: &HashSet<String>, pending: &[crate::approvals::
                     if text.trim().is_empty() {
                         continue;
                     }
-                    out.push(AgentItemData { kind: "text".into(), key: key.into(), text: text.into(), ..Default::default() });
+                    out.extend(prose_of(&key, text));
                 }
                 Item::Thinking(text) => {
                     let text = text.last(TEXT_BYTES);
@@ -793,6 +798,59 @@ fn items_of(a: &Agent, expanded: &HashSet<String>, pending: &[crate::approvals::
         }
     }
     out
+}
+
+/// One block of the mind's text as the pane draws it, one item per block: a paragraph or a list
+/// with its bold, italic, inline code and links (`StyledText`), a heading, or a code block. The
+/// blocks are the Lens's own reading of the text (`crate::markdown`), so the two views of one
+/// answer cannot disagree about where a list or a fence begins.
+///
+/// Read again from the whole text on every redraw, so an answer still arriving is drawn as far as
+/// it has got — a fence still open is a code block, a `**` still open is two asterisks — and the
+/// blocks before the last keep their keys, so the view extends in place.
+fn prose_of(key: &str, text: &str) -> Vec<AgentItemData> {
+    crate::markdown::parse_blocks(text)
+        .iter()
+        .enumerate()
+        .map(|(n, block)| {
+            let kind = match block.block_type {
+                kind @ ("heading" | "bullet" | "code") => kind,
+                // A trail line the feed did not take out is still words, not a card: a card is
+                // only ever made from the store's own `Card`.
+                _ => "text",
+            };
+            AgentItemData {
+                kind: "text".into(),
+                key: format!("{key}.{n}").into(),
+                block: kind.into(),
+                text: block.text.as_str().into(),
+                styled: crate::markdown::styled(block),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+/// What the list says when the tab it is on has no one in it: what is true of the others. "No
+/// agents yet" only when there are none at all — an empty Active tab beside six finished agents
+/// said there were none, with one of them open in the middle column (#190).
+fn empty_note(tab: Tab, counts: [usize; 4]) -> String {
+    let [active, _, complete, all] = counts;
+    if all == 0 {
+        return "No agents yet. New agent starts one; a question in the Lens to an attached mind \
+                shows up here too."
+            .to_string();
+    }
+    // Every agent is either active (working, waiting, or idle between prompts) or complete.
+    let (going, done) = (format!("{active} active"), format!("{complete} complete"));
+    match tab {
+        Tab::Active => format!("Nothing running. {done}."),
+        Tab::NeedsYou if active > 0 => format!("Nothing is waiting on you. {going}."),
+        Tab::NeedsYou => format!("Nothing is waiting on you. {done}."),
+        Tab::Complete => format!("Nothing has finished yet. {going}."),
+        // All holds every agent, so it is empty only when there are none, above.
+        Tab::All => format!("{going}, {done}."),
+    }
 }
 
 /// An approval, as the pane draws it: the shell's own card — the Lens's component, filled from the
@@ -949,6 +1007,8 @@ fn card_of(c: &Card, key: String, open: bool) -> AgentItemData {
         runs,
         rows,
         approval: Default::default(),
+        block: Default::default(),
+        styled: Default::default(),
     }
 }
 
@@ -1623,6 +1683,82 @@ mod tests {
         for drawn in ["From the catalog", "AgentsState.start-role(AgentsState.new-role", "AgentsState.pick-role(role.id)", "label: \"Role\"", "AgentsState.details.reach"] {
             assert!(slint.contains(drawn), "{drawn:?} is not in agents.slint");
         }
+    }
+
+    /// #190: a catalog role's answer — a heading, bold labels, italics, backticks, a list, a fence —
+    /// reaches the pane as one item per block, read by the Lens's parser: a heading and a code block
+    /// as themselves, a paragraph and a list as `StyledText` with their bold, italic and code. None
+    /// of it arrives as asterisks and hashes.
+    #[test]
+    fn an_answers_markdown_is_drawn_as_blocks_with_their_styles() {
+        let mut s = Store::new();
+        let red = AgentId("deepseek:c-red001".into());
+        s.open_turn(&red, "attack this plan");
+        s.text(&red, "## Strongest point\n\n**How:** it *fails* when `sync` runs twice.\n\n- one **bold**\n- two\n\n```\nsync && sync\n```\n");
+        let items = items_of(s.agent(&red).unwrap(), &HashSet::new(), &[]);
+        let prompt = items.iter().find(|i| i.kind == "prompt").expect("the prompt").key.to_string();
+        let prose: Vec<&AgentItemData> = items.iter().filter(|i| i.kind == "text").collect();
+        let drawn: Vec<(String, &str, &str)> =
+            prose.iter().map(|i| (i.key.to_string(), i.block.as_str(), i.text.as_str())).collect();
+        assert_eq!(
+            drawn,
+            vec![
+                (format!("{prompt}.0.0"), "heading", "Strongest point"),
+                (format!("{prompt}.0.1"), "text", "How: it fails when sync runs twice."),
+                (format!("{prompt}.0.2"), "bullet", "\u{2022} one bold\n\u{2022} two"),
+                (format!("{prompt}.0.3"), "code", "sync && sync"),
+            ]
+        );
+        let styles = |i: &AgentItemData| format!("{:?}", i.styled);
+        for style in ["Strong", "Emphasis", "Code"] {
+            assert!(styles(prose[1]).contains(style), "{style} missing from the paragraph: {}", styles(prose[1]));
+        }
+        assert!(styles(prose[2]).contains("Strong"), "the list keeps its bold: {}", styles(prose[2]));
+        assert!(items.iter().all(|i| !i.text.contains("**") && !i.text.contains("## ")), "no raw markers reach the pane");
+        // A block's key is not a call's: nothing opens it or sends it to the Editor.
+        assert!(prose.iter().all(|i| parse_key(&i.key).is_none()));
+    }
+
+    /// Streaming: the answer is read again as it grows. A `**` still open is text and changes no
+    /// block's shape; the blocks already drawn keep their keys, so the view extends in place; and
+    /// the chunk that closes the marker makes the run bold.
+    #[test]
+    fn an_answer_still_arriving_extends_the_pane_and_an_open_marker_is_text() {
+        let mut s = Store::new();
+        let red = AgentId("deepseek:c-red002".into());
+        s.open_turn(&red, "attack this plan");
+        s.text(&red, "## Verdict\n\nIt is **very");
+        let first = items_of(s.agent(&red).unwrap(), &HashSet::new(), &[]);
+        let open = first.last().unwrap();
+        assert_eq!((open.block.as_str(), open.text.as_str()), ("text", "It is **very"));
+        assert_eq!(open.styled, slint::StyledText::from_plain_text("It is **very"), "an open marker is its characters");
+        s.text(&red, " weak** here.\n\n- and a list");
+        let next = items_of(s.agent(&red).unwrap(), &HashSet::new(), &[]);
+        let keys = |items: &[AgentItemData]| items.iter().map(|i| i.key.to_string()).collect::<Vec<_>>();
+        assert!(keys(&next).starts_with(&keys(&first)), "{:?} then {:?}", keys(&first), keys(&next));
+        let closed = &next[first.len() - 1];
+        assert_eq!(closed.text, "It is very weak here.");
+        assert!(format!("{:?}", closed.styled).contains("Strong"), "{:?}", closed.styled);
+        assert_eq!(next.last().unwrap().block, "bullet");
+    }
+
+    /// #190: an empty tab says what is true of the others. "No agents yet" only when there are none.
+    #[test]
+    fn an_empty_tab_says_what_the_other_tabs_hold() {
+        // [active, needs you, complete, all]
+        assert_eq!(empty_note(Tab::Active, [0, 0, 6, 6]), "Nothing running. 6 complete.");
+        assert_eq!(empty_note(Tab::NeedsYou, [2, 0, 4, 6]), "Nothing is waiting on you. 2 active.");
+        assert_eq!(empty_note(Tab::NeedsYou, [0, 0, 6, 6]), "Nothing is waiting on you. 6 complete.");
+        assert_eq!(empty_note(Tab::Complete, [3, 1, 0, 3]), "Nothing has finished yet. 3 active.");
+        for tab in Tab::EVERY {
+            assert!(empty_note(tab, [0, 0, 0, 0]).starts_with("No agents yet."), "{tab:?}");
+        }
+        assert!(!empty_note(Tab::Active, [0, 0, 6, 6]).contains("No agents"));
+
+        // And the list draws it — the sentence is the shell's, not a guess in the view.
+        let slint = read("../yantrik-ui-slint/ui/agents.slint");
+        assert!(slint.contains("text: AgentsState.empty-note;"), "agents.slint draws the shell's sentence");
+        assert!(!slint.contains("No agents yet"), "and has no sentence of its own that could disagree");
     }
 
     #[test]
