@@ -32,6 +32,8 @@ use std::path::PathBuf;
 use yantrik_companion::CompanionConfig;
 
 mod activity_feed;
+/// Every agent — one conversation with one mind — and its session, drawn by the Agents screen.
+mod agents;
 mod ambient;
 mod app_context;
 mod approvals;

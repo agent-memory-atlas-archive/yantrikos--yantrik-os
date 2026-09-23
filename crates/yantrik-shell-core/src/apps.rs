@@ -99,6 +99,13 @@ DesktopEntry {
             categories: "System;Security;".into(), comment: "File & system permissions".into(),
             app_id: "permissions".into(), icon_char: "\u{2318}".into(),
         },
+        // One pane per agent, with its work inside it: every mind's conversation, each call it
+        // made as a card. design/agents-workspace-2026-09-23.md.
+        DesktopEntry {
+            name: "Agents".into(), exec: "__builtin__".into(), icon: String::new(),
+            categories: "Utility;".into(), comment: "Your agents and what each one is doing".into(),
+            app_id: "agents".into(), icon_char: "A".into(),
+        },
 DesktopEntry {
             name: "Skills".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "System;".into(), comment: "Install companion skills".into(),

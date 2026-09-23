@@ -56,7 +56,7 @@ export component Preview inherits Window {
             { title: "Project overview.md", subtitle: "Documents", action-id: "file:1" },
         ];
     }
-    if root.scene == "" : StatusBar { y: 0px; clock-text: "10:24"; date-text: "Sat, Sep 19"; mem-text: "4.2 GB"; cpu-percent: 8; wifi-connected: true; active-harness-id: "mind"; active-harness-name: "Yantrik Mind"; harness-driving: true; }
+    if root.scene == "" : StatusBar { y: 0px; clock-text: "10:24"; date-text: "Sat, Sep 19"; mem-text: "4.2 GB"; cpu-percent: 8; network-online: true; active-harness-id: "mind"; active-harness-name: "Yantrik Mind"; harness-driving: true; }
     if root.scene == "" && !root.app-view && !root.actual-desktop : DesktopHome {
         width: min(760px, parent.width - 48px); x: (parent.width - self.width) / 2;
         y: 76px; height: parent.height - 136px;
@@ -270,5 +270,25 @@ export component SettingsProbe inherits Window {
         save-error:root.save-error;
         save-status:root.save-error?"Not saved: Preferences are read-only; the original file was preserved.":"Changes saved on this device";
         retry-save=>{root.action="retry";}
+    }
+}
+
+// The Agents screen (screen 34) and one agent's own window, filled with fixture data by
+// src/agents_tests.rs. Callbacks are recorded there, never acted on.
+import { AgentsScreen } from "agents.slint";
+export { AgentsState, AgentWindow, AgentTabData, AgentRowData, AgentRunData, AgentItemData, AgentHeaderData, AgentDetailsData, AgentMindData } from "agents.slint";
+export { ToolCallData } from "components/tool_call.slint";
+export component AgentsProbe inherits Window {
+    in property <length> canvas-width: 1280px;
+    in property <length> canvas-height: 800px;
+    width: root.canvas-width;
+    height: root.canvas-height;
+    default-font-family: Theme.font-ui;
+    background: Theme.bg-deep;
+    in-out property <bool> light: false;
+    changed light => { ThemeMode.dark = !root.light; }
+    AgentsScreen {
+        width: 100%;
+        height: 100%;
     }
 }

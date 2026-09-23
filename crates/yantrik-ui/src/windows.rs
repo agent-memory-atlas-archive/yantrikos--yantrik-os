@@ -663,7 +663,13 @@ fn app_id_for_title(title: &str) -> Option<&'static str> {
 }
 
 /// Derive a normalized app_id from a window title (fallback path only).
-fn derive_app_id(title: &str) -> String {
+pub(crate) fn derive_app_id(title: &str) -> String {
+    // An agent's own window (Agents → Pop out) is titled after its task, and a task can say
+    // "files" or "terminal" — which would mark Files or Terminal open in the taskbar. Its prefix
+    // says whose window it is before the words of the task are looked at.
+    if title.starts_with(crate::agents::WINDOW_TITLE_PREFIX) {
+        return "agents".to_string();
+    }
     let lower = title.to_lowercase();
     if lower.contains("foot") || lower.contains("terminal") {
         "terminal".to_string()
