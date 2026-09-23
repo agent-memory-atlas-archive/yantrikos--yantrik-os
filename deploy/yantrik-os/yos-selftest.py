@@ -33,6 +33,9 @@ What it is checking, in one line each:
     for the person's Allow, says so, waits, and acts again carrying the grant; a denial and an
     unanswered card are plain sentences, `--no-ask` hands the refusal back, and `--grant`
     carries one already held;
+  * the same path for a service that answers `app.act` itself: `yos act system-monitor
+    kill_process` with the window shut reaches the service, which refuses a `dangerous` act in
+    `ask` mode with the same sentence since issue #153, and `yos` asks and acts again there;
   * an agent's token — `--agent-token`, `YANTRIK_AGENT_TOKEN`, or an `agent_token=` argument —
     rides beside the arguments on `app.act` and never among them, so the approval card it may
     raise is asked for with the arguments alone; and an act told to `wait` is given longer than
@@ -538,6 +541,67 @@ def main():
               and yos.act_timeout("agent_job", {"wait": 0}) == 40
               and yos.act_timeout("dismiss", {"id": "67"}) == 40,
               [yos.act_timeout("agent_run", {}), yos.act_timeout("agent_run", {"wait": 600})])
+
+        print("yos act, against a service that answers app.act itself (issue #153)")
+        # System Monitor's service answers `app.act` in its own handler, and with the window shut
+        # `yos act system-monitor` reaches `system-monitor.sock`, not `app-system-monitor`. Its
+        # `kill_process` ran on any call until #153. Under a ceiling a person has raised to
+        # `dangerous`, in ask mode, the service now refuses it with the sentence every app's
+        # dispatch uses — and `yos` has to take the same ask-and-wait path, to the same socket.
+        KILL_REFUSAL = (REFUSAL.replace("blender.render", "system-monitor.kill_process")
+                        .replace("`sensitive`", "`dangerous`"))
+        SYSMON = {
+            "app": "system-monitor", "summary": "System — CPU 3%", "state": {},
+            "revision": "s0",
+            "actions": [
+                {"name": "kill_process", "description": "End a running process by PID",
+                 "permission": "dangerous", "settles": "on return",
+                 "parameters": {"type": "object", "required": ["pid"], "properties": {
+                     "pid": {"type": "number", "description": "The process id to end"}}}},
+            ],
+        }
+
+        def sysmon_reply(_self, asked):
+            params = asked.get("params") or {}
+            if asked["method"] == "app.describe":
+                return SYSMON
+            if params.get("grant") == "appr-7":
+                return {"summary": "System — CPU 2%", "accepted": True, "settled": True,
+                        "revision": "s1", "result": {"killed": params["args"].get("pid")}}
+            return {"__error__": {"code": -32602, "message": KILL_REFUSAL}}
+
+        sysmon = FakeService(sockets / "system-monitor.sock", sysmon_reply)
+        sysmon.start()
+        services.append(sysmon)
+        answers["status"] = "granted"
+        polls.clear()
+        shell.calls.clear()
+
+        def kills():
+            return [c["params"] for c in sysmon.calls if c["method"] == "app.act"]
+
+        out, err, code = run(lambda: yos.cmd_act(["system-monitor", "kill_process", "pid=4242"]))
+        check("the service's refusal made yos ask the shell, once",
+              len(asked()) == 1, shell.calls)
+        check("for system-monitor.kill_process, graded dangerous, with the pid the grant binds",
+              asked() and asked()[0].get("app") == "system-monitor"
+              and asked()[0].get("action") == "kill_process"
+              and asked()[0].get("grade") == "dangerous"
+              and asked()[0].get("args_json") == {"pid": 4242},
+              asked())
+        check("and said so on the terminal",
+              "asking — a card is on the screen (120 s)" in out, out)
+        check("the service was asked twice: without a grant, then with the person's",
+              [k.get("grant") for k in kills()] == [None, "appr-7"]
+              and all(k.get("args") == {"pid": 4242} for k in kills()), kills())
+        check("and the second one ran", "accepted: True" in out and code is None, (out, err, code))
+
+        answers["status"] = "denied"
+        polls.clear()
+        sysmon.calls.clear()
+        out, err, code = run(lambda: yos.cmd_act(["system-monitor", "kill_process", "pid=4242"]))
+        check("a denial ends nothing", [k.get("grant") for k in kills()] == [None]
+              and code == 1 and "said no" in err, (kills(), err))
 
         print("yos perception, with no desktop to ask")
         for svc in services:

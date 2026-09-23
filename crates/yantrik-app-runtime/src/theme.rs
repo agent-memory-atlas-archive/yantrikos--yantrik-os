@@ -36,12 +36,10 @@ pub fn accent_name_to_index(name: &str) -> i32 {
         .unwrap_or(0)
 }
 
-/// Path of the shell's settings file.
+/// Path of the shell's settings file — the one the machine's ceiling is read from, so the theme
+/// and the ceiling can never be reading two different files.
 pub fn settings_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config/yantrik/settings.yaml")
+    yantrik_ipc_transport::gate::settings_path()
 }
 
 /// Read the theme settings, falling back to the defaults for anything missing or unreadable.

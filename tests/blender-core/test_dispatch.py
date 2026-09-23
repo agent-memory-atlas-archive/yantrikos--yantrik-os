@@ -408,6 +408,23 @@ class TestModeAndGrant(unittest.TestCase):
             message = refusal(self, lambda s=surface, g=grant: self.save(s, grant=g))
             self.assertTrue(message.startswith("CEILING:"), (mode, grant, message))
 
+    def test_a_grant_is_not_spent_on_an_act_the_ceiling_refuses(self):
+        # #154: the grant was spent first, so an act above the ceiling used up the person's
+        # Allow and never ran. The ceiling comes first now, as in the runtime.
+        surface, _ = self.surface("ask", ceiling="standard")
+        message = refusal(self, lambda: self.save(surface, grant="fresh-154"))
+        self.assertTrue(message.startswith("CEILING:"), message)
+        self.assertEqual(self.spent, [], "the grant was spent on an act the ceiling refused")
+        # And it still holds once the ceiling allows the act.
+        surface, fake = self.surface("ask")
+        self.assertTrue(self.save(surface, grant="fresh-154")["accepted"])
+        self.assertEqual(self.spent, ["fresh-154"])
+
+    def test_an_unknown_action_is_answered_before_a_grant_is_looked_at(self):
+        surface, _ = self.surface("ask")
+        message = refusal(self, lambda: surface.act({"action": "nope", "args": {}, "grant": "made-up"}))
+        self.assertTrue(message.startswith("unknown action `nope`"), message)
+
     def test_a_standard_act_runs_unasked_in_every_mode_plan_included(self):
         # The desktop's own processes call `standard` actions on these sockets; see the
         # runtime's SOCKET_FLOOR. Plan's refusal of `standard` is the bridge's.

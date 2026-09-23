@@ -28,6 +28,10 @@ use std::sync::Arc;
 pub use serde_json;
 pub use yantrik_ipc_contracts::email::ServiceError;
 pub use yantrik_ipc_transport::server::{RpcServer, ServiceHandler};
+/// The ceiling, mode and grant rule every `app.act` meets. A service that answers `app.act` in
+/// its own handler calls [`gate::permit`] before it dispatches, with the grade from the table it
+/// publishes in `describe` — the rule an app window's dispatch enforces, in the same words.
+pub use yantrik_ipc_transport::gate;
 
 /// Commonly-needed imports for service authors.
 pub mod prelude {

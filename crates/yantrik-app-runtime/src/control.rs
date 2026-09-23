@@ -78,9 +78,16 @@
 //! no record (issues #49 and #116). Now the dispatch reads the mode the way it reads the ceiling
 //! — the shell publishes it beside `settings.yaml` — and a call above what the mode allows must
 //! carry a **grant**: the `request_id` that `request_approval` minted and a person's Allow turned
-//! into one, which the dispatch spends through the shell before the handler runs. Every door
-//! meets the same question; `yos act` and the bridge ask for the card on the caller's behalf.
-//! `describe` needs nothing, and the ceiling stays above every mode and every grant.
+//! into one, which the dispatch spends through the shell before the handler runs — once the
+//! ceiling has passed, so an Allow is never used up on an act the ceiling then refuses (#154).
+//! Every door meets the same question; `yos act` and the bridge ask for the card on the caller's
+//! behalf. `describe` needs nothing, and the ceiling stays above every mode and every grant.
+//!
+//! The rule itself is `yantrik_ipc_transport::gate`, re-exported below. Three services answer
+//! `app.act` in their own handlers rather than through this dispatch — System Monitor, whose
+//! `kill_process` is `dangerous`, Notifications and Weather — and until #153 they met none of it.
+//! They call the same `gate::permit` now, with the grades from the tables they publish, and
+//! refuse in the same words.
 //!
 //! One line the dispatch does not draw: plan mode's refusal of `standard`. The desktop's own
 //! processes cross this socket with `standard` calls — an app asking the shell to `start_service`
@@ -133,12 +140,11 @@
 
 use std::cell::RefCell;
 use std::sync::mpsc;
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::Duration;
 
 use yantrik_ipc_contracts::email::ServiceError;
 use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
-use yantrik_ipc_transport::SyncRpcClient;
 
 /// How long the RPC thread waits for the UI thread to answer.
 ///
@@ -258,317 +264,29 @@ pub fn other_names(app_id: &str) -> &'static [&'static str] {
         .unwrap_or(&[])
 }
 
-// ── The ceiling ─────────────────────────────────────────────────────
-
-/// The grades an action can carry, lowest first. The same ladder the MCP bridge and the
-/// companion's `parse_permission` use; held as strings here because an [`Action`]'s own
-/// `permission` is a `&'static str` and this crate must not grow a dependency to compare it.
-pub const LADDER: [&str; 4] = ["safe", "standard", "sensitive", "dangerous"];
-
-/// Where a grade sits on [`LADDER`], or `None` if it is not a level this OS defines.
-fn grade(permission: &str) -> Option<usize> {
-    LADDER.iter().position(|g| *g == permission)
-}
-
-/// The ceiling used when `settings.yaml` is missing, unreadable, or says nothing usable —
-/// the same default the shell's own `UserSettings` carries, so a machine that has never
-/// opened Settings behaves the way Settings would show it.
-const DEFAULT_CEILING: &str = "sensitive";
-
-/// The machine's ceiling for programmatic callers, from the shell's settings file.
-///
-/// Read per call rather than cached at `serve()`: the whole point of the setting is that a
-/// person can tighten it while apps are running, and a boundary that only notices at launch
-/// is a boundary the Settings screen lies about. The file is a few hundred bytes and an
-/// `act` happens at human-or-model speed, so the read costs nothing that matters. It happens
-/// on the RPC thread — the dispatch closure runs where windows are painted, and file IO
-/// does not belong there.
-pub fn configured_ceiling() -> String {
-    let Ok(text) = std::fs::read_to_string(crate::theme::settings_path()) else {
-        return DEFAULT_CEILING.to_string();
-    };
-    ceiling_from(&text)
-}
-
-/// Pull `tool_permission` out of settings text. Only that key is parsed, for the same reason
-/// `theme::parse` only parses its two: the rest of the file is the shell's business.
-fn ceiling_from(text: &str) -> String {
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once(':') else { continue };
-        if key.trim() != "tool_permission" {
-            continue;
-        }
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        if grade(value).is_some() {
-            return value.to_string();
-        }
-        tracing::warn!(value = %value, "tool_permission is not a grade; using {DEFAULT_CEILING}");
-        return DEFAULT_CEILING.to_string();
-    }
-    DEFAULT_CEILING.to_string()
-}
-
-// ── The mode, and the grant that stands in for it ───────────────────
+// ── The ceiling, the mode and the grant ─────────────────────────────
 //
-// The ceiling is the machine's wall. Under it the PERSON has a mode — plan, ask, auto or bypass
-// — that says what a caller may do without being asked, and for a while the mode lived only in
-// the shell and the MCP bridge: the bridge read it off `describe shell`, raised a card when the
-// mode said to, and ran the action once the person had pressed Allow. Nothing else did. `yos
-// act` and a raw JSON-RPC client on the socket ran a `sensitive` action in `ask` mode with no
-// card and no record (issues #49 and #116), because the one function every call crosses —
-// `Registry::act` below — knew the ceiling and nothing else.
+// Every action carries a grade; the machine has a ceiling (`tool_permission`), the person has a
+// mode, and a call above what the mode runs unasked must carry a grant — a person's Allow, spent
+// through the shell. That rule lives in `yantrik_ipc_transport::gate` since issue #153: three
+// services answer `app.act` in their own handlers, never crossed this dispatch, and so never met
+// it — System Monitor's `dangerous` `kill_process` ran on any call to its socket. A service must
+// not link Slint to be told no, so the rule moved below this crate, beside the socket client it
+// needs for spending a grant, and is re-exported here unchanged: `control::configured_ceiling`,
+// `control::mode_from`, `control::spend_grants_with` and the rest are what they were.
 //
-// So the mode is read here too, the way the ceiling is: the shell writes it to a small file
-// beside `settings.yaml` whenever it changes (`mind_mode::publish_policy_file` in the shell), and
-// every dispatch reads it per call. A call above what the mode allows must carry a GRANT — the
-// `request_id` the shell's `request_approval` minted and a person's Allow turned into one — and
-// the dispatch spends it through the shell's `consume_approval` before the handler runs. The
-// bridge and `yos act` ask for the card on the caller's behalf; a raw client can do the same
-// three steps itself. Whichever door a call came through, it meets the same question.
-//
-// What an app learns from all of this is one bit: a grant was, or was not, attached. The card,
-// the countdown and the store are the shell's.
-
-/// The file the shell publishes the mode in, beside the settings file.
-pub const MODE_FILE: &str = "mind-mode.json";
-
-/// The modes a desktop can be in, strictest first, and what each runs without asking: the
-/// highest grade on [`LADDER`] a caller may use with no grant. One column of the table in the
-/// shell's `mind_mode::Modes::decide` and the bridge's `decide`, which stay the definition.
-pub const MODES: [(&str, &str); 4] =
-    [("plan", "safe"), ("ask", "standard"), ("auto", "sensitive"), ("bypass", "dangerous")];
-
-/// What the dispatch runs without a grant in every mode, plan included.
-///
-/// Plan mode's own column says `safe`, and the bridge enforces that for a mind on it. The
-/// dispatch cannot: the desktop's own processes call `standard` actions on this socket to work at
-/// all — every app's notifications and Calendar's and Email's services are started on demand
-/// through the shell's `start_service`, and a second launch of an editor hands its file to the
-/// open window with `open` — and nothing here can tell those callers from a mind until the
-/// socket carries identity (#43). Refusing them would stop the person's own desktop working the
-/// moment they chose plan for the mind. Everything above this still needs a grant in plan, and
-/// the shell mints none there.
-pub const SOCKET_FLOOR: &str = "standard";
-
-/// The mode assumed when the shell has published nothing usable: `ask`, the strictest mode that
-/// still lets ordinary work happen and the one the shell itself boots into. A missing file is not
-/// a permission, so this fails closed, exactly as the bridge does when `describe shell` says
-/// nothing about the mode.
-pub const DEFAULT_MODE: &str = "ask";
-
-/// Where the shell publishes the mode.
-pub fn mode_path() -> std::path::PathBuf {
-    crate::theme::settings_path().with_file_name(MODE_FILE)
-}
-
-/// The mode as the shell last published it: its name, and the session rules beside it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Mode {
-    pub name: String,
-    /// `(app, action)` pairs a person allowed for the rest of the session from the card's
-    /// "Allow for this session". A rule covers any arguments, but only its own action.
-    pub session_rules: Vec<(String, String)>,
-}
-
-impl Mode {
-    pub fn named(name: &str) -> Mode {
-        Mode { name: name.to_string(), session_rules: Vec::new() }
-    }
-
-    /// The highest grade this mode runs unasked, as a position on [`LADDER`]. A name that is
-    /// not a mode reads as `ask`, never as something looser.
-    fn allows(&self) -> usize {
-        MODES
-            .iter()
-            .find(|(name, _)| *name == self.name)
-            .and_then(|(_, top)| grade(top))
-            .unwrap_or_else(|| grade("standard").unwrap())
-    }
-
-    fn covers(&self, app: &str, action: &str) -> bool {
-        self.session_rules.iter().any(|(a, x)| a == app && x == action)
-    }
-}
-
-/// The mode right now, from the file the shell writes. Read per call for the reason the ceiling
-/// is: a person changes the mode from the chip while apps are running, and a dispatch that read
-/// it once at launch would be enforcing a mode the chip no longer shows.
-pub fn configured_mode() -> Mode {
-    let Ok(text) = std::fs::read_to_string(mode_path()) else {
-        return Mode::named(DEFAULT_MODE);
-    };
-    mode_from(&text, unix_now())
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-/// Read the mode out of what the shell wrote. Public so the shell's own test can prove that
-/// what it writes is what every app will read.
-///
-/// `now_unix` is for a bypass. The shell folds an expired bypass back on its own tick and
-/// rewrites the file, but a shell that crashed mid-bypass leaves a file saying `bypass` with
-/// nobody left to fold it — so the file carries when the bypass ends and this honours it. A
-/// bypass "until restart" carries no end and is trusted until the next shell start rewrites it.
-pub fn mode_from(text: &str, now_unix: u64) -> Mode {
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
-        tracing::warn!("{MODE_FILE} is not JSON; using {DEFAULT_MODE}");
-        return Mode::named(DEFAULT_MODE);
-    };
-    let is_mode = |name: &str| MODES.iter().any(|(m, _)| *m == name);
-    let mut name = doc["mode"].as_str().unwrap_or("").to_string();
-    if !is_mode(&name) {
-        tracing::warn!(mode = %name, "{MODE_FILE} names no mode this OS defines; using {DEFAULT_MODE}");
-        name = DEFAULT_MODE.to_string();
-    }
-    if name == "bypass" {
-        if let Some(until) = doc["bypass_expires_unix"].as_u64() {
-            if now_unix >= until {
-                let previous = doc["previous"].as_str().unwrap_or(DEFAULT_MODE);
-                name = if is_mode(previous) && previous != "bypass" {
-                    previous.to_string()
-                } else {
-                    DEFAULT_MODE.to_string()
-                };
-            }
-        }
-    }
-    let session_rules = doc["session_rules"]
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .filter_map(|r| {
-                    Some((r["app"].as_str()?.to_string(), r["action"].as_str()?.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Mode { name, session_rules }
-}
-
-// ── Spending a grant ────────────────────────────────────────────────
-
-/// How this process spends a grant: the token and the exact triple in, and either it is burned
-/// or the reason it was not.
-type Spender = dyn Fn(&str, &str, &str, &serde_json::Value) -> Result<(), String> + Send + Sync;
-
-static SPENDER: OnceLock<Box<Spender>> = OnceLock::new();
-
-/// How long a dispatch waits for the shell to spend a grant. One hop to the shell's UI thread
-/// and back; anything slower is a shell that is not answering, and the honest outcome then is
-/// a refusal that says so, not a handler that ran on a grant nobody checked.
-const GRANT_ROUNDTRIP: Duration = Duration::from_secs(5);
-
-/// Install the function this process spends grants with.
-///
-/// The shell calls this once, with its own `approvals::consume`, because the shell IS the store
-/// — and asking itself over its own socket from its own RPC thread is a call that cannot be
-/// answered until the call returns. Every other app leaves it unset and spends grants over the
-/// shell's socket. A second call changes nothing: the store does not move.
-pub fn spend_grants_with(
-    spend: impl Fn(&str, &str, &str, &serde_json::Value) -> Result<(), String>
-        + Send
-        + Sync
-        + 'static,
-) {
-    let _ = SPENDER.set(Box::new(spend));
-}
-
-/// Burn `id` for exactly `app.action(args)`, or say why it could not be.
-///
-/// Through the shell's published `consume_approval`, which is what the bridge used to call
-/// itself before running the action. The check is the shell's — granted, unspent, unexpired,
-/// bound to this app, this action and these arguments — and the refusal is the shell's own
-/// sentence, which already names the part that differed.
-fn spend_grant(id: &str, app: &str, action: &str, args: &serde_json::Value) -> Result<(), String> {
-    if let Some(spend) = SPENDER.get() {
-        return spend(id, app, action, args);
-    }
-    let shell = SyncRpcClient::for_service(&service_id_for("shell")).with_timeout(GRANT_ROUNDTRIP);
-    shell
-        .call(
-            "app.act",
-            serde_json::json!({
-                "action": "consume_approval",
-                "args": { "request_id": id, "app": app, "action": action, "args_json": args },
-            }),
-        )
-        .map(|_| ())
-        .map_err(|e| e.message)
-}
-
-/// What the RPC thread established about one call before handing it to the UI thread: the
-/// ceiling and the mode as the files say them, and whether a grant was attached and spent.
-///
-/// Built off the UI thread because all three are IO — two file reads and, with a grant, a
-/// round trip to the shell — and enforced on it, inside [`Registry::act`], for the reason the
-/// ceiling always was: the check and the dispatch have to be one turn of the event loop.
-#[derive(Debug)]
-struct Authority {
-    ceiling: String,
-    mode: Mode,
-    /// A grant was attached to the call and the shell spent it. Never true for a grant the
-    /// shell refused: that refusal ends the call before it reaches the UI thread.
-    granted: bool,
-}
-
-/// Everything the dispatch may assume about one call, or the refusal that ends it.
-///
-/// A grant is spent here, before the grade is even looked at. It cannot be otherwise: the grade
-/// lives on the UI thread and the shell does not, and a grant checked after the dispatch has
-/// begun is a window in which the same grant covers two calls. The cost is one wasted grant for
-/// a caller that attached one to an action that needed none, which nothing on this desktop
-/// does — the shell answers `not_needed` rather than minting a grant the mode makes pointless.
-fn authority_for(
-    app_id: &str,
-    action: &str,
-    args: &serde_json::Value,
-    grant: Option<&str>,
-) -> Result<Authority, String> {
-    let ceiling = configured_ceiling();
-    let mode = configured_mode();
-    let granted = match grant {
-        None => false,
-        Some(id) => {
-            spend_grant(id, app_id, action, args).map_err(|why| {
-                format!(
-                    "GRANT: `{id}` does not authorise {app_id}.{action} — {why} Nothing was run; \
-                     a grant covers one action, once, with the arguments the person was shown."
-                )
-            })?;
-            true
-        }
-    };
-    Ok(Authority { ceiling, mode, granted })
-}
-
-/// The refusal for a call above what the mode allows, with no grant to stand in for it.
-///
-/// It says how to get one, because the caller reading it is usually a program — `yos`, or a
-/// mind with a terminal — and "no" without a way forward is what teaches a program to look for
-/// another door. `GRANT:` in front so a caller can branch on it the way it branches on
-/// `CEILING:` and `STALE:`; `yos act` does, and asks on the caller's behalf.
-fn grant_refusal(app: &str, action: &str, graded: &str, mode: &Mode) -> String {
-    if mode.name == "plan" {
-        return format!(
-            "GRANT: {app}.{action} is graded `{graded}` and this machine is in plan mode, which \
-             raises no card for anything above `{SOCKET_FLOOR}` — so it was not run. Say what \
-             you would do and let the person decide; they switch the mode from the chip in the \
-             status bar."
-        );
-    }
-    format!(
-        "GRANT: {app}.{action} is graded `{graded}` and this machine is in {mode} mode, which \
-         runs nothing above `{allowed}` without asking — so it was not run. Ask the shell for \
-         approval first (`request_approval` with this app, action and these exact arguments, \
-         poll `approval_status`, then send the granted request_id as `grant` on app.act — \
-         `yos act` does all of that for you), or have the person at the machine press Allow \
-         when the card appears.",
-        mode = mode.name,
-        allowed = LADDER[mode.allows().max(grade(SOCKET_FLOOR).unwrap())],
-    )
-}
+// What stays here is the half only a window has. Its grades live on the UI thread and file and
+// socket IO does not, so the RPC thread reads the files and spends any grant (see
+// `ControlRpc::dispatch`), and `Registry::act` decides with `gate::decide` inside the same turn
+// of the event loop as the handler.
+pub use yantrik_ipc_transport::gate::{
+    configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, permit,
+    spend_grants_with, Authority, Mode, AGENT_TOKEN, DEFAULT_MODE, LADDER, MODES, MODE_FILE,
+    SOCKET_FLOOR,
+};
+use yantrik_ipc_transport::gate::{agent_token_of, grade};
+#[cfg(test)]
+use yantrik_ipc_transport::gate::{ceiling_from, DEFAULT_CEILING};
 
 // ── What an app reports ─────────────────────────────────────────────
 //
@@ -625,8 +343,26 @@ impl Registry {
         describe_json(&self.app_id, &view, &specs)
     }
 
-    /// Check the ceiling, check the guard, dispatch, and read what came of it — without leaving
-    /// the UI thread.
+    /// The grade this surface publishes for `name` right now — regrades included — or the
+    /// refusal an action it does not have gets.
+    ///
+    /// The RPC thread asks for this before it spends a grant, so a grant is only ever spent on an
+    /// act whose grade the ceiling allows (#154). `act` reads the grade the same way.
+    fn grade_of(&self, name: &str) -> Result<&'static str, String> {
+        self.actions
+            .iter()
+            .find(|(a, _)| a.name == name)
+            .map(|(a, _)| effective_grade(&a.name, a.permission))
+            .ok_or_else(|| self.unknown(name))
+    }
+
+    fn unknown(&self, name: &str) -> String {
+        let known: Vec<&str> = self.actions.iter().map(|(a, _)| a.name.as_str()).collect();
+        format!("unknown action `{name}`; this app offers: {}", known.join(", "))
+    }
+
+    /// Check the ceiling and the mode, check the guard, dispatch, and read what came of it —
+    /// without leaving the UI thread.
     ///
     /// These steps are one function because they have to be one turn of the event loop. Split
     /// across RPC calls, the gap between the check and the dispatch is a window in which the user
@@ -635,10 +371,10 @@ impl Registry {
     /// would have to run it.
     ///
     /// `authority` arrives as an argument — the ceiling and the mode already read from their
-    /// files by the RPC thread, and any grant already spent (see [`authority_for`]) — so the
-    /// boundary is enforced in the dispatch itself, the one function every `app.act` crosses,
-    /// whoever sent it, while the IO stays off the UI thread and tests can pin the ceiling and
-    /// the mode instead of inheriting the developer's.
+    /// files by the RPC thread, and any grant already spent there (see `ControlRpc::dispatch`) —
+    /// so the boundary is enforced in the dispatch itself, the one function every `app.act` to a
+    /// window crosses, whoever sent it, while the IO stays off the UI thread and tests can pin the
+    /// ceiling and the mode instead of inheriting the developer's.
     fn act(
         &self,
         name: &str,
@@ -648,53 +384,18 @@ impl Registry {
         authority: &Authority,
     ) -> Result<serde_json::Value, String> {
         let Some((spec, run)) = self.actions.iter().find(|(a, _)| a.name == name) else {
-            let known: Vec<&str> = self.actions.iter().map(|(a, _)| a.name.as_str()).collect();
-            return Err(format!("unknown action `{name}`; this app offers: {}", known.join(", ")));
+            return Err(self.unknown(name));
         };
 
-        // The ceiling, before anything else about this call is even looked at. It refuses on the
-        // grade alone — before the arguments are checked, before the revision guard, and long
-        // before the handler — because "may this caller use this action at all" is a question
-        // about the action, and answering any narrower question first would mean doing work for
-        // a call that was never allowed. An unrecognised ceiling falls back to the default rather
-        // than failing open: the same choice the companion's `parse_permission` makes.
-        // `effective_grade`, not `spec.permission`: an app may have moved its own grade since the
-        // surface was published (see `regrade`), and the check has to read the grade that
-        // `describe` is currently showing or the two disagree.
+        // The ceiling and then the mode, before anything else about this call is even looked at
+        // — before the arguments are checked, before the revision guard, and long before the
+        // handler — because "may this caller use this action at all" is a question about the
+        // action. `gate::decide` is the rule a service answering `app.act` itself meets too, in
+        // the same words. `effective_grade`, not `spec.permission`: an app may have moved its own
+        // grade since the surface was published (see `regrade`), and the check has to read the
+        // grade that `describe` is currently showing or the two disagree.
         let published = effective_grade(name, spec.permission);
-        let Some(level) = grade(published) else {
-            return Err(format!(
-                "CEILING: {}.{} is graded `{}`, which is not a level this OS defines ({}), \
-                 so it was not run.",
-                self.app_id,
-                name,
-                published,
-                LADDER.join(" < ")
-            ));
-        };
-        let cap = grade(&authority.ceiling).unwrap_or_else(|| grade(DEFAULT_CEILING).unwrap());
-        if level > cap {
-            return Err(format!(
-                "CEILING: {app}.{name} is graded `{perm}`, above this machine's `{ceiling}` \
-                 ceiling (`tool_permission` in ~/.config/yantrik/settings.yaml), so it was not \
-                 run. An action at that grade needs a person to authorise it directly — raise \
-                 the ceiling in Settings if that is the intent.",
-                app = self.app_id,
-                perm = published,
-                ceiling = authority.ceiling
-            ));
-        }
-
-        // The mode, and the grant that stands in for it. After the ceiling — no mode and no
-        // grant reaches past that — and before the arguments, for the reason the ceiling is:
-        // "may this caller use this action at all" comes before anything about this call. A
-        // session rule is the person's standing answer for this one action and covers it the
-        // way a grant would. Nothing here asks anybody: raising the card is the shell's, and
-        // the caller's job is to have done it (`yos act` does it for a caller that has not).
-        let unasked = authority.mode.allows().max(grade(SOCKET_FLOOR).unwrap());
-        if level > unasked && !authority.granted && !authority.mode.covers(&self.app_id, name) {
-            return Err(grant_refusal(&self.app_id, name, published, &authority.mode));
-        }
+        decide(authority, &self.app_id, name, published)?;
 
         // Checked here rather than in every handler: a missing argument is the most common way a
         // model gets a call wrong, and the error should name the argument, not panic in the app.
@@ -841,14 +542,7 @@ pub fn caller() -> Option<Caller> {
 /// harmless": an unknown action has no grade, and the honest answer to a question about one is
 /// a refusal, not a default.
 pub fn published_grade(action: &str) -> Option<&'static str> {
-    REGISTRY.with(|cell| {
-        cell.borrow().as_ref().and_then(|reg| {
-            reg.actions
-                .iter()
-                .find(|(a, _)| a.name == action)
-                .map(|(a, _)| effective_grade(&a.name, a.permission))
-        })
-    })
+    REGISTRY.with(|cell| cell.borrow().as_ref().and_then(|reg| reg.grade_of(action).ok()))
 }
 
 /// Re-declare the grade THIS app publishes for one of its own actions, while it is running.
@@ -935,9 +629,10 @@ impl Drop for CallerScope {
 // hands it to the handler the way it hands over the caller: for the duration of the one dispatch,
 // on the thread the handler runs on. What the token is worth is the handler's business — the
 // shell resolves it against the kernel's account of the caller; here it is only carried.
-
-/// The key an agent token travels under: beside `args` on `app.act`, never inside them.
-pub const AGENT_TOKEN: &str = "agent_token";
+//
+// The lifting itself — `AGENT_TOKEN` and `agent_token_of` — is `yantrik_ipc_transport::gate`'s,
+// beside `grant_of`, so a service answering `app.act` in its own handler takes the token out of
+// `args` the same way before its grant is spent against them.
 
 thread_local! {
     /// The agent token of the dispatch currently running on THIS thread, or `None`.
@@ -966,26 +661,6 @@ impl Drop for AgentTokenScope {
         let previous = self.0.take();
         CURRENT_AGENT_TOKEN.with(|cell| *cell.borrow_mut() = previous);
     }
-}
-
-/// The token a call carries, from beside its `args` — and any copy inside `args` taken out.
-///
-/// The copy inside is removed and NOT used. Defence in depth: whatever put it there has already
-/// shown it to anything that prints the arguments, and honouring it would teach callers that
-/// the arguments are a place a token may go.
-fn agent_token_of(params: &serde_json::Value, args: &mut serde_json::Value) -> Option<String> {
-    if args.as_object_mut().and_then(|given| given.remove(AGENT_TOKEN)).is_some() {
-        tracing::warn!(
-            "an agent token arrived inside `args`; it was removed and not used. It travels beside \
-             `args` on app.act, never among them"
-        );
-    }
-    params
-        .get(AGENT_TOKEN)
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
 }
 
 // ── Answers that take time ──────────────────────────────────────────
@@ -1281,22 +956,31 @@ impl ControlRpc {
                     .map(str::to_string);
                 // A grant, when the caller holds one: the `request_id` the shell answered
                 // `request_approval` with, once a person has pressed Allow. Optional for the
-                // same reason `expect_revision` is — most calls need none — and checked before
-                // anything else when it is there, because a grant that does not hold is the
-                // whole answer to the call.
-                let grant = params
-                    .get("grant")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|g| !g.is_empty())
-                    .map(str::to_string);
+                // same reason `expect_revision` is — most calls need none.
+                let grant = grant_of(&params);
                 let action_id = next_action_id(&self.service_id);
 
                 // Read on this thread, enforced on the UI one: the settings and mode files are
                 // IO, spending a grant is a round trip, and the dispatch closure is a turn of
                 // the event loop.
-                let authority = authority_for(&self.app_id, &action, &args, grant.as_deref())
-                    .map_err(|m| ServiceError { code: -32602, message: m })?;
+                let mut authority = Authority::now();
+                if let Some(id) = grant.as_deref() {
+                    // A grant is spent only once the ceiling has passed on the action's grade,
+                    // or a person's Allow is used up on an act that is then refused and never
+                    // runs (#154). The grade lives on the UI thread, so ask it first — one extra
+                    // hop, only for a call that carries a grant, which is one a person has just
+                    // answered a card for. An action this app does not have is answered as that
+                    // here, and nothing is spent on it. Should the app regrade the action between
+                    // this read and the dispatch, the dispatch still decides on the grade it
+                    // publishes then; the most that race can cost is the grant.
+                    let name = action.clone();
+                    let graded = on_ui_thread(who, move |reg| reg.grade_of(&name))
+                        .map_err(|m| ServiceError { code: -32000, message: m })?
+                        .map_err(|m| ServiceError { code: -32602, message: m })?;
+                    authority
+                        .spend(id, &self.app_id, &action, graded, &args)
+                        .map_err(|m| ServiceError { code: -32602, message: m })?;
+                }
                 tracing::info!(
                     action = %action,
                     id = %action_id,
@@ -2360,6 +2044,12 @@ mod tests {
         });
     }
 
+    /// Spend `id` for `blender.render`, graded `sensitive`, under `authority`, the way the RPC
+    /// thread does before anything reaches the UI thread.
+    fn spend_for_render(mut authority: Authority, id: &str, args: &serde_json::Value) -> Result<Authority, String> {
+        authority.spend(id, "blender", "render", "sensitive", args).map(|()| authority)
+    }
+
     /// A grant is spent on the RPC thread, before anything reaches the UI thread: a spent one,
     /// one bound to other arguments, and one that never existed each end the call there, with
     /// the shell's reason in the refusal. Without this, "with a grant it runs" would be "with
@@ -2369,20 +2059,49 @@ mod tests {
         spend_through_a_stand_in_shell();
         let args = serde_json::json!({"out": "x.png"});
 
-        let first = authority_for("blender", "render", &args, Some("fresh-1")).expect("a fresh grant holds");
+        let first = spend_for_render(open(), "fresh-1", &args).expect("a fresh grant holds");
         assert!(first.granted);
 
-        let err = authority_for("blender", "render", &args, Some("fresh-1")).unwrap_err();
+        let err = spend_for_render(open(), "fresh-1", &args).unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("already used"), "replayed: {err}");
 
-        let err = authority_for("blender", "render", &serde_json::json!({"out": "y.png"}), Some("fresh-2")).unwrap_err();
+        let err = spend_for_render(open(), "fresh-2", &serde_json::json!({"out": "y.png"})).unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("this call carries"), "swapped: {err}");
 
-        let err = authority_for("blender", "render", &args, Some("made-up")).unwrap_err();
+        let err = spend_for_render(open(), "made-up", &args).unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("no approval request"), "invented: {err}");
+    }
 
-        // No grant at all is not a refusal: it is a call for the mode to judge.
-        assert!(!authority_for("blender", "render", &args, None).unwrap().granted);
+    /// #154, item 2: `authority_for` spent the grant before the grade had been looked at, and the
+    /// dispatch then refused the act for being above the ceiling — so the person's Allow was
+    /// used up on an act that never ran, and could not be offered again. The ceiling comes
+    /// first now. Refused above it, the grant is still whole: once the ceiling allows the act,
+    /// the same grant holds, once.
+    #[test]
+    fn a_grant_is_not_spent_on_an_act_the_ceiling_refuses() {
+        spend_through_a_stand_in_shell();
+        let args = serde_json::json!({"out": "x.png"});
+
+        let err = spend_for_render(under("standard"), "fresh-154", &args).unwrap_err();
+        assert!(err.starts_with("CEILING:"), "the ceiling's refusal, not the grant's: {err}");
+        assert!(err.contains("graded `sensitive`") && err.contains("`standard` ceiling"), "{err}");
+
+        let raised = spend_for_render(under("sensitive"), "fresh-154", &args)
+            .expect("the refusal above the ceiling left the grant unspent");
+        assert!(raised.granted);
+        let err = spend_for_render(open(), "fresh-154", &args).unwrap_err();
+        assert!(err.contains("already used"), "and it still holds only once: {err}");
+
+        // And the dispatch reaches the same answer on the UI thread, whatever was spent: the
+        // ceiling is decided again there, on the grade `describe` is showing at that moment.
+        let mut granted = under("standard");
+        granted.granted = true;
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let err = render_surface(ran.clone())
+            .act("render", &args, None, "blender#1", &granted)
+            .unwrap_err();
+        assert!(err.starts_with("CEILING:"), "{err}");
+        assert!(!ran.get());
     }
 
     /// Same file, same shape as the shell writes (see `mind_mode::policy_json`), and the same
@@ -2459,8 +2178,9 @@ mod tests {
     }
 
     /// The socket the tests below talk to: one served surface per test binary, because the UI
-    /// stand-in is one per binary (see `test_ui_thread`). Two actions: `who` reports the caller as
-    /// the handler sees it; `slow` finishes its answer off the UI thread with [`answer_later`].
+    /// stand-in is one per binary (see `test_ui_thread`). `who` reports the caller as the handler
+    /// sees it; `slow` finishes its answer off the UI thread with [`answer_later`]; `echo` hands back
+    /// its arguments and agent token; `nuke` is graded off the ladder, for the ceiling.
     #[cfg(unix)]
     fn served_test_surface() -> &'static str {
         use std::os::unix::net::UnixStream;
@@ -2530,9 +2250,15 @@ mod tests {
                             Ok(serde_json::json!({ "args": args, "agent_token": agent_token() }))
                         }),
                     ),
+                    (
+                        // Graded off the ladder, so the ceiling refuses it whatever the machine
+                        // running the tests has in its settings file.
+                        Action::new("nuke", "Refused by the ceiling on every machine").risk("catastrophic"),
+                        Box::new(|_| Ok(serde_json::json!("never reached"))),
+                    ),
                 ],
             }));
-            serve_rpc(APP, 3);
+            serve_rpc(APP, 4);
 
             // Thirty seconds is a bound on a hung server, not a budget for a slow one: the server
             // binds on its own thread after building a tokio runtime, and the failure this loop
@@ -2700,6 +2426,47 @@ mod tests {
         assert!(scope.take().is_none(), "taken once");
         drop(scope);
         assert!(answer_later(|| Ok(serde_json::json!(2))).is_err(), "the scope closed with the dispatch");
+    }
+
+    /// #154 through the real dispatch: the RPC thread asks the UI thread for the grade before it
+    /// offers a grant to the shell, so an act the ceiling refuses, and an action the app does not
+    /// have, spend nothing. Before, both came back `GRANT: … does not authorise …` — the grant had
+    /// already gone to the shell by the time anything looked at the action.
+    #[cfg(unix)]
+    #[test]
+    fn a_grant_on_the_socket_is_offered_to_the_shell_only_past_the_ceiling() {
+        spend_through_a_stand_in_shell();
+        let act = |action: &str, args: serde_json::Value, grant: &str| {
+            let request = serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "app.act",
+                "params": { "action": action, "args": args, "grant": grant },
+            });
+            let reply = call(&request.to_string());
+            reply["error"]["message"].as_str().unwrap_or_default().to_string()
+        };
+
+        let err = act("nuke", serde_json::json!({}), "fresh-socket");
+        assert!(err.starts_with("CEILING:"), "the ceiling's answer, not the shell's: {err}");
+
+        let err = act("nope", serde_json::json!({}), "fresh-socket");
+        assert!(err.starts_with("unknown action `nope`"), "the app's answer, not the shell's: {err}");
+
+        // Past the ceiling the grant does go to the shell, and one that does not hold ends the
+        // call in the shell's words.
+        let err = act("who", serde_json::json!({}), "made-up");
+        assert!(err.starts_with("GRANT:") && err.contains("no approval request"), "{err}");
+
+        // What a grant is spent against is the arguments with any agent token a caller put among
+        // them already lifted off (see `agent_token`): the shell is shown `{"command":"ls"}` and
+        // the grant is bound to that, never to a token. The stand-in shell names what it was
+        // handed, which is how this can be seen from here.
+        let err = act("echo", serde_json::json!({"command": "ls", "agent_token": "smuggled"}), "fresh-echo");
+        assert!(err.starts_with("GRANT:") && err.contains(r#"this call carries {"command":"ls"}"#), "{err}");
+        assert!(!err.contains("smuggled"), "the token reached the shell as an argument: {err}");
+
+        // And the grant the two refusals carried was never spent.
+        spend_for_render(open(), "fresh-socket", &serde_json::json!({"out": "x.png"}))
+            .expect("nothing spent `fresh-socket` on the way to either refusal");
     }
 
     #[test]

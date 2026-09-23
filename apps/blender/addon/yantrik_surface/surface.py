@@ -8,11 +8,12 @@ that drift.
 
 The order of dispatch, exactly as `Registry::act` runs it:
 
-  0. a grant, when the call carries one, is spent through the shell (said as GRANT when it
-     does not hold) — before anything else, as the runtime spends it on its RPC thread;
   1. unknown action;
   2. an action graded off the ladder (a bug, said as CEILING);
   3. an action above this machine's ceiling (a policy, said as CEILING);
+  3a. a grant, when the call carries one, is spent through the shell (said as GRANT when it
+     does not hold) — once the ceiling has passed, never before, as the runtime's RPC thread
+     spends it (#154);
   3b. an action above what the desktop's mind mode runs unasked, with no grant and no session
      rule (a policy, said as GRANT — issue #116);
   4. a missing required argument;
@@ -295,21 +296,8 @@ class Surface:
         if expect_revision is not None and not isinstance(expect_revision, str):
             expect_revision = str(expect_revision)
 
-        # 0. A grant, spent before anything else — the runtime spends it in `authority_for`, on
-        # the RPC thread, before the dispatch reaches the main thread. A grant checked after the
-        # dispatch had begun would be a window in which one grant covers two calls.
         grant = params.get("grant")
         grant = grant.strip() if isinstance(grant, str) else ""
-        granted = False
-        if grant:
-            try:
-                self._spend_grant(grant, self.app_id, name, args)
-            except GrantRefused as why:
-                self._refuse(
-                    "GRANT: `%s` does not authorise %s.%s — %s Nothing was run; a grant covers "
-                    "one action, once, with the arguments the person was shown."
-                    % (grant, self.app_id, name, why))
-            granted = True
 
         # 1. Unknown action.
         spec = self._by_name.get(name)
@@ -333,6 +321,22 @@ class Surface:
                 "An action at that grade needs a person to authorise it directly — raise "
                 "the ceiling in Settings if that is the intent."
                 % (self.app_id, name, spec.permission, ceiling))
+
+        # 3a. A grant, spent once the ceiling has passed and before the main thread is reached
+        # — as the runtime's RPC thread spends it (`Authority::spend` in
+        # `yantrik_ipc_transport::gate`). Not earlier: a grant spent on an act the ceiling then
+        # refused was a person's Allow used up on nothing (#154). Not later: a grant checked
+        # after the dispatch had begun would be a window in which one grant covers two calls.
+        granted = False
+        if grant:
+            try:
+                self._spend_grant(grant, self.app_id, name, args)
+            except GrantRefused as why:
+                self._refuse(
+                    "GRANT: `%s` does not authorise %s.%s — %s Nothing was run; a grant covers "
+                    "one action, once, with the arguments the person was shown."
+                    % (grant, self.app_id, name, why))
+            granted = True
 
         # 3b. Above what the mode runs unasked, with no grant and no session rule: the refusal
         # that says how to get one. After the ceiling — nothing reaches past that — and before
