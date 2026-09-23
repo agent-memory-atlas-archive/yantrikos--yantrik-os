@@ -17,7 +17,17 @@ pub(crate) const SHELL_WINDOW_TITLE: &str = "Yantrik OS";
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowEntry {
     pub title: String,
+    /// The shell's own id for the app — `blender`, `browser`, `notes` — which the dock keys its
+    /// running marks by and `show_app` accepts. Lowercase, always.
     pub app_id: String,
+    /// The app_id the window declared to the compositor, spelled exactly as `wlrctl toplevel
+    /// list` printed it, or empty for a window that declared none (every Slint window of ours).
+    ///
+    /// Kept apart from `app_id` because the two disagree in case and the compositor cares:
+    /// `wlrctl toplevel find app_id:Blender` matches Blender's window and `app_id:blender` does
+    /// not. This is the one string that names a foreign window to wlrctl whatever its title has
+    /// changed to since the list was read.
+    pub wayland_app_id: String,
     pub icon_char: String,
     pub subtitle: String,
 }
@@ -86,20 +96,77 @@ pub fn list_windows_throttled() -> Vec<WindowEntry> {
 /// The launch registry, plus everything the compositor saw that the registry does not know about.
 ///
 /// A window is the same window if the id matches, not only if the title does. The registry names
-/// a window by its app id and titles it `display_name(id)`; the compositor gives back whatever
-/// the window is actually called at this moment. Those agree today — `app_names_agree_everywhere`
-/// holds every app's `title:` to its APP_NAMES entry — but the day one of them puts a filename in
-/// its title bar, matching on the title as well would have listed the same window twice: once as
-/// the shell remembers launching it and once as the compositor sees it.
+/// a window by its app id; the compositor gives back whatever the window is actually called at
+/// this moment. For our own apps those agree — `app_names_agree_everywhere` holds every app's
+/// `title:` to its APP_NAMES entry — but a foreign app puts what it likes in its title bar, and
+/// matching on the title would list the same window twice: once as the shell remembers launching
+/// it and once as the compositor sees it.
 ///
-/// Our own apps are single-instance (see `running::mark_launched`), so one id is one window.
-fn merge_windows(mut launched: Vec<WindowEntry>, discovered: Vec<WindowEntry>) -> Vec<WindowEntry> {
-    for window in discovered {
-        if !launched.iter().any(|known| known.app_id == window.app_id) {
-            launched.push(window);
-        }
+/// When both have the window, the compositor's account of it is the one listed. The registry
+/// used to win, and it titled the window `display_name(id)`: so Blender, launched by the shell,
+/// was listed as "Blender" while the compositor had it as `(Unsaved) - Blender 4.3.2`. That
+/// title went into `describe shell`, a caller passed it back to `minimise_window`, and
+/// `wlrctl toplevel minimize title:Blender` matched nothing — and the real title, the only
+/// string wlrctl would have taken, was refused by the validator because the list did not show
+/// it. No value worked for that window. The registry still says the app is open before the
+/// compositor's next reading has the window; it just stops naming a window it cannot see.
+///
+/// A launched app pairs with a compositor window by the shell's id, or by the binary the shell
+/// started: `open_app browser` runs `chromium`, and the window comes back as app_id `chromium`,
+/// so on id alone the merge saw two applications and listed a phantom "Browser" beside the real
+/// Chromium window, twice in the taskbar. Our own apps are single-instance (see
+/// `running::mark_launched`), so one id is one window.
+fn merge_windows(launched: &[crate::running::RunningApp], mut discovered: Vec<WindowEntry>) -> Vec<WindowEntry> {
+    let mut merged: Vec<WindowEntry> = launched
+        .iter()
+        .map(|app| {
+            let app_id = app.app_id.clone();
+            let seen = discovered
+                .iter()
+                .position(|w| w.app_id == app_id || same_program(&app.binary, &w.wayland_app_id))
+                .map(|i| discovered.remove(i));
+            match seen {
+                Some(window) => WindowEntry {
+                    subtitle: derive_context(&window.title, &app_id),
+                    icon_char: icon_for_app(&app_id).to_string(),
+                    title: window.title,
+                    wayland_app_id: window.wayland_app_id,
+                    app_id,
+                },
+                None => WindowEntry {
+                    title: display_name(&app_id),
+                    icon_char: icon_for_app(&app_id).to_string(),
+                    subtitle: String::new(),
+                    wayland_app_id: String::new(),
+                    app_id,
+                },
+            }
+        })
+        .collect();
+    merged.append(&mut discovered);
+    merged
+}
+
+/// Whether a window that declared `wayland_app_id` came from the binary the shell started.
+///
+/// A program's app_id is its binary's name, or the name with a distribution suffix on one side:
+/// Debian's `chromium` is `chromium`, Ubuntu's is `chromium-browser`, `google-chrome-stable`
+/// declares `google-chrome`. So the two are the same program when they are equal, or when one is
+/// the other up to a `-`. The binary is compared by its file name, because the shell launches
+/// Blender by the full path `find_program` resolved.
+fn same_program(binary: &str, wayland_app_id: &str) -> bool {
+    let bin = std::path::Path::new(binary)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let id = wayland_app_id.to_lowercase();
+    if bin.is_empty() || id.is_empty() {
+        return false;
     }
-    launched
+    let extends = |longer: &str, shorter: &str| {
+        longer.strip_prefix(shorter).is_some_and(|rest| rest.starts_with('-'))
+    };
+    bin == id || extends(&bin, &id) || extends(&id, &bin)
 }
 
 /// The windows the shell has open: what it launched, plus what the compositor says is on screen.
@@ -125,19 +192,7 @@ fn merge_windows(mut launched: Vec<WindowEntry>, discovered: Vec<WindowEntry>) -
 /// so the id comes from a lookup rather than a guess. `wlrctl` being absent costs us only what it
 /// cost before: the registry answer, which is what this returned in the first place.
 pub fn shell_windows() -> Vec<WindowEntry> {
-    let launched: Vec<WindowEntry> = crate::running::running()
-        .into_iter()
-        .map(|app| {
-            let app_id = app.app_id;
-            WindowEntry {
-                title: display_name(&app_id),
-                icon_char: icon_for_app(&app_id).to_string(),
-                subtitle: String::new(),
-                app_id,
-            }
-        })
-        .collect();
-    merge_windows(launched, compositor_snapshot())
+    merge_windows(&crate::running::running(), compositor_snapshot())
 }
 
 /// The name one of our app ids goes by on screen.
@@ -217,6 +272,14 @@ fn display_name(app_id: &str) -> String {
 /// outside that and still well inside the three seconds the control surface gives an action.
 const COMPOSITOR_REPLY_LIMIT: Duration = Duration::from_millis(1200);
 
+/// The `wlrctl toplevel <verb>` command line for one matchspec, such as `title:Notes`.
+///
+/// One argument each, so a title with a space travels as a title with a space. There is no shell
+/// between us and wlrctl and there must not be a quoting scheme pretending there is.
+fn toplevel_command(verb: &str, matchspec: &str) -> Vec<String> {
+    vec!["toplevel".to_string(), verb.to_string(), matchspec.to_string()]
+}
+
 /// The `wlrctl toplevel <verb>` command line for one window, named by title.
 ///
 /// Two things about wlrctl's matchspec, both learned the hard way and both load-bearing:
@@ -231,7 +294,7 @@ const COMPOSITOR_REPLY_LIMIT: Duration = Duration::from_millis(1200);
 /// typed against the open windows first (see [`window_named`]) and passes the title it found,
 /// never the one it was given.
 fn toplevel_args(verb: &str, title: &str) -> Vec<String> {
-    vec!["toplevel".to_string(), verb.to_string(), format!("title:{title}")]
+    toplevel_command(verb, &format!("title:{title}"))
 }
 
 /// The command line that brings a MINIMIZED window back onto the screen.
@@ -239,28 +302,52 @@ fn toplevel_args(verb: &str, title: &str) -> Vec<String> {
 /// A minimized window cannot take focus while it is still minimized, and wlrctl has no
 /// "unminimize" verb — `maximize` is what brings it back. `state:minimized` narrows it to windows
 /// that are actually minimized, so presenting a visible window does not resize it.
-fn restore_args(title: &str) -> Vec<String> {
-    let mut args = toplevel_args("maximize", title);
+fn restore_command(matchspec: &str) -> Vec<String> {
+    let mut args = toplevel_command("maximize", matchspec);
     args.push("state:minimized".to_string());
     args
 }
 
-/// Run one `wlrctl` command and say, in words a caller can act on, what happened.
+fn restore_args(title: &str) -> Vec<String> {
+    restore_command(&format!("title:{title}"))
+}
+
+/// Every matchspec that names the window called `title`, most precise first.
 ///
-/// A non-zero exit means the compositor matched no window, which is the interesting failure: it
-/// says the shell and the compositor disagree about what is open. A missing binary is a different
-/// answer and gets a different sentence, because nothing on the machine will fix itself.
-fn run_wlrctl(args: &[String]) -> Result<(), String> {
+/// `title:` first, which is exact and so cannot touch a second window by mistake. Then, for a
+/// window that declared an app_id to the compositor, `app_id:` spelled as the compositor spelled
+/// it — because a foreign app's title is not stable. Blender is `(Unsaved) - Blender 4.3.2` until
+/// the scene is saved and `scene.blend - Blender 4.3.2` after; Chromium retitles itself on every
+/// tab. The list this title came from is up to nine seconds old (`COMPOSITOR_TTL`), so `title:`
+/// can miss a window that is plainly there, and the app_id is what still names it. Our own Slint
+/// windows declare no app_id, and their titles do not move, so for them the list has one entry.
+///
+/// The fallback is offered only when no other open window shares the app_id. wlrctl applies a
+/// verb to every toplevel the matchspec matches, and `close app_id:chromium` with two Chromium
+/// windows open would close both — the coin toss `window_to_close` exists to refuse.
+fn matchspecs(title: &str, open: &[WindowEntry]) -> Vec<String> {
+    let mut specs = vec![format!("title:{title}")];
+    if let Some(window) = open.iter().find(|w| w.title == title) {
+        let id = &window.wayland_app_id;
+        let alone = !id.is_empty() && open.iter().filter(|w| &w.wayland_app_id == id).count() == 1;
+        if alone {
+            specs.push(format!("app_id:{id}"));
+        }
+    }
+    specs
+}
+
+/// One `wlrctl toplevel <verb>` command line per matchspec, in the order to try them.
+fn commands_for(verb: &str, specs: &[String]) -> Vec<Vec<String>> {
+    specs.iter().map(|spec| toplevel_command(verb, spec)).collect()
+}
+
+/// Run one `wlrctl` command. `Err` is for a wlrctl that could not run at all — a missing binary
+/// gets its own sentence, because nothing on the machine will fix itself — and a wlrctl that ran
+/// and matched nothing comes back as its exit status, for the caller to try another name with.
+fn wlrctl_exit(args: &[String]) -> Result<std::process::ExitStatus, String> {
     match std::process::Command::new("wlrctl").args(args).status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!(
-            "the compositor matched no window: `wlrctl {}` exited {}",
-            args.join(" "),
-            status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "on a signal".to_string())
-        )),
+        Ok(status) => Ok(status),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
             "wlrctl is not installed on this machine, so nothing here can move a window"
                 .to_string(),
@@ -269,18 +356,47 @@ fn run_wlrctl(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Run the command lines in turn until the compositor matches one, and say, in words a caller
+/// can act on, what happened.
+///
+/// A non-zero exit means the compositor matched no window, which is the interesting failure: it
+/// says the shell and the compositor disagree about what is open. With more than one command line
+/// the refusal spells out each attempt, so a caller reading "exited 1" can see that the app_id
+/// was tried too and there is no third name to reach for.
+fn run_first_matching(commands: &[Vec<String>]) -> Result<(), String> {
+    let mut refused = Vec::new();
+    for args in commands {
+        let status = wlrctl_exit(args)?;
+        if status.success() {
+            return Ok(());
+        }
+        refused.push(format!(
+            "`wlrctl {}` exited {}",
+            args.join(" "),
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "on a signal".to_string())
+        ));
+    }
+    Err(format!("the compositor matched no window: {}", refused.join(", then ")))
+}
+
 /// Ask the compositor for something from the UI thread, and wait a moment for the answer.
 ///
 /// The work goes to a worker because `wlrctl` is a process; the wait is bounded because the caller
 /// is the thread that paints the desktop. A timeout comes back as a timeout and not as success —
 /// a caller told "done" by a shell that does not know is exactly the complaint this fixes.
-fn ask_compositor(args: Vec<String>) -> Result<(), String> {
-    let spelled = format!("wlrctl {}", args.join(" "));
+fn ask_compositor(commands: Vec<Vec<String>>) -> Result<(), String> {
+    let spelled = commands
+        .first()
+        .map(|args| format!("wlrctl {}", args.join(" ")))
+        .unwrap_or_else(|| "wlrctl".to_string());
     let (answer, wait) = std::sync::mpsc::channel();
     if std::thread::Builder::new()
         .name("yos-wlrctl".to_string())
         .spawn(move || {
-            let _ = answer.send(run_wlrctl(&args));
+            let _ = answer.send(run_first_matching(&commands));
         })
         .is_err()
     {
@@ -299,12 +415,13 @@ fn ask_compositor(args: Vec<String>) -> Result<(), String> {
 /// Bring the window called `title` to the front, restoring it first if it was minimized. Says
 /// whether the compositor had such a window.
 pub fn present(title: &str) -> bool {
-    if let Err(why) = run_wlrctl(&restore_args(title)) {
+    let specs = matchspecs(title, &shell_windows());
+    if let Err(why) = run_first_matching(&specs.iter().map(|s| restore_command(s)).collect::<Vec<_>>()) {
         // Not a warning: the usual reason is that the window was never minimized, and the
         // matchspec simply matched nothing.
         tracing::debug!(window = %title, reason = %why, "nothing to un-minimize before focusing");
     }
-    match run_wlrctl(&toplevel_args("focus", title)) {
+    match run_first_matching(&commands_for("focus", &specs)) {
         Ok(()) => true,
         Err(why) => {
             tracing::warn!(window = %title, reason = %why, "could not bring a window forward");
@@ -314,8 +431,19 @@ pub fn present(title: &str) -> bool {
 }
 
 /// Bring the window of one of our apps to the front, by the id the launcher knows it by.
+///
+/// By the title the window list has for it, not `display_name(id)`: those are the same string
+/// for our own apps and different for a foreign one — `show_app blender` asked for `title:Blender`
+/// and no window is called that. An app the list does not have yet (launched a moment ago, before
+/// the compositor's next reading) is still asked for by its display name, which is the title it
+/// will have if it is one of ours.
 pub fn present_app(app_id: &str) -> bool {
-    present(&display_name(app_id))
+    let title = shell_windows()
+        .into_iter()
+        .find(|w| w.app_id == app_id)
+        .map(|w| w.title)
+        .unwrap_or_else(|| display_name(app_id));
+    present(&title)
 }
 
 /// Bring the shell's own window to the front. `Err` says why it is still behind something.
@@ -327,7 +455,7 @@ pub fn present_app(app_id: &str) -> bool {
 /// `control_approvals` already asks for it when a card goes up, `open_lens` when the ask bar
 /// opens, and `show_screen` because a screen nobody can see has not been shown.
 pub fn raise_shell() -> Result<(), String> {
-    ask_compositor(toplevel_args("focus", SHELL_WINDOW_TITLE))
+    ask_compositor(vec![toplevel_args("focus", SHELL_WINDOW_TITLE)])
 }
 
 /// Ask the window called `title` to close, the way pressing its × does.
@@ -336,7 +464,7 @@ pub fn raise_shell() -> Result<(), String> {
 /// unsaved work is entitled to put up its own dialog and stay open, and the shell has no standing
 /// to overrule it. So `Ok` here means the request was delivered, never that the window went.
 pub fn close(title: &str) -> Result<(), String> {
-    ask_compositor(toplevel_args("close", title))
+    ask_compositor(commands_for("close", &matchspecs(title, &shell_windows())))
 }
 
 /// Put the window called `title` out of the way, leaving it running.
@@ -344,7 +472,7 @@ pub fn close(title: &str) -> Result<(), String> {
 /// wlrctl spells the verb the American way; this desktop's own surface does not, which is why the
 /// two spellings meet here rather than anywhere a caller can see.
 pub fn minimise(title: &str) -> Result<(), String> {
-    ask_compositor(toplevel_args("minimize", title))
+    ask_compositor(commands_for("minimize", &matchspecs(title, &shell_windows())))
 }
 
 // ── Which window a person meant ─────────────────────────────────────
@@ -473,31 +601,27 @@ fn wlrctl_windows() -> Vec<WindowEntry> {
         // desktop's own "open windows" list both offered to switch you to the desktop you are
         // already looking at.
         .filter(|line| split_toplevel_line(line).0 != SHELL_WINDOW_TITLE)
-        .map(|line| {
-            // `wlrctl toplevel list` prints `app_id: title`. Reading the whole line as the title
-            // put that separator into the name, and our own windows set no wayland app_id at all,
-            // so the taskbar showed every one of them as ": Terminal", ": Weather" — a stray colon
-            // in front of the name, on the desktop's most-looked-at strip.
-            let (title, app_id) = split_toplevel_line(line);
-            let icon_char = icon_for_app(&app_id).to_string();
-            let subtitle = derive_context(&title, &app_id);
-            WindowEntry {
-                title,
-                app_id,
-                icon_char,
-                subtitle,
-            }
-        })
+        .map(toplevel_entry)
         .collect()
 }
 
-/// One `wlrctl toplevel list` line, as `(title, app_id)`.
+/// One `wlrctl toplevel list` line, as `(title, app_id)` — the shell's id, see [`toplevel_entry`].
+fn split_toplevel_line(line: &str) -> (String, String) {
+    let window = toplevel_entry(line);
+    (window.title, window.app_id)
+}
+
+/// One `wlrctl toplevel list` line, as the window it describes.
 ///
 /// The format is `app_id: title`. Reading the whole line as the title put that separator into the
 /// name, and our own windows set no wayland app_id at all, so the taskbar showed every one of them
 /// as ": Terminal", ": Weather" — a stray colon in front of the name, on the strip of the desktop
 /// people look at most.
-fn split_toplevel_line(line: &str) -> (String, String) {
+///
+/// The declared app_id is kept twice: lowercased as the shell's `app_id`, which is what every
+/// table in the shell is keyed by, and verbatim as `wayland_app_id`, which is what the compositor
+/// answers to — `app_id:Blender` finds Blender's window and `app_id:blender` does not.
+fn toplevel_entry(line: &str) -> WindowEntry {
     let (declared_id, title) = match line.split_once(':') {
         Some((id, rest)) if !rest.trim().is_empty() => (id.trim(), rest.trim()),
         // A foreign toplevel with no separator at all is all title.
@@ -521,7 +645,13 @@ fn split_toplevel_line(line: &str) -> (String, String) {
     } else {
         derive_app_id(&title)
     };
-    (title, app_id)
+    WindowEntry {
+        icon_char: icon_for_app(&app_id).to_string(),
+        subtitle: derive_context(&title, &app_id),
+        wayland_app_id: declared_id.to_string(),
+        title,
+        app_id,
+    }
 }
 
 /// The app id whose window is titled exactly this, if it is one of ours.
@@ -616,10 +746,25 @@ fn derive_context(title: &str, app_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::running::RunningApp;
+
+    /// A registry entry as `running()` hands it to the merge: the id it was launched under and
+    /// the binary that was spawned, which is a full path for Blender and a bare name otherwise.
+    fn launched(app_id: &str, binary: &str) -> RunningApp {
+        RunningApp { app_id: app_id.into(), pid: 1, binary: binary.into(), since_unix: 0 }
+    }
+
+    /// What the compositor reported, one `wlrctl toplevel list` line each.
+    fn seen(lines: &[&str]) -> Vec<WindowEntry> {
+        lines.iter().map(|line| toplevel_entry(line)).collect()
+    }
+
     #[test]
     fn surviving_windows_remain_when_editor_is_launched() {
-        let win=|id:&str,title:&str| WindowEntry {app_id:id.into(),title:title.into(),icon_char:String::new(),subtitle:String::new()};
-        let merged=merge_windows(vec![win("editor","Editor")],vec![win("terminal","Terminal"),win("notes","Notes"),win("editor","Editor")]);
+        let merged = merge_windows(
+            &[launched("editor", "yantrik-text-editor")],
+            seen(&[": Terminal", ": Notes", ": Editor"]),
+        );
         assert_eq!(merged.iter().map(|w|w.app_id.as_str()).collect::<Vec<_>>(),["editor","terminal","notes"]);
     }
 
@@ -631,19 +776,134 @@ mod tests {
     /// what answers it — with an empty registry the compositor's list IS the list.
     #[test]
     fn a_shell_that_has_just_started_still_sees_the_windows_already_open() {
-        let restarted_into: Vec<WindowEntry> = ["notes: Notes", ": Terminal", ": Editor", "firefox: Mozilla Firefox"]
-            .iter()
-            .map(|line| {
-                let (title, app_id) = split_toplevel_line(line);
-                WindowEntry { title, app_id, icon_char: String::new(), subtitle: String::new() }
-            })
-            .collect();
-        let merged = merge_windows(Vec::new(), restarted_into);
+        let restarted_into = seen(&["notes: Notes", ": Terminal", ": Editor", "firefox: Mozilla Firefox"]);
+        let merged = merge_windows(&[], restarted_into);
         assert_eq!(merged.len(), 4, "every window the compositor still holds is open");
         assert_eq!(
             merged.iter().map(|w| w.app_id.as_str()).collect::<Vec<_>>(),
             ["notes", "terminal", "editor", "firefox"]
         );
+    }
+
+    /// The window list and the window actions beside it agree about Blender (#113).
+    ///
+    /// The shell launched Blender, so the registry had it, and the registry titled it "Blender".
+    /// That is what `describe shell` listed; the compositor's line for the same window was
+    /// `Blender: (Unsaved) - Blender 4.3.2`. So `minimise_window title=Blender` resolved to
+    /// "Blender", ran `wlrctl toplevel minimize title:Blender`, and matched nothing — and the
+    /// real title, the one string wlrctl would have taken, was refused by the validator because
+    /// the list did not show it. No value worked for that window.
+    #[test]
+    fn a_launched_app_is_listed_by_the_title_the_compositor_has_for_it() {
+        let real = "(Unsaved) - Blender 4.3.2";
+        let merged = merge_windows(
+            &[launched("blender", "/usr/bin/blender")],
+            seen(&[": Terminal", "Blender: (Unsaved) - Blender 4.3.2"]),
+        );
+        assert_eq!(merged.len(), 2, "one Blender window, listed once: {merged:?}");
+        let blender = &merged[0];
+        assert_eq!(blender.app_id, "blender", "the dock and `show_app` still know it by the shell's id");
+        assert_eq!(blender.title, real, "the list shows the title the compositor can be asked for");
+        assert_eq!(blender.wayland_app_id, "Blender", "spelled as the compositor spelled it");
+
+        // What the list shows is what the validator accepts: the real title exactly, and the
+        // app's name as part of it.
+        let titles: Vec<String> = merged.iter().map(|w| w.title.clone()).collect();
+        assert_eq!(window_named(real, &titles).unwrap(), real);
+        assert_eq!(window_named("Blender", &titles).unwrap(), real);
+        assert_eq!(window_to_close("blender", &titles).unwrap(), real);
+
+        // And the compositor is asked by that title, then by the app_id it declared — with the
+        // capital B, because `app_id:blender` matches nothing on labwc while `app_id:Blender`
+        // does — for when the title has moved on since the list was read.
+        assert_eq!(
+            matchspecs(real, &merged),
+            ["title:(Unsaved) - Blender 4.3.2", "app_id:Blender"]
+        );
+        assert_eq!(
+            commands_for("minimize", &matchspecs(real, &merged)),
+            [
+                vec!["toplevel", "minimize", "title:(Unsaved) - Blender 4.3.2"],
+                vec!["toplevel", "minimize", "app_id:Blender"],
+            ]
+        );
+    }
+
+    /// Until the compositor's next reading has the window, the registry still says the app is
+    /// open — under the name it will have if it is one of ours.
+    #[test]
+    fn an_app_launched_a_moment_ago_is_listed_from_the_registry_alone() {
+        let merged = merge_windows(&[launched("notes", "yantrik-notes")], seen(&[": Terminal"]));
+        assert_eq!(merged[0].title, "Notes");
+        assert_eq!(merged[0].app_id, "notes");
+        assert_eq!(merged[0].wayland_app_id, "", "nothing declared, so nothing to fall back to");
+        assert_eq!(matchspecs("Notes", &merged), ["title:Notes"]);
+    }
+
+    /// The phantom "Browser" (#113): `open_app browser` runs `chromium`, and the window comes
+    /// back from the compositor as app_id `chromium`, so on id alone the merge saw two
+    /// applications — a "Browser" with no toplevel behind it, and the real Chromium window —
+    /// and the taskbar showed the one window twice.
+    #[test]
+    fn the_browser_the_shell_launched_is_the_chromium_window_the_compositor_sees() {
+        let merged = merge_windows(
+            &[launched("browser", "chromium")],
+            seen(&["chromium: webgl-check.html - Chromium", ": Notes"]),
+        );
+        assert_eq!(merged.len(), 2, "one browser window, listed once: {merged:?}");
+        assert_eq!(merged[0].app_id, "browser", "the pin's running mark is keyed by the shell's id");
+        assert_eq!(merged[0].title, "webgl-check.html - Chromium");
+        assert_eq!(merged[0].wayland_app_id, "chromium");
+        assert_eq!(merged[0].icon_char, icon_for_app("browser"));
+        assert_eq!(matchspecs("webgl-check.html - Chromium", &merged),
+            ["title:webgl-check.html - Chromium", "app_id:chromium"]);
+    }
+
+    /// A program's app_id is its binary's name, give or take a distribution's suffix.
+    #[test]
+    fn a_window_is_paired_with_the_binary_that_was_started_for_it() {
+        assert!(same_program("chromium", "chromium"));
+        assert!(same_program("/usr/bin/blender", "Blender"));
+        assert!(same_program("chromium-browser", "chromium"));
+        assert!(same_program("google-chrome-stable", "google-chrome"));
+        assert!(same_program("firefox", "firefox-esr"));
+        assert!(!same_program("yantrik-notes", "Blender"));
+        assert!(!same_program("chromium", "chrome"), "a prefix that is not a whole word is not the same program");
+        assert!(!same_program("yantrik-notes", ""), "our windows declare nothing, and nothing pairs with nothing");
+    }
+
+    /// With two windows sharing an app_id, only the title can name one of them.
+    ///
+    /// wlrctl applies a verb to every toplevel the matchspec matches, so `close app_id:chromium`
+    /// with two Chromium windows open closes both. The fallback is withheld rather than guessed.
+    #[test]
+    fn a_window_sharing_its_app_id_with_another_is_named_only_by_title() {
+        let open = seen(&[
+            "chromium: Northwind Cloud - Pricing - Chromium",
+            "chromium: Ask | Hacker News - Chromium",
+            "Blender: (Unsaved) - Blender 4.3.2",
+        ]);
+        assert_eq!(
+            matchspecs("Ask | Hacker News - Chromium", &open),
+            ["title:Ask | Hacker News - Chromium"]
+        );
+        assert_eq!(
+            matchspecs("(Unsaved) - Blender 4.3.2", &open),
+            ["title:(Unsaved) - Blender 4.3.2", "app_id:Blender"]
+        );
+        // The shell's own window is never in this list and is named by its title alone.
+        assert_eq!(matchspecs(SHELL_WINDOW_TITLE, &open), ["title:Yantrik OS"]);
+    }
+
+    /// The declared app_id is kept as the compositor spelled it, beside the lowercased one the
+    /// shell keys everything by.
+    #[test]
+    fn a_declared_app_id_is_kept_as_the_compositor_spelled_it() {
+        let blender = toplevel_entry("Blender: (Unsaved) - Blender 4.3.2");
+        assert_eq!(blender.app_id, "blender");
+        assert_eq!(blender.wayland_app_id, "Blender");
+        assert_eq!(toplevel_entry(": Notes").wayland_app_id, "");
+        assert_eq!(toplevel_entry("Some Foreign Window").wayland_app_id, "");
     }
 
     /// Every name in APP_NAMES is a window title the compositor can hand back, and it has to come
