@@ -248,7 +248,7 @@ apt-get install -y -qq \
 # Browser pin that ran `chromium` and found nothing, no notification daemon, no portals, no
 # screenshots — each failing quietly. No `|| true`: a desktop missing its runtime is a failed
 # build, and the parity check after this step names anything user-data.yaml gains later.
-apt-get install -y -qq     seatd     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp     qemu-guest-agent     libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr     lxpolkit     udisks2     brightnessctl     bluez alsa-utils
+apt-get install -y -qq     seatd     libcap2-bin     chromium     pipewire-pulse wireplumber pulseaudio-utils     python3-websocket     fontconfig     grim slurp     qemu-guest-agent     libnotify-bin     xdg-desktop-portal xdg-desktop-portal-wlr     lxpolkit     udisks2     brightnessctl     bluez alsa-utils
 
 # Three programs the shell shells out to by name, and did not have.
 #   swaybg     — yantrik-companion-tools/src/wallpaper.rs: setting a wallpaper did nothing
@@ -368,6 +368,8 @@ sudo mkdir -p "$ROOTFS/opt/yantrik/bin" "$ROOTFS/opt/yantrik/models"
 sudo cp -a "$UNPACK/bin/." "$ROOTFS/opt/yantrik/bin/"
 sudo chmod +x "$ROOTFS/opt/yantrik/bin/"*
 
+# libcap2-bin is installed in the rootfs above so the updater can re-apply this after a swap;
+# the image tested on 2026-09-23 had no setcap at all, and the grant silently did not happen.
 # perception-service is the one program here that needs privilege, and only for two calls at
 # startup: `fanotify_init` (CAP_SYS_ADMIN) and joining the process connector (CAP_NET_ADMIN).
 # It then applies Landlock and drops every capability, irreversibly - main.rs explains the
