@@ -25,9 +25,14 @@ What it is checking, in one line each:
     the "failed (exit 1)" that a mind used to be handed for a perfectly good question;
   * `ensure_service`, which the notify path uses, still ends the command when the service
     will not come up;
-  * and `yos act` sends each argument as the type the app declared for it — `dismiss id=67`
+  * `yos act` sends each argument as the type the app declared for it — `dismiss id=67`
     reaches the service as the string "67", because that action publishes `id: string`, while
-    `add_event duration_min=30` still arrives as the number 30.
+    `add_event duration_min=30` still arrives as the number 30;
+  * and when an app refuses an action for want of a grant — `sensitive` in `ask` mode, which
+    the app's own dispatch refuses on every door since issue #116 — `yos act` asks the shell
+    for the person's Allow, says so, waits, and acts again carrying the grant; a denial and an
+    unanswered card are plain sentences, `--no-ask` hands the refusal back, and `--grant`
+    carries one already held.
 """
 
 import contextlib
@@ -102,6 +107,12 @@ class FakeService(threading.Thread):
                 self.calls.append(asked)
                 answer = self.reply(self, asked)
                 if answer is None:
+                    continue
+                # A reply of `{"__error__": {...}}` is a JSON-RPC error — how an app's dispatch
+                # refuses, and what `yos act` has to be able to read past.
+                if isinstance(answer, dict) and set(answer) == {"__error__"}:
+                    conn.sendall((json.dumps({"jsonrpc": "2.0", "id": asked.get("id"),
+                                              "error": answer["__error__"]}) + "\n").encode())
                     continue
                 conn.sendall((json.dumps({"jsonrpc": "2.0", "id": asked.get("id"),
                                           "result": answer}) + "\n").encode())
@@ -339,6 +350,119 @@ def main():
                   "title": "Dentist", "date": "2026-10-02",
                   "duration_min": 30, "all_day": False},
               last_act("calendar"))
+
+        print("yos act, when the desktop wants a person's Allow")
+        # The account from inside VM 520 (issue #116): `blender.render` is `sensitive`, the
+        # machine was in `ask` mode, and `yos act` ran it in 1.72 s with no card. The app's own
+        # dispatch refuses that now, on every door, and says how to get a grant. `yos` has to
+        # read that refusal, ask the shell, say so, wait for the person, and act again with the
+        # grant — the same three steps the MCP bridge does for a mind, for whoever is at a
+        # terminal.
+        REFUSAL = ("GRANT: blender.render is graded `sensitive` and this machine is in ask mode, "
+                   "which runs nothing above `standard` without asking — so it was not run. Ask "
+                   "the shell for approval first (`request_approval` with this app, action and "
+                   "these exact arguments, poll `approval_status`, then send the granted "
+                   "request_id as `grant` on app.act — `yos act` does all of that for you), or "
+                   "have the person at the machine press Allow when the card appears.")
+        RENDERED = {"summary": "Blender — rendered", "accepted": True, "settled": True,
+                    "revision": "b1", "result": {"rendered_to": "x.png"}}
+        answers = {"status": "granted"}
+        polls = []
+
+        def blender_reply(_self, asked):
+            params = asked.get("params") or {}
+            if asked["method"] != "app.act":
+                return {"app": "blender", "summary": "Blender — cube.blend", "state": {},
+                        "revision": "b0", "actions": []}
+            if params.get("grant") == "appr-7":
+                return RENDERED
+            if params.get("grant"):
+                return {"__error__": {"code": -32602, "message": (
+                    "GRANT: `%s` does not authorise blender.render — no approval request `%s`. "
+                    "Nothing was run" % (params["grant"], params["grant"]))}}
+            return {"__error__": {"code": -32602, "message": REFUSAL}}
+
+        def asking_shell_reply(_self, asked):
+            params = asked.get("params") or {}
+            action = params.get("action")
+            if asked["method"] == "app.act" and action == "request_approval":
+                return {"accepted": True, "settled": True, "result": {
+                    "request_id": "appr-7", "status": "pending", "expires_in_secs": 120}}
+            if asked["method"] == "app.act" and action == "approval_status":
+                polls.append(1)
+                # Pending on the first poll, so the wait is a real wait.
+                status = answers["status"] if len(polls) >= 2 else "pending"
+                return {"accepted": True, "settled": True,
+                        "result": {"request_id": "appr-7", "status": status}}
+            return {"accepted": True, "settled": True}
+
+        blender = FakeService(sockets / "app-blender.sock", blender_reply)
+        blender.start()
+        services.append(blender)
+        shell.reply = asking_shell_reply
+        shell.calls.clear()
+        yos.APPROVAL_POLL = 0.02
+
+        def acts():
+            return [c["params"] for c in blender.calls if c["method"] == "app.act"]
+
+        def asked():
+            return [c["params"]["args"] for c in shell.calls
+                    if c["method"] == "app.act" and c["params"].get("action") == "request_approval"]
+
+        out, err, code = run(lambda: yos.cmd_act(["blender", "render", "out=x.png"]))
+        check("the refusal made yos ask the shell for the person's Allow, once",
+              len(asked()) == 1, shell.calls)
+        check("with the app, action, grade and the exact arguments the grant binds",
+              asked() and asked()[0].get("app") == "blender" and asked()[0].get("action") == "render"
+              and asked()[0].get("grade") == "sensitive" and asked()[0].get("args_json") == {"out": "x.png"},
+              asked())
+        check("and said so on the terminal",
+              "asking — a card is on the screen (120 s)" in out, out)
+        check("the action was sent once without a grant and once with the one the person gave",
+              [a.get("grant") for a in acts()] == [None, "appr-7"], acts())
+        check("carrying the same arguments both times",
+              all(a.get("args") == {"out": "x.png"} for a in acts()), acts())
+        check("and the second one ran, with nothing on stderr",
+              "accepted: True" in out and code is None and err == "", (out, err, code))
+
+        answers["status"] = "denied"
+        polls.clear()
+        blender.calls.clear()
+        shell.calls.clear()
+        out, err, code = run(lambda: yos.cmd_act(["blender", "render", "out=x.png"]))
+        check("a denial runs nothing", [a.get("grant") for a in acts()] == [None], acts())
+        check("and is a plain sentence that ends the command",
+              code == 1 and "said no" in err and "Traceback" not in err, (err, code))
+
+        answers["status"] = "pending"
+        polls.clear()
+        blender.calls.clear()
+        yos.APPROVAL_WAIT = 0.2
+        out, err, code = run(lambda: yos.cmd_act(["blender", "render", "out=x.png"]))
+        check("an unanswered card runs nothing and says nobody answered",
+              code == 1 and "nobody answered" in err and len(acts()) == 1, (err, acts()))
+        yos.APPROVAL_WAIT = 120
+
+        shell.calls.clear()
+        blender.calls.clear()
+        out, err, code = run(lambda: yos.cmd_act(["blender", "render", "out=x.png", "--no-ask"]))
+        check("--no-ask hands the refusal back instead of asking",
+              code == 1 and "GRANT:" in err and not asked(), (err, shell.calls))
+        check("in the app's own words, without the transport's prefix",
+              "app.act refused:" not in err, err)
+
+        blender.calls.clear()
+        out, err, code = run(lambda: yos.cmd_act(["blender", "render", "out=x.png", "--grant", "appr-7"]))
+        check("--grant carries a grant already held, and asks nobody",
+              [a.get("grant") for a in acts()] == ["appr-7"] and code is None and not asked(),
+              (acts(), err))
+
+        blender.calls.clear()
+        out, err, code = run(lambda: yos.cmd_act(["blender", "render", "out=x.png", "--grant", "stale"]))
+        check("a grant that does not hold is a refusal, not a second card",
+              code == 1 and "does not authorise" in err and not asked() and len(acts()) == 1,
+              (err, acts()))
 
         print("yos perception, with no desktop to ask")
         for svc in services:

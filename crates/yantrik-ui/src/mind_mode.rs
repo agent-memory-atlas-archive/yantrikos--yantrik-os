@@ -827,6 +827,77 @@ fn persist(mode: Mode) {
     crate::wire::settings::set_mind_mode(to_store(mode, previous).as_str());
 }
 
+// ── What every app reads ────────────────────────────────────────────
+//
+// The apps enforce the mode now (issue #116): `yantrik_app_runtime::control::Registry::act`
+// refuses a call above what the mode allows unless it carries a grant, whichever door it came
+// through — the MCP bridge, `yos act`, or a raw client on the socket. An app cannot ask this
+// shell over the socket on every call: the shell's own actions cross the same dispatch, and a
+// shell asking itself is a call that cannot be answered until it returns. So the mode is
+// published the way the ceiling already is — a small file beside `settings.yaml`, rewritten
+// whenever the mode or the rules change, read by every dispatch per call.
+//
+// Bypass IS written here, unlike in `settings.yaml`. This file is a fact about now, not a mode
+// to boot into, and the next shell start rewrites it before anything can read a stale one. A
+// bypass with a deadline carries it, so a shell that died mid-bypass leaves a file the apps stop
+// trusting at the minute the person was promised.
+
+/// The file's contents for this state.
+///
+/// Pure, so the test can drive what is written through the runtime's own reader without a
+/// file, and separate from the write for the reason [`to_store`] is. The countdown is not in
+/// it — the deadline is — so a running bypass rewrites nothing on any tick.
+pub fn policy_json(modes: &Modes, now: Instant, now_unix: u64) -> String {
+    let rules: Vec<serde_json::Value> = modes
+        .rules()
+        .iter()
+        .map(|r| serde_json::json!({"app": r.app, "action": r.action}))
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "mode": modes.mode(now).as_str(),
+        "previous": modes.previous(now).as_str(),
+        "bypass_expires_unix": modes.bypass_left(now).map(|left| now_unix + left.as_secs()),
+        "session_rules": rules,
+        "note": "Written by the shell whenever the mind mode or a session rule changes; every \
+                 app's dispatch reads it before running an action. Editing it changes nothing \
+                 the shell shows, and the next change overwrites it.",
+    }))
+    .unwrap_or_default()
+}
+
+/// Write the file, if what it would say has changed.
+///
+/// Called from `control_approvals::publish_mode`, which every change of mode or rule already
+/// passes through — a person's click, `set_mind_mode` from the socket, a lapsing bypass, the
+/// shell starting. Atomic through a rename, so an app reading mid-write sees the old file or
+/// the new one and never half of either. A failure is logged and the apps fall back to `ask`,
+/// which is the strict side of every mistake this could make.
+pub fn publish_policy_file() {
+    static LAST: Mutex<String> = Mutex::new(String::new());
+    let text = policy_json(&locked(), Instant::now(), unix_now());
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if *last == text {
+        return;
+    }
+    let path = yantrik_app_runtime::control::mode_path();
+    let written = (|| -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let temp = path.with_extension("json.tmp");
+        std::fs::write(&temp, text.as_bytes())?;
+        std::fs::rename(&temp, &path)
+    })();
+    match written {
+        Ok(()) => *last = text,
+        Err(e) => tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "could not publish the mind mode; apps will treat this desktop as `ask`"
+        ),
+    }
+}
+
 /// Everything the UI and `describe shell` show about the mode.
 pub fn snapshot() -> serde_json::Value {
     let now = Instant::now();
@@ -1280,6 +1351,40 @@ mod mind_mode_tests {
         assert!(modes.lapse(later), "the screen has something new to show");
         assert!(!modes.lapse(later), "and only once");
         assert_eq!(modes.mode(later), Mode::Auto);
+    }
+
+    /// What this shell publishes is what every app enforces (issue #116). The runtime reads
+    /// the mode from the file this writes, so the two sides are driven through each other: a
+    /// `Modes` in each state, the text this would write, and the runtime's own reader of it.
+    /// A reader and a writer tested apart could each pass while the apps enforced nothing.
+    #[test]
+    fn mind_mode_what_the_shell_publishes_is_what_the_apps_enforce() {
+        use yantrik_app_runtime::control::mode_from;
+        let now = Instant::now();
+        let unix = 1_800_000_000;
+        let mut modes = at(Mode::Ask);
+        assert_eq!(mode_from(&policy_json(&modes, now, unix), unix).name, "ask");
+
+        modes.person_set_mode(Mode::Auto, Bypass::Hour, now, 0);
+        modes.person_add_rule("calendar", "move_event", "sensitive", "Move an event").unwrap();
+        let read = mode_from(&policy_json(&modes, now, unix), unix);
+        assert_eq!(read.name, "auto");
+        assert_eq!(read.session_rules, vec![("calendar".to_string(), "move_event".to_string())]);
+
+        // A bypass carries its deadline: an app trusts it until then and not a second longer,
+        // even if this shell is no longer there to fold it back.
+        modes.person_set_mode(Mode::Bypass, Bypass::Minutes15, now, unix);
+        let text = policy_json(&modes, now, unix);
+        assert!(text.contains(&format!("\"bypass_expires_unix\": {}", unix + 15 * 60)), "{text}");
+        assert_eq!(mode_from(&text, unix).name, "bypass");
+        assert_eq!(mode_from(&text, unix + 15 * 60).name, "auto", "back to what it was");
+        assert_eq!(mode_from(&text, unix).session_rules.len(), 1, "the rule rides along");
+
+        // Until restart carries no deadline, and the runtime trusts it until the next write.
+        modes.person_set_mode(Mode::Bypass, Bypass::UntilRestart, now, unix);
+        let text = policy_json(&modes, now, unix);
+        assert!(text.contains("\"bypass_expires_unix\": null"), "{text}");
+        assert_eq!(mode_from(&text, unix + 86_400).name, "bypass");
     }
 
     /// Choosing bypass twice must not strand the machine there.

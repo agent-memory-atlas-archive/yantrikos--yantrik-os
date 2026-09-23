@@ -18,6 +18,8 @@ protocol and prints what came back.
     yos act shell open_app name=notes   ask something to do something
     yos act notes append text='...'     with arguments
     yos act shell open_app name=notes --full     the reply with the app state
+    yos act blender render out=x.png    an action the mode asks about: a card goes up,
+                                        yos waits for Allow (120 s) and acts with the grant
     yos perception [N]                  the last N kernel observations, starting the
                                         service if the desktop has not needed it yet
     yos journal                         is the eye being drained, and how far behind
@@ -42,6 +44,13 @@ Conventions worth knowing:
     `add_event duration_min=30` sends the number 30 to one whose parameter is a number.
     Quoting says it outright — `id="67"` is the string whatever the app declared.
 
+  * an `act` graded above what the desktop's mode allows — `sensitive` in `ask` mode — is
+    refused by the app itself unless the call carries a grant, whichever door it came through:
+    a mind's tools, this command, or a raw client on the socket all meet the same refusal.
+    `yos act` asks for you: it puts the card on the person's screen, waits up to 120 s for
+    Allow, and acts again carrying the grant. `--no-ask` hands the refusal back instead, and
+    `--grant <id>` carries a grant you already hold. `describe` needs nothing.
+
   * `describe` and `act` take a short name. `shell` means `app-shell`, `notes` means
     `app-notes`; anything else is used as given, so `yos describe weather` reaches the
     weather service directly. An app answers to every name it is known by — `containers`
@@ -62,6 +71,7 @@ Conventions worth knowing:
 
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -475,6 +485,13 @@ def cmd_ls(argv):
     for a in openable:
         if a.get("opens", "").startswith("the launcher"):
             print("The launcher (open_app name=%s, or show_screen): %s" % (a["name"], a.get("for", "")))
+    # The sentence issue #116 asked for. Before it, this listing said the surfaces were "what
+    # the minds use too" while a mind with a terminal could run through `yos act` what its own
+    # tools would have asked about — the grade was the bridge's policy, not the machine's.
+    print("Every door asks the same way: an action graded above what the desktop's mode allows")
+    print("    needs the person's Allow — from a mind's tools, from `yos act` here, or straight")
+    print("    at the socket; the app itself refuses without a grant. `yos act` raises the card")
+    print("    and waits (120 s). `describe shell` shows the mode; `describe` never asks.")
     if raw and stale:
         print("Closed, socket left behind: %s" % ", ".join(stale))
 
@@ -621,16 +638,109 @@ def render_action(action, brief=False):
     return "\n".join(lines)
 
 
+# How an app says "not without the person's Allow". The refusal an app's runtime sends for a
+# call above what the desktop's mode allows starts with this and says how to get a grant: ask
+# the shell, wait for the person, act again carrying the grant. `yos act` does those three steps
+# itself, so a person at the keyboard sees one card and clicks it, and a mind in a terminal gets
+# the same card its own tools would have raised (issue #116). It branches on the marker the
+# way the bridge branches on `CEILING:`; the words after it are for a reader.
+GRANT_MARK = "GRANT:"
+# The shell holds a request open for this long. Polled, once a second, because nothing here can
+# be called back; a person cannot answer inside the first second anyway.
+APPROVAL_WAIT = 120
+APPROVAL_POLL = 1.0
+
+
+def plain(unreachable):
+    """The sentence in a refusal, without the `shell.app.act refused:` the transport put in front."""
+    return re.sub(r"^\S+\.app\.act refused: ", "", str(unreachable))
+
+
+def act_after_asking(target, action, params, refusal):
+    """Raise the card the refusal asked for, wait for the person, and act again with the grant.
+
+    Returns the second act's reply, or ends the command with a plain sentence: the person said
+    no, nobody answered, or the desktop would not ask. Nothing in here decides anything —
+    `request_approval` puts a card up, `approval_status` reads an answer somebody else gave, and
+    the app's own dispatch spends the grant when the action runs. There is no action anywhere on
+    this desktop that grants.
+    """
+    app = target[4:] if target.startswith("app-") else target
+    found = re.search(r"graded `([a-z]+)`", refusal)
+    # The shell reads the app's published grade itself and corrects an understated one; what is
+    # sent here only has to be a grade, and the refusal always names one.
+    grade = found.group(1) if found else "sensitive"
+    try:
+        asked = request("shell", "app.act", {"action": "request_approval", "args": {
+            "app": app, "action": action, "grade": grade,
+            "args_json": params["args"], "requester": "yos",
+        }}, timeout=20)
+    except Unreachable as e:
+        # The shell's own sentence: plan mode, the ceiling, a grade it will not ask about.
+        die("%s.%s needs the person's Allow and they could not be asked: %s" % (app, action, plain(e)))
+    answer = asked.get("result") or {}
+    if answer.get("status") == "not_needed":
+        die("%s refused %s.%s without a grant, but the desktop says its %s mode runs it unasked. "
+            "The two should agree; nothing was run. Try again in a moment, or read the refusal: %s"
+            % (app, app, action, answer.get("mode", "current"), plain(refusal)))
+    request_id = answer.get("request_id")
+    if not request_id:
+        die("the desktop was asked to put a card up for %s.%s and did not say which request it "
+            "was, so there is nothing to wait on. Nothing was run." % (app, action))
+
+    print("asking — a card is on the screen (%d s)" % APPROVAL_WAIT)
+    sys.stdout.flush()
+    deadline = time.monotonic() + APPROVAL_WAIT
+    status = "pending"
+    while time.monotonic() < deadline:
+        time.sleep(max(0.0, min(APPROVAL_POLL, deadline - time.monotonic())))
+        try:
+            poll = request("shell", "app.act", {"action": "approval_status",
+                                                "args": {"request_id": request_id}}, timeout=10)
+        except Unreachable:
+            # A poll that fails is not an answer. The card is still up and the person may be
+            # reaching for the mouse; ask again until the wait is up.
+            continue
+        status = (poll.get("result") or {}).get("status", "pending")
+        if status != "pending":
+            break
+
+    if status == "granted":
+        try:
+            return request(target, "app.act", dict(params, grant=request_id))
+        except Unreachable as e:
+            die("the person allowed %s.%s, but it did not go through: %s" % (app, action, plain(e)))
+    if status == "denied":
+        die("the person at the machine said no to %s.%s. Nothing was run. That is an answer, not "
+            "an error: do not ask again unless they bring it up." % (app, action))
+    if status == "consumed":
+        die("the grant for %s.%s had already been spent, so nothing was run. Ask again if it still "
+            "needs doing." % (app, action))
+    die("nobody answered the card for %s.%s within %d s, so nothing was run. They were probably "
+        "away from the keyboard; run this again when they are back." % (app, action, APPROVAL_WAIT))
+
+
 def cmd_act(argv):
     if len(argv) < 2:
-        die("usage: yos act <target> <action> [key=value ...] [--full]")
+        die("usage: yos act <target> <action> [key=value ...] [--full] [--grant <id>] [--no-ask]")
     # The reply carries a full `describe` of the app as it stands after the action. That is
     # the right thing to send and the wrong thing to print: filling six fields of the
     # installer printed the same 180-line shell state six times, and an agent pays for every
     # line of it. So the default is the part that changed, and `--full` is there for when the
     # whole picture is what you actually wanted.
     full = "--full" in argv
-    argv = [a for a in argv if a != "--full"]
+    # `--no-ask` is for a caller that asks on its own account — the MCP bridge raises the card
+    # itself, with the mind's name on it — and wants a refusal back rather than a second card.
+    # `--grant` carries a grant such a caller already holds.
+    no_ask = "--no-ask" in argv
+    grant = None
+    if "--grant" in argv:
+        at = argv.index("--grant")
+        if at + 1 >= len(argv):
+            die("--grant needs the request_id the shell granted")
+        grant = argv[at + 1]
+        argv = argv[:at] + argv[at + 2:]
+    argv = [a for a in argv if a not in ("--full", "--no-ask")]
     target, action = argv[0], argv[1]
     pairs = argv[2:]
     params = {"action": action, "args": parse_args(pairs, declared_types(target, action, pairs))}
@@ -638,7 +748,16 @@ def cmd_act(argv):
     # than being an argument to the action.
     if "expect_revision" in params["args"]:
         params["expect_revision"] = params["args"].pop("expect_revision")
-    reply = call(target, "app.act", params)
+    if grant:
+        params["grant"] = grant
+    try:
+        reply = request(target, "app.act", params)
+    except Unreachable as e:
+        # A refusal for want of a grant is a question, not an ending — unless the caller said
+        # it would do its own asking, or already brought a grant that did not hold.
+        if GRANT_MARK not in str(e) or no_ask or grant:
+            die(plain(e) if GRANT_MARK in str(e) else str(e))
+        reply = act_after_asking(target, action, params, str(e))
     if full:
         print(json.dumps(reply, indent=2))
         return

@@ -137,6 +137,12 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                         Ok(settled) => settled,
                         Err(why) => return Err(why),
                     };
+                // Bound to the id the app publishes under, not the spelling the caller used. The
+                // app's own dispatch spends the grant now (issue #116) and it spends it under that
+                // id — so a card asked for `container-manager` would otherwise be allowed and then
+                // refused as "approved for app `container-manager`, not `containers`". One app,
+                // one name on the card, one name on the grant, one name on a session rule.
+                let app = surface_for(&app).unwrap_or(app);
 
                 // Whether the app's own sentence says this cannot be taken back. `auto` asks
                 // about those exactly as it asks about a `dangerous` action — the defect of
@@ -749,6 +755,15 @@ pub fn machine_ceiling() -> String {
 /// from a `TouchArea` in `intent_lens.slint`. Nothing else in this crate calls
 /// `approvals::grant` or `approvals::deny`, and they are `pub(crate)` so nothing outside it can.
 pub fn wire(ui: &App) {
+    // The apps spend a grant through this shell's `consume_approval` over the socket. This
+    // shell's own dispatch cannot — asking itself over its own socket from its own RPC thread is
+    // a call that cannot be answered until it returns — so it spends them in-process, through
+    // the same store and the same check. Still not a way to grant: `consume` burns what a click
+    // created and refuses everything else.
+    yantrik_app_runtime::control::spend_grants_with(|id, app, action, args| {
+        approvals::consume(id, app, action, args)
+    });
+
     let allow_ui = ui.as_weak();
     ui.on_approval_allow(move |id| {
         let id = id.to_string();
@@ -1158,6 +1173,10 @@ fn publish_mode_if_changed(ui: &App) {
 
 fn publish_mode(ui: &App) {
     MODE_SHOWN.with(|shown| *shown.borrow_mut() = mode_fingerprint());
+    // And to the apps, which enforce it (issue #116). Every change of mode or rule comes
+    // through here, so this is the one place the file has to be kept true; it rewrites
+    // nothing when nothing it says has changed.
+    crate::mind_mode::publish_policy_file();
 
     let mode = crate::mind_mode::current();
     ui.set_mind_mode(mode.as_str().into());

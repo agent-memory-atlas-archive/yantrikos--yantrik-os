@@ -123,6 +123,22 @@ Permission denied: 'shell.lock' is declared sensitive but max is standard
 An action with no declaration is treated as `standard`. An unknown risk is never treated as no
 risk.
 
+The check is the app's own, and it is the same on every door. `yantrik-app-runtime`'s dispatch
+refuses anything above the machine ceiling (`tool_permission` in `settings.yaml`) and, under it,
+anything above what the desktop's mind mode allows — `sensitive` in `ask` mode — unless the call
+carries a **grant**: the `request_id` the shell's
+`request_approval` minted and a person's Allow turned into one, which the dispatch spends through
+the shell before the handler runs. The MCP bridge, `yos act` and a raw JSON-RPC client on the
+socket meet the same refusal; the first two raise the card on the caller's behalf, and the refusal
+says how the third can. The shell publishes the mode beside `settings.yaml` (`mind-mode.json`) so
+an app can read it the way it reads the ceiling. `describe` needs nothing.
+
+In `plan` mode the shell raises no card, so nothing above `standard` runs on any door. Plan's
+refusal of `standard` itself stays the MCP bridge's: the desktop's own processes make `standard`
+calls on these sockets (an app starting its service through the shell's `start_service`, a second
+launch handing its file to the open window), and the dispatch cannot tell them from a mind until
+callers carry an identity (#43).
+
 Grade within an app rather than across it. Starting a container is recoverable and stays
 `standard`; stopping one interrupts what it was serving and is `sensitive`; removing one takes its
 writable layer with it and is `dangerous`.

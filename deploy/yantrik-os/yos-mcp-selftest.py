@@ -203,7 +203,40 @@ if argv[:1] == ["web"]:
 
 if argv[:1] == ["act"]:
     target, action = argv[1], argv[2]
-    args = parse_args(argv[3:], declared(target, action))
+    # What the app's own dispatch does now (issue #116): a `--grant` is spent — bound to the
+    # app, the action and the exact arguments — before anything runs, and the call is refused
+    # in the shell's words if it does not hold. `--no-ask` is the bridge telling yos not to
+    # raise a card of its own; this fake has no card to raise. Both are recorded, because the
+    # bridge carrying them is half of what this file checks.
+    rest = argv[3:]
+    grant = None
+    if "--grant" in rest:
+        at = rest.index("--grant")
+        grant = rest[at + 1]
+        rest = rest[:at] + rest[at + 2:]
+    no_ask = "--no-ask" in rest
+    rest = [a for a in rest if a != "--no-ask"]
+    args = parse_args(rest, declared(target, action))
+    if grant is not None and target != "shell":
+        def spent_refusal(why):
+            die("%s.app.act refused: GRANT: `%s` does not authorise %s.%s — %s Nothing was run; "
+                "a grant covers one action, once, with the arguments the person was shown."
+                % (target, grant, target, action, why))
+        if grant not in state.get("ids", {}):
+            spent_refusal("no approval request `%s`." % grant)
+        if state.get("answer") != "granted":
+            spent_refusal("`%s` is %s." % (grant, state.get("answer")))
+        if grant in state.get("spent", []):
+            spent_refusal("`%s` was already used." % grant)
+        want = state["ids"][grant]
+        got = canonical(args)
+        if want != got:
+            spent_refusal("`%s` was approved with arguments %s, and this call carries %s. "
+                          "Nothing was authorised." % (grant, want, got))
+        if target != state["requests"][int(grant.split("-")[1]) - 1].get("app"):
+            spent_refusal("wrong app.")
+        state.setdefault("spent", []).append(grant)
+        save(state)
 
     if target == "shell" and action == "request_approval":
         if state.get("shell_down"):
@@ -260,7 +293,8 @@ if argv[:1] == ["act"]:
         envelope({"recorded": "%s.%s" % (args.get("app"), args.get("action"))})
         raise SystemExit(0)
 
-    state.setdefault("acted", []).append({"app": target, "action": action, "args": args})
+    state.setdefault("acted", []).append({"app": target, "action": action, "args": args,
+                                          "grant": grant, "no_ask": no_ask})
     save(state)
     envelope({"done": True})
     raise SystemExit(0)
@@ -470,6 +504,8 @@ with tempfile.TemporaryDirectory() as d:
     s = read(state)
     check("a standard action is not put in front of anybody", not s.get("requests"), s)
     check("a standard action runs", not is_error and len(s.get("acted", [])) == 1, text)
+    check("and carries no grant, because none was minted",
+          (s.get("acted") or [{}])[0].get("grant") is None, s.get("acted"))
 
     # 2. Above the ceiling and allowed: asked, bound, spent, run.
     module, state = case(tmp, "granted", answer="granted")
@@ -489,6 +525,13 @@ with tempfile.TemporaryDirectory() as d:
     check("the grant is spent exactly once", s.get("spent") == ["appr-1"], s)
     check("and only then does the action run",
           [a["action"] for a in s.get("acted", [])] == ["delete_event"], s)
+    # Issue #116: the app's own dispatch spends the grant, so the bridge has to CARRY it — and
+    # has to tell `yos` not to raise a card of its own, or a refusal would put up a second card
+    # with nobody's name on it and a wait longer than this call's budget.
+    check("the grant rides on the call, for the app's dispatch to spend",
+          (s.get("acted") or [{}])[0].get("grant") == "appr-1", s.get("acted"))
+    check("and yos is told the bridge does its own asking",
+          all(a.get("no_ask") for a in s.get("acted", [])), s.get("acted"))
     check("the answer says a person allowed it",
           not is_error and "allowed this once" in text, text)
 
@@ -589,25 +632,35 @@ with tempfile.TemporaryDirectory() as d:
     check("no shell says the person could not be asked",
           "could not be asked" in text and "Nothing was run" in text, text)
 
-    # 8. A grant that does not match what is being consumed authorises nothing.
+    # 8. A grant that does not match what is being run authorises nothing.
     #
-    # Driven by rewriting the recorded binding behind yos-mcp's back, which is the argument-swap
-    # an attacker would attempt: get one thing approved, consume for another.
+    # Driven by making the call carry different arguments from the card, which is the
+    # argument-swap an attacker would attempt: get one thing approved, run another. The check
+    # is the app's own dispatch's now (issue #116) — the fake models it — and the bridge's part
+    # is to report the refusal as "did not go through" rather than as a fault.
     module, state = case(tmp, "swap", answer="granted")
-    original = module.shell_call
-
-    def swapped(action, args, timeout=None):
-        if action == "consume_approval":
-            args = dict(args, args_json={"id": "evt-99"})
-        return original(action, args, timeout)
-
-    module.shell_call = swapped
+    # The call's argv, not `act_pairs`: that also feeds the card, and a swap that moved both
+    # sides together would be no swap at all.
+    module.BY_NAME["os_act"]["argv"] = lambda a: ["act", a["app"], a["action"], "id=evt-99"]
     text, is_error = act(module, "calendar", "delete_event", {"id": "evt-3"})
     s = read(state)
     check("a swapped argument spends no grant", not s.get("spent"), s)
     check("a swapped argument runs nothing", not s.get("acted"), s)
     check("a swapped argument is reported as not gone through",
           not is_error and text.startswith("REFUSED") and "could not be spent" in text, text)
+
+    # 8b. And a refusal from the app's dispatch when the bridge asked nobody — the desktop's
+    # mode as the app read it disagreed with what this bridge read — is a policy answer in the
+    # app's own words, not "failed (exit 1)".
+    module, state = case(tmp, "app-refuses", mode="auto", ceiling=None)
+    module.BY_NAME["os_act"]["argv"] = lambda a: (
+        ["act", a["app"], a["action"], "id=evt-3", "date=2026-10-09", "--grant", "never-minted"])
+    text, is_error = act(module, "calendar", "move_event", {"id": "evt-3", "date": "2026-10-09"})
+    s = read(state)
+    check("an app's own GRANT refusal runs nothing", not s.get("acted"), s)
+    check("and is reported as the desktop saying no, in its words",
+          not is_error and text.startswith("REFUSED") and "GRANT:" in text
+          and "failed (exit" not in text, text)
 
     # 9. The name on the card comes from the client's own handshake when it sent one.
     #

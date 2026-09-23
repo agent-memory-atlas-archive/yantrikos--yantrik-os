@@ -7,6 +7,8 @@ a caller on the other end (yos, yos-mcp, a harness, a conformance probe) reads t
 app's own words, and a paraphrase is a different promise.
 """
 
+import atexit
+import json
 import os
 import sys
 import tempfile
@@ -21,21 +23,41 @@ import fake_bpy  # noqa: E402
 from yantrik_surface import wire  # noqa: E402
 from yantrik_surface.bridge import BridgeTimeout, DirectBridge  # noqa: E402
 from yantrik_surface.scene import Scene  # noqa: E402
-from yantrik_surface.surface import ACTIONS, LADDER, Surface  # noqa: E402
+from yantrik_surface.surface import (  # noqa: E402
+    ACTIONS, LADDER, GrantRefused, Surface, grant_refusal, mode_from)
 
 ALL_ACTION_NAMES = [a.name for a in ACTIONS]
 
 
-def make_surface(ceiling=None, bridge=None):
+def mode_file(mode):
+    """A `mind-mode.json` saying `mode`, or no file at all for None — the shell has published
+    nothing, which the dispatch reads as `ask`. A dict is written as given."""
+    tmp = tempfile.NamedTemporaryFile("w", suffix="-mind-mode.json", delete=False)
+    tmp.close()
+    atexit.register(lambda p=tmp.name: os.path.exists(p) and os.unlink(p))
+    if mode is None:
+        os.unlink(tmp.name)
+    else:
+        with open(tmp.name, "w", encoding="utf-8") as f:
+            json.dump(mode if isinstance(mode, dict) else {"mode": mode}, f)
+    return tmp.name
+
+
+def make_surface(ceiling=None, bridge=None, mode="bypass", spend_grant=None):
     """A Surface over a fake bpy. `ceiling` writes a settings file; None means no file at
-    all, which is a machine that has never opened Settings — the default, `sensitive`."""
+    all, which is a machine that has never opened Settings — the default, `sensitive`.
+
+    `mode` defaults to bypass, which asks about nothing under the ceiling, for the tests that
+    are about everything EXCEPT the mode — the runtime's tests do the same with `open()`. The
+    mode has its own tests below, with the mode pinned per case."""
     fake = fake_bpy.make_bpy()
     tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     if ceiling is not None:
         tmp.write("other_key: 1\ntool_permission: %s\n" % ceiling)
     tmp.close()
     surface = Surface(Scene(fake), bridge or DirectBridge(), app_id="blender",
-                      settings_path=tmp.name)
+                      settings_path=tmp.name, mode_path=mode_file(mode),
+                      spend_grant=spend_grant)
     return surface, fake, tmp.name
 
 
@@ -296,6 +318,141 @@ class TestCeiling(unittest.TestCase):
                 "OS defines (safe < standard < sensitive < dangerous), so it was not run.")
         finally:
             spec.permission = original
+
+
+class TestModeAndGrant(unittest.TestCase):
+    """Issue #116, found on this app: `blender.render` through the MCP bridge raised a card, and
+    through `yos act` it ran in 1.72 s with nobody asked — the mode lived in the bridge. These
+    pin the runtime's rule in this port of its dispatch, sentences in full."""
+
+    ASK_SENTENCE = (
+        "GRANT: blender.save is graded `sensitive` and this machine is in ask mode, which runs "
+        "nothing above `standard` without asking — so it was not run. Ask the shell for approval "
+        "first (`request_approval` with this app, action and these exact arguments, poll "
+        "`approval_status`, then send the granted request_id as `grant` on app.act — `yos act` "
+        "does all of that for you), or have the person at the machine press Allow when the card "
+        "appears.")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.blend = os.path.join(self.tmp.name, "scene.blend")
+        self.spent = []
+
+    def shell(self, grant, app, action, args):
+        """A stand-in for the shell's store: `fresh-*` holds once, for exactly this save."""
+        if not grant.startswith("fresh-"):
+            raise GrantRefused("no approval request `%s`." % grant)
+        if (app, action, args) != ("blender", "save", {"path": self.blend}):
+            raise GrantRefused("`%s` was approved for other arguments. Nothing was authorised."
+                               % grant)
+        if grant in self.spent:
+            raise GrantRefused("`%s` was already used." % grant)
+        self.spent.append(grant)
+
+    def surface(self, mode, ceiling=None):
+        surface, fake, path = make_surface(ceiling=ceiling, mode=mode, spend_grant=self.shell)
+        self.addCleanup(os.unlink, path)
+        return surface, fake
+
+    def save(self, surface, grant=None, **args):
+        params = {"action": "save", "args": args or {"path": self.blend}}
+        if grant:
+            params["grant"] = grant
+        return surface.act(params)
+
+    def test_a_sensitive_act_without_a_grant_is_refused_in_ask_mode(self):
+        surface, fake = self.surface("ask")
+        self.assertEqual(refusal(self, lambda: self.save(surface)), self.ASK_SENTENCE)
+        self.assertNotEqual(fake.data.filepath, self.blend, "the handler must not have run")
+
+    def test_no_mode_file_is_ask_not_something_looser(self):
+        surface, _ = self.surface(None)
+        self.assertEqual(refusal(self, lambda: self.save(surface)), self.ASK_SENTENCE)
+
+    def test_the_mode_refuses_before_the_arguments_are_looked_at(self):
+        surface, _ = self.surface("ask")
+        message = refusal(self, lambda: surface.act({"action": "save", "args": {}}))
+        self.assertTrue(message.startswith("GRANT:"), message)
+
+    def test_a_sensitive_act_runs_in_auto_and_bypass(self):
+        for mode in ("auto", "bypass"):
+            surface, fake = self.surface(mode)
+            self.assertTrue(self.save(surface)["accepted"], mode)
+            self.assertEqual(fake.data.filepath, self.blend, mode)
+
+    def test_a_grant_lets_a_sensitive_act_run_in_any_mode(self):
+        for n, mode in enumerate(("plan", "ask", "auto", "bypass")):
+            surface, fake = self.surface(mode)
+            self.assertTrue(self.save(surface, grant="fresh-%d" % n)["accepted"], mode)
+            self.assertEqual(fake.data.filepath, self.blend, mode)
+
+    def test_a_spent_or_wrong_grant_is_refused_before_anything_is_dispatched(self):
+        surface, fake = self.surface("ask")
+        self.save(surface, grant="fresh-1")
+        fake.data.filepath = ""
+        self.assertEqual(
+            refusal(self, lambda: self.save(surface, grant="fresh-1")),
+            "GRANT: `fresh-1` does not authorise blender.save — `fresh-1` was already used. "
+            "Nothing was run; a grant covers one action, once, with the arguments the person "
+            "was shown.")
+        message = refusal(self, lambda: self.save(
+            surface, grant="fresh-2", path=os.path.join(self.tmp.name, "other.blend")))
+        self.assertIn("approved for other arguments", message)
+        self.assertIn("no approval request", refusal(self, lambda: self.save(surface, grant="made-up")))
+        self.assertEqual(fake.data.filepath, "", "nothing ran on a grant that did not hold")
+
+    def test_the_ceiling_refuses_whatever_the_grant_or_mode(self):
+        for mode, grant in (("bypass", None), ("ask", "fresh-9"), ("bypass", "fresh-10")):
+            surface, fake = self.surface(mode, ceiling="standard")
+            message = refusal(self, lambda s=surface, g=grant: self.save(s, grant=g))
+            self.assertTrue(message.startswith("CEILING:"), (mode, grant, message))
+
+    def test_a_standard_act_runs_unasked_in_every_mode_plan_included(self):
+        # The desktop's own processes call `standard` actions on these sockets; see the
+        # runtime's SOCKET_FLOOR. Plan's refusal of `standard` is the bridge's.
+        for mode in ("plan", "ask", "auto", "bypass"):
+            surface, _ = self.surface(mode)
+            out = surface.act({"action": "add_primitive", "args": {"kind": "cube"}})
+            self.assertTrue(out["accepted"], mode)
+        self.assertEqual(self.spent, [], "no grant was asked for, so none was spent")
+
+    def test_plan_refuses_a_sensitive_act_and_says_no_card_is_coming(self):
+        surface, _ = self.surface("plan")
+        self.assertEqual(
+            refusal(self, lambda: self.save(surface)),
+            "GRANT: blender.save is graded `sensitive` and this machine is in plan mode, which "
+            "raises no card for anything above `standard` — so it was not run. Say what you "
+            "would do and let the person decide; they switch the mode from the chip in the "
+            "status bar.")
+
+    def test_a_session_rule_covers_its_own_action_and_no_other(self):
+        rule = {"mode": "ask", "session_rules": [{"app": "blender", "action": "save"}]}
+        surface, fake = self.surface(rule)
+        self.assertTrue(self.save(surface)["accepted"])
+        other = {"mode": "ask", "session_rules": [{"app": "blender", "action": "open"}]}
+        surface, _ = self.surface(other)
+        self.assertTrue(refusal(self, lambda: self.save(surface)).startswith("GRANT:"))
+
+    def test_describe_needs_nothing(self):
+        surface, _ = self.surface("plan")
+        actions = {a["name"]: a for a in surface.describe_json()["actions"]}
+        self.assertEqual(actions["save"]["permission"], "sensitive")
+
+    def test_the_mode_file_is_read_the_way_the_runtime_reads_it(self):
+        now = 1_800_000_000
+        self.assertEqual(mode_from('{"mode":"auto"}', now), ("auto", set()))
+        for text in ("", "{}", "mode: auto", '{"mode":"yolo"}', '{"mode":"BYPASS"}', "[]"):
+            self.assertEqual(mode_from(text, now)[0], "ask", text)
+        bypass = json.dumps({"mode": "bypass", "previous": "auto",
+                             "bypass_expires_unix": now + 60})
+        self.assertEqual(mode_from(bypass, now)[0], "bypass")
+        self.assertEqual(mode_from(bypass, now + 60)[0], "auto")
+        odd = json.dumps({"mode": "bypass", "previous": "bypass", "bypass_expires_unix": now})
+        self.assertEqual(mode_from(odd, now)[0], "ask")
+        until_restart = json.dumps({"mode": "bypass", "bypass_expires_unix": None})
+        self.assertEqual(mode_from(until_restart, now + 86_400)[0], "bypass")
+        self.assertEqual(grant_refusal("blender", "save", "sensitive", "ask"), self.ASK_SENTENCE)
 
 
 class TestBridgeTimeout(unittest.TestCase):
