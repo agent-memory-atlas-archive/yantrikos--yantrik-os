@@ -449,6 +449,9 @@ pub fn publish(
                 .with("memories", ui.get_memory_count())
                 .with("bond", bond.bond_level.to_string())
                 .with("bond_score", bond.bond_score as f64)
+                // The count as well as the score: the score caps at 5.0, and on a machine
+                // that reached it a reader has no other way to see a turn being counted.
+                .with("bond_interactions", bond.total_interactions)
                 .with("active_project", ui.get_active_project().to_string())
                 .with("clock", ui.get_clock_text().to_string())
                 .with("date", ui.get_date_text().to_string())

@@ -3661,6 +3661,30 @@ impl CompanionService {
         now_ts() - self.last_interaction_ts
     }
 
+    /// Count a conversation turn that another mind answered.
+    ///
+    /// The built-in scores its own turns from inside its handlers, where it also knows what it
+    /// recalled. A turn an attached harness answered reaches the companion only here, after the
+    /// fact, from the shell — and it has to reach it rather than the store alone, because the
+    /// level and score cached on this struct are what the proactive engine, the voice profile
+    /// and the status bar read. Scoring the store from outside and leaving these stale would
+    /// move the Bond screen and nothing else.
+    pub fn score_conversation_turn(&mut self, user_text: &str) {
+        if !self.config.bond.enabled || self.incognito {
+            return;
+        }
+        let (new_level, level_changed) = {
+            let conn = self.db.conn();
+            BondTracker::score_conversation_turn(&conn, user_text)
+        };
+        self.bond_level = new_level;
+        self.bond_level_changed = level_changed;
+        self.bond_score = BondTracker::get_state(&self.db.conn()).bond_score;
+        // The person is here, talking — to whichever mind. `idle_seconds` is what the
+        // companion's own instincts read before speaking unprompted.
+        self.last_interaction_ts = now_ts();
+    }
+
     /// Get current bond level.
     pub fn bond_level(&self) -> BondLevel {
         self.bond_level

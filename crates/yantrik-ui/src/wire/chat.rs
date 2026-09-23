@@ -75,7 +75,12 @@ fn dispatch(
         yantrik_harness::Turn::new(text.to_string()).with_context(desktop_context(&super::settings::place())),
     );
     let (tx, rx) = crossbeam_channel::unbounded::<String>();
+    let bridge = bridge.clone();
+    let asked = text.to_string();
     std::thread::spawn(move || {
+        // Whether the mind answered, as opposed to giving up. A turn that ended in an error is
+        // not a conversation: the person spoke and was not talked to.
+        let mut answered = true;
         // A closed channel is the end of the turn — that is the protocol, and it is why this
         // loop ends on recv() failing rather than on a sentinel.
         while let Ok(chunk) = answer.recv() {
@@ -84,15 +89,25 @@ fn dispatch(
                 // Said, not swallowed. A stream that simply stopped would look identical to a
                 // harness that had finished, and the person would be left with half an answer
                 // and no reason.
-                yantrik_harness::Chunk::Failed(why) => tx
-                    .send("__REPLACE__".to_string())
-                    .and_then(|_| tx.send(why)),
+                yantrik_harness::Chunk::Failed(why) => {
+                    answered = false;
+                    tx.send("__REPLACE__".to_string()).and_then(|_| tx.send(why))
+                }
             };
             if sent.is_err() {
                 return;
             }
         }
         let _ = tx.send("__DONE__".to_string());
+        // The bond is the person's relationship with the desktop, whichever mind answers — the
+        // Bond screen and `describe shell` present it as such. But only the built-in ever
+        // scored a turn, from inside its own handler, so a machine whose mind was Hermes said
+        // "Stranger, 0.0" after forty minutes of talking. This is where a harness's answer
+        // ends, so this is where its turn counts. Acts on the control surface are not scored:
+        // those are the mind working, not the person talking.
+        if answered {
+            bridge.score_conversation_turn(asked);
+        }
     });
     streaming::stream_into(ui_weak.clone(), rx, text, streams);
 }
@@ -238,6 +253,32 @@ mod tests {
             "`dispatch` decides between the builtin and an attached harness by comparing the active id; without that comparison the builtin is simply whatever happens to run"
         );
     }
+    /// The bond counts conversation with the desktop, whichever mind answered.
+    ///
+    /// The built-in scores its own turns inside the companion. A harness's turn is relayed
+    /// from the host to the panel by the thread below `host.send(`, and nothing else in the
+    /// shell sees it end — so if this branch does not score it, nothing does, and a machine
+    /// whose mind is Hermes stays "Stranger, 0.0" however long the person talks.
+    #[test]
+    fn a_turn_a_harness_answered_counts_toward_the_bond() {
+        let dispatch = SELF_SRC
+            .split_once("/// Wire on_send_message and on_lens_submit callbacks.")
+            .expect("the wiring doc comment marks the end of dispatch")
+            .0;
+        let harness_branch = dispatch
+            .split_once("host.send(")
+            .expect("dispatch sends a harness its turn through the host")
+            .1;
+        assert!(
+            harness_branch.contains("bridge.score_conversation_turn("),
+            "the harness branch of `dispatch` relays the answer and must also score the turn; the built-in scores its own, and nothing else sees a harness's answer end"
+        );
+        assert!(
+            harness_branch.contains("if answered"),
+            "a turn the harness failed is not a conversation and must not count"
+        );
+    }
+
     #[test]
     fn a_turn_tells_the_mind_where_the_machine_is_and_nothing_more() {
         let place = crate::wire::settings::Place {

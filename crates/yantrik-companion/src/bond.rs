@@ -289,6 +289,19 @@ impl BondTracker {
         (new_level, level_changed)
     }
 
+    /// Score one conversation turn with the desktop, whichever mind answered it.
+    ///
+    /// The bond is the person's relationship with Yantrik, not with one of its minds — the
+    /// Bond screen and `describe shell` say so — but only the built-in companion ever called
+    /// `score_interaction`, from inside its own turn. With Hermes answering, forty minutes of
+    /// conversation left the store untouched. What every mind's turn has in common is the part
+    /// that scores: the person said something and was answered. The memory-callback bonus is
+    /// the built-in's alone, because an attached harness keeps its own memory and the shell
+    /// cannot see what it recalled; the reply text has never counted.
+    pub fn score_conversation_turn(conn: &Connection, user_text: &str) -> (BondLevel, bool) {
+        Self::score_interaction(conn, user_text, "", 0)
+    }
+
     /// Record a humor attempt outcome.
     pub fn record_humor(conn: &Connection, success: bool) {
         if success {
@@ -414,6 +427,31 @@ mod tests {
     fn no_first_interaction_means_no_days_together() {
         let conn = conn_with_first_interaction(None);
         assert_eq!(BondTracker::get_state(&conn).days_together, 0.0);
+    }
+
+    #[test]
+    fn a_turn_answered_by_any_mind_counts_toward_the_bond() {
+        // No memories recalled and no reply text: that is all the shell knows about a turn an
+        // attached harness answered, and it has to be enough to move the bond, or a machine
+        // whose mind is Hermes stays "Stranger, 0.0" no matter how long the person talks.
+        let conn = conn_with_first_interaction(None);
+        let before = BondTracker::get_state(&conn);
+        assert_eq!(before.total_interactions, 0);
+
+        let (level, _) = BondTracker::score_conversation_turn(&conn, "how is the build going?");
+        let after = BondTracker::get_state(&conn);
+        assert_eq!(after.total_interactions, 1, "a harness turn is an interaction");
+        assert!(after.bond_score > before.bond_score, "a harness turn moves the score");
+        assert_eq!(level, after.bond_level);
+        assert!(after.first_interaction_at.is_some(), "the first turn is the day the two met");
+        let logged: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM bond_events WHERE event_type = 'interaction'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(logged, 1, "scored through the same path as the built-in, so it is logged like one");
     }
 
     #[test]
