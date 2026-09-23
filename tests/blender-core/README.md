@@ -30,6 +30,10 @@ python3 -m unittest discover -s tests/blender-core
   full, the validate-before-touch discipline (a refused action left nothing behind), the
   look-at quaternion against a known-good vector, and the honest-failure checks (a render
   that wrote nothing is not reported as a render).
+* **`test_startup.py`** — how the surface comes up in a window: the splash preference is
+  off before the socket and the pump exist (so the first-run Quick Setup never sits over the
+  viewport the surface drives), untouched headless, and a `bpy` without the preference does
+  not take the surface down. Runs the real `_Session` with its socket in a private dir.
 * **`test_dispatch.py`** — the surface layer, which must be indistinguishable from
   `yantrik-app-runtime::control`: dispatch order, exact refusal wording (unknown action,
   missing/unexpected arguments, CEILING, STALE), the action table's grades, the ceiling

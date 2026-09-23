@@ -426,11 +426,22 @@ class FakeTempOverride:
         return False
 
 
+class FakePreferencesView:
+    def __init__(self):
+        self.show_splash = True  # Blender's default; a fresh install shows the splash
+
+
+class FakePreferences:
+    def __init__(self):
+        self.view = FakePreferencesView()
+
+
 class FakeContext:
     def __init__(self, scene, windows):
         self.scene = scene
         self.window_manager = FakeWindowManager(windows)
         self.temp_override = FakeTempOverride()
+        self.preferences = FakePreferences()
 
 
 class FakeApp:
