@@ -48,6 +48,8 @@ mod control_installer;
 mod control_update;
 mod control_files;
 mod control_editor;
+/// Agents' commands on the shell's surface: agent_run / agent_job / agent_input / agent_kill.
+mod control_agent_terminal;
 mod jobs;
 mod cards;
 mod clipboard;
@@ -234,6 +236,8 @@ fn main() {
     // Clean shutdown
     tracing::info!("Yantrik OS shutting down");
     service_manager.stop_all();
+    // Agents' commands belong to the shell and go with it: every process group, not one pid.
+    control_agent_terminal::shutdown();
 }
 
 /// Start background services via the ServiceManager.

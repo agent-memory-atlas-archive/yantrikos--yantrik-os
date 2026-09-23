@@ -102,6 +102,13 @@
 //! An `act` that would take real time must still not run inline; do what the app's own button
 //! does and hand off to a worker.
 //!
+//! When the caller is owed the *result* of that time — a command's exit code, not "started" — the
+//! handler hands the rest of its answer to [`answer_later`]: the handler returns at once and the UI
+//! thread moves on, the work runs on the RPC side, and the caller's reply is its result. The RPC
+//! side is a multi-threaded runtime that steps the waiting call out of the way
+//! (`block_in_place`), so one caller waiting two minutes does not hold up every other caller of the
+//! same socket.
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -916,6 +923,156 @@ impl Drop for CallerScope {
     }
 }
 
+// ── Which agent a call is for ───────────────────────────────────────
+//
+// A mind running as one of the person's agents carries a token its harness was given (design
+// `agents-workspace-2026-09-23.md`, decision 3). It travels BESIDE `args` on `app.act`, the way a
+// grant does, and never inside them — because `args` is what gets shown and kept: the approval
+// card draws it, `record_unasked_action` writes it to `mind-audit.jsonl`, a grant is bound to it.
+// A token in any of those is a token anyone reading the screen or the log can replay.
+//
+// So the dispatch lifts the token off the call, strips any copy a caller put inside `args`, and
+// hands it to the handler the way it hands over the caller: for the duration of the one dispatch,
+// on the thread the handler runs on. What the token is worth is the handler's business — the
+// shell resolves it against the kernel's account of the caller; here it is only carried.
+
+/// The key an agent token travels under: beside `args` on `app.act`, never inside them.
+pub const AGENT_TOKEN: &str = "agent_token";
+
+thread_local! {
+    /// The agent token of the dispatch currently running on THIS thread, or `None`.
+    static CURRENT_AGENT_TOKEN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The agent token the call being handled carried beside its `args`, inside an action handler.
+/// `None` when it carried none, or outside a dispatch.
+///
+/// Like [`caller`], it is a fact about the call and not a verdict: nothing here checks it.
+pub fn agent_token() -> Option<String> {
+    CURRENT_AGENT_TOKEN.with(|cell| cell.borrow().clone())
+}
+
+/// Installs a dispatch's token for its duration and puts back what was there, panic or not.
+struct AgentTokenScope(Option<String>);
+
+impl AgentTokenScope {
+    fn enter(token: Option<String>) -> AgentTokenScope {
+        AgentTokenScope(CURRENT_AGENT_TOKEN.with(|cell| cell.replace(token)))
+    }
+}
+
+impl Drop for AgentTokenScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        CURRENT_AGENT_TOKEN.with(|cell| *cell.borrow_mut() = previous);
+    }
+}
+
+/// The token a call carries, from beside its `args` — and any copy inside `args` taken out.
+///
+/// The copy inside is removed and NOT used. Defence in depth: whatever put it there has already
+/// shown it to anything that prints the arguments, and honouring it would teach callers that
+/// the arguments are a place a token may go.
+fn agent_token_of(params: &serde_json::Value, args: &mut serde_json::Value) -> Option<String> {
+    if args.as_object_mut().and_then(|given| given.remove(AGENT_TOKEN)).is_some() {
+        tracing::warn!(
+            "an agent token arrived inside `args`; it was removed and not used. It travels beside \
+             `args` on app.act, never among them"
+        );
+    }
+    params
+        .get(AGENT_TOKEN)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
+// ── Answers that take time ──────────────────────────────────────────
+//
+// A handler has the three seconds of `UI_ROUNDTRIP`, on the thread that paints the window. Some
+// acts are worth waiting for anyway: the shell's `agent_run` starts a command and owes its caller
+// the exit code, which may be two minutes away. Deferring (`settled: false`, "go and look later")
+// is the right answer for work whose result lands on screen; it is the wrong one for work whose
+// result IS the answer.
+//
+// So a handler can say "the rest of my answer is this closure". It returns at once — the window
+// never waits — and the dispatch runs the closure on the RPC side, where the only thing waiting is
+// the one caller who asked. The closure travels from the UI thread back to the RPC thread with the
+// reply, the same way the caller travelled out with the request.
+
+/// The rest of an answer, finished off the UI thread.
+type Later = Box<dyn FnOnce() -> Result<serde_json::Value, String> + Send>;
+
+thread_local! {
+    /// On the UI thread, during one dispatch: where [`answer_later`] leaves the rest of the
+    /// answer. `None` outside a dispatch, which is how `answer_later` knows nothing will run it.
+    static LATER_SLOT: RefCell<Option<Option<Later>>> = const { RefCell::new(None) };
+
+    /// On the RPC thread: the rest of the answer the dispatch that just came back handed over.
+    static LATER_HANDED: RefCell<Option<Later>> = const { RefCell::new(None) };
+}
+
+/// Finish this action's answer off the UI thread: `work` runs after the handler has returned, on
+/// the socket's side, and what it returns is the caller's `result` (an `Err` is the caller's
+/// refusal, exactly as if the handler had returned it).
+///
+/// Call it from inside a handler, as its last act, and return anything — the value is replaced.
+/// `work` must carry everything it needs: it does not run on the UI thread, so it cannot touch the
+/// window, and [`caller`] is not set there (read it in the handler and move it in).
+///
+/// `Err(work)` hands the work back when nothing will run it — the handler was called directly, not
+/// through the socket — so the handler can run it itself:
+/// `answer_later(work).map(|()| placeholder).or_else(|work| work())`.
+///
+/// If the UI thread answered too late for the caller (see `UI_ROUNDTRIP`), `work` is dropped
+/// without running: do the whole of the act inside it and a late reply starts nothing.
+pub fn answer_later<F>(work: F) -> Result<(), F>
+where
+    F: FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+{
+    LATER_SLOT.with(|cell| match cell.borrow_mut().as_mut() {
+        Some(slot) => {
+            *slot = Some(Box::new(work));
+            Ok(())
+        }
+        None => Err(work),
+    })
+}
+
+/// Opens the slot for one dispatch on the UI thread and closes it afterwards, even on a panic, so
+/// one handler's work can never be run as another's answer.
+struct LaterScope(Option<Option<Later>>);
+
+impl LaterScope {
+    fn enter() -> LaterScope {
+        LaterScope(LATER_SLOT.with(|cell| cell.replace(Some(None))))
+    }
+
+    fn take(&self) -> Option<Later> {
+        LATER_SLOT.with(|cell| cell.borrow_mut().as_mut().and_then(Option::take))
+    }
+}
+
+impl Drop for LaterScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        LATER_SLOT.with(|cell| *cell.borrow_mut() = previous);
+    }
+}
+
+/// Run `work` without holding up the socket's other callers: on the multi-threaded runtime the
+/// control surface serves on, this worker steps aside and another takes its connections.
+fn off_the_reactor<T>(work: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 /// Hand one closure to the thread that owns the window.
 ///
 /// Boxed rather than generic so that the test stand-in below can take it back unrun when no
@@ -1001,19 +1158,24 @@ where
     T: Send + 'static,
     F: FnOnce(&Registry) -> T + Send + 'static,
 {
-    let (tx, rx) = mpsc::sync_channel::<Result<T, String>>(1);
+    let (tx, rx) = mpsc::sync_channel::<(Result<T, String>, Option<Later>)>(1);
     post_to_ui(Box::new(move || {
         let _scope = CallerScope::enter(who);
+        let later = LaterScope::enter();
         let answer = REGISTRY.with(|cell| match cell.borrow().as_ref() {
             Some(reg) => Ok(job(reg)),
             None => Err("this app published no control surface".to_string()),
         });
         // The receiver is gone only if we already timed out; dropping the answer is correct.
-        let _ = tx.send(answer);
+        let _ = tx.send((answer, later.take()));
     }))?;
 
-    rx.recv_timeout(UI_ROUNDTRIP)
-        .map_err(|_| format!("app did not answer within {}s", UI_ROUNDTRIP.as_secs()))?
+    let (answer, later) = rx
+        .recv_timeout(UI_ROUNDTRIP)
+        .map_err(|_| format!("app did not answer within {}s", UI_ROUNDTRIP.as_secs()))?;
+    // For `ControlRpc::handle_from`, on this same thread, which finishes it. See `answer_later`.
+    LATER_HANDED.with(|cell| *cell.borrow_mut() = later);
+    answer
 }
 
 // ── The RPC surface ─────────────────────────────────────────────────
@@ -1037,7 +1199,7 @@ impl ServiceHandler for ControlRpc {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ServiceError> {
-        self.dispatch(method, params, None)
+        self.handle_from(method, params, None)
     }
 
     fn handle_from(
@@ -1046,12 +1208,40 @@ impl ServiceHandler for ControlRpc {
         params: serde_json::Value,
         peer: Option<PeerCred>,
     ) -> Result<serde_json::Value, ServiceError> {
-        self.dispatch(
-            method,
-            params,
-            peer.map(|p| Caller { pid: p.pid, uid: p.uid, gid: p.gid }),
-        )
+        let who = peer.map(|p| Caller { pid: p.pid, uid: p.uid, gid: p.gid });
+        // Nothing left over from an earlier call on this thread can be taken for this one's.
+        LATER_HANDED.with(|cell| cell.borrow_mut().take());
+        let answer = self.dispatch(method, params, who);
+        let later = LATER_HANDED.with(|cell| cell.borrow_mut().take());
+        match (answer, later) {
+            (Ok(envelope), Some(later)) if method == "app.act" => finish_later(envelope, later, who),
+            (answer, _) => answer,
+        }
     }
+}
+
+/// Run the rest of an answer a handler left with [`answer_later`], and put its result in the
+/// envelope — with the view read again afterwards, so the state beside the result is the state
+/// the result came from rather than the state before the wait.
+fn finish_later(
+    mut envelope: serde_json::Value,
+    later: Later,
+    who: Option<Caller>,
+) -> Result<serde_json::Value, ServiceError> {
+    let result = off_the_reactor(later).map_err(|message| ServiceError { code: -32602, message })?;
+    envelope["result"] = result;
+    let after = on_ui_thread(who, |reg| {
+        let now = reg.snapshot();
+        (now.summary, now.state, now.revision)
+    });
+    // A UI thread too busy to answer now does not undo what the work did: the result stands and
+    // the view is the one from when the handler ran.
+    if let Ok((summary, state, revision)) = after {
+        envelope["summary"] = summary.into();
+        envelope["state"] = state;
+        envelope["revision"] = revision.into();
+    }
+    Ok(envelope)
 }
 
 impl ControlRpc {
@@ -1078,7 +1268,10 @@ impl ControlRpc {
                         message: "act needs a non-empty `action`".into(),
                     });
                 }
-                let args = params.get("args").cloned().unwrap_or(serde_json::json!({}));
+                let mut args = params.get("args").cloned().unwrap_or(serde_json::json!({}));
+                // Lifted off before anything reads `args` — the grant below is bound to them —
+                // and out of `args` if a caller put it there. See `agent_token`.
+                let token = agent_token_of(&params, &mut args);
                 // Optional, and deliberately so: a caller acting on its own initiative has nothing
                 // to compare against, and demanding a revision it never read would only teach it
                 // to send back whatever it last saw.
@@ -1114,10 +1307,13 @@ impl ControlRpc {
                     // audit log is the shell's job; this is the runtime's own record.
                     caller_pid = who.map(|c| c.pid).unwrap_or(0),
                     caller_uid = who.map(|c| c.uid).unwrap_or(0),
+                    // Whether one came, never the token itself.
+                    agent_token = token.is_some(),
                     "app.act"
                 );
                 let id = action_id.clone();
                 let outcome = on_ui_thread(who, move |reg| {
+                    let _agent = AgentTokenScope::enter(token);
                     reg.act(&action, &args, expect.as_deref(), &id, &authority)
                 })
                 .map_err(|m| ServiceError { code: -32000, message: m })?;
@@ -1193,7 +1389,10 @@ fn serve_rpc(app_id: &str, action_count: usize) {
         std::thread::Builder::new()
             .name(format!("{service_id}-rpc"))
             .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
+                // Multi-threaded, and small: a caller waiting on `answer_later` steps its worker
+                // out of the way and the other keeps serving everyone else.
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
                     .enable_all()
                     .build()
                 {
@@ -2259,84 +2458,248 @@ mod tests {
         assert_eq!(caller(), None);
     }
 
-    /// The one test with a real socket in it. See `test_ui_thread` for why the hop is a channel.
+    /// The socket the tests below talk to: one served surface per test binary, because the UI
+    /// stand-in is one per binary (see `test_ui_thread`). Two actions: `who` reports the caller as
+    /// the handler sees it; `slow` finishes its answer off the UI thread with [`answer_later`].
+    #[cfg(unix)]
+    fn served_test_surface() -> &'static str {
+        use std::os::unix::net::UnixStream;
+        use std::sync::OnceLock;
+
+        static ADDRESS: OnceLock<String> = OnceLock::new();
+        ADDRESS.get_or_init(|| {
+            const APP: &str = "caller-test";
+
+            // The server binds wherever `XDG_RUNTIME_DIR` points when its thread gets there, and
+            // the connect below looks wherever it points then. Nothing else may move it in between
+            // — see `env_lock` — and it points at a directory this test owns, not at the runner's
+            // `/run/user/<uid>`, which need not exist on a machine with no login session. Once
+            // something has connected, the address is a path and the variable no longer matters.
+            let _env = crate::env_lock();
+            let runtime =
+                std::env::temp_dir().join(format!("yantrik-ui-hop-test-{}", std::process::id()));
+            std::fs::create_dir_all(&runtime).expect("a runtime dir of our own");
+            std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+
+            test_ui_thread::start(Box::new(|| Registry {
+                app_id: APP.into(),
+                describe: Some(Box::new(|| View::new("caller-test"))),
+                actions: vec![
+                    (
+                        // `safe` so the machine ceiling cannot refuse this on a developer's box
+                        // that has tightened `tool_permission`; the ceiling has its own tests above.
+                        Action::new("who", "Report who is calling").risk("safe"),
+                        Box::new(|_| {
+                            // The handler's own view, on the thread the handler actually runs on.
+                            // If the caller had been left on the socket thread this would be null.
+                            Ok(match caller() {
+                                Some(c) => serde_json::json!({ "pid": c.pid, "uid": c.uid }),
+                                None => serde_json::Value::Null,
+                            })
+                        }),
+                    ),
+                    (
+                        Action::new("slow", "Take `ms` milliseconds to answer, off the UI thread")
+                            .risk("safe")
+                            .arg(Param::number("ms"))
+                            .arg(Param::flag("refuse").optional()),
+                        Box::new(|args| {
+                            let ms = args["ms"].as_u64().unwrap_or(0);
+                            let refuse = args["refuse"].as_bool().unwrap_or(false);
+                            // Read here, where it is set, and carried into the work.
+                            let pid = caller().map(|c| c.pid);
+                            let work = move || {
+                                std::thread::sleep(Duration::from_millis(ms));
+                                if refuse {
+                                    return Err(format!("refused after {ms} ms"));
+                                }
+                                Ok(serde_json::json!({ "slept_ms": ms, "pid": pid }))
+                            };
+                            answer_later(work)
+                                .map(|()| serde_json::json!("replaced by the work's own answer"))
+                                .or_else(|work| work())
+                        }),
+                    ),
+                    (
+                        // What a handler that records or shows its arguments would record or
+                        // show — an approval card, an audit line — and the token beside them.
+                        Action::new("echo", "Answer with the arguments and the agent token as the handler got them")
+                            .risk("safe")
+                            .arg(Param::text("command").optional()),
+                        Box::new(|args| {
+                            Ok(serde_json::json!({ "args": args, "agent_token": agent_token() }))
+                        }),
+                    ),
+                ],
+            }));
+            serve_rpc(APP, 3);
+
+            // Thirty seconds is a bound on a hung server, not a budget for a slow one: the server
+            // binds on its own thread after building a tokio runtime, and the failure this loop
+            // used to report was never slowness but the environment race described at `env_lock`.
+            let address = RpcServer::default_address(&service_id_for(APP));
+            for _ in 0..1000 {
+                if UnixStream::connect(&address).is_ok() {
+                    return address;
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            panic!("nothing ever bound {address}");
+        })
+    }
+
+    /// One JSON-RPC line out, one back, on a connection of its own.
+    #[cfg(unix)]
+    fn call(request: &str) -> serde_json::Value {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let mut socket = UnixStream::connect(served_test_surface()).expect("connect");
+        socket.write_all(format!("{request}\n").as_bytes()).expect("write the request");
+        let mut line = String::new();
+        BufReader::new(socket).read_line(&mut line).expect("read the reply");
+        serde_json::from_str(&line).expect(&line)
+    }
+
+    /// See `test_ui_thread` for why the hop is a channel.
     #[cfg(unix)]
     #[test]
     fn the_caller_reaches_the_handler_across_the_ui_hop() {
-        use std::io::{BufRead, BufReader, Write};
         use std::os::unix::fs::MetadataExt;
-        use std::os::unix::net::UnixStream;
 
-        const APP: &str = "caller-test";
-
-        // The server binds wherever `XDG_RUNTIME_DIR` points when its thread gets there, and the
-        // connect below looks wherever it points then. Nothing else may move it in between —
-        // see `env_lock` — and it points at a directory this test owns, not at the runner's
-        // `/run/user/<uid>`, which need not exist on a machine with no login session.
-        let _env = crate::env_lock();
-        let runtime = std::env::temp_dir().join(format!("yantrik-ui-hop-test-{}", std::process::id()));
-        std::fs::create_dir_all(&runtime).expect("a runtime dir of our own");
-        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
-
-        test_ui_thread::start(Box::new(|| Registry {
-            app_id: APP.into(),
-            describe: Some(Box::new(|| View::new("caller-test"))),
-            actions: vec![(
-                // `safe` so the machine ceiling cannot refuse this on a developer's box that
-                // has tightened `tool_permission`; the ceiling has its own tests above.
-                Action::new("who", "Report who is calling").risk("safe"),
-                Box::new(|_| {
-                    // The handler's own view, on the thread the handler actually runs on. If
-                    // the caller had been left on the socket thread this would be null.
-                    Ok(match caller() {
-                        Some(c) => serde_json::json!({ "pid": c.pid, "uid": c.uid }),
-                        None => serde_json::Value::Null,
-                    })
-                }),
-            )],
-        }));
-        serve_rpc(APP, 1);
-
-        // Thirty seconds is a bound on a hung server, not a budget for a slow one: the server
-        // binds on its own thread after building a tokio runtime, and the failure this loop used
-        // to report was never slowness but the environment race described at `env_lock`.
-        let address = RpcServer::default_address(&service_id_for(APP));
-        let mut socket = None;
-        for _ in 0..1000 {
-            if let Ok(s) = UnixStream::connect(&address) {
-                socket = Some(s);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        let mut socket = socket.unwrap_or_else(|| panic!("nothing ever bound {address}"));
-
-        socket
-            .write_all(
-                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"app.act\",\
-                  \"params\":{\"action\":\"who\",\"args\":{}}}\n",
-            )
-            .expect("write the request");
-        let mut line = String::new();
-        BufReader::new(socket.try_clone().expect("clone the socket"))
-            .read_line(&mut line)
-            .expect("read the reply");
-
-        let reply: serde_json::Value = serde_json::from_str(&line).expect(&line);
+        let reply = call(r#"{"jsonrpc":"2.0","id":1,"method":"app.act","params":{"action":"who","args":{}}}"#);
         let seen = &reply["result"]["result"];
         assert!(
             !seen.is_null(),
-            "the handler saw no caller at all — the credentials did not cross the hop: {line}"
+            "the handler saw no caller at all — the credentials did not cross the hop: {reply}"
         );
         assert_eq!(
             seen["pid"].as_u64(),
             Some(u64::from(std::process::id())),
-            "the kernel's pid for this connection is this test process: {line}"
+            "the kernel's pid for this connection is this test process: {reply}"
         );
         // The uid the kernel reported has to be the uid that owns the socket — this test is both
         // ends of the connection, so anything else means the field is not the peer's.
-        let owner = std::fs::metadata(&address).expect("the socket exists").uid();
-        assert_eq!(seen["uid"].as_u64(), Some(u64::from(owner)), "{line}");
+        let owner = std::fs::metadata(served_test_surface()).expect("the socket exists").uid();
+        assert_eq!(seen["uid"].as_u64(), Some(u64::from(owner)), "{reply}");
+    }
+
+    /// The shell's `agent_run` owes its caller an exit code that may be minutes away. The handler
+    /// hands the wait to `answer_later`; the caller gets the work's own result, and in the
+    /// meantime the socket and the UI thread both go on answering everybody else.
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_that_takes_time_is_finished_off_the_ui_thread_and_holds_up_nobody() {
+        use std::time::Instant;
+
+        served_test_surface();
+        let asked = Instant::now();
+        let slow = std::thread::spawn(|| {
+            call(r#"{"jsonrpc":"2.0","id":1,"method":"app.act","params":{"action":"slow","args":{"ms":1500}}}"#)
+        });
+
+        // While that one waits: another caller, another connection, served at once. `describe`
+        // runs on the UI stand-in, so this also shows the UI thread is not the one waiting.
+        std::thread::sleep(Duration::from_millis(200));
+        let glance = Instant::now();
+        let described = call(r#"{"jsonrpc":"2.0","id":2,"method":"app.describe","params":{}}"#);
+        assert_eq!(described["result"]["app"], "caller-test", "{described}");
+        assert!(
+            glance.elapsed() < Duration::from_millis(700),
+            "a describe waited {:?} behind a slow act",
+            glance.elapsed()
+        );
+
+        let reply = slow.join().expect("the slow call");
+        assert!(asked.elapsed() >= Duration::from_millis(1500), "the reply is the finished work");
+        assert_eq!(reply["result"]["accepted"], true, "{reply}");
+        assert_eq!(reply["result"]["result"]["slept_ms"], 1500, "the work's result, not the handler's: {reply}");
+        assert_eq!(
+            reply["result"]["result"]["pid"].as_u64(),
+            Some(u64::from(std::process::id())),
+            "the caller read in the handler reached the work: {reply}"
+        );
+        assert!(reply["result"]["revision"].as_str().is_some(), "the envelope keeps its view: {reply}");
+
+        // Work that refuses is refused to the caller, as a handler's refusal would be.
+        let refused = call(
+            r#"{"jsonrpc":"2.0","id":3,"method":"app.act","params":{"action":"slow","args":{"ms":10,"refuse":true}}}"#,
+        );
+        assert_eq!(refused["error"]["message"], "refused after 10 ms", "{refused}");
+        assert_eq!(refused["error"]["code"], -32602, "an application refusal, not a transport fault");
+    }
+
+    /// The token rides beside `args` and reaches the handler through `agent_token()`; `args` —
+    /// what an approval card shows and an audit line keeps — never holds it, even when a caller
+    /// puts it there.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_token_reaches_the_handler_beside_the_arguments_and_never_among_them() {
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":1,"method":"app.act","params":{"action":"echo","args":{"command":"ls"},"agent_token":"tok-7f3a"}}"#,
+        );
+        let seen = &reply["result"]["result"];
+        assert_eq!(seen["agent_token"], "tok-7f3a", "the handler reads the token: {reply}");
+        assert_eq!(seen["args"], serde_json::json!({"command": "ls"}), "and its args are only args: {reply}");
+
+        // Smuggled inside `args` as well: taken out, not used, and not refused as an undeclared
+        // argument either — the call goes on as if it had never been there.
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":2,"method":"app.act","params":{"action":"echo","args":{"command":"ls","agent_token":"smuggled"},"agent_token":"tok-7f3a"}}"#,
+        );
+        assert_eq!(reply["result"]["result"]["args"], serde_json::json!({"command": "ls"}), "{reply}");
+        assert_eq!(reply["result"]["result"]["agent_token"], "tok-7f3a", "the one beside args wins: {reply}");
+        assert!(!reply.to_string().contains("smuggled"), "nothing in the reply carries it: {reply}");
+
+        // Only inside `args`: stripped, and the handler sees no token at all.
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":3,"method":"app.act","params":{"action":"echo","args":{"agent_token":"smuggled"}}}"#,
+        );
+        assert_eq!(reply["result"]["result"]["args"], serde_json::json!({}), "{reply}");
+        assert!(reply["result"]["result"]["agent_token"].is_null(), "{reply}");
+
+        // No token, no token.
+        let reply = call(r#"{"jsonrpc":"2.0","id":4,"method":"app.act","params":{"action":"echo","args":{}}}"#);
+        assert!(reply["result"]["result"]["agent_token"].is_null(), "{reply}");
+    }
+
+    #[test]
+    fn an_agent_token_is_current_only_while_its_own_dispatch_runs() {
+        assert_eq!(agent_token(), None);
+        {
+            let _outer = AgentTokenScope::enter(Some("tok-a".into()));
+            assert_eq!(agent_token().as_deref(), Some("tok-a"));
+            {
+                let _inner = AgentTokenScope::enter(None);
+                assert_eq!(agent_token(), None, "a nested call without one has none");
+            }
+            assert_eq!(agent_token().as_deref(), Some("tok-a"));
+        }
+        assert_eq!(agent_token(), None, "and nothing is left behind for the next dispatch");
+
+        let mut args = serde_json::json!({"command": "ls", "agent_token": "x"});
+        let params = serde_json::json!({"agent_token": "  tok-b  "});
+        assert_eq!(agent_token_of(&params, &mut args).as_deref(), Some("tok-b"));
+        assert_eq!(args, serde_json::json!({"command": "ls"}));
+        let mut args = serde_json::json!({});
+        assert_eq!(agent_token_of(&serde_json::json!({"agent_token": " "}), &mut args), None, "blank is none");
+    }
+
+    #[test]
+    fn a_handler_called_directly_is_handed_its_work_back_to_run_itself() {
+        // No socket, no dispatch: nothing would run the work, so it comes back.
+        let back = answer_later(|| Ok(serde_json::json!("ran inline")));
+        let work = back.err().expect("no dispatch is in progress on this thread");
+        assert_eq!(work(), Ok(serde_json::json!("ran inline")));
+
+        // And inside a dispatch's scope it is kept, once, for the dispatch to finish.
+        let scope = LaterScope::enter();
+        assert!(answer_later(|| Ok(serde_json::json!(1))).is_ok());
+        let kept = scope.take().expect("the work was kept");
+        assert_eq!(kept(), Ok(serde_json::json!(1)));
+        assert!(scope.take().is_none(), "taken once");
+        drop(scope);
+        assert!(answer_later(|| Ok(serde_json::json!(2))).is_err(), "the scope closed with the dispatch");
     }
 
     #[test]

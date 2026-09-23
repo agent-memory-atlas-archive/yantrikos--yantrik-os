@@ -133,6 +133,14 @@ socket meet the same refusal; the first two raise the card on the caller's behal
 says how the third can. The shell publishes the mode beside `settings.yaml` (`mind-mode.json`) so
 an app can read it the way it reads the ceiling. `describe` needs nothing.
 
+A mind running as one of the person's agents also carries an **agent token** beside `args`, the
+same way: `{action, args, grant?, agent_token?}`. It says which agent the call is for, and it is
+never an argument, because `args` is what the approval card shows and `mind-audit.jsonl` keeps.
+The dispatch hands it to the handler as `control::agent_token()`, and removes any `agent_token` a
+caller put inside `args`. `yos act` sends it from `--agent-token` or `YANTRIK_AGENT_TOKEN`. The
+shell's `agent_run` / `agent_job` / `agent_input` / `agent_kill` resolve it against the kernel's
+account of the caller (see `design/agents-workspace-2026-09-23.md`, decision 3).
+
 In `plan` mode the shell raises no card, so nothing above `standard` runs on any door. Plan's
 refusal of `standard` itself stays the MCP bridge's: the desktop's own processes make `standard`
 calls on these sockets (an app starting its service through the shell's `start_service`, a second

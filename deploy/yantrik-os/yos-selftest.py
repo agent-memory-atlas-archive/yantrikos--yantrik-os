@@ -32,7 +32,11 @@ What it is checking, in one line each:
     the app's own dispatch refuses on every door since issue #116 — `yos act` asks the shell
     for the person's Allow, says so, waits, and acts again carrying the grant; a denial and an
     unanswered card are plain sentences, `--no-ask` hands the refusal back, and `--grant`
-    carries one already held.
+    carries one already held;
+  * an agent's token — `--agent-token`, `YANTRIK_AGENT_TOKEN`, or an `agent_token=` argument —
+    rides beside the arguments on `app.act` and never among them, so the approval card it may
+    raise is asked for with the arguments alone; and an act told to `wait` is given longer than
+    its wait.
 """
 
 import contextlib
@@ -215,6 +219,9 @@ def main():
         print("skipped: this test needs unix sockets")
         return 0
 
+    # A token in the environment this runs in would ride on every act below and change what they
+    # send; the agent-token checks set their own.
+    os.environ.pop("YANTRIK_AGENT_TOKEN", None)
     tmp = tempfile.mkdtemp(prefix="yos-selftest-")
     sockets = pathlib.Path(tmp) / "yantrik"
     sockets.mkdir(parents=True)
@@ -463,6 +470,74 @@ def main():
         check("a grant that does not hold is a refusal, not a second card",
               code == 1 and "does not authorise" in err and not asked() and len(acts()) == 1,
               (err, acts()))
+
+        print("yos act, for one of the person's agents")
+        # The agent token says which agent a call is for. It rides BESIDE the arguments, never
+        # among them: the arguments are what the approval card shows and the audit log keeps,
+        # and a token in either is a token anyone reading them could replay.
+
+        def shell_acts(action):
+            return [c["params"] for c in shell.calls
+                    if c["method"] == "app.act" and c["params"].get("action") == action]
+
+        shell.calls.clear()
+        run(lambda: yos.cmd_act(["shell", "agent_run", "command=ls -la", "--agent-token", "tok-flag"]))
+        sent = shell_acts("agent_run")
+        check("--agent-token travels beside the arguments",
+              sent and sent[-1].get("agent_token") == "tok-flag", sent)
+        check("and never among them", sent and sent[-1].get("args") == {"command": "ls -la"}, sent)
+
+        os.environ["YANTRIK_AGENT_TOKEN"] = "tok-env"
+        try:
+            shell.calls.clear()
+            run(lambda: yos.cmd_act(["shell", "agent_run", "command=ls"]))
+            sent = shell_acts("agent_run")
+            check("YANTRIK_AGENT_TOKEN, as a harness sets it, is carried the same way",
+                  sent and sent[-1].get("agent_token") == "tok-env"
+                  and sent[-1].get("args") == {"command": "ls"}, sent)
+            shell.calls.clear()
+            run(lambda: yos.cmd_act(["shell", "agent_run", "command=ls", "--agent-token", "tok-flag"]))
+            sent = shell_acts("agent_run")
+            check("a token given on the command line wins over the environment's",
+                  sent and sent[-1].get("agent_token") == "tok-flag", sent)
+        finally:
+            os.environ.pop("YANTRIK_AGENT_TOKEN", None)
+
+        shell.calls.clear()
+        run(lambda: yos.cmd_act(["shell", "agent_run", "command=ls", "agent_token=0042"]))
+        sent = shell_acts("agent_run")
+        check("an agent_token= argument is lifted out beside the rest, as the text it was typed as",
+              sent and sent[-1].get("agent_token") == "0042"
+              and sent[-1].get("args") == {"command": "ls"}, sent)
+
+        shell.calls.clear()
+        run(lambda: yos.cmd_act(["shell", "agent_run", "command=ls"]))
+        sent = shell_acts("agent_run")
+        check("with no token anywhere, none is sent", sent and "agent_token" not in sent[-1], sent)
+
+        # The card: what the person is shown, and what a grant is bound to, is the arguments —
+        # so the token has to be absent from the request and present on both acts.
+        answers["status"] = "granted"
+        polls.clear()
+        blender.calls.clear()
+        shell.calls.clear()
+        out, err, code = run(lambda: yos.cmd_act(["blender", "render", "out=x.png",
+                                                  "--agent-token", "tok-card"]))
+        check("the card is asked for with the arguments alone",
+              asked() and asked()[0].get("args_json") == {"out": "x.png"}, asked())
+        check("and nothing sent to the shell carries the token",
+              "tok-card" not in json.dumps(shell.calls), shell.calls)
+        check("while both acts carry it beside the same arguments",
+              [a.get("agent_token") for a in acts()] == ["tok-card", "tok-card"]
+              and all(a.get("args") == {"out": "x.png"} for a in acts())
+              and [a.get("grant") for a in acts()] == [None, "appr-7"], acts())
+
+        check("an act told to wait is given longer than its wait before yos gives up on it",
+              yos.act_timeout("agent_run", {}) == 140
+              and yos.act_timeout("agent_run", {"wait": 600}) == 620
+              and yos.act_timeout("agent_job", {"wait": 0}) == 40
+              and yos.act_timeout("dismiss", {"id": "67"}) == 40,
+              [yos.act_timeout("agent_run", {}), yos.act_timeout("agent_run", {"wait": 600})])
 
         print("yos perception, with no desktop to ask")
         for svc in services:

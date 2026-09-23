@@ -53,6 +53,7 @@ members = [
     "apps/weather",
     "apps/studio",
     "crates/yantrik-harness",
+    "crates/yantrik-agent-terminal",
 ]
 
 # ── Shared dependencies ──────────────────────────────────────────────
@@ -117,6 +118,7 @@ libc = "0.2"
 
 # Internal crates
 yantrik-harness = { path = "crates/yantrik-harness" }
+yantrik-agent-terminal = { path = "crates/yantrik-agent-terminal" }
 yantrik-companion-core = { path = "crates/yantrik-companion-core" }
 yantrik-companion-instincts = { path = "crates/yantrik-companion-instincts" }
 yantrik-companion-cortex = { path = "crates/yantrik-companion-cortex" }
