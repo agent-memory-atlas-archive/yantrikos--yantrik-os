@@ -8,21 +8,31 @@
 //!   sysmon.processes   { sort_by?, limit? }      → Vec<ProcessInfo>
 //!   sysmon.kill_process { pid }                  → ()
 
-use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
 use yantrik_ipc_contracts::system_monitor::*;
+#[cfg(test)]
 use yantrik_service_sdk::gate::{self, Authority};
 use yantrik_service_sdk::prelude::*;
+use yantrik_service_sdk::{Action, Param, PeerCred, Surface, View};
 
 /// The id this surface publishes, and the app a grant for one of its actions is bound to.
 const APP: &str = "system-monitor";
 
 fn main() {
     ServiceBuilder::new("system-monitor")
-        .handler(SysMonHandler)
+        .handler(SysMonHandler::new())
         .run();
 }
 
-struct SysMonHandler;
+struct SysMonHandler {
+    /// `app.describe` and `app.act`, dispatched as an app window's are.
+    surface: Surface,
+}
+
+impl SysMonHandler {
+    fn new() -> SysMonHandler {
+        SysMonHandler { surface: sysmon_surface() }
+    }
+}
 
 impl ServiceHandler for SysMonHandler {
     fn service_id(&self) -> &str {
@@ -34,6 +44,22 @@ impl ServiceHandler for SysMonHandler {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ServiceError> {
+        self.handle_from(method, params, None)
+    }
+
+    fn handle_from(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        peer: Option<PeerCred>,
+    ) -> Result<serde_json::Value, ServiceError> {
+        // The agent-facing surface: one call gives live eyesight of the machine — the same
+        // numbers the System app draws — without opening a window or reading a screenshot. The
+        // ceiling and the mode are read per call, as an app window's dispatch reads them, because
+        // a person can change either while this runs.
+        if let Some(answer) = self.surface.answer(method, &params, peer) {
+            return answer;
+        }
         match method {
             "sysmon.snapshot" => {
                 let snap = build_snapshot()?;
@@ -46,19 +72,12 @@ impl ServiceHandler for SysMonHandler {
                 Ok(serde_json::to_value(procs).unwrap())
             }
             "sysmon.kill_process" => {
-                let pid = params["pid"].as_u64().ok_or_else(|| ServiceError {
-                    code: -32602,
-                    message: "Missing 'pid' parameter".to_string(),
-                })? as u32;
+                // The same reading `app.act` uses, so `0` or a pid past `i32::MAX` never reaches
+                // `kill(2)` as a whole process group from this door either.
+                let pid = pid_of(&params).map_err(|message| ServiceError { code: -32602, message })?;
                 kill_process(pid)?;
                 Ok(serde_json::json!(null))
             }
-            // The agent-facing surface: one call gives live eyesight of the machine — the same
-            // numbers the System app draws — without opening a window or reading a screenshot.
-            "app.describe" => Ok(describe_json(APP, &describe_view()?, &sysmon_actions())),
-            // The ceiling and the mode as the files say them now: read per call, as an app
-            // window's dispatch reads them, because a person can change either while this runs.
-            "app.act" => act(&params, Authority::now()),
             _ => Err(ServiceError {
                 code: -1,
                 message: format!("Unknown method: {method}"),
@@ -183,7 +202,9 @@ fn sysmon_actions() -> Vec<Action> {
             )),
         Action::new("kill_process", "End a running process by PID")
             .risk("dangerous")
-            .arg(Param::number("pid").describe(
+            // An integer, not a number: a pid is whole, and `3.5` used to reach the handler and
+            // come back as "needs argument `pid`" for an argument that was plainly there.
+            .arg(Param::integer("pid").describe(
                 "The process id to end, as shown in top_processes or found by find_process",
             )),
     ]
@@ -232,108 +253,80 @@ fn find_processes(needle: &str) -> Vec<serde_json::Value> {
 /// The grade this surface publishes for `action`, from the same table `describe` hands out — so
 /// the grade a caller is shown and the grade that is enforced cannot come apart. `None` for an
 /// action this service does not have, which has no grade and gets no default.
+#[cfg(test)]
 fn published_grade(action: &str) -> Option<&'static str> {
     sysmon_actions().into_iter().find(|a| a.name == action).map(|a| a.permission)
 }
 
-/// What this surface says `action` does — the sentence `gate::permit` reads for "cannot be undone",
-/// from the same table `describe` publishes, so what a caller is shown is what is enforced.
-fn published_purpose(action: &str) -> String {
-    sysmon_actions().into_iter().find(|a| a.name == action).map(|a| a.description).unwrap_or_default()
-}
-
-fn unknown_action(action: &str) -> ServiceError {
-    let offered: Vec<String> = sysmon_actions().into_iter().map(|a| a.name).collect();
-    ServiceError {
-        code: -32601,
-        message: format!("unknown action `{action}`; this service offers: {}", offered.join(", ")),
-    }
-}
-
-/// Dispatch `app.act`. The argument checks mirror the Slint path: an unknown action or a missing
-/// argument is named, not swallowed, because a model reads the error and corrects from it.
+/// The system monitor's surface, answering on the service's own socket.
 ///
-/// Before any of that, the action meets the rule an app window's dispatch enforces: the machine's
-/// ceiling, then any grant the call carries, then the person's mode (`gate::permit`). This
-/// handler used to dispatch straight away, so `kill_process` — graded `dangerous` just below —
+/// Every call meets the rule an app window's dispatch enforces — the machine's ceiling, then any
+/// grant the call carries, then the person's mode — and the argument checks, before a handler
+/// runs. This service used to dispatch straight away, so `kill_process` — graded `dangerous` —
 /// ended a process on any call to this socket, with no ceiling, no mode and no grant: `yos act
 /// system-monitor kill_process` with the window closed, or one raw JSON-RPC line (#153). Now it is
 /// refused above the ceiling (the shipped `sensitive` is below it), and under a raised ceiling in
 /// `ask` mode it is refused with `GRANT:` until a person has pressed Allow for this exact pid.
-fn act(params: &serde_json::Value, mut authority: Authority) -> Result<serde_json::Value, ServiceError> {
-    let action = params["action"].as_str().unwrap_or("").trim();
-    let mut args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
-    // Lifted off before anything reads `args`, and out of them if a caller put it there: a grant
-    // is spent against the arguments, and an agent token is not one. It says whose reach to hold
-    // the call to, below.
-    let token = gate::agent_token_of(params, &mut args);
-    let action_id = "system-monitor#act";
-    if action.is_empty() {
-        return Err(ServiceError {
-            code: -32602,
-            message: "act needs a non-empty `action`".to_string(),
-        });
+fn sysmon_surface() -> Surface {
+    let mut surface = Surface::new(APP).socket_name("system-monitor").describe(|| {
+        // A machine whose /proc cannot be read still answers describe, and says why, rather than
+        // failing the call — and an act whose effect landed is not reported as a failure because
+        // the view after it could not be drawn.
+        describe_view().unwrap_or_else(|e| {
+            View::new(format!("System — could not read this machine's state ({})", e.message))
+                .with("error", e.message)
+        })
+    });
+    for spec in sysmon_actions() {
+        surface = match spec.name.as_str() {
+            "find_process" => surface.action(spec, find_process_action),
+            "kill_process" => surface.action(spec, kill_process_action),
+            // Published and graded, but no handler here: a mistake in this file.
+            // `every_published_action_has_a_handler` keeps it from shipping.
+            _ => surface,
+        };
     }
-    // An action this service does not have is answered as that, before a grant is looked at:
-    // nothing is spent on a call that could never run.
-    let graded = published_grade(action).ok_or_else(|| unknown_action(action))?;
-    // An agent started from a catalog role is held to the role's reach first (agents catalog).
-    yantrik_service_sdk::reach::permits(token.as_deref(), APP, action, graded)
-        .map_err(|message| ServiceError { code: -32602, message })?;
-    let grant = gate::grant_of(params);
-    gate::permit(&mut authority, APP, action, graded, &published_purpose(action), &args, grant.as_deref())
-        // A refusal is an application answer, not a transport failure: -32602, as the app
-        // runtime answers it, keeps it out of the client's circuit breaker.
-        .map_err(|message| ServiceError { code: -32602, message })?;
-    tracing::info!(
-        action,
-        ceiling = %authority.ceiling,
-        mode = %authority.mode.name,
-        granted = authority.granted,
-        // Whether one came, never the token itself.
-        agent_token = token.is_some(),
-        "app.act"
-    );
-    match action {
-        "find_process" => {
-            let name = args["name"].as_str().unwrap_or("").trim();
-            if name.is_empty() {
-                return Err(ServiceError {
-                    code: -32602,
-                    message: "`find_process` needs argument `name`".to_string(),
-                });
-            }
-            let found = find_processes(name);
-            let view = describe_view()?;
-            Ok(act_json(
-                APP,
-                action_id,
-                true,
-                serde_json::json!({ "query": name, "count": found.len(), "processes": found }),
-                &view,
-            ))
-        }
-        "kill_process" => {
-            let pid = args["pid"].as_u64().ok_or_else(|| ServiceError {
-                code: -32602,
-                message: "`kill_process` needs argument `pid` (a number)".to_string(),
-            })? as u32;
-            kill_process(pid)?;
-            // Read back through describe, so the caller sees the machine after the kill without a
-            // second round trip and can confirm the process is gone.
-            let view = describe_view()?;
-            Ok(act_json(
-                APP,
-                action_id,
-                true,
-                serde_json::json!({ "killed": pid }),
-                &view,
-            ))
-        }
-        // Published and graded, but no arm here: a mistake in this file, and still not a
-        // dispatch. `every_published_action_has_a_handler` keeps it from shipping.
-        other => Err(unknown_action(other)),
+    surface
+}
+
+/// `find_process {name}`: every process whose name or command line holds `name`.
+fn find_process_action(args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let name = args["name"].as_str().unwrap_or("").trim();
+    if name.is_empty() {
+        return Err("`find_process` needs argument `name`".to_string());
     }
+    let found = find_processes(name);
+    Ok(serde_json::json!({ "query": name, "count": found.len(), "processes": found }))
+}
+
+/// `kill_process {pid}`: SIGTERM to one process. The view after it is read by the dispatch, so
+/// the caller sees the machine after the kill without a second round trip.
+fn kill_process_action(args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let pid = pid_of(args)?;
+    kill_process(pid).map_err(|e| e.message)?;
+    Ok(serde_json::json!({ "killed": pid }))
+}
+
+/// The one process `kill_process` may signal, or the refusal.
+///
+/// `kill(2)` does not read its pid as "a process" at the edges: `0` signals every process in the
+/// caller's process group — this service and everything started with it — and a negative pid
+/// signals a whole group by its id. A pid above `i32::MAX` became one of those on the way to
+/// `libc::kill`, and `0` went straight through. Only `1..=i32::MAX` names one process.
+fn pid_of(args: &serde_json::Value) -> Result<u32, String> {
+    args["pid"]
+        .as_u64()
+        .and_then(|p| i32::try_from(p).ok())
+        .filter(|p| *p > 0)
+        .map(|p| p as u32)
+        .ok_or_else(|| "`kill_process` argument `pid` must be a process id: a whole number above zero".to_string())
+}
+
+/// `app.act` under a pinned authority, as the socket's dispatch runs it with `Authority::now()`.
+/// The tests' door.
+#[cfg(test)]
+fn act(params: &serde_json::Value, authority: Authority) -> Result<serde_json::Value, ServiceError> {
+    sysmon_surface().act(params, None, authority)
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -848,7 +841,7 @@ mod through_the_handler {
     }
 
     fn kill_on_the_socket(pid: u32) -> Result<serde_json::Value, ServiceError> {
-        SysMonHandler.handle(
+        SysMonHandler::new().handle(
             "app.act",
             serde_json::json!({ "action": "kill_process", "args": { "pid": pid } }),
         )
@@ -1054,7 +1047,7 @@ mod tests {
     /// `describe` takes no authority, and the grades it publishes are the grades `act` enforces.
     #[test]
     fn describe_needs_nothing_and_publishes_the_grades_act_enforces() {
-        let described = SysMonHandler.handle("app.describe", serde_json::json!({})).expect("describe");
+        let described = SysMonHandler::new().handle("app.describe", serde_json::json!({})).expect("describe");
         let actions = described["actions"].as_array().expect("actions");
         assert_eq!(actions.len(), sysmon_actions().len());
         for a in actions {
@@ -1080,7 +1073,94 @@ mod tests {
             at("dangerous", "ask"),
         )
         .unwrap_err();
-        assert_eq!(err.code, -32601);
-        assert_eq!(err.message, "unknown action `reboot`; this service offers: find_process, kill_process");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "unknown action `reboot`; this app offers: find_process, kill_process");
+    }
+
+    /// A pid is an integer, and anything else is refused by the dispatch before a signal could be
+    /// sent — above the gate, so the refusal is for the argument and not for the grade.
+    #[test]
+    fn kill_process_takes_a_whole_pid_and_refuses_anything_else_before_it_runs() {
+        let mut child = sleeper();
+        let pid = child.id();
+        for (given, why) in [
+            (serde_json::json!(pid.to_string()), "a string arrived"),
+            (serde_json::json!(pid as f64 + 0.5), "a number with a fraction arrived"),
+            (serde_json::json!(true), "a boolean arrived"),
+        ] {
+            let err = act(
+                &serde_json::json!({ "action": "kill_process", "args": { "pid": given } }),
+                at("dangerous", "bypass"),
+            )
+            .unwrap_err();
+            assert_eq!(err.code, -32602);
+            assert!(
+                err.message.starts_with("`kill_process` argument `pid` must be an integer, and ")
+                    && err.message.contains(why),
+                "{}",
+                err.message
+            );
+        }
+        let err = act(
+            &serde_json::json!({ "action": "kill_process", "args": { "pid": -1 } }),
+            at("dangerous", "bypass"),
+        )
+        .unwrap_err();
+        assert_eq!(err.message, "`kill_process` argument `pid` must be a process id: a whole number above zero");
+        assert!(still_running(&mut child), "a refusal ended the process anyway");
+        reap(child);
+    }
+
+    /// The pids `kill(2)` reads as a whole process group are never handed to it. Checked on the
+    /// reading alone, so a regression here fails this test instead of signalling the test's own
+    /// process group.
+    #[test]
+    fn a_pid_that_names_a_process_group_is_refused() {
+        let refusal = "`kill_process` argument `pid` must be a process id: a whole number above zero";
+        for pid in [serde_json::json!(0), serde_json::json!(-1), serde_json::json!(1u64 << 31), serde_json::json!(u64::MAX)] {
+            assert_eq!(pid_of(&serde_json::json!({ "pid": pid })), Err(refusal.to_string()), "{pid}");
+        }
+        assert_eq!(pid_of(&serde_json::json!({ "pid": 1 })), Ok(1));
+        assert_eq!(pid_of(&serde_json::json!({ "pid": i32::MAX })), Ok(i32::MAX as u32));
+    }
+
+    /// An act decided on a view the machine has left is refused before the signal, as on a window.
+    #[test]
+    fn kill_process_on_a_stale_revision_ends_nothing() {
+        let mut child = sleeper();
+        let err = act(
+            &serde_json::json!({
+                "action": "kill_process",
+                "args": { "pid": child.id() },
+                "expect_revision": "0000000000000000",
+            }),
+            at("dangerous", "bypass"),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.starts_with("STALE: this app is at revision "), "{}", err.message);
+        assert!(still_running(&mut child), "the refusal was reported, and the process was ended anyway");
+        reap(child);
+    }
+
+    /// Each act has its own name, on the service's own socket, not one fixed id for every call.
+    #[test]
+    fn every_act_gets_its_own_action_id() {
+        let find = || {
+            act(&serde_json::json!({ "action": "find_process", "args": { "name": "sleep" } }), at("sensitive", "ask"))
+                .expect("a read runs")["action_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let (first, second) = (find(), find());
+        assert_ne!(first, second);
+        assert!(first.starts_with("system-monitor#"), "{first}");
+    }
+
+    /// The surface declares nothing the dispatch cannot check.
+    #[test]
+    fn the_surface_is_declared_soundly() {
+        assert!(sysmon_surface().registry().problems().is_empty());
     }
 }

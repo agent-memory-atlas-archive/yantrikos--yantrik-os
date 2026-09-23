@@ -11,11 +11,12 @@
 
 mod machine_place;
 
-use std::sync::Mutex;
-use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
+use std::sync::{Arc, Mutex};
 use yantrik_ipc_contracts::weather::*;
+#[cfg(test)]
 use yantrik_service_sdk::gate::{self, Authority};
 use yantrik_service_sdk::prelude::*;
+use yantrik_service_sdk::{Action, Param, PeerCred, Surface, View};
 
 /// The id this surface publishes, and the app a grant for one of its actions is bound to.
 const APP: &str = "weather";
@@ -39,12 +40,28 @@ struct LastPlace {
     fahrenheit: bool,
 }
 
+/// What the service remembers between calls: the last place it was asked about. Shared between
+/// the data methods, which record it, and the surface, which reports on it and moves it.
 #[derive(Default)]
-struct WeatherHandler {
+struct Places {
     last_place: Mutex<Option<LastPlace>>,
 }
 
-impl WeatherHandler {
+struct WeatherHandler {
+    places: Arc<Places>,
+    /// `app.describe` and `app.act`, dispatched as an app window's are.
+    surface: Surface,
+}
+
+impl Default for WeatherHandler {
+    fn default() -> Self {
+        let places = Arc::new(Places::default());
+        let surface = weather_surface(places.clone());
+        WeatherHandler { places, surface }
+    }
+}
+
+impl Places {
     /// Record the place a data call was about, so a later describe has somewhere to report on.
     fn remember(&self, location: &Location, fahrenheit: bool) {
         if let Ok(mut guard) = self.last_place.lock() {
@@ -63,11 +80,27 @@ impl ServiceHandler for WeatherHandler {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ServiceError> {
+        self.handle_from(method, params, None)
+    }
+
+    fn handle_from(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        peer: Option<PeerCred>,
+    ) -> Result<serde_json::Value, ServiceError> {
+        // The agent-facing surface: the weather where the user is, in one line and a small state
+        // object, without opening the app — and the one action that moves it. The ceiling and the
+        // mode are read per call from the files the shell writes, as an app window's dispatch
+        // reads them.
+        if let Some(answer) = self.surface.answer(method, &params, peer) {
+            return answer;
+        }
         match method {
             "weather.current" => {
                 let loc = parse_location(&params)?;
                 let fahrenheit = params["fahrenheit"].as_bool().unwrap_or(false);
-                self.remember(&loc, fahrenheit);
+                self.places.remember(&loc, fahrenheit);
                 let result = fetch_current(&loc, fahrenheit)?;
                 Ok(serde_json::to_value(result).unwrap())
             }
@@ -75,7 +108,7 @@ impl ServiceHandler for WeatherHandler {
                 let loc = parse_location(&params)?;
                 let hours = params["hours"].as_u64().unwrap_or(24) as u32;
                 let fahrenheit = params["fahrenheit"].as_bool().unwrap_or(false);
-                self.remember(&loc, fahrenheit);
+                self.places.remember(&loc, fahrenheit);
                 let result = fetch_hourly(&loc, hours, fahrenheit)?;
                 Ok(serde_json::to_value(result).unwrap())
             }
@@ -83,7 +116,7 @@ impl ServiceHandler for WeatherHandler {
                 let loc = parse_location(&params)?;
                 let days = params["days"].as_u64().unwrap_or(5) as u32;
                 let fahrenheit = params["fahrenheit"].as_bool().unwrap_or(false);
-                self.remember(&loc, fahrenheit);
+                self.places.remember(&loc, fahrenheit);
                 let result = fetch_daily(&loc, days, fahrenheit)?;
                 Ok(serde_json::to_value(result).unwrap())
             }
@@ -118,12 +151,6 @@ impl ServiceHandler for WeatherHandler {
                 let result = geocode(query)?;
                 Ok(serde_json::to_value(result).unwrap())
             }
-            // The agent-facing surface: the weather where the user is, in one line and a small
-            // state object, without opening the app.
-            "app.describe" => Ok(describe_json(APP, &self.describe_view(), &weather_actions())),
-            // The ceiling and the mode as the files say them now, read per call as an app
-            // window's dispatch reads them.
-            "app.act" => self.act(&params, Authority::now()),
             _ => Err(ServiceError {
                 code: -1,
                 message: format!("Unknown method: {method}"),
@@ -133,6 +160,18 @@ impl ServiceHandler for WeatherHandler {
 }
 
 impl WeatherHandler {
+    /// `app.act` under a pinned authority, as the socket's dispatch would run it. The tests' door.
+    #[cfg(test)]
+    fn act(
+        &self,
+        params: &serde_json::Value,
+        authority: Authority,
+    ) -> Result<serde_json::Value, ServiceError> {
+        self.surface.act(params, None, authority)
+    }
+}
+
+impl Places {
     /// The current weather for the last place asked about, or an honest "nowhere yet".
     fn describe_view(&self) -> View {
         let asked = self.last_place.lock().ok().and_then(|g| g.clone());
@@ -202,127 +241,79 @@ impl WeatherHandler {
         }
     }
 
-    /// Dispatch `app.act`. The one action changes which place describe reports on.
+    /// `set_location`: change which place describe reports on.
     ///
-    /// It first meets the rule an app window's dispatch enforces — the machine's ceiling, then
-    /// any grant, then the person's mode (`gate::permit`) — on the grade this surface publishes
-    /// for it. This handler used to dispatch straight away, whatever the ceiling said (#153).
-    /// `set_location` is `standard`, which every mode runs unasked (`SOCKET_FLOOR`), so what this
-    /// changes in practice is the ceiling: a machine set to `safe` refuses it here too.
-    fn act(
-        &self,
-        params: &serde_json::Value,
-        mut authority: Authority,
-    ) -> Result<serde_json::Value, ServiceError> {
-        let action = params["action"].as_str().unwrap_or("").trim();
-        let mut args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
-        // Lifted off before anything reads `args`, and out of them if a caller put it there: a grant
-        // is spent against the arguments, and an agent token is not one. It says whose reach to
-        // hold the call to, below.
-        let token = gate::agent_token_of(params, &mut args);
-        if action.is_empty() {
-            return Err(ServiceError {
-                code: -32602,
-                message: "act needs a non-empty `action`".to_string(),
-            });
-        }
-        // An action this service does not have is answered as that, before a grant is looked
-        // at: nothing is spent on a call that could never run.
-        let graded = published_grade(action).ok_or_else(|| unknown_action(action))?;
-        // An agent started from a catalog role is held to the role's reach first (agents catalog).
-        yantrik_service_sdk::reach::permits(token.as_deref(), APP, action, graded)
-            .map_err(|message| ServiceError { code: -32602, message })?;
-        let grant = gate::grant_of(params);
-        gate::permit(&mut authority, APP, action, graded, &published_purpose(action), &args, grant.as_deref())
-            // A refusal is an application answer, not a transport failure: -32602, as the app
-            // runtime answers it, keeps it out of the client's circuit breaker.
-            .map_err(|message| ServiceError { code: -32602, message })?;
-        tracing::info!(
-            action,
-            ceiling = %authority.ceiling,
-            mode = %authority.mode.name,
-            granted = authority.granted,
-            // Whether one came, never the token itself.
-            agent_token = token.is_some(),
-            "app.act"
-        );
-        match action {
-            "set_location" => {
-                // Either a place name to geocode, or an explicit lat/lon for somewhere without a
-                // name. A name is what a person types, so it comes first.
-                let fahrenheit = args["fahrenheit"].as_bool();
-                let location = if let Some(query) = args["query"].as_str() {
-                    if query.trim().is_empty() {
-                        return Err(ServiceError {
-                            code: -32602,
-                            message: "`set_location` query is empty".to_string(),
-                        });
-                    }
-                    geocode(query)?
-                } else if let (Some(lat), Some(lon)) = (args["lat"].as_f64(), args["lon"].as_f64())
-                {
-                    let name = args["name"].as_str().unwrap_or("(pinned location)").to_string();
-                    Location { name, lat, lon }
-                } else {
-                    return Err(ServiceError {
-                        code: -32602,
-                        message: "`set_location` needs `query`, or `lat` and `lon`".to_string(),
-                    });
-                };
-                // Keep the unit the caller last used, unless they overrode it here.
-                let unit = fahrenheit.unwrap_or_else(|| {
-                    self.last_place
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.as_ref().map(|p| p.fahrenheit))
-                        .unwrap_or(false)
-                });
-                self.remember(&location, unit);
-                let view = self.describe_view();
-                Ok(act_json(
-                    APP,
-                    "weather#act",
-                    true,
-                    serde_json::json!({ "location": location.name, "lat": location.lat, "lon": location.lon }),
-                    &view,
-                ))
+    /// The dispatch has already met the rule an app window's dispatch enforces — the machine's
+    /// ceiling, then any grant, then the person's mode — on the grade this surface publishes for
+    /// it, and checked the arguments' names and types. This handler used to dispatch straight
+    /// away, whatever the ceiling said (#153). `set_location` is `standard`, which every mode runs
+    /// unasked (`SOCKET_FLOOR`), so what the gate changes in practice is the ceiling: a machine
+    /// set to `safe` refuses it.
+    fn set_location(&self, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+        // Either a place name to geocode, or an explicit lat/lon for somewhere without a name. A
+        // name is what a person types, so it comes first.
+        let fahrenheit = args["fahrenheit"].as_bool();
+        let location = if let Some(query) = args["query"].as_str() {
+            if query.trim().is_empty() {
+                return Err("`set_location` query is empty".to_string());
             }
-            // Published and graded, but no arm here: a mistake in this file, and still not a
-            // dispatch. `every_published_action_has_a_handler` keeps it from shipping.
-            other => Err(unknown_action(other)),
-        }
+            geocode(query).map_err(|e| e.message)?
+        } else if let (Some(lat), Some(lon)) = (args["lat"].as_f64(), args["lon"].as_f64()) {
+            let name = args["name"].as_str().unwrap_or("(pinned location)").to_string();
+            Location { name, lat, lon }
+        } else {
+            return Err("`set_location` needs `query`, or `lat` and `lon`".to_string());
+        };
+        // Keep the unit the caller last used, unless they overrode it here.
+        let unit = fahrenheit.unwrap_or_else(|| {
+            self.last_place
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|p| p.fahrenheit))
+                .unwrap_or(false)
+        });
+        self.remember(&location, unit);
+        Ok(serde_json::json!({ "location": location.name, "lat": location.lat, "lon": location.lon }))
     }
+}
+
+/// The weather service's surface: describe reports on the last place, and `set_location` moves
+/// it. Its socket is the service's own, `weather.sock`, beside the data methods.
+fn weather_surface(places: Arc<Places>) -> Surface {
+    let describing = places.clone();
+    Surface::new(APP)
+        .socket_name("weather")
+        .describe(move || describing.describe_view())
+        .action(set_location_action(), move |args| places.set_location(args))
 }
 
 /// The grade this surface publishes for `action`, from the same table `describe` hands out, so
 /// the grade a caller is shown and the grade that is enforced cannot come apart.
+#[cfg(test)]
 fn published_grade(action: &str) -> Option<&'static str> {
     weather_actions().into_iter().find(|a| a.name == action).map(|a| a.permission)
 }
 
-/// What this surface says `action` does — the sentence `gate::permit` reads for "cannot be undone",
-/// from the same table `describe` publishes, so what a caller is shown is what is enforced.
-fn published_purpose(action: &str) -> String {
-    weather_actions().into_iter().find(|a| a.name == action).map(|a| a.description).unwrap_or_default()
-}
-
-fn unknown_action(action: &str) -> ServiceError {
-    let offered: Vec<String> = weather_actions().into_iter().map(|a| a.name).collect();
-    ServiceError {
-        code: -32601,
-        message: format!("unknown action `{action}`; this service offers: {}", offered.join(", ")),
-    }
-}
-
-/// What the weather service can be asked to do. Reading is free (`app.describe`); the one action
-/// changes which place is reported, and geocoding a name touches the network, so it is graded
-/// `standard`, the floor for anything that reaches outside the process.
+/// What the weather service can be asked to do, as `describe` publishes it.
+#[cfg(test)]
 fn weather_actions() -> Vec<Action> {
-    vec![Action::new("set_location", "Choose the place `describe` reports on")
+    vec![set_location_action()]
+}
+
+/// Reading is free (`app.describe`); the one action changes which place is reported, and
+/// geocoding a name touches the network, so it is graded `standard`, the floor for anything that
+/// reaches outside the process.
+///
+/// `name` is declared because the handler reads it: before this surface moved onto the shared
+/// dispatch nothing checked the arguments' names, so a `name` beside `lat`/`lon` arrived without
+/// ever being published — and a caller reading `describe` could not know it existed.
+fn set_location_action() -> Action {
+    Action::new("set_location", "Choose the place `describe` reports on")
         .arg(Param::text("query").describe("A place name to look up, e.g. 'Dallas, TX'").optional())
         .arg(Param::number("lat").describe("Latitude, if giving coordinates instead of a name").optional())
         .arg(Param::number("lon").describe("Longitude, if giving coordinates instead of a name").optional())
-        .arg(Param::flag("fahrenheit").describe("Report in °F instead of °C").optional())]
+        .arg(Param::text("name").describe("What to call a place given by `lat` and `lon`").optional())
+        .arg(Param::flag("fahrenheit").describe("Report in °F instead of °C").optional())
 }
 
 // ── Parameter parsing ────────────────────────────────────────────────
@@ -849,7 +840,7 @@ mod tests {
     }
 
     fn place_is_unset(handler: &WeatherHandler) -> bool {
-        handler.last_place.lock().map(|p| p.is_none()).unwrap_or(false)
+        handler.places.last_place.lock().map(|p| p.is_none()).unwrap_or(false)
     }
 
     /// `set_location` is `standard`, and `standard` needs no grant in any mode, plan included.
@@ -941,7 +932,8 @@ mod tests {
     }
 
     /// Every action `describe` offers reaches a handler past the gate, and an action it does not
-    /// offer is answered as that before any grant is looked at.
+    /// offer is answered as that before any grant is looked at — as an app window answers it:
+    /// -32602, in the dispatch's words.
     #[test]
     fn every_published_action_has_a_handler() {
         for spec in weather_actions() {
@@ -956,7 +948,60 @@ mod tests {
                 at("dangerous", "ask"),
             )
             .unwrap_err();
-        assert_eq!(err.code, -32601);
-        assert_eq!(err.message, "unknown action `set_units`; this service offers: set_location");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "unknown action `set_units`; this app offers: set_location");
+    }
+
+    /// `name` beside `lat`/`lon` is read by the handler, so it is declared — and an argument the
+    /// action does not declare is refused by name, as on every app's door, where before this
+    /// surface moved onto the shared dispatch it was dropped in silence.
+    #[test]
+    fn the_arguments_are_checked_as_an_apps_are() {
+        let handler = WeatherHandler::default();
+        let described = handler.handle("app.describe", serde_json::json!({})).expect("describe");
+        let properties = &described["actions"][0]["parameters"]["properties"];
+        assert_eq!(properties["name"]["type"], "string", "{described}");
+
+        let err = handler
+            .act(&serde_json::json!({ "action": "set_location", "args": { "city": "Dallas" } }), at("sensitive", "ask"))
+            .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "`set_location` has no argument `city`; it takes: query, lat, lon, name, fahrenheit");
+
+        let err = handler
+            .act(&serde_json::json!({ "action": "set_location", "args": { "lat": "32.7", "lon": -96.8 } }), at("sensitive", "ask"))
+            .unwrap_err();
+        assert_eq!(err.message, "`set_location` argument `lat` must be a number, and a string arrived");
+        assert!(place_is_unset(&handler));
+    }
+
+    /// Stale is refused before the place moves, as on a window. No place is known and `HOME` is
+    /// empty, so the view is the "nowhere yet" one and no forecast is fetched.
+    #[test]
+    fn an_act_decided_on_an_old_revision_moves_nothing() {
+        let home = std::env::temp_dir().join(format!("weather-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let handler = WeatherHandler::default();
+        let err = handler
+            .act(
+                &serde_json::json!({
+                    "action": "set_location",
+                    "args": { "lat": 32.78, "lon": -96.8 },
+                    "expect_revision": "0000000000000000",
+                }),
+                at("sensitive", "ask"),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.starts_with("STALE: this app is at revision "), "{}", err.message);
+        assert!(place_is_unset(&handler));
+    }
+
+    /// The surface declares nothing the dispatch cannot check.
+    #[test]
+    fn the_surface_is_declared_soundly() {
+        assert!(WeatherHandler::default().surface.registry().problems().is_empty());
     }
 }

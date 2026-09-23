@@ -752,7 +752,7 @@ fn publish_control(app: &SystemMonitorApp, status: Rc<RefCell<Status>>) {
         )
         .action(
             Action::new("kill_process", "End a running process by pid")
-                .arg(Param::number("pid"))
+                .arg(Param::integer("pid"))
                 .arg(Param::flag("force").describe("SIGKILL instead of SIGTERM").optional())
                 // Everything else on this surface changes a view. This ends someone's work, and
                 // there is no undo — so it must clear the caller's ceiling on its own.

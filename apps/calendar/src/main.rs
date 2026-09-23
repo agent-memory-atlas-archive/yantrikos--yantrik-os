@@ -980,7 +980,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
         .describe(describe)
         .action(
             Action::new("select_day", "Show what is on one day of the month shown")
-                .arg(Param::number("day").describe("Day of the month, 1-31")),
+                .arg(Param::integer("day").describe("Day of the month, 1-31")),
             move |args| {
                 let ui = day_ui()?;
                 let day = args["day"].as_i64().ok_or("`day` must be a number")? as i32;
@@ -1026,7 +1026,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 // The form has no duration field and the template path already carries minutes,
                 // so the one caller that could say how long a thing runs was the one that could
                 // not: a mind asking for a fifteen-minute call got an hour and was not told.
-                .arg(Param::number("duration_min")
+                .arg(Param::integer("duration_min")
                     .describe("How long it runs, in minutes; an hour when not given")
                     .optional())
                 // The contract carries `is_all_day` and nothing on this surface could set it, so
@@ -1195,7 +1195,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 .arg(Param::text("title").describe("A new title").optional())
                 .arg(Param::text("date").describe("Move it to this day, YYYY-MM-DD").optional())
                 .arg(Param::text("time").describe("Move it to this time, HH:MM").optional())
-                .arg(Param::number("duration_min")
+                .arg(Param::integer("duration_min")
                     .describe("How long it runs, in minutes; unchanged when not given")
                     .optional())
                 .arg(Param::text("notes").optional()),

@@ -135,7 +135,8 @@ class TestTheOrder(support.MachineCase):
     def test_a_handler_refusal_is_the_apps_own_sentence(self):
         self.assertEqual(self.refusal(lambda: self.act("open_note", title="Ghost")),
                          "there is no note called `Ghost`")
-        support.quoted(self, C, "Err(message) => Err(ServiceError { code: -32602, message }),")
+        support.quoted(self, C, "ServiceError { code: REFUSED, message }")
+        support.quoted(self, C, "pub const REFUSED: i32 = -32602;")
 
     def test_an_unknown_method_names_the_two_it_serves(self):
         fragment = 'format!("unknown method `{other}`; this app serves app.describe, app.act")'

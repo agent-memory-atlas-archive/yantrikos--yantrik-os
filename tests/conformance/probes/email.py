@@ -180,11 +180,12 @@ def run():
             contract=3, evidence={"account_store": view.get("account_store"),
                                   "summary": described.get("summary")})
 
-        # ── 4. `which` takes a number ─────────────────────────────────────
+        # ── 4. `which` names a row ────────────────────────────────────────
         #
-        # Sent as a JSON number, which is how a caller that has just read `describe.messages`
-        # sends it. `args["which"].as_str()` gave `""` for this, and the refusal quoted it.
-        numeric = lib.act(APP, "open_message", which=1)
+        # A row number, sent as the text `which` is declared as — which is what `yos act email
+        # open_message which=1` sends. `args["which"].as_str()` once gave `""` for a number, and
+        # the refusal quoted it back.
+        numeric = lib.act(APP, "open_message", which="1")
         probe.check(
             "open_message which=1 on an empty mailbox is refused, in words, by the app",
             lib.refusal_kind(numeric) == "app" and bool(numeric.get("refused")),
@@ -197,6 +198,14 @@ def run():
             "the refusal says what was asked for: message 1, and how many there are",
             "1" in str(numeric.get("refused") or ""),
             contract=3, evidence={"refusal": numeric.get("refused")})
+        # Sent as a JSON number instead, it never reaches the app: the dispatch checks each
+        # argument against its declared type, and says what it wanted without echoing the value.
+        typed = lib.act(APP, "open_message", which=1)
+        probe.check(
+            "which as a JSON number is refused by the dispatch for its type, before the app",
+            "`open_message` argument `which` must be a string, and a number arrived"
+            in str(typed.get("refused") or ""),
+            contract=3, evidence={"answer": typed})
 
         textual = lib.act(APP, "open_message", which="quarterly report")
         probe.check(
@@ -267,7 +276,7 @@ def run():
                 unreachable = lib.state(APP)
                 unreachable_described = lib.describe(APP)
                 refused_search = lib.act(APP, "search", query="anything at all")
-                refused_open = lib.act(APP, "open_message", which=1)
+                refused_open = lib.act(APP, "open_message", which="1")
         except (FileNotFoundError, RuntimeError) as exc:
             moved_ok = False
             unreachable_described = {}

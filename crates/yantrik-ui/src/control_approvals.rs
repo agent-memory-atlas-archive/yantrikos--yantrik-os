@@ -90,7 +90,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     .describe("The action's permission grade as os_describe reports it: safe, standard, sensitive or dangerous"),
             )
             .arg(
-                Param::text("args_json")
+                Param::object("args_json")
                     .optional()
                     .describe("The exact arguments, as a JSON object. The grant is bound to these — a different value later is a different action and will be refused"),
             )
@@ -302,7 +302,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             .arg(Param::text("app"))
             .arg(Param::text("action"))
             .arg(
-                Param::text("args_json")
+                Param::object("args_json")
                     .optional()
                     .describe("The same JSON object the request carried"),
             ),
@@ -392,7 +392,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                     .describe("The mode it ran under: auto, bypass, or rule"),
             )
             .arg(
-                Param::text("args_json")
+                Param::object("args_json")
                     .optional()
                     .describe("The exact arguments it ran with, as a JSON object"),
             )
@@ -1485,13 +1485,17 @@ fn text(value: Option<&serde_json::Value>) -> String {
 
 /// The arguments the grant will be bound to.
 ///
-/// Accepts both shapes this can arrive in, because both are real. Over raw JSON-RPC a caller
-/// sends `args_json` as a string. Through `yos act shell request_approval args_json={...}` it is
-/// also a string, because this parameter is published as `text` and the CLI keeps a value bound
-/// for a text parameter as the text it arrived as — but the CLI predates that rule, and older
-/// builds of it parsed every value as JSON and sent an object. The two must produce the same
-/// canonical form or a grant requested one way and consumed the other would never match — so
-/// both land here, and the canonicalisation is done once, in Rust, on the parsed value.
+/// `args_json` is published as an `object`, because an object is what every caller that spends a
+/// grant sends: the dispatch's own `gate::spend_grant`, the Python SDK's, `yos act` asking on a
+/// caller's behalf, and `yos act shell request_approval args_json={...}`, which binds a value by
+/// its published type. It was published as `text` until the dispatch began checking types, and
+/// the check found it: every grant spent from outside the shell arrived as an object for an
+/// argument that said it was a string. The dispatch now refuses a string before this runs.
+///
+/// Both shapes are still read here, because this function does not know which door its value
+/// came through, and the two must produce the same canonical form or a grant requested one way
+/// and consumed the other would never match — so the canonicalisation is done once, in Rust, on
+/// the parsed value.
 ///
 /// An `agent_token` among them is taken out and not used. A token is not an argument: these are
 /// what the card draws, what `record_unasked_action` writes to the audit log and what the grant is

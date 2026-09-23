@@ -173,13 +173,31 @@ An **action**:
 | `description` | What it does, in the app's words. The dispatch reads it (§7): wording that says the action cannot be undone changes when a person is asked. |
 | `permission` | Its **grade**: `safe` < `standard` < `sensitive` < `dangerous`. An action declared without one is `standard`. |
 | `settles` | `"on return"` — the work is done when the act answers — or `"later"` — the act only starts it. |
-| `parameters` | A JSON Schema object: `type` `"object"`, `properties` (each `{type, description}`; `description` MAY be empty), `required` (names, in declaration order). |
+| `parameters` | A JSON Schema object: `type` `"object"`, `properties` (each `{type, description}` and, when declared, `enum`, `items` and `default`; `description` MAY be empty), `required` (names, in declaration order). |
+| `expected_seconds` | Optional integer: how long a call usually takes to answer, when the app knows it is more than a moment (a render, an export). A client SHOULD size its timeout by it; absent, the client keeps its own. |
 
-**Parameter types.** `type` is one of `string`, `number`, `integer`, `boolean`. Version 1 checks
-**presence, not type**: the dispatch refuses a missing required argument and an argument the
-action does not declare (§5), and hands every value to the handler as it came. A client SHOULD send
-each value as its declared type (`yos act` reads `key=value` by the declared type, so `id=67` is
-the string `"67"` for a `string` parameter and the number `67` for a `number` one).
+**Parameter types.** `type` is one of `string`, `number`, `integer`, `boolean`, `array`,
+`object`, and the dispatch checks it (§5, step 9): an argument of another type is refused before
+the handler runs. What each accepts:
+
+| declared | published | accepts |
+| --- | --- | --- |
+| `string` | `{"type": "string"}` | a JSON string — not a number, even one that spells an id |
+| `number` | `{"type": "number"}` | any JSON number |
+| `integer` | `{"type": "integer"}` | a JSON number written without a fraction or exponent: `3`, not `3.0` or `3e0` (stricter than JSON Schema, on purpose: a handler reading `3.0` as an integer finds nothing) |
+| `boolean` | `{"type": "boolean"}` | `true` or `false` |
+| enum | `{"type": "string", "enum": ["low", "normal"]}` | one of the listed strings, exactly |
+| `array` | `{"type": "array", "items": {"type": "string"}}` | a JSON array whose every item is of the `items` type |
+| `object` | `{"type": "object"}` | a JSON object |
+
+`null` for an optional argument is the same as leaving it out; for a required one it is a value of
+the wrong type. A parameter MAY carry `default`: what the handler is given when the caller leaves
+the argument out (or sends `null`), and a parameter with a default is not required. A client SHOULD
+send each value as its declared type (`yos act` reads `key=value` by the declared type, so `id=67`
+is the string `"67"` for a `string` parameter and the number `67` for an `integer` one).
+
+Type checking is an addition to version 1 (see Changes): a client that predates it already
+handles its refusal, which is `-32602` like every other in §5.
 
 `describe` is never gated: reading a surface needs no grade, no mode and no grant.
 
@@ -205,12 +223,21 @@ refusal of the act itself is error `-32602`, whose `message` is the sentence giv
 | 3 | the ceiling, on the grade | `CEILING: …` (§7) |
 | 4 | the grant, if the call carries one — spent only now, past the ceiling | ``GRANT: `<id>` does not authorise <app>.<action> — <the shell's reason> Nothing was run; a grant covers one action, once, with the arguments the person was shown.`` |
 | 5 | the mode, the session rules and the description | `GRANT: …` (§7) |
-| 6 | every required argument is present | `` `<action>` needs argument `<param>` `` (the first missing, in declaration order) |
-| 7 | no argument the action does not declare | `` `<action>` has no argument `<key>`; it takes: <p1>, <p2>, … `` — or, for an action with none, `` `<action>` takes no arguments, but `<key>` was given `` (the first undeclared key in sorted order; the list in declaration order) |
-| 8 | `expect_revision`, when given, is the current revision | `STALE: this app is at revision <current> and you acted on <expected>. It now reports: <summary>. Read it again before deciding.` |
-| 9 | the handler | the handler's own sentence, as it returned it |
+| 6 | `args` is an object (absent or `null` is none) | `` `<action>` takes its arguments as an object of named values, and <kind> arrived `` |
+| 7 | every required argument is present | `` `<action>` needs argument `<param>` `` (the first missing, in declaration order) |
+| 8 | no argument the action does not declare | `` `<action>` has no argument `<key>`; it takes: <p1>, <p2>, … `` — or, for an action with none, `` `<action>` takes no arguments, but `<key>` was given `` (the first undeclared key in sorted order; the list in declaration order) |
+| 9 | every argument is of its declared type (§4) | `` `<action>` argument `<param>` must be <wanted>, and <kind> arrived `` — or, for an enum, `` `<action>` argument `<param>` must be one of `<v1>`, `<v2>`, …, and another string arrived `` — or, for an array item, `` `<action>` argument `<param>` must be <wanted>, and `<param>[<i>]` is <kind> `` (the first wrong argument in declaration order) |
+| 10 | `expect_revision`, when given, is the current revision | `STALE: this app is at revision <current> and you acted on <expected>. It now reports: <summary>. Read it again before deciding.` |
+| 11 | the handler, with every declared default filled in for an argument left out | the handler's own sentence, as it returned it |
 
-Steps 8 and 9 happen in **one turn** of the surface's own serialization (a window's UI thread):
+In step 9, `<wanted>` is `a string`, `a number`, `an integer`, `a boolean`, `an object`, `an array`,
+or `an array of <items>s` (`strings`, `numbers`, `integers`, `booleans`, `objects`, `arrays`), and
+`<kind>` names what arrived — `null`, `a boolean`, `a number`, `a number with a fraction` (where an
+integer was wanted), `a string`, `an array`, `an object` — **never its value**: a number a caller
+sends may be a PIN, a year of birth or a dose, and a refusal is shown, logged and handed to a model.
+The declaration is what a caller corrects from.
+
+Steps 10 and 11 happen in **one turn** of the surface's own serialization (a window's UI thread):
 between the revision check and the handler nothing else can change what the app shows, and the
 view in the reply is read in the same turn, after the handler.
 
@@ -233,13 +260,14 @@ An accepted act answers (schema: `act.schema.json`, the root; `act_json`'s own o
 | --- | --- |
 | `accepted` | Always `true`: the guard passed and the handler ran. It never means "done". |
 | `settled` | `true` when the action's `settles` is `"on return"`, `false` when `"later"`: the work was started and is not finished. A client MUST NOT report a `settled: false` act as complete. |
-| `action_id` | A name for this dispatch, unique within the surface's run: `<service-id>#<n>`. |
+| `action_id` | A name for this dispatch, unique within the surface's run: `<service-id>#<n>`, where `<service-id>` is the socket's name — `app-notes#7` for a window, `weather#12` for a service. |
 | `result` | The handler's answer, any JSON. |
 | `revision`, `summary`, `state` | The view **after** the action. |
 
 A handler that owes its caller a result that takes longer than the surface's turn may finish its
-answer off that turn (`control::answer_later`): the reply then waits for the work, `result` is the
-work's value (or its refusal, as `-32602`), and the view is read again afterwards.
+answer off that turn (`yantrik_surface::answer_later`, re-exported as `control::answer_later`): the
+reply then waits for the work, `result` is the work's value (or its refusal, as `-32602`), and the
+view is read again afterwards. Such an action SHOULD declare `expected_seconds` (§4).
 
 ## 6. `revision`
 
@@ -379,29 +407,25 @@ a program and exits non-zero when a surface breaks it:
 | `protocol` | `protocol` is present and is `1`. |
 | `schema` | the describe matches `describe.schema.json`. |
 | `grades` | every action is graded on the ladder. |
-| `params` | every parameter has a v1 type, and every required one is declared. |
+| `params` | every parameter has a type from §4 (an array's `items` too), and every required one is declared. |
 | `secrets` | no parameter is named like a secret — the shell's rule: `passphrase`, `password`, `passwd`, `pin`, `secret`, `credential`, `unlock` (`pinned` excepted). |
 | `revision` | the published revision is §6's hash of the summary and state (a warning when a float may render differently). |
 | `steady` | an unchanged view keeps its revision across reads. |
 | `method`, `empty`, `unknown` | an unknown method, an empty action and an unknown action are refused with the right code and words. |
-| `missing`, `undeclared`, `stale` | a missing argument, an undeclared one and a stale `expect_revision` are refused with the right code and words. |
+| `missing`, `undeclared`, `types`, `stale` | a missing argument, an undeclared one, one of the wrong type and a stale `expect_revision` are refused with the right code and words. `types` is a warning, not a failure, when the revision guard refused the mistyped argument instead: type checking is an addition to version 1. |
 
-It never runs an action. The last three are sent only to a surface that publishes `protocol: 1`
+It never runs an action. The last four are sent only to a surface that publishes `protocol: 1`
 and refused the unknown action exactly as §5 says; they name an action graded `safe` or `standard`
-that does not say it cannot be undone, and they all carry a stale `expect_revision` besides, so a
-surface that skipped an argument check is still stopped by its revision guard before a handler
-runs.
+that does not say it cannot be undone, with every other required argument given a value its
+declaration accepts (an enum's first value, a declared default), and they all carry a stale
+`expect_revision` besides, so a surface that skipped an argument check is still stopped by its
+revision guard before a handler runs.
 
 ## Known deviations
 
 What the code in this repository does that this document does not, so nobody mistakes it for the
 protocol:
 
-- **The three services that answer `app.act` themselves** (weather, system-monitor, notifications)
-  refuse an unknown action with `-32601` and "this service offers", name every dispatch
-  `<service>#act`, and do not refuse undeclared arguments or check `expect_revision`. They publish
-  `protocol: 1` through the shared `describe_json`, and `yos check` fails them on `unknown`. The
-  surface SDK's piece B moves them onto the shared dispatch.
 - **network-service and calendar-service** answer `app.describe` and no `app.act` at all: an act
   there is `-32601 Unknown method: app.act`, where a surface with no actions owes
   `` unknown action `<name>`; this app offers: `` with an empty list.
@@ -410,13 +434,8 @@ protocol:
   `-32601`. They publish no `describe`, so they are outside this protocol; `yos check --all`
   skips them, and `yos ls` (a mind's `os_apps`) does not list them — only `yos ls --all` names
   them, as the desktop's own.
-- **Rust dispatch:** a non-string `expect_revision` is ignored (no guard) and a non-object `args`
-  is read as no arguments. A client MUST send a string and an object.
-- **The Python surface SDK** (`sdk/python/yantrik_surface`), and Blender's addon, which is built on
-  it: checks each argument against its published type and refuses a non-object `args`
-  (`` `<action>` takes its arguments as an object of named values, and an array arrived ``), in the
-  words of the Rust `yantrik-surface` crate (piece B of the SDK design) — where the Rust dispatch
-  on `main` checks presence, not type (§4). It replays `surface-vectors.json` in full.
+- **Rust dispatch:** a non-string `expect_revision` is ignored (no guard). A client MUST send a
+  string.
 
 ## Changes
 
@@ -425,3 +444,12 @@ protocol:
   every door decides alike; owned names (bind only over a dead socket; the shell's peer checked
   before a grant is spent); surfaces declared in `.desktop` files, so they are found while closed
   (§3).
+- **1, extended** (the surface SDK's piece B, `crates/yantrik-surface`): parameters gain `integer`
+  enforced as written, `array` with `items`, `object`, `enum` and `default`, and actions gain
+  `expected_seconds`; the dispatch refuses a non-object `args` (step 6) and an argument of the wrong
+  type (step 9), both `-32602`, which a version-1 client already treats as an answer; the three
+  services that answered `app.act` themselves dispatch through the shared crate, so they now keep
+  §5 — `-32602` and "this app offers" for an unknown action, per-call `action_id`s, undeclared
+  arguments and `expect_revision` refused. The Python SDK (`sdk/python/yantrik_surface`) publishes
+  the same shapes and refuses in the same words. Nothing a version-1 client relied on changed
+  shape.

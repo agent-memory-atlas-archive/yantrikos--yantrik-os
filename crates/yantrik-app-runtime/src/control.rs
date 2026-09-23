@@ -84,10 +84,17 @@
 //! behalf. `describe` needs nothing, and the ceiling stays above every mode and every grant.
 //!
 //! The rule itself is `yantrik_ipc_transport::gate`, re-exported below. Three services answer
-//! `app.act` in their own handlers rather than through this dispatch — System Monitor, whose
-//! `kill_process` is `dangerous`, Notifications and Weather — and until #153 they met none of it.
-//! They call the same `gate::permit` now, with the grades from the tables they publish, and
-//! refuse in the same words.
+//! `app.act` without a window — System Monitor, whose `kill_process` is `dangerous`,
+//! Notifications and Weather — and until #153 they met none of it. They dispatch through the same
+//! `yantrik_surface::Registry` as this module now, so they refuse in the same words, in the same
+//! order, with the same argument checks.
+//!
+//! # What is here, and what is not
+//!
+//! The dispatch — the registry, the argument checks, the revision guard, the gate, the caller and
+//! the agent token, answers finished later — is `yantrik-surface`, which has no UI dependency and
+//! is what a service or an outside author links. This module is that dispatch plus the one thing
+//! only a window needs: the hop to the thread that owns it, and back.
 //!
 //! One line the dispatch does not draw: plan mode's refusal of `standard`. The desktop's own
 //! processes cross this socket with `standard` calls — an app asking the shell to `start_service`
@@ -145,6 +152,10 @@ use std::time::Duration;
 
 use yantrik_ipc_contracts::email::ServiceError;
 use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
+use yantrik_surface::{
+    finish_later, next_action_id, refusal, ActCall, AgentTokenScope, CallerScope, Later, LaterScope,
+    LocalRegistry, NO_SUCH_METHOD, UNANSWERED,
+};
 
 /// How long the RPC thread waits for the UI thread to answer.
 ///
@@ -153,24 +164,11 @@ use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
 /// not have made — and the caller deserves a timeout it can report rather than a hang.
 const UI_ROUNDTRIP: Duration = Duration::from_secs(3);
 
-/// A name for one dispatch, so anything waiting on its effects can say which one it is waiting on.
-///
-/// Scoped to the app and monotonic within a run. Not a UUID: it is read by people in logs and
-/// compared by machines within a single session, and `app-notes#7` does both better than
-/// thirty-two hex digits would.
-fn next_action_id(service_id: &str) -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    format!("{service_id}#{}", NEXT.fetch_add(1, Ordering::Relaxed))
-}
-
 /// Service ids are prefixed so an app cannot collide with the service of the same name.
 ///
 /// `notes` is already taken by notes-service, which stores notes; `app-notes` is the window a
 /// person is looking at. They are different things and must not share a socket.
-pub fn service_id_for(app_id: &str) -> String {
-    format!("app-{app_id}")
-}
+pub use yantrik_surface::service_id_for;
 
 // ── The names one app answers to ─────────────────────────────────────
 
@@ -245,25 +243,22 @@ pub fn other_names(app_id: &str) -> &'static [&'static str] {
 // Every action carries a grade; the machine has a ceiling (`tool_permission`), the person has a
 // mode, and a call above what the mode runs unasked must carry a grant — a person's Allow, spent
 // through the shell. That rule lives in `yantrik_ipc_transport::gate` since issue #153: three
-// services answer `app.act` in their own handlers, never crossed this dispatch, and so never met
-// it — System Monitor's `dangerous` `kill_process` ran on any call to its socket. A service must
-// not link Slint to be told no, so the rule moved below this crate, beside the socket client it
-// needs for spending a grant, and is re-exported here unchanged: `control::configured_ceiling`,
-// `control::mode_from`, `control::spend_grants_with` and the rest are what they were.
+// services answer `app.act` without a window, and a service must not link Slint to be told no,
+// so the rule moved below this crate, beside the socket client it needs for spending a grant, and
+// is re-exported here unchanged: `control::configured_ceiling`, `control::mode_from`,
+// `control::spend_grants_with` and the rest are what they were.
 //
 // What stays here is the half only a window has. Its grades live on the UI thread and file and
 // socket IO does not, so the RPC thread reads the files and spends any grant (see
-// `ControlRpc::dispatch`), and `Registry::act` decides with `gate::decide` inside the same turn
-// of the event loop as the handler.
+// `ControlRpc::dispatch`), and the registry decides with `gate::decide` inside the same turn of
+// the event loop as the handler.
 pub use yantrik_ipc_transport::gate::{
     configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, permit,
     spend_grants_with, unrecoverable, Authority, Mode, AGENT_TOKEN, DEFAULT_MODE, LADDER, MODES,
     MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
 };
-use yantrik_ipc_transport::gate::{agent_token_of, grade};
-use yantrik_ipc_transport::reach;
 #[cfg(test)]
-use yantrik_ipc_transport::gate::{ceiling_from, DEFAULT_CEILING};
+use yantrik_ipc_transport::gate::{agent_token_of, ceiling_from, DEFAULT_CEILING};
 
 // ── What an app reports ─────────────────────────────────────────────
 //
@@ -278,238 +273,29 @@ pub use yantrik_ipc_contracts::control_surface::{
 };
 
 // ── The registry, which lives on the UI thread ──────────────────────
+//
+// `yantrik_surface::Registry` with closures that may capture Slint handles, which is why it
+// never leaves the thread that owns the window.
 
-type DescribeFn = Box<dyn Fn() -> View>;
-type ActFn = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
-
-struct Registry {
-    app_id: String,
-    describe: Option<DescribeFn>,
-    actions: Vec<(Action, ActFn)>,
-}
-
-/// What an app reports about itself right now: the view, and its fingerprint.
-struct Snapshot {
-    summary: String,
-    state: serde_json::Value,
-    revision: String,
-}
-
-impl Registry {
-    /// Read the live view once. Every caller below goes through this, so a revision is never
-    /// computed from a different read than the state it is reported beside.
-    fn snapshot(&self) -> Snapshot {
-        let view = match &self.describe {
-            Some(f) => f(),
-            None => View::new(format!("{} (no description published)", self.app_id)),
-        };
-        let revision = view.revision();
-        Snapshot { summary: view.summary, state: view.state, revision }
-    }
-
-    fn describe(&self) -> serde_json::Value {
-        let now = self.snapshot();
-        let specs: Vec<Action> = self
-            .actions
-            .iter()
-            .map(|(a, _)| {
-                let mut spec = a.clone();
-                spec.permission = effective_grade(&spec.name, spec.permission);
-                spec
-            })
-            .collect();
-        let view = View { summary: now.summary, state: now.state };
-        describe_json(&self.app_id, &view, &specs)
-    }
-
-    /// The grade this surface publishes for `name` right now — regrades included — or the
-    /// refusal an action it does not have gets.
-    ///
-    /// The RPC thread asks for this before it spends a grant, so a grant is only ever spent on an
-    /// act whose grade the ceiling allows (#154). `act` reads the grade the same way.
-    fn grade_of(&self, name: &str) -> Result<&'static str, String> {
-        self.actions
-            .iter()
-            .find(|(a, _)| a.name == name)
-            .map(|(a, _)| effective_grade(&a.name, a.permission))
-            .ok_or_else(|| self.unknown(name))
-    }
-
-    fn unknown(&self, name: &str) -> String {
-        let known: Vec<&str> = self.actions.iter().map(|(a, _)| a.name.as_str()).collect();
-        format!("unknown action `{name}`; this app offers: {}", known.join(", "))
-    }
-
-    /// Check the ceiling and the mode, check the guard, dispatch, and read what came of it —
-    /// without leaving the UI thread.
-    ///
-    /// These steps are one function because they have to be one turn of the event loop. Split
-    /// across RPC calls, the gap between the check and the dispatch is a window in which the user
-    /// can type, and the gap between the dispatch and the read is a window in which they can undo
-    /// it. Here nothing runs in between, because there is no in between: this is the thread that
-    /// would have to run it.
-    ///
-    /// `authority` arrives as an argument — the ceiling and the mode already read from their
-    /// files by the RPC thread, and any grant already spent there (see `ControlRpc::dispatch`) —
-    /// so the boundary is enforced in the dispatch itself, the one function every `app.act` to a
-    /// window crosses, whoever sent it, while the IO stays off the UI thread and tests can pin the
-    /// ceiling and the mode instead of inheriting the developer's.
-    fn act(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        expect_revision: Option<&str>,
-        action_id: &str,
-        authority: &Authority,
-    ) -> Result<serde_json::Value, String> {
-        let Some((spec, run)) = self.actions.iter().find(|(a, _)| a.name == name) else {
-            return Err(self.unknown(name));
-        };
-
-        // The ceiling and then the mode, before anything else about this call is even looked at
-        // — before the arguments are checked, before the revision guard, and long before the
-        // handler — because "may this caller use this action at all" is a question about the
-        // action. `gate::decide` is the rule a service answering `app.act` itself meets too, in
-        // the same words. `effective_grade`, not `spec.permission`: an app may have moved its own
-        // grade since the surface was published (see `regrade`), and the check has to read the
-        // grade that `describe` is currently showing or the two disagree.
-        // With the action's own description beside the grade: an action this app says cannot be
-        // undone is asked about in every mode but bypass, as the shell and the bridge ask.
-        let published = effective_grade(name, spec.permission);
-        decide(authority, &self.app_id, name, published, &spec.description)?;
-
-        // Checked here rather than in every handler: a missing argument is the most common way a
-        // model gets a call wrong, and the error should name the argument, not panic in the app.
-        for p in spec.params.iter().filter(|p| p.required) {
-            if args.get(&p.name).is_none() {
-                return Err(format!("`{name}` needs argument `{}`", p.name));
-            }
-        }
-
-        // The mirror of the check above, and the omission that actually bit: an argument the
-        // action does not declare used to be dropped in silence. `new_note title='Handover'`
-        // answered accepted:true and wrote a note called "Untitled" — the caller was told its
-        // instruction had landed when nothing had read it. Refusing names the mistake and costs
-        // one retry; accepting it hides the mistake and costs the whole task.
-        if let Some(given) = args.as_object() {
-            for key in given.keys() {
-                if spec.params.iter().any(|p| &p.name == key) {
-                    continue;
-                }
-                let known: Vec<&str> = spec.params.iter().map(|p| p.name.as_str()).collect();
-                return Err(if known.is_empty() {
-                    format!("`{name}` takes no arguments, but `{key}` was given")
-                } else {
-                    format!("`{name}` has no argument `{key}`; it takes: {}", known.join(", "))
-                });
-            }
-        }
-
-        // The guard. A caller that read state, decided, and asked for this action gets to say what
-        // it was looking at; if the app has moved on, the action does not happen. Refusing is
-        // cheap and correctable — acting on a stale premise is neither.
-        if let Some(expected) = expect_revision {
-            let before = self.snapshot();
-            if before.revision != expected {
-                return Err(format!(
-                    "STALE: this app is at revision {} and you acted on {expected}. \
-                     It now reports: {}. Read it again before deciding.",
-                    before.revision, before.summary
-                ));
-            }
-        }
-
-        let result = run(args)?;
-
-        // Read back through the same path a `describe` would take, so a caller never has to make
-        // a second round trip to find out what its own action did.
-        let after = self.snapshot();
-        // Through the same helper a service uses, so a window action and a service action are
-        // indistinguishable by shape. `accepted` says the handler ran; `settled` (from the
-        // action's own `deferred`) says whether the work finished — never `ok`, never `done`.
-        let view = View { summary: after.summary, state: after.state };
-        Ok(act_json(&self.app_id, action_id, !spec.deferred, result, &view))
-    }
-}
+type Registry = LocalRegistry;
 
 thread_local! {
     /// Installed by [`App::serve`] on the thread that owns the window.
     static REGISTRY: RefCell<Option<Registry>> = const { RefCell::new(None) };
-
-    /// Grades [`regrade`] has moved since the surface was published, by action name.
-    ///
-    /// A separate cell, and that is the whole point. The dispatch runs a handler from *inside*
-    /// `REGISTRY.borrow()` (see `on_ui_thread`), so a handler that reached for `borrow_mut` on
-    /// the same cell panicked with "RefCell already borrowed" and took the app down with it —
-    /// which is exactly what `set_backend` did, since calling `regrade` from a handler is the
-    /// only way this function is ever meant to be used. Writing the override here means the
-    /// registry stays immutably borrowed and nothing re-enters it.
-    static OVERRIDES: RefCell<Vec<(String, &'static str)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The grade an action is published at right now: what it was declared with, unless
-/// [`regrade`] has moved it.
-///
-/// Every reader goes through here — the ceiling check in [`Registry::act`], [`published_grade`],
-/// and the specs [`Registry::describe`] hands out — so the card a person is shown and the
-/// dispatch that enforces it can never be reading two different numbers.
-fn effective_grade(action: &str, declared: &'static str) -> &'static str {
-    OVERRIDES.with(|cell| {
-        cell.borrow()
-            .iter()
-            .find(|(name, _)| name == action)
-            .map(|(_, grade)| *grade)
-            .unwrap_or(declared)
-    })
-}
-
-// ── Who is calling ──────────────────────────────────────────────────
+// ── Who is calling, which agent it is for, and answers that take time ──
 //
-// An action handler used to have no way to find out. Everything it could see about its caller
-// arrived inside the request, which means the caller wrote it — and the shell was printing one
-// of those strings on an approval card under the words "asking to use this machine". Anything
-// that could open the socket could put any name there (issue #43).
-//
-// The kernel knows better and says so for free: `SO_PEERCRED` on an accepted unix socket gives
-// the peer's pid, uid and gid, filled in at `connect` time from the peer's own process. The
-// transport reads it at accept (see `yantrik_ipc_transport::server::PeerCred`); this module's
-// job is to get it to the place the handler actually runs.
-//
-// That last part is the whole difficulty, and it is why this is a thread-local rather than a
-// global. The socket is served on its own thread; handlers run on the UI thread, reached by
-// posting a closure to the Slint event loop. A "current caller" stored anywhere shared would be
-// read by a handler that belongs to a different request, because two connections can be in
-// flight at once. So the caller travels WITH the closure, and is installed on the UI thread for
-// exactly the duration of that one dispatch.
+// All three are `yantrik_surface`'s, and are the same functions a service's handler calls. What
+// this module adds is carrying them across the hop: the caller and the agent token travel WITH
+// the closure posted to the UI thread and are installed there for exactly the duration of that
+// one dispatch (see `on_ui_thread`), and the rest of an answer a handler left with
+// `answer_later` travels back to the RPC thread with the reply, where it runs off the UI thread.
 //
 // The handler signature is untouched: fourteen apps build `|args| { ... }` closures and none of
 // them has to change. A handler that cares reads `control::caller()`; every other one never
 // learns this exists.
-
-/// Who opened the socket this request came in on, as the kernel reports it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Caller {
-    /// The peer process at `connect` time. It may well have exited by now — `yos` runs one call
-    /// and stops — so anything that wants `/proc` facts about it must read them promptly.
-    pub pid: i32,
-    pub uid: u32,
-    pub gid: u32,
-}
-
-thread_local! {
-    /// The caller of the dispatch currently running on THIS thread, or `None`.
-    static CURRENT_CALLER: RefCell<Option<Caller>> = const { RefCell::new(None) };
-}
-
-/// Who is calling, inside an action or describe handler. `None` when nothing could be
-/// established — a TCP dev connection, a peer that vanished, or a handler invoked directly.
-///
-/// Nothing in this crate refuses anything on the strength of it. Deciding what an identity is
-/// worth is the shell's business (`crates/yantrik-ui/src/caller_identity.rs`); the runtime's job
-/// is only to make the fact available where it can be read honestly.
-pub fn caller() -> Option<Caller> {
-    CURRENT_CALLER.with(|cell| *cell.borrow())
-}
+pub use yantrik_surface::{agent_token, answer_later, caller, Caller};
 
 /// The grade THIS app publishes for one of its own actions.
 ///
@@ -523,21 +309,13 @@ pub fn caller() -> Option<Caller> {
 /// harmless": an unknown action has no grade, and the honest answer to a question about one is
 /// a refusal, not a default.
 pub fn published_grade(action: &str) -> Option<&'static str> {
-    REGISTRY.with(|cell| cell.borrow().as_ref().and_then(|reg| reg.grade_of(action).ok()))
+    REGISTRY.with(|cell| cell.borrow().as_ref().and_then(|reg| reg.published_grade(action)))
 }
 
 /// Re-declare the grade THIS app publishes for one of its own actions, while it is running.
 ///
-/// An app whose actions cost different amounts depending on how it is configured needs this.
-/// Studio's `generate` sends a prompt to whatever backend the person chose: to a ComfyUI on their
-/// own LAN that is `standard`, to a hosted service it is `sensitive`, because the words leave the
-/// machine and may cost money doing it. The grade is fixed when [`App::serve`] runs, and the
-/// configuration can change afterwards from an action on this same surface — so without a way to
-/// move it, a caller could point the app at a hosted service and generate in the same breath, and
-/// the prompt would leave under the grade that applied when it was still local. That is the one
-/// direction a grade must never be wrong in, and it is why an app may raise its own grade at
-/// runtime rather than publish the cautious one forever.
-///
+/// See `yantrik_surface::Registry::regrade` for why an app needs this (Studio's `generate`, whose
+/// backend can move from the person's LAN to a hosted service by an action on the same surface).
 /// Returns the grade now published, so a handler can say what the next call will be asked for.
 /// `Err` leaves the published grade untouched: a typo must not quietly un-grade an action.
 ///
@@ -545,188 +323,22 @@ pub fn published_grade(action: &str) -> Option<&'static str> {
 /// only on the thread that owns the window — which is where handlers run, and the only place a
 /// grade can be changed without racing the dispatch that reads it.
 ///
-/// It takes only a SHARED borrow of the registry, and writes the new grade into a separate cell.
+/// It takes only a SHARED borrow of the registry, whose overrides sit behind their own lock.
 /// That is not tidiness: the dispatch runs a handler from inside `REGISTRY.borrow()`, so the
 /// first version of this — which took `borrow_mut` — panicked with "RefCell already borrowed"
 /// the first time an action called it, killing the app. Calling this from a handler is the only
 /// way it is ever meant to be used, so that was every use of it.
 pub fn regrade(action: &str, permission: &'static str) -> Result<&'static str, String> {
-    if grade(permission).is_none() {
-        return Err(format!(
-            "`{permission}` is not a level this OS defines ({}), so `{action}` kept the grade it had",
-            LADDER.join(" < ")
-        ));
-    }
-    REGISTRY.with(|cell| {
-        let installed = cell.borrow();
-        let Some(registry) = installed.as_ref() else {
-            return Err("this app published no control surface, so there is no grade to change".to_string());
-        };
-        if !registry.actions.iter().any(|(a, _)| a.name == action) {
-            let known: Vec<&str> = registry.actions.iter().map(|(a, _)| a.name.as_str()).collect();
-            return Err(format!("this app has no action `{action}`; it offers: {}", known.join(", ")));
-        }
-        Ok(())
-    })?;
-    OVERRIDES.with(|cell| {
-        let mut set = cell.borrow_mut();
-        match set.iter_mut().find(|(name, _)| name == action) {
-            Some(entry) => entry.1 = permission,
-            None => set.push((action.to_string(), permission)),
-        }
-    });
-    Ok(permission)
-}
-
-/// Installs `who` for the duration of `job` and takes it back afterwards.
-///
-/// A guard rather than a set-then-clear pair, so a handler that panics cannot leave the next
-/// dispatch on this thread reading the previous caller's pid. It restores the *previous* value
-/// rather than clearing, which costs nothing and keeps a nested call honest.
-struct CallerScope(Option<Caller>);
-
-impl CallerScope {
-    fn enter(who: Option<Caller>) -> CallerScope {
-        let previous = CURRENT_CALLER.with(|cell| cell.replace(who));
-        CallerScope(previous)
-    }
-}
-
-impl Drop for CallerScope {
-    fn drop(&mut self) {
-        CURRENT_CALLER.with(|cell| *cell.borrow_mut() = self.0);
-    }
-}
-
-// ── Which agent a call is for ───────────────────────────────────────
-//
-// A mind running as one of the person's agents carries a token its harness was given (design
-// `agents-workspace-2026-09-23.md`, decision 3). It travels BESIDE `args` on `app.act`, the way a
-// grant does, and never inside them — because `args` is what gets shown and kept: the approval
-// card draws it, `record_unasked_action` writes it to `mind-audit.jsonl`, a grant is bound to it.
-// A token in any of those is a token anyone reading the screen or the log can replay.
-//
-// So the dispatch lifts the token off the call, strips any copy a caller put inside `args`, and
-// hands it to the handler the way it hands over the caller: for the duration of the one dispatch,
-// on the thread the handler runs on. What the token is worth is the handler's business — the
-// shell resolves it against the kernel's account of the caller; here it is only carried.
-//
-// The lifting itself — `AGENT_TOKEN` and `agent_token_of` — is `yantrik_ipc_transport::gate`'s,
-// beside `grant_of`, so a service answering `app.act` in its own handler takes the token out of
-// `args` the same way before its grant is spent against them.
-
-thread_local! {
-    /// The agent token of the dispatch currently running on THIS thread, or `None`.
-    static CURRENT_AGENT_TOKEN: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-/// The agent token the call being handled carried beside its `args`, inside an action handler.
-/// `None` when it carried none, or outside a dispatch.
-///
-/// Like [`caller`], it is a fact about the call and not a verdict: nothing here checks it.
-pub fn agent_token() -> Option<String> {
-    CURRENT_AGENT_TOKEN.with(|cell| cell.borrow().clone())
-}
-
-/// Installs a dispatch's token for its duration and puts back what was there, panic or not.
-struct AgentTokenScope(Option<String>);
-
-impl AgentTokenScope {
-    fn enter(token: Option<String>) -> AgentTokenScope {
-        AgentTokenScope(CURRENT_AGENT_TOKEN.with(|cell| cell.replace(token)))
-    }
-}
-
-impl Drop for AgentTokenScope {
-    fn drop(&mut self) {
-        let previous = self.0.take();
-        CURRENT_AGENT_TOKEN.with(|cell| *cell.borrow_mut() = previous);
-    }
-}
-
-// ── Answers that take time ──────────────────────────────────────────
-//
-// A handler has the three seconds of `UI_ROUNDTRIP`, on the thread that paints the window. Some
-// acts are worth waiting for anyway: the shell's `agent_run` starts a command and owes its caller
-// the exit code, which may be two minutes away. Deferring (`settled: false`, "go and look later")
-// is the right answer for work whose result lands on screen; it is the wrong one for work whose
-// result IS the answer.
-//
-// So a handler can say "the rest of my answer is this closure". It returns at once — the window
-// never waits — and the dispatch runs the closure on the RPC side, where the only thing waiting is
-// the one caller who asked. The closure travels from the UI thread back to the RPC thread with the
-// reply, the same way the caller travelled out with the request.
-
-/// The rest of an answer, finished off the UI thread.
-type Later = Box<dyn FnOnce() -> Result<serde_json::Value, String> + Send>;
-
-thread_local! {
-    /// On the UI thread, during one dispatch: where [`answer_later`] leaves the rest of the
-    /// answer. `None` outside a dispatch, which is how `answer_later` knows nothing will run it.
-    static LATER_SLOT: RefCell<Option<Option<Later>>> = const { RefCell::new(None) };
-
-    /// On the RPC thread: the rest of the answer the dispatch that just came back handed over.
-    static LATER_HANDED: RefCell<Option<Later>> = const { RefCell::new(None) };
-}
-
-/// Finish this action's answer off the UI thread: `work` runs after the handler has returned, on
-/// the socket's side, and what it returns is the caller's `result` (an `Err` is the caller's
-/// refusal, exactly as if the handler had returned it).
-///
-/// Call it from inside a handler, as its last act, and return anything — the value is replaced.
-/// `work` must carry everything it needs: it does not run on the UI thread, so it cannot touch the
-/// window, and [`caller`] is not set there (read it in the handler and move it in).
-///
-/// `Err(work)` hands the work back when nothing will run it — the handler was called directly, not
-/// through the socket — so the handler can run it itself:
-/// `answer_later(work).map(|()| placeholder).or_else(|work| work())`.
-///
-/// If the UI thread answered too late for the caller (see `UI_ROUNDTRIP`), `work` is dropped
-/// without running: do the whole of the act inside it and a late reply starts nothing.
-pub fn answer_later<F>(work: F) -> Result<(), F>
-where
-    F: FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
-{
-    LATER_SLOT.with(|cell| match cell.borrow_mut().as_mut() {
-        Some(slot) => {
-            *slot = Some(Box::new(work));
-            Ok(())
-        }
-        None => Err(work),
+    yantrik_surface::check_grade(action, permission)?;
+    REGISTRY.with(|cell| match cell.borrow().as_ref() {
+        None => Err("this app published no control surface, so there is no grade to change".to_string()),
+        Some(registry) => registry.regrade(action, permission),
     })
 }
 
-/// Opens the slot for one dispatch on the UI thread and closes it afterwards, even on a panic, so
-/// one handler's work can never be run as another's answer.
-struct LaterScope(Option<Option<Later>>);
-
-impl LaterScope {
-    fn enter() -> LaterScope {
-        LaterScope(LATER_SLOT.with(|cell| cell.replace(Some(None))))
-    }
-
-    fn take(&self) -> Option<Later> {
-        LATER_SLOT.with(|cell| cell.borrow_mut().as_mut().and_then(Option::take))
-    }
-}
-
-impl Drop for LaterScope {
-    fn drop(&mut self) {
-        let previous = self.0.take();
-        LATER_SLOT.with(|cell| *cell.borrow_mut() = previous);
-    }
-}
-
-/// Run `work` without holding up the socket's other callers: on the multi-threaded runtime the
-/// control surface serves on, this worker steps aside and another takes its connections.
-fn off_the_reactor<T>(work: impl FnOnce() -> T) -> T {
-    use tokio::runtime::{Handle, RuntimeFlavor};
-    match Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(work)
-        }
-        _ => work(),
-    }
+thread_local! {
+    /// On the RPC thread: the rest of the answer the dispatch that just came back handed over.
+    static LATER_HANDED: RefCell<Option<Later>> = const { RefCell::new(None) };
 }
 
 /// Hand one closure to the thread that owns the window.
@@ -747,7 +359,7 @@ fn post_to_ui(job: Box<dyn FnOnce() + Send>) -> Result<(), String> {
     slint::invoke_from_event_loop(job).map_err(|e| format!("app is not accepting requests: {e}"))
 }
 
-/// A stand-in for the thread that owns the window, for the one test that needs a real socket.
+/// A stand-in for the thread that owns the window, for the tests that need a real socket.
 ///
 /// The property worth testing is that the caller crosses the thread hop with its own request,
 /// and that cannot be tested through a handler called directly — `Registry::act` never sees a
@@ -794,7 +406,8 @@ mod test_ui_thread {
     }
 
     /// Post to the stand-in, or hand the job straight back when there is none — which is every
-    /// test but the one, so nothing else in this module changes behaviour under `cfg(test)`.
+    /// test but the socket ones, so nothing else in this module changes behaviour under
+    /// `cfg(test)`.
     pub(super) fn post(job: Job) -> Result<(), Job> {
         let Some(tx) = STANDIN.get() else { return Err(job) };
         let tx = tx.lock().unwrap_or_else(|e| e.into_inner());
@@ -808,7 +421,8 @@ mod test_ui_thread {
 /// [`UI_ROUNDTRIP`] — both of which the caller should see as an error rather than a hang.
 ///
 /// `who` rides along to the far side. It is installed there, not here: the handler runs on the
-/// UI thread, so the UI thread is the only place a thread-local can be read by it.
+/// UI thread, so the UI thread is the only place a thread-local can be read by it. The rest of an
+/// answer a handler left with [`answer_later`] rides back, for `ControlRpc::handle_from` to run.
 fn on_ui_thread<T, F>(who: Option<Caller>, job: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -832,6 +446,11 @@ where
     // For `ControlRpc::handle_from`, on this same thread, which finishes it. See `answer_later`.
     LATER_HANDED.with(|cell| *cell.borrow_mut() = later);
     answer
+}
+
+/// The UI thread did not answer in time, or there is no window to answer.
+fn unanswered(message: String) -> ServiceError {
+    ServiceError { code: UNANSWERED, message }
 }
 
 // ── The RPC surface ─────────────────────────────────────────────────
@@ -864,40 +483,20 @@ impl ServiceHandler for ControlRpc {
         params: serde_json::Value,
         peer: Option<PeerCred>,
     ) -> Result<serde_json::Value, ServiceError> {
-        let who = peer.map(|p| Caller { pid: p.pid, uid: p.uid, gid: p.gid });
+        let who = peer.map(Caller::from);
         // Nothing left over from an earlier call on this thread can be taken for this one's.
         LATER_HANDED.with(|cell| cell.borrow_mut().take());
         let answer = self.dispatch(method, params, who);
         let later = LATER_HANDED.with(|cell| cell.borrow_mut().take());
         match (answer, later) {
-            (Ok(envelope), Some(later)) if method == "app.act" => finish_later(envelope, later, who),
+            // The work runs here, off the UI thread, and the view beside its result is read
+            // again on the UI thread once it has.
+            (Ok(envelope), Some(later)) if method == "app.act" => finish_later(envelope, later, || {
+                on_ui_thread(who, |reg| reg.snapshot()).ok()
+            }),
             (answer, _) => answer,
         }
     }
-}
-
-/// Run the rest of an answer a handler left with [`answer_later`], and put its result in the
-/// envelope — with the view read again afterwards, so the state beside the result is the state
-/// the result came from rather than the state before the wait.
-fn finish_later(
-    mut envelope: serde_json::Value,
-    later: Later,
-    who: Option<Caller>,
-) -> Result<serde_json::Value, ServiceError> {
-    let result = off_the_reactor(later).map_err(|message| ServiceError { code: -32602, message })?;
-    envelope["result"] = result;
-    let after = on_ui_thread(who, |reg| {
-        let now = reg.snapshot();
-        (now.summary, now.state, now.revision)
-    });
-    // A UI thread too busy to answer now does not undo what the work did: the result stands and
-    // the view is the one from when the handler ran.
-    if let Ok((summary, state, revision)) = after {
-        envelope["summary"] = summary.into();
-        envelope["state"] = state;
-        envelope["revision"] = revision.into();
-    }
-    Ok(envelope)
 }
 
 impl ControlRpc {
@@ -908,111 +507,50 @@ impl ControlRpc {
         who: Option<Caller>,
     ) -> Result<serde_json::Value, ServiceError> {
         match method {
-            "app.describe" => on_ui_thread(who, |reg| reg.describe())
-                .map_err(|m| ServiceError { code: -32000, message: m }),
+            "app.describe" => on_ui_thread(who, |reg| reg.describe()).map_err(unanswered),
 
             "app.act" => {
-                let action = params
-                    .get("action")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                if action.is_empty() {
-                    return Err(ServiceError {
-                        code: -32602,
-                        message: "act needs a non-empty `action`".into(),
-                    });
-                }
-                let mut args = params.get("args").cloned().unwrap_or(serde_json::json!({}));
-                // Lifted off before anything reads `args` — the grant below is bound to them —
-                // and out of `args` if a caller put it there. See `agent_token`.
-                let token = agent_token_of(&params, &mut args);
-                // ── Agents catalog: the calling agent's reach (`yantrik_ipc_transport::reach`) —
+                let call = ActCall::parse(&params)?;
+                // Agents catalog: the calling agent's reach (`yantrik_ipc_transport::reach`) —
                 // read here, where IO belongs, and held to below before any grant is spent and
                 // before the handler runs. No token, or a token with no reach, is not held.
-                let reach = match token.as_deref() {
-                    Some(token) => reach::reach_of(token).map_err(|why| ServiceError {
-                        code: -32602,
-                        message: format!("REACH: {why}, so no act carrying an agent token runs until it can be. Nothing was run."),
-                    })?,
-                    None => None,
-                };
-                // Optional, and deliberately so: a caller acting on its own initiative has nothing
-                // to compare against, and demanding a revision it never read would only teach it
-                // to send back whatever it last saw.
-                let expect = params
-                    .get("expect_revision")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                // A grant, when the caller holds one: the `request_id` the shell answered
-                // `request_approval` with, once a person has pressed Allow. Optional for the
-                // same reason `expect_revision` is — most calls need none.
-                let grant = grant_of(&params);
+                let reach = call.reach()?;
                 let action_id = next_action_id(&self.service_id);
 
                 // Read on this thread, enforced on the UI one: the settings and mode files are
                 // IO, spending a grant is a round trip, and the dispatch closure is a turn of
                 // the event loop.
                 let mut authority = Authority::now();
-                if let Some(id) = grant.as_deref() {
-                    // A grant is spent only once the ceiling has passed on the action's grade,
-                    // or a person's Allow is used up on an act that is then refused and never
-                    // runs (#154). The grade lives on the UI thread, so ask it first — one extra
-                    // hop, only for a call that carries a grant, which is one a person has just
-                    // answered a card for. An action this app does not have is answered as that
-                    // here, and nothing is spent on it. Should the app regrade the action between
-                    // this read and the dispatch, the dispatch still decides on the grade it
-                    // publishes then; the most that race can cost is the grant.
-                    let name = action.clone();
-                    let graded = on_ui_thread(who, move |reg| reg.grade_of(&name))
-                        .map_err(|m| ServiceError { code: -32000, message: m })?
-                        .map_err(|m| ServiceError { code: -32602, message: m })?;
-                    // Outside the agent's reach, a person's Allow is not used up on it either.
-                    if let Some(reach) = &reach {
-                        reach::within(reach, &self.app_id, &action, graded)
-                            .map_err(|m| ServiceError { code: -32602, message: m })?;
-                    }
-                    authority
-                        .spend(id, &self.app_id, &action, graded, &args)
-                        .map_err(|m| ServiceError { code: -32602, message: m })?;
-                }
-                tracing::info!(
-                    action = %action,
-                    id = %action_id,
-                    ceiling = %authority.ceiling,
-                    mode = %authority.mode.name,
-                    granted = authority.granted,
-                    // Logged as a pair so a line in the journal says who as well as what. The
-                    // audit log is the shell's job; this is the runtime's own record.
-                    caller_pid = who.map(|c| c.pid).unwrap_or(0),
-                    caller_uid = who.map(|c| c.uid).unwrap_or(0),
-                    // Whether one came, never the token itself.
-                    agent_token = token.is_some(),
-                    "app.act"
-                );
-                let id = action_id.clone();
-                let app_id = self.app_id.clone();
-                let outcome = on_ui_thread(who, move |reg| {
-                    let _agent = AgentTokenScope::enter(token);
-                    // The reach, on the grade this surface publishes now — the one `act` decides on.
-                    if let Some(reach) = &reach {
-                        reach::within(reach, &app_id, &action, reg.grade_of(&action)?)?;
-                    }
-                    reg.act(&action, &args, expect.as_deref(), &id, &authority)
-                })
-                .map_err(|m| ServiceError { code: -32000, message: m })?;
+                // A grant is spent only once the ceiling has passed on the action's grade (#154).
+                // The grade lives on the UI thread, so ask it first — one extra hop, only for a
+                // call that carries a grant, which is one a person has just answered a card for.
+                // An action this app does not have is answered as that here, and nothing is
+                // spent on it. Should the app regrade the action between this read and the
+                // dispatch, the dispatch still decides on the grade it publishes then; the most
+                // that race can cost is the grant. Outside the agent's reach, a person's Allow is
+                // not used up on it either.
+                call.spend_grant(&mut authority, &self.app_id, reach.as_ref(), |name| {
+                    let name = name.to_string();
+                    on_ui_thread(who, move |reg| reg.grade_of(&name)).map_err(unanswered)?.map_err(refusal)
+                })?;
+                call.log(&action_id, &authority, who);
 
-                match outcome {
-                    Ok(answer) => Ok(answer),
-                    // An action that legitimately refuses is an application error, not a
-                    // transport failure: -32602 keeps it out of the client's circuit breaker.
-                    Err(message) => Err(ServiceError { code: -32602, message }),
-                }
+                let ActCall { action, args, agent_token, expect_revision, .. } = call;
+                on_ui_thread(who, move |reg| {
+                    let _agent = AgentTokenScope::enter(agent_token);
+                    // The reach, on the grade this surface publishes now — the one `act` decides on.
+                    reg.within_reach(reach.as_ref(), &action).and_then(|()| {
+                        reg.act(&action, &args, expect_revision.as_deref(), &action_id, &authority)
+                    })
+                })
+                .map_err(unanswered)?
+                // An action that legitimately refuses is an application error, not a transport
+                // failure: -32602 keeps it out of the client's circuit breaker.
+                .map_err(refusal)
             }
 
             other => Err(ServiceError {
-                code: -32601,
+                code: NO_SUCH_METHOD,
                 message: format!("unknown method `{other}`; this app serves app.describe, app.act"),
             }),
         }
@@ -1030,12 +568,12 @@ pub struct App {
 
 impl App {
     pub fn new(app_id: &str) -> Self {
-        Self { registry: Registry { app_id: app_id.into(), describe: None, actions: Vec::new() } }
+        Self { registry: Registry::new(app_id) }
     }
 
     /// What this app reports when asked. Runs on the UI thread; keep it cheap.
     pub fn describe(mut self, f: impl Fn() -> View + 'static) -> Self {
-        self.registry.describe = Some(Box::new(f));
+        self.registry.set_describe(Box::new(f));
         self
     }
 
@@ -1045,7 +583,7 @@ impl App {
         spec: Action,
         f: impl Fn(&serde_json::Value) -> Result<serde_json::Value, String> + 'static,
     ) -> Self {
-        self.registry.actions.push((spec, Box::new(f)));
+        self.registry.add(spec, Box::new(f));
         self
     }
 
@@ -1055,8 +593,8 @@ impl App {
     /// not fatal: an app whose socket cannot be bound is still a working app, it is only invisible
     /// to the mind, and taking the window down over that would be the worse outcome.
     pub fn serve(self) {
-        let app_id = self.registry.app_id.clone();
-        let action_count = self.registry.actions.len();
+        let app_id = self.registry.app_id().to_string();
+        let action_count = self.registry.action_count();
         REGISTRY.with(|cell| *cell.borrow_mut() = Some(self.registry));
         serve_rpc(&app_id, action_count);
     }
@@ -1208,13 +746,18 @@ pub fn running_apps() -> Vec<String> {
     Vec::new()
 }
 
+/// The dispatch's own tests — the order of the checks, every sentence, the ceiling, the mode, the
+/// guard, the argument types — live with the dispatch, in `yantrik-surface`. These are the ones
+/// only a window has: the registry on the UI thread, the free `published_grade` / `regrade` a
+/// handler calls there, the hop across and back over a real socket, and the names.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     /// A ceiling that binds nothing, for the tests that are about everything *except* the
-    /// boundary. The boundary has its own tests below, with the ceiling and the mode pinned per
-    /// case rather than inherited from whatever files the machine running them happens to have.
+    /// boundary.
     const OPEN: &str = "dangerous";
 
     /// Authority that binds nothing: the ceiling and the mode both at the top of the ladder.
@@ -1230,6 +773,24 @@ mod tests {
     /// An open ceiling and the mode under test, with or without a grant spent for the call.
     fn in_mode(mode: &str, granted: bool) -> Authority {
         Authority { ceiling: OPEN.into(), mode: Mode::named(mode), granted }
+    }
+
+    type Act = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
+
+    /// A registry built the way [`App`] builds one.
+    fn registry(
+        app_id: &str,
+        describe: Option<Box<dyn Fn() -> View>>,
+        actions: Vec<(Action, Act)>,
+    ) -> Registry {
+        let mut app = App::new(app_id);
+        if let Some(f) = describe {
+            app = app.describe(f);
+        }
+        for (spec, f) in actions {
+            app = app.action(spec, f);
+        }
+        app.registry
     }
 
     #[test]
@@ -1308,351 +869,33 @@ mod tests {
         assert_eq!(v.state["unsaved"], true);
     }
 
-    /// A registry with one action over a state the test can move underneath it.
-    fn notes_at(title: &'static str) -> Registry {
-        Registry {
-            app_id: "notes".into(),
-            describe: Some(Box::new(move || {
-                View::new(format!("Notes \u{2014} {title}")).with("open_note", title)
-            })),
-            actions: vec![(
+    /// An `App` is the dispatch: what it builds refuses and answers as `yantrik-surface` does,
+    /// with the argument types checked.
+    #[test]
+    fn an_app_dispatches_through_the_surface_crate() {
+        let reg = registry(
+            "notes",
+            Some(Box::new(|| View::new("Notes \u{2014} Kernel asks"))),
+            vec![(
                 Action::new("rename", "Rename the open note").arg(Param::text("to")),
                 Box::new(|args| Ok(serde_json::json!({ "renamed_to": args["to"].clone() }))),
             )],
-        }
-    }
-
-    #[test]
-    fn an_action_becomes_json_schema() {
-        let schema = Action::new("open_note", "Open a note by title")
-            .arg(Param::text("title").describe("The note's title"))
-            .arg(Param::flag("focus").optional())
-            .schema();
-
-        assert_eq!(schema["name"], "open_note");
-        // Unstated risk is `standard`: steering someone's window is never free.
-        assert_eq!(schema["permission"], "standard");
-        assert_eq!(schema["parameters"]["properties"]["title"]["type"], "string");
-        assert_eq!(schema["parameters"]["properties"]["focus"]["type"], "boolean");
-        // Only the required argument is listed as required.
-        assert_eq!(schema["parameters"]["required"], serde_json::json!(["title"]));
-    }
-
-    #[test]
-    fn an_action_can_declare_itself_dangerous() {
-        let schema = Action::new("kill_process", "End a process").risk("dangerous").schema();
-        assert_eq!(schema["permission"], "dangerous");
-    }
-
-    #[test]
-    fn a_missing_argument_is_named_not_guessed() {
-        let reg = Registry {
-            app_id: "notes".into(),
-            describe: None,
-            actions: vec![(
-                Action::new("open_note", "Open a note").arg(Param::text("title")),
-                Box::new(|_| Ok(serde_json::json!("never reached"))),
-            )],
-        };
-
-        let err = reg.act("open_note", &serde_json::json!({}), None, "t#1", &open()).unwrap_err();
-        assert!(err.contains("title"), "the error must name the missing argument: {err}");
-    }
-
-    #[test]
-    fn an_argument_the_action_never_declared_is_refused_not_dropped() {
-        let reg = Registry {
-            app_id: "notes".into(),
-            describe: None,
-            actions: vec![(
-                Action::new("open_note", "Open a note").arg(Param::text("title")),
-                Box::new(|_| Ok(serde_json::json!("ran"))),
-            )],
-        };
-
-        // The real call that exposed this: a title was passed to an action that does not take
-        // one, the argument was dropped, and the caller was told the action succeeded.
-        let err = reg
-            .act("open_note", &serde_json::json!({"title": "a", "colour": "red"}), None, "t#1", &open())
-            .unwrap_err();
-        assert!(err.contains("colour"), "the error must name the argument it did not know: {err}");
-        assert!(err.contains("title"), "and list what it does take: {err}");
-    }
-
-    #[test]
-    fn an_action_that_takes_nothing_says_so_rather_than_ignoring_you() {
-        let reg = Registry {
-            app_id: "notes".into(),
-            describe: None,
-            actions: vec![(
-                Action::new("new_note", "Start a new note"),
-                Box::new(|_| Ok(serde_json::json!({"title": "Untitled"}))),
-            )],
-        };
-
-        // This is verbatim the call made on the deployed VM. It used to answer accepted:true
-        // and write a note called "Untitled".
-        let err = reg
-            .act("new_note", &serde_json::json!({"title": "Handover"}), None, "t#1", &open())
-            .unwrap_err();
-        assert!(err.contains("takes no arguments"), "{err}");
-        assert!(err.contains("title"), "{err}");
-
-        // And the no-argument call it was always meant to accept still works.
-        assert!(reg.act("new_note", &serde_json::json!({}), None, "t#2", &open()).is_ok());
-    }
-
-    #[test]
-    fn an_unknown_action_lists_the_real_ones() {
-        let reg = Registry {
-            app_id: "notes".into(),
-            describe: None,
-            actions: vec![(
-                Action::new("open_note", "Open a note"),
-                Box::new(|_| Ok(serde_json::Value::Null)),
-            )],
-        };
-
-        let err = reg.act("nope", &serde_json::json!({}), None, "t#1", &open()).unwrap_err();
-        assert!(err.contains("open_note"), "a wrong guess should be correctable: {err}");
-    }
-
-    #[test]
-    fn describe_falls_back_when_the_app_published_nothing() {
-        let reg = Registry { app_id: "notes".into(), describe: None, actions: Vec::new() };
-        let out = reg.describe();
-        assert_eq!(out["app"], "notes");
-        assert_eq!(out["actions"], serde_json::json!([]));
-    }
-
-    // ── The fingerprint ──
-
-    #[test]
-    fn the_same_view_fingerprints_the_same_and_a_changed_one_does_not() {
-        let a = View::new("Notes \u{2014} Kernel asks").with("words", 412).with("unsaved", true);
-        let same = View::new("Notes \u{2014} Kernel asks").with("words", 412).with("unsaved", true);
-        assert_eq!(a.revision(), same.revision());
-
-        // One word typed is a different state, and has to be a different revision — otherwise a
-        // guard built on it would wave through an action decided before the typing.
-        let typed = View::new("Notes \u{2014} Kernel asks").with("words", 413).with("unsaved", true);
-        assert_ne!(a.revision(), typed.revision());
-
-        // And so is a different summary over identical state.
-        let renamed = View::new("Notes \u{2014} Kernel answers").with("words", 412).with("unsaved", true);
-        assert_ne!(a.revision(), renamed.revision());
-    }
-
-    #[test]
-    fn the_order_fields_were_added_in_does_not_change_the_revision() {
-        // Two `describe` implementations of the same state must agree, or a guard would fire on a
-        // refactor that changed nothing a person could see.
-        let one = View::new("Notes").with("words", 412).with("unsaved", true);
-        let other = View::new("Notes").with("unsaved", true).with("words", 412);
-        assert_eq!(one.revision(), other.revision());
-    }
-
-    // ── Accepted is not done ──
-
-    #[test]
-    fn acting_never_answers_with_a_bare_success() {
-        let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "Kernel answers" }), None, "notes#1", &open())
-            .unwrap();
-
-        // The three things a caller has to be able to tell apart.
-        assert_eq!(answer["accepted"], true);
-        assert_eq!(answer["action_id"], "notes#1");
-        assert_eq!(answer["settled"], true);
-        assert_eq!(answer["result"]["renamed_to"], "Kernel answers");
-        // And the state afterwards, so nobody has to make a second call to find out what they did.
-        assert!(answer["summary"].as_str().unwrap().contains("Kernel asks"));
-        assert!(answer["revision"].as_str().is_some_and(|r| r.len() == 16));
-    }
-
-    #[test]
-    fn an_action_that_only_starts_the_work_says_so() {
-        // The build case. Returning `accepted: true` with nothing else would let a caller report a
-        // compile as finished the instant it was started.
-        let reg = Registry {
-            app_id: "builder".into(),
-            describe: None,
-            actions: vec![(
-                Action::new("build", "Start a build").defers(),
-                Box::new(|_| Ok(serde_json::json!({ "job": 83 }))),
-            )],
-        };
-
-        let answer = reg.act("build", &serde_json::json!({}), None, "builder#1", &open()).unwrap();
-        assert_eq!(answer["accepted"], true);
-        assert_eq!(answer["settled"], false, "a dispatched build has not built anything yet");
-
-        // And the schema says it in advance, so a caller can plan to watch rather than discover
-        // afterwards that it has to.
-        let schema = Action::new("build", "Start a build").defers().schema();
-        assert_eq!(schema["settles"], "later");
-        assert_eq!(Action::new("open_note", "Open").schema()["settles"], "on return");
-    }
-
-    // ── The guard ──
-
-    #[test]
-    fn an_action_decided_on_a_state_the_app_has_left_is_refused() {
-        // The race this exists for. A caller reads "Kernel asks", decides to rename it, and by the
-        // time the call lands the user has opened something else. Renaming now renames the wrong
-        // note, and the caller would report success.
-        let stale = View::new("Notes \u{2014} Kernel asks").with("open_note", "Kernel asks").revision();
-
-        let err = notes_at("Shopping list")
-            .act("rename", &serde_json::json!({ "to": "x" }), Some(&stale), "notes#1", &open())
-            .unwrap_err();
-
-        assert!(err.starts_with("STALE:"), "a caller has to be able to branch on this: {err}");
-        assert!(err.contains(&stale), "the refusal names what was expected: {err}");
-        assert!(
-            err.contains("Shopping list"),
-            "and what is actually there, so the next read is not blind: {err}"
         );
-    }
-
-    #[test]
-    fn a_guard_that_matches_lets_the_action_through() {
-        let current = View::new("Notes \u{2014} Kernel asks").with("open_note", "Kernel asks").revision();
-
-        let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), Some(&current), "notes#1", &open())
-            .unwrap();
+        let answer = reg.act("rename", &serde_json::json!({"to": "x"}), None, "app-notes#1", &open()).unwrap();
         assert_eq!(answer["accepted"], true);
-        assert_eq!(answer["result"]["renamed_to"], "ok");
-    }
-
-    #[test]
-    fn an_action_with_no_guard_still_runs() {
-        // Most calls are the caller's own initiative and have nothing to compare against.
-        // Requiring a revision would only teach callers to echo back whatever they last saw,
-        // which is a guard that always passes.
-        let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", &open())
-            .unwrap();
-        assert_eq!(answer["accepted"], true);
-    }
-
-    #[test]
-    fn the_guard_is_checked_before_the_arguments_are_used() {
-        // Ordering that matters: a stale guard must refuse without the handler having run. If the
-        // rename happened and *then* we noticed the state had moved, the refusal would be a lie.
-        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-        let reg = Registry {
-            app_id: "notes".into(),
-            describe: Some(Box::new(|| View::new("Notes \u{2014} now"))),
-            actions: vec![(Action::new("go", "Go"), {
-                let ran = ran.clone();
-                Box::new(move |_| {
-                    ran.set(true);
-                    Ok(serde_json::Value::Null)
-                })
-            })],
-        };
-
-        let err = reg.act("go", &serde_json::json!({}), Some("0000000000000000"), "n#1", &open());
-        assert!(err.is_err());
-        assert!(!ran.get(), "the handler must not have run");
-    }
-
-    // ── The ceiling ──
-
-    /// The shape the bug was measured in: `files_delete`, graded `dangerous`, on a machine
-    /// whose ceiling is `sensitive`. The bridge refused it; the dispatch waved it through, and
-    /// the file was gone. These tests live here, beside the dispatch, so the boundary fails
-    /// loudly if anyone moves the check back out to a caller.
-    fn delete_surface(ran: std::rc::Rc<std::cell::Cell<bool>>) -> Registry {
-        Registry {
-            app_id: "shell".into(),
-            describe: Some(Box::new(|| View::new("Shell \u{2014} Files"))),
-            actions: vec![(
-                Action::new("files_delete", "Delete a file").risk("dangerous").arg(Param::text("name")),
-                Box::new(move |args| {
-                    ran.set(true);
-                    Ok(serde_json::json!({ "deleted": args["name"].clone() }))
-                }),
-            )],
-        }
-    }
-
-    #[test]
-    fn an_action_above_the_ceiling_is_refused_by_the_dispatch_itself() {
-        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-        let reg = delete_surface(ran.clone());
-
-        let err = reg
-            .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", &under("sensitive"))
-            .unwrap_err();
-
-        assert!(err.starts_with("CEILING:"), "a caller has to be able to branch on this: {err}");
-        assert!(err.contains("dangerous"), "the refusal names the grade: {err}");
-        assert!(err.contains("sensitive"), "and the ceiling it was over: {err}");
-        assert!(err.contains("tool_permission"), "and where that ceiling is set: {err}");
-        assert!(!ran.get(), "the handler must not have run");
-    }
-
-    #[test]
-    fn the_ceiling_refuses_on_the_grade_alone_before_anything_is_checked() {
-        // The measured MCP behaviour, now the dispatch's too: it refused `files_delete {"name":
-        // "x"}` on grade before even establishing whether `x` existed. A caller over the ceiling
-        // gets one answer regardless of what else is wrong with its call — otherwise fixing the
-        // smaller mistake looks like progress toward a call that was never going to run.
-        let reg = delete_surface(std::rc::Rc::new(std::cell::Cell::new(false)));
-
-        let err = reg.act("files_delete", &serde_json::json!({}), None, "shell#1", &under("sensitive")).unwrap_err();
-        assert!(err.starts_with("CEILING:"), "not the missing-argument error: {err}");
-        assert!(!err.contains("needs argument"), "{err}");
-    }
-
-    #[test]
-    fn an_action_at_or_below_the_ceiling_runs() {
-        // "At or below" is the whole contract; the ceiling is not a blanket refusal.
-        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-        let reg = delete_surface(ran.clone());
-        let answer = reg
-            .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", &under("dangerous"))
-            .unwrap();
-        assert_eq!(answer["accepted"], true);
-        assert!(ran.get());
-
-        // And the everyday case: a `standard` action under the shipped `sensitive` default.
-        let answer = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", &under("sensitive"))
-            .unwrap();
-        assert_eq!(answer["accepted"], true);
-    }
-
-    #[test]
-    fn a_ceiling_tightened_to_safe_binds_the_default_actions_too() {
-        // The setting has to actually tighten, not only refuse the graded-dangerous few: every
-        // action floors at `standard`, so `safe` closes the door to programmatic callers entirely.
-        let err = notes_at("Kernel asks")
-            .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", &under("safe"))
-            .unwrap_err();
-        assert!(err.starts_with("CEILING:"), "{err}");
-        assert!(err.contains("standard"), "the refusal names the action's own grade: {err}");
-    }
-
-    #[test]
-    fn an_action_graded_off_the_ladder_is_refused_not_waved_through() {
-        // The mirror of the bridge's rule: an ungradeable action is not "safe". A typo in a
-        // `.risk(...)` must fail closed, or the typo silently becomes an exemption.
-        let reg = Registry {
-            app_id: "notes".into(),
-            describe: None,
-            actions: vec![(
-                Action::new("nuke", "Typo'd grade").risk("catastrophic"),
-                Box::new(|_| Ok(serde_json::json!("never reached"))),
-            )],
-        };
-
-        let err = reg.act("nuke", &serde_json::json!({}), None, "notes#1", &open()).unwrap_err();
-        assert!(err.starts_with("CEILING:"), "{err}");
-        assert!(err.contains("not a level this OS defines"), "{err}");
+        assert_eq!(answer["result"]["renamed_to"], "x");
+        assert_eq!(
+            reg.act("rename", &serde_json::json!({}), None, "app-notes#2", &open()).unwrap_err(),
+            "`rename` needs argument `to`"
+        );
+        assert_eq!(
+            reg.act("rename", &serde_json::json!({"to": 7}), None, "app-notes#3", &open()).unwrap_err(),
+            "`rename` argument `to` must be a string, and a number arrived"
+        );
+        assert_eq!(
+            reg.act("nope", &serde_json::json!({}), None, "app-notes#4", &open()).unwrap_err(),
+            "unknown action `nope`; this app offers: rename"
+        );
     }
 
     #[test]
@@ -1674,20 +917,14 @@ mod tests {
         // from the UI thread that is making the call. `None` for an action that does not exist,
         // because an unknown action has no grade and defaulting one would invent a permission.
         REGISTRY.with(|cell| {
-            *cell.borrow_mut() = Some(Registry {
-                app_id: "shell".into(),
-                describe: None,
-                actions: vec![
-                    (
-                        Action::new("files_delete", "Delete a file").risk("dangerous"),
-                        Box::new(|_| Ok(serde_json::Value::Null)),
-                    ),
-                    (
-                        Action::new("open_app", "Open an app"),
-                        Box::new(|_| Ok(serde_json::Value::Null)),
-                    ),
+            *cell.borrow_mut() = Some(registry(
+                "shell",
+                None,
+                vec![
+                    (Action::new("files_delete", "Delete a file").risk("dangerous"), Box::new(|_| Ok(serde_json::Value::Null))),
+                    (Action::new("open_app", "Open an app"), Box::new(|_| Ok(serde_json::Value::Null))),
                 ],
-            })
+            ))
         });
 
         assert_eq!(published_grade("files_delete"), Some("dangerous"));
@@ -1705,72 +942,51 @@ mod tests {
         // grade has to move with it, or a caller under a `standard` ceiling can be talked into
         // sending a prompt off the machine by an action that never asked for anything.
         REGISTRY.with(|cell| {
-            *cell.borrow_mut() = Some(Registry {
-                app_id: "studio".into(),
-                describe: None,
-                actions: vec![(
+            *cell.borrow_mut() = Some(registry(
+                "studio",
+                None,
+                vec![(
                     Action::new("generate", "Make a picture from a sentence"),
                     Box::new(|_| Ok(serde_json::json!({"queued": 1}))),
                 )],
+            ))
+        });
+        let act_under = |ceiling: &str, id: &str| {
+            REGISTRY.with(|cell| {
+                cell.borrow().as_ref().unwrap().act("generate", &serde_json::json!({}), None, id, &under(ceiling))
             })
-        });
+        };
 
-        // Local backend: a `standard` ceiling lets it through, and says it settled nothing yet only
-        // because this handler is not deferred.
-        REGISTRY.with(|cell| {
-            let installed = cell.borrow();
-            let registry = installed.as_ref().unwrap();
-            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#1", &under("standard")).is_ok());
-        });
-
+        assert!(act_under("standard", "studio#1").is_ok());
         assert_eq!(regrade("generate", "sensitive").unwrap(), "sensitive");
         assert_eq!(published_grade("generate"), Some("sensitive"), "the two readers disagree");
-
+        let err = act_under("standard", "studio#2").unwrap_err();
+        assert!(err.starts_with("CEILING:") && err.contains("graded `sensitive`"), "{err}");
+        assert!(act_under("sensitive", "studio#3").is_ok());
+        // And `describe` — what a caller reads before deciding — reports the new grade, so the
+        // card a person is shown is the card the dispatch will enforce.
         REGISTRY.with(|cell| {
-            let installed = cell.borrow();
-            let registry = installed.as_ref().unwrap();
-            // The same call, the same arguments, the same ceiling: refused now, and refused for the
-            // grade rather than for anything about the arguments.
-            let err = registry
-                .act("generate", &serde_json::json!({}), None, "studio#2", &under("standard"))
-                .unwrap_err();
-            assert!(err.starts_with("CEILING:"), "{err}");
-            assert!(err.contains("graded `sensitive`"), "{err}");
-            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#3", &under("sensitive")).is_ok());
-            // And `describe` — what a caller reads before deciding — reports the new grade, so the
-            // card a person is shown is the card the dispatch will enforce.
-            let described = registry.describe();
+            let described = cell.borrow().as_ref().unwrap().describe();
             assert_eq!(described["actions"][0]["permission"], serde_json::json!("sensitive"));
         });
 
         // Down again, because the backend can be pointed back at a machine the person owns.
         assert_eq!(regrade("generate", "standard").unwrap(), "standard");
-        REGISTRY.with(|cell| {
-            let installed = cell.borrow();
-            let registry = installed.as_ref().unwrap();
-            assert!(registry.act("generate", &serde_json::json!({}), None, "studio#4", &under("standard")).is_ok());
-        });
+        assert!(act_under("standard", "studio#4").is_ok());
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
-        OVERRIDES.with(|cell| cell.borrow_mut().clear());
     }
 
     #[test]
     fn a_grade_this_os_does_not_define_leaves_the_action_at_the_one_it_had() {
         REGISTRY.with(|cell| {
-            *cell.borrow_mut() = Some(Registry {
-                app_id: "studio".into(),
-                describe: None,
-                actions: vec![
-                    (
-                        Action::new("generate", "Make a picture").risk("standard"),
-                        Box::new(|_| Ok(serde_json::Value::Null)),
-                    ),
-                    (
-                        Action::new("refresh", "Read the gallery again"),
-                        Box::new(|_| Ok(serde_json::Value::Null)),
-                    ),
+            *cell.borrow_mut() = Some(registry(
+                "studio",
+                None,
+                vec![
+                    (Action::new("generate", "Make a picture").risk("standard"), Box::new(|_| Ok(serde_json::Value::Null))),
+                    (Action::new("refresh", "Read the gallery again"), Box::new(|_| Ok(serde_json::Value::Null))),
                 ],
-            })
+            ))
         });
 
         // A typo must not quietly un-grade an action, which is what writing the string through
@@ -1787,30 +1003,30 @@ mod tests {
         assert_eq!(published_grade("refresh"), Some("standard"), "an unknown action regraded a known one");
 
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
-        OVERRIDES.with(|cell| cell.borrow_mut().clear());
         let err = regrade("generate", "sensitive").unwrap_err();
         assert!(err.contains("published no control surface"), "{err}");
+        // And an undefined grade is refused as that whether or not anything is published.
+        let err = regrade("generate", "catastrophic").unwrap_err();
+        assert!(err.contains("not a level this OS defines"), "{err}");
     }
 
     #[test]
     fn a_handler_can_regrade_from_inside_its_own_dispatch() {
         // The test the first two were missing, and the only way `regrade` is ever actually used.
         //
-        // Both tests above called `regrade` from open code, where nothing was holding the
-        // registry. Real callers do not: `on_ui_thread` runs every handler from INSIDE
-        // `REGISTRY.borrow()`, so the first shipped version — which took `borrow_mut` — panicked
-        // with "RefCell already borrowed" the moment Studio's `set_backend` ran, and took the
-        // whole app down with it. The config had already been written by then, so the app came
-        // back pointed at a hosted service with the grade never raised: precisely the state
-        // `regrade` exists to prevent.
+        // Real callers run every handler from INSIDE `REGISTRY.borrow()` (see `on_ui_thread`), so
+        // the first shipped version — which took `borrow_mut` — panicked with "RefCell already
+        // borrowed" the moment Studio's `set_backend` ran, and took the whole app down with it.
+        // The config had already been written by then, so the app came back pointed at a hosted
+        // service with the grade never raised: precisely the state `regrade` exists to prevent.
         //
         // This mirrors the dispatch: the borrow is held across `act`, exactly as it is in
-        // `on_ui_thread`. It panics on the old implementation and passes on this one.
+        // `on_ui_thread`.
         REGISTRY.with(|cell| {
-            *cell.borrow_mut() = Some(Registry {
-                app_id: "studio".into(),
-                describe: None,
-                actions: vec![
+            *cell.borrow_mut() = Some(registry(
+                "studio",
+                None,
+                vec![
                     (
                         Action::new("generate", "Make a picture from a sentence"),
                         Box::new(|_| Ok(serde_json::json!({"queued": 1}))),
@@ -1824,7 +1040,7 @@ mod tests {
                         }),
                     ),
                 ],
-            })
+            ))
         });
 
         let answered = REGISTRY.with(|cell| {
@@ -1851,71 +1067,6 @@ mod tests {
         assert_eq!(published_grade("generate"), Some("sensitive"));
 
         REGISTRY.with(|cell| *cell.borrow_mut() = None);
-        OVERRIDES.with(|cell| cell.borrow_mut().clear());
-    }
-
-    // ── The mode, and the grant ──
-
-    /// Blender's `render`, graded `sensitive`, over a flag that says whether it ran — the action
-    /// the account from inside VM 520 found running through `yos act` with no card.
-    fn render_surface(ran: std::rc::Rc<std::cell::Cell<bool>>) -> Registry {
-        Registry {
-            app_id: "blender".into(),
-            describe: Some(Box::new(|| View::new("Blender \u{2014} cube.blend"))),
-            actions: vec![(
-                Action::new("render", "Render the scene").risk("sensitive").arg(Param::text("out")),
-                Box::new(move |args| {
-                    ran.set(true);
-                    Ok(serde_json::json!({ "rendered_to": args["out"].clone() }))
-                }),
-            )],
-        }
-    }
-
-    /// The defect of #116 and #49: `blender.render` is `sensitive`, the machine was in `ask`,
-    /// and through `yos act` it ran in 1.72 s with no card and no record, because only the MCP
-    /// bridge knew the mode. The dispatch is the one function every door crosses, so it is
-    /// where the refusal has to live — and the refusal has to say how to get a grant, or a
-    /// program reading it goes looking for another door.
-    #[test]
-    fn a_sensitive_act_without_a_grant_is_refused_in_ask_mode() {
-        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-        let reg = render_surface(ran.clone());
-
-        let err = reg
-            .act("render", &serde_json::json!({"out": "x.png"}), None, "blender#1", &in_mode("ask", false))
-            .unwrap_err();
-
-        assert!(err.starts_with("GRANT:"), "a caller has to be able to branch on this: {err}");
-        assert!(err.contains("graded `sensitive`"), "the refusal names the grade: {err}");
-        assert!(err.contains("ask mode"), "and the mode it was over: {err}");
-        assert!(err.contains("request_approval") && err.contains("press Allow"), "and how to get a grant: {err}");
-        assert!(!ran.get(), "the handler must not have run");
-    }
-
-    /// On the grade alone, before the arguments — as the ceiling refuses. A caller over the
-    /// mode gets one answer whatever else is wrong with its call; otherwise fixing the smaller
-    /// mistake looks like progress toward a call that was never going to run unasked.
-    #[test]
-    fn the_mode_refuses_before_the_arguments_are_looked_at() {
-        let reg = render_surface(std::rc::Rc::new(std::cell::Cell::new(false)));
-        let err = reg.act("render", &serde_json::json!({}), None, "blender#1", &in_mode("ask", false)).unwrap_err();
-        assert!(err.starts_with("GRANT:"), "not the missing-argument error: {err}");
-        assert!(!err.contains("needs argument"), "{err}");
-    }
-
-    /// `auto` exists for routine sensitive work, and bypass says "it does not ask" on a red
-    /// panel with a countdown. A card in either would make the mode chip a lie.
-    #[test]
-    fn a_sensitive_act_runs_in_auto_mode() {
-        for mode in ["auto", "bypass"] {
-            let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-            let answer = render_surface(ran.clone())
-                .act("render", &serde_json::json!({"out": "x.png"}), None, "blender#1", &in_mode(mode, false))
-                .unwrap_or_else(|e| panic!("{mode}: {e}"));
-            assert_eq!(answer["accepted"], true, "{mode}");
-            assert!(ran.get(), "{mode}: the handler ran");
-        }
     }
 
     /// The dispatch reads the action's own description, not only its grade: Calendar's
@@ -1924,125 +1075,50 @@ mod tests {
     /// about on this door too now; bypass still asks nobody.
     #[test]
     fn what_the_app_says_cannot_be_undone_is_asked_about_in_auto() {
-        let delete = |ran: std::rc::Rc<std::cell::Cell<bool>>| Registry {
-            app_id: "calendar".into(),
-            describe: Some(Box::new(|| View::new("Calendar"))),
-            actions: vec![(
-                Action::new("delete_event", "Take an event off the calendar. It is not recoverable")
-                    .risk("sensitive")
-                    .arg(Param::text("id")),
-                Box::new(move |_: &serde_json::Value| {
-                    ran.set(true);
-                    Ok(serde_json::json!({ "deleted": true }))
-                }) as ActFn,
-            )],
+        let delete = |ran: Rc<Cell<bool>>| {
+            registry(
+                "calendar",
+                Some(Box::new(|| View::new("Calendar"))),
+                vec![(
+                    Action::new("delete_event", "Take an event off the calendar. It is not recoverable")
+                        .risk("sensitive")
+                        .arg(Param::text("id")),
+                    Box::new(move |_: &serde_json::Value| {
+                        ran.set(true);
+                        Ok(serde_json::json!({ "deleted": true }))
+                    }),
+                )],
+            )
         };
-        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ran = Rc::new(Cell::new(false));
         let err = delete(ran.clone())
             .act("delete_event", &serde_json::json!({"id": "e1"}), None, "calendar#1", &in_mode("auto", false))
             .unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("cannot be undone"), "{err}");
         assert!(!ran.get(), "the handler must not have run");
 
-        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ran = Rc::new(Cell::new(false));
         delete(ran.clone())
             .act("delete_event", &serde_json::json!({"id": "e1"}), None, "calendar#2", &in_mode("bypass", false))
             .expect("bypass asks nobody");
         assert!(ran.get());
     }
 
-    /// A grant is a person's Allow for this exact call, and that answer stands whatever the
-    /// mode — including plan, where the shell raises no card at all, so a grant there can only
-    /// have come from somewhere a person said yes.
-    #[test]
-    fn a_grant_lets_a_sensitive_act_run_in_any_mode() {
-        for mode in ["plan", "ask", "auto", "bypass"] {
-            let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-            let answer = render_surface(ran.clone())
-                .act("render", &serde_json::json!({"out": "x.png"}), None, "blender#1", &in_mode(mode, true))
-                .unwrap_or_else(|e| panic!("{mode}: {e}"));
-            assert_eq!(answer["accepted"], true, "{mode}");
-            assert!(ran.get(), "{mode}: the handler ran");
-        }
-    }
+    // ── The grant ──
 
-    /// The everyday case has to stay everyday: a `standard` action asks nobody, in any mode.
-    /// Plan included, because the desktop's own processes cross this dispatch with `standard`
-    /// calls — every app starts its services on demand through the shell's `start_service` —
-    /// and a dispatch that refused them in plan would stop the person's desktop working the
-    /// moment they chose plan for the mind. Plan's refusal of `standard` is the bridge's.
-    #[test]
-    fn a_standard_act_needs_no_grant_in_any_mode() {
-        for mode in ["plan", "ask", "auto", "bypass"] {
-            let answer = notes_at("Kernel asks")
-                .act("rename", &serde_json::json!({ "to": "ok" }), None, "notes#1", &in_mode(mode, false))
-                .unwrap_or_else(|e| panic!("{mode}: {e}"));
-            assert_eq!(answer["accepted"], true, "{mode}");
-        }
-    }
-
-    /// Plan raises no card, so above the floor it refuses outright — in words that say no card
-    /// is coming, or `yos act` would promise one the shell will not put up.
-    #[test]
-    fn plan_mode_refuses_a_sensitive_act_and_says_no_card_is_coming() {
-        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-        let err = render_surface(ran.clone())
-            .act("render", &serde_json::json!({"out": "x.png"}), None, "blender#1", &in_mode("plan", false))
-            .unwrap_err();
-        assert!(err.starts_with("GRANT:") && err.contains("plan mode"), "{err}");
-        assert!(err.contains("raises no card"), "plan must not promise a card: {err}");
-        assert!(!ran.get());
-    }
-
-    /// "Allow for this session" is the person's standing answer for one action: it covers any
-    /// arguments of that action and nothing beside it — not the app's other actions, not
-    /// another app's action of the same name.
-    #[test]
-    fn a_session_rule_covers_the_action_it_names_and_no_other() {
-        let with_rule = |app: &str, action: &str| {
-            let mut mode = Mode::named("ask");
-            mode.session_rules.push((app.to_string(), action.to_string()));
-            Authority { ceiling: OPEN.into(), mode, granted: false }
-        };
-        let args = serde_json::json!({"out": "anything.png"});
-
-        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-        render_surface(ran.clone()).act("render", &args, None, "b#1", &with_rule("blender", "render")).unwrap();
-        assert!(ran.get());
-
-        for (app, action) in [("blender", "bake"), ("studio", "render")] {
-            let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-            let err = render_surface(ran.clone())
-                .act("render", &args, None, "b#2", &with_rule(app, action))
-                .unwrap_err();
-            assert!(err.starts_with("GRANT:"), "a rule for {app}.{action} is not a rule for blender.render: {err}");
-            assert!(!ran.get());
-        }
-    }
-
-    /// The ceiling is the machine's wall and nothing reaches past it: not bypass, not a grant,
-    /// not both. The shell will not even raise a card above it, so a grant there is a grant
-    /// from a ceiling that has since been tightened — and the tightening wins.
-    #[test]
-    fn the_ceiling_still_refuses_dangerous_whatever_the_grant_or_mode() {
-        for (mode, granted) in [("bypass", false), ("ask", true), ("bypass", true)] {
-            let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-            let authority = Authority { ceiling: "sensitive".into(), mode: Mode::named(mode), granted };
-            let err = delete_surface(ran.clone())
-                .act("files_delete", &serde_json::json!({"name": "x"}), None, "shell#1", &authority)
-                .unwrap_err();
-            assert!(err.starts_with("CEILING:"), "{mode}, granted={granted}: {err}");
-            assert!(!ran.get(), "{mode}, granted={granted}: the handler must not have run");
-        }
-    }
-
-    /// `describe` takes no authority — the signature is the proof — and it reports the grade a
-    /// call would be asked for, so a caller can see the cost before paying it.
-    #[test]
-    fn describe_needs_nothing() {
-        let described = render_surface(std::rc::Rc::new(std::cell::Cell::new(false))).describe();
-        assert_eq!(described["actions"][0]["name"], serde_json::json!("render"));
-        assert_eq!(described["actions"][0]["permission"], serde_json::json!("sensitive"));
+    /// Blender's `render`, graded `sensitive`, over a flag that says whether it ran.
+    fn render_surface(ran: Rc<Cell<bool>>) -> Registry {
+        registry(
+            "blender",
+            Some(Box::new(|| View::new("Blender \u{2014} cube.blend"))),
+            vec![(
+                Action::new("render", "Render the scene").risk("sensitive").arg(Param::text("out")),
+                Box::new(move |args| {
+                    ran.set(true);
+                    Ok(serde_json::json!({ "rendered_to": args["out"].clone() }))
+                }),
+            )],
+        )
     }
 
     /// A stand-in for the shell's store: `fresh-*` ids are grants that hold once, for exactly
@@ -2099,11 +1175,8 @@ mod tests {
         assert!(err.starts_with("GRANT:") && err.contains("no approval request"), "invented: {err}");
     }
 
-    /// #154, item 2: `authority_for` spent the grant before the grade had been looked at, and the
-    /// dispatch then refused the act for being above the ceiling — so the person's Allow was
-    /// used up on an act that never ran, and could not be offered again. The ceiling comes
-    /// first now. Refused above it, the grant is still whole: once the ceiling allows the act,
-    /// the same grant holds, once.
+    /// #154, item 2: a grant spent before the grade was looked at, then refused by the ceiling,
+    /// was a person's Allow used up on an act that never ran. The ceiling comes first now.
     #[test]
     fn a_grant_is_not_spent_on_an_act_the_ceiling_refuses() {
         spend_through_a_stand_in_shell();
@@ -2123,10 +1196,8 @@ mod tests {
         // ceiling is decided again there, on the grade `describe` is showing at that moment.
         let mut granted = under("standard");
         granted.granted = true;
-        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
-        let err = render_surface(ran.clone())
-            .act("render", &args, None, "blender#1", &granted)
-            .unwrap_err();
+        let ran = Rc::new(Cell::new(false));
+        let err = render_surface(ran.clone()).act("render", &args, None, "blender#1", &granted).unwrap_err();
         assert!(err.starts_with("CEILING:"), "{err}");
         assert!(!ran.get());
     }
@@ -2166,43 +1237,17 @@ mod tests {
         assert_eq!(LADDER[Mode::named("yolo").allows()], "standard", "an unknown mode reads as ask");
     }
 
-    // ── Who is calling ──
-
     #[test]
-    fn a_caller_is_current_only_while_its_own_dispatch_runs() {
-        // The reason this is a thread-local with a guard rather than a global: two connections
-        // can be in flight at once, and a handler must never read the pid of somebody else's
-        // request. Outside a scope there is no caller at all — not a stale one.
-        assert_eq!(caller(), None, "nothing is calling before anything has called");
-
-        let hermes = Caller { pid: 696, uid: 1000, gid: 1000 };
-        {
-            let _scope = CallerScope::enter(Some(hermes));
-            assert_eq!(caller(), Some(hermes));
-
-            // Nested, because `describe` inside an `act` is a real shape.
-            {
-                let _inner = CallerScope::enter(Some(Caller { pid: 4242, uid: 1000, gid: 1000 }));
-                assert_eq!(caller().map(|c| c.pid), Some(4242));
-            }
-            assert_eq!(caller(), Some(hermes), "the outer dispatch gets its own caller back");
-        }
-        assert_eq!(caller(), None, "and nothing is left behind");
+    fn the_agent_token_is_lifted_off_the_arguments() {
+        let mut args = serde_json::json!({"command": "ls", "agent_token": "x"});
+        let params = serde_json::json!({"agent_token": "  tok-b  "});
+        assert_eq!(agent_token_of(&params, &mut args).as_deref(), Some("tok-b"));
+        assert_eq!(args, serde_json::json!({"command": "ls"}));
+        let mut args = serde_json::json!({});
+        assert_eq!(agent_token_of(&serde_json::json!({"agent_token": " "}), &mut args), None, "blank is none");
     }
 
-    #[test]
-    fn a_handler_that_panics_does_not_leave_its_caller_behind() {
-        // A leaked caller would be worse than none: the next request on this thread would be
-        // attributed to the process that crashed the previous one, and the shell would print
-        // that pid on an approval card as a verified fact.
-        let panicked = std::panic::catch_unwind(|| {
-            let _scope = CallerScope::enter(Some(Caller { pid: 7, uid: 0, gid: 0 }));
-            assert_eq!(caller().map(|c| c.pid), Some(7));
-            panic!("a handler blew up");
-        });
-        assert!(panicked.is_err(), "the panic has to actually happen for this to prove anything");
-        assert_eq!(caller(), None);
-    }
+    // ── Across the hop, over a real socket ──
 
     /// The socket the tests below talk to: one served surface per test binary, because the UI
     /// stand-in is one per binary (see `test_ui_thread`). `who` reports the caller as the handler
@@ -2228,62 +1273,65 @@ mod tests {
             std::fs::create_dir_all(&runtime).expect("a runtime dir of our own");
             std::env::set_var("XDG_RUNTIME_DIR", &runtime);
 
-            test_ui_thread::start(Box::new(|| Registry {
-                app_id: APP.into(),
-                describe: Some(Box::new(|| View::new("caller-test"))),
-                actions: vec![
-                    (
-                        // `safe` so the machine ceiling cannot refuse this on a developer's box
-                        // that has tightened `tool_permission`; the ceiling has its own tests above.
-                        Action::new("who", "Report who is calling").risk("safe"),
-                        Box::new(|_| {
-                            // The handler's own view, on the thread the handler actually runs on.
-                            // If the caller had been left on the socket thread this would be null.
-                            Ok(match caller() {
-                                Some(c) => serde_json::json!({ "pid": c.pid, "uid": c.uid }),
-                                None => serde_json::Value::Null,
-                            })
-                        }),
-                    ),
-                    (
-                        Action::new("slow", "Take `ms` milliseconds to answer, off the UI thread")
-                            .risk("safe")
-                            .arg(Param::number("ms"))
-                            .arg(Param::flag("refuse").optional()),
-                        Box::new(|args| {
-                            let ms = args["ms"].as_u64().unwrap_or(0);
-                            let refuse = args["refuse"].as_bool().unwrap_or(false);
-                            // Read here, where it is set, and carried into the work.
-                            let pid = caller().map(|c| c.pid);
-                            let work = move || {
-                                std::thread::sleep(Duration::from_millis(ms));
-                                if refuse {
-                                    return Err(format!("refused after {ms} ms"));
-                                }
-                                Ok(serde_json::json!({ "slept_ms": ms, "pid": pid }))
-                            };
-                            answer_later(work)
-                                .map(|()| serde_json::json!("replaced by the work's own answer"))
-                                .or_else(|work| work())
-                        }),
-                    ),
-                    (
-                        // What a handler that records or shows its arguments would record or
-                        // show — an approval card, an audit line — and the token beside them.
-                        Action::new("echo", "Answer with the arguments and the agent token as the handler got them")
-                            .risk("safe")
-                            .arg(Param::text("command").optional()),
-                        Box::new(|args| {
-                            Ok(serde_json::json!({ "args": args, "agent_token": agent_token() }))
-                        }),
-                    ),
-                    (
-                        // Graded off the ladder, so the ceiling refuses it whatever the machine
-                        // running the tests has in its settings file.
-                        Action::new("nuke", "Refused by the ceiling on every machine").risk("catastrophic"),
-                        Box::new(|_| Ok(serde_json::json!("never reached"))),
-                    ),
-                ],
+            test_ui_thread::start(Box::new(|| {
+                registry(
+                    APP,
+                    Some(Box::new(|| View::new("caller-test"))),
+                    vec![
+                        (
+                            // `safe` so the machine ceiling cannot refuse this on a developer's box
+                            // that has tightened `tool_permission`; the ceiling has its own tests.
+                            Action::new("who", "Report who is calling").risk("safe"),
+                            Box::new(|_| {
+                                // The handler's own view, on the thread the handler actually runs
+                                // on. If the caller had been left on the socket thread this would
+                                // be null.
+                                Ok(match caller() {
+                                    Some(c) => serde_json::json!({ "pid": c.pid, "uid": c.uid }),
+                                    None => serde_json::Value::Null,
+                                })
+                            }),
+                        ),
+                        (
+                            Action::new("slow", "Take `ms` milliseconds to answer, off the UI thread")
+                                .risk("safe")
+                                .arg(Param::integer("ms"))
+                                .arg(Param::flag("refuse").optional()),
+                            Box::new(|args| {
+                                let ms = args["ms"].as_u64().unwrap_or(0);
+                                let refuse = args["refuse"].as_bool().unwrap_or(false);
+                                // Read here, where it is set, and carried into the work.
+                                let pid = caller().map(|c| c.pid);
+                                let work = move || {
+                                    std::thread::sleep(Duration::from_millis(ms));
+                                    if refuse {
+                                        return Err(format!("refused after {ms} ms"));
+                                    }
+                                    Ok(serde_json::json!({ "slept_ms": ms, "pid": pid }))
+                                };
+                                answer_later(work)
+                                    .map(|()| serde_json::json!("replaced by the work's own answer"))
+                                    .or_else(|work| work())
+                            }),
+                        ),
+                        (
+                            // What a handler that records or shows its arguments would record or
+                            // show — an approval card, an audit line — and the token beside them.
+                            Action::new("echo", "Answer with the arguments and the agent token as the handler got them")
+                                .risk("safe")
+                                .arg(Param::text("command").optional()),
+                            Box::new(|args| {
+                                Ok(serde_json::json!({ "args": args, "agent_token": agent_token() }))
+                            }),
+                        ),
+                        (
+                            // Graded off the ladder, so the ceiling refuses it whatever the machine
+                            // running the tests has in its settings file.
+                            Action::new("nuke", "Refused by the ceiling on every machine").risk("catastrophic"),
+                            Box::new(|_| Ok(serde_json::json!("never reached"))),
+                        ),
+                    ],
+                )
             }));
             serve_rpc(APP, 4);
 
@@ -2318,8 +1366,8 @@ mod tests {
     /// over a real socket: the protocol written down, read by a program in another language, and
     /// this code agreeing with it refusal for refusal. The served surface grades `nuke` off the
     /// ladder on purpose, so the checker has to fail exactly the two checks that say so and pass
-    /// every other — including the missing, undeclared and stale probes, which only a surface
-    /// that answered like the protocol's dispatch is sent.
+    /// every other — including the missing, undeclared, mistyped and stale probes, which only a
+    /// surface that answered like the protocol's dispatch is sent.
     #[cfg(unix)]
     #[test]
     fn yos_check_reads_this_dispatch_as_the_protocol() {
@@ -2349,11 +1397,64 @@ mod tests {
         );
         for check in [
             "ping", "describe", "protocol", "params", "secrets", "revision", "method", "empty", "unknown",
-            "missing", "undeclared", "stale",
+            "missing", "undeclared", "types", "stale",
         ] {
             assert_eq!(status(check).as_deref(), Some("pass"), "{check}: {text}");
         }
         assert_eq!(run.status.code(), Some(1), "a failed check is a non-zero exit");
+    }
+
+    /// Agents catalog: an agent started from a role is held to the role's reach on the real
+    /// dispatch — its token names a reach (here through an installed reader, as the shell installs
+    /// its own registry), an act on its surfaces runs, one off them is refused in the reach's words
+    /// before the handler and before any grant is spent, and a token with no reach is not held.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_held_to_its_reach_on_the_socket_before_any_grant_is_spent() {
+        use yantrik_ipc_transport::reach;
+
+        spend_through_a_stand_in_shell();
+        reach::read_reach_with(|token| {
+            (token == "tok-reach-reviewer").then(|| reach::Reach {
+                agent: "deepseek:c-reach1".into(),
+                role: "reviewer".into(),
+                name: "Reviewer".into(),
+                surfaces: vec!["caller-test.echo".into(), "caller-test.nuke".into()],
+                ceiling: "safe".into(),
+            })
+        });
+        let act = |action: &str, token: &str, grant: Option<&str>| {
+            let mut params = serde_json::json!({ "action": action, "args": {}, "agent_token": token });
+            if let Some(grant) = grant {
+                params["grant"] = grant.into();
+            }
+            call(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "app.act", "params": params }).to_string())
+        };
+
+        let reply = act("echo", "tok-reach-reviewer", None);
+        assert_eq!(reply["result"]["result"]["agent_token"], "tok-reach-reviewer", "on its surfaces it runs: {reply}");
+
+        let reply = act("who", "tok-reach-reviewer", None);
+        let err = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(err.starts_with("REACH: caller-test.who is outside the Reviewer's reach"), "{reply}");
+        assert!(err.contains("`deepseek:c-reach1` is the Reviewer"), "{err}");
+        assert_eq!(reply["error"]["code"], -32602, "a policy answer, not a transport fault");
+
+        // A grade off the ladder is refused by the reach before the machine's ceiling is asked.
+        let reply = act("nuke", "tok-reach-reviewer", None);
+        assert!(reply["error"]["message"].as_str().unwrap_or_default().starts_with("REACH: caller-test.nuke is graded"), "{reply}");
+
+        // Refused by the reach, a person's Allow is not used up on it.
+        let reply = act("who", "tok-reach-reviewer", Some("fresh-reach"));
+        assert!(reply["error"]["message"].as_str().unwrap_or_default().starts_with("REACH:"), "{reply}");
+        spend_for_render(open(), "fresh-reach", &serde_json::json!({"out": "x.png"}))
+            .expect("the reach's refusal spent nothing");
+
+        // Another agent's token, with no reach, is not held; and the person's call has none.
+        let reply = act("who", "tok-no-reach", None);
+        assert!(reply["error"].is_null(), "{reply}");
+        let reply = call(r#"{"jsonrpc":"2.0","id":9,"method":"app.act","params":{"action":"who","args":{}}}"#);
+        assert!(reply["error"].is_null(), "{reply}");
     }
 
     /// See `test_ui_thread` for why the hop is a channel.
@@ -2377,6 +1478,7 @@ mod tests {
         // ends of the connection, so anything else means the field is not the peer's.
         let owner = std::fs::metadata(served_test_surface()).expect("the socket exists").uid();
         assert_eq!(seen["uid"].as_u64(), Some(u64::from(owner)), "{reply}");
+        assert!(reply["result"]["action_id"].as_str().unwrap().starts_with("app-caller-test#"), "{reply}");
     }
 
     /// The shell's `agent_run` owes its caller an exit code that may be minutes away. The handler
@@ -2422,6 +1524,17 @@ mod tests {
         );
         assert_eq!(refused["error"]["message"], "refused after 10 ms", "{refused}");
         assert_eq!(refused["error"]["code"], -32602, "an application refusal, not a transport fault");
+
+        // And a wrong type is refused on the socket as it is in the dispatch, before the handler.
+        let mistyped = call(
+            r#"{"jsonrpc":"2.0","id":4,"method":"app.act","params":{"action":"slow","args":{"ms":"soon"}}}"#,
+        );
+        assert_eq!(
+            mistyped["error"]["message"],
+            "`slow` argument `ms` must be an integer, and a string arrived",
+            "{mistyped}"
+        );
+        assert_eq!(mistyped["error"]["code"], -32602);
     }
 
     /// The token rides beside `args` and reaches the handler through `agent_token()`; `args` —
@@ -2456,45 +1569,6 @@ mod tests {
         // No token, no token.
         let reply = call(r#"{"jsonrpc":"2.0","id":4,"method":"app.act","params":{"action":"echo","args":{}}}"#);
         assert!(reply["result"]["result"]["agent_token"].is_null(), "{reply}");
-    }
-
-    #[test]
-    fn an_agent_token_is_current_only_while_its_own_dispatch_runs() {
-        assert_eq!(agent_token(), None);
-        {
-            let _outer = AgentTokenScope::enter(Some("tok-a".into()));
-            assert_eq!(agent_token().as_deref(), Some("tok-a"));
-            {
-                let _inner = AgentTokenScope::enter(None);
-                assert_eq!(agent_token(), None, "a nested call without one has none");
-            }
-            assert_eq!(agent_token().as_deref(), Some("tok-a"));
-        }
-        assert_eq!(agent_token(), None, "and nothing is left behind for the next dispatch");
-
-        let mut args = serde_json::json!({"command": "ls", "agent_token": "x"});
-        let params = serde_json::json!({"agent_token": "  tok-b  "});
-        assert_eq!(agent_token_of(&params, &mut args).as_deref(), Some("tok-b"));
-        assert_eq!(args, serde_json::json!({"command": "ls"}));
-        let mut args = serde_json::json!({});
-        assert_eq!(agent_token_of(&serde_json::json!({"agent_token": " "}), &mut args), None, "blank is none");
-    }
-
-    #[test]
-    fn a_handler_called_directly_is_handed_its_work_back_to_run_itself() {
-        // No socket, no dispatch: nothing would run the work, so it comes back.
-        let back = answer_later(|| Ok(serde_json::json!("ran inline")));
-        let work = back.err().expect("no dispatch is in progress on this thread");
-        assert_eq!(work(), Ok(serde_json::json!("ran inline")));
-
-        // And inside a dispatch's scope it is kept, once, for the dispatch to finish.
-        let scope = LaterScope::enter();
-        assert!(answer_later(|| Ok(serde_json::json!(1))).is_ok());
-        let kept = scope.take().expect("the work was kept");
-        assert_eq!(kept(), Ok(serde_json::json!(1)));
-        assert!(scope.take().is_none(), "taken once");
-        drop(scope);
-        assert!(answer_later(|| Ok(serde_json::json!(2))).is_err(), "the scope closed with the dispatch");
     }
 
     /// #154 through the real dispatch: the RPC thread asks the UI thread for the grade before it
@@ -2536,64 +1610,5 @@ mod tests {
         // And the grant the two refusals carried was never spent.
         spend_for_render(open(), "fresh-socket", &serde_json::json!({"out": "x.png"}))
             .expect("nothing spent `fresh-socket` on the way to either refusal");
-    }
-
-    /// Agents catalog: an agent started from a role is held to the role's reach on the real
-    /// dispatch — its token names a reach (here through an installed reader, as the shell installs
-    /// its own registry), an act on its surfaces runs, one off them is refused in the reach's words
-    /// before the handler and before any grant is spent, and a token with no reach is not held.
-    #[cfg(unix)]
-    #[test]
-    fn an_agent_is_held_to_its_reach_on_the_socket_before_any_grant_is_spent() {
-        spend_through_a_stand_in_shell();
-        reach::read_reach_with(|token| {
-            (token == "tok-reach-reviewer").then(|| reach::Reach {
-                agent: "deepseek:c-reach1".into(),
-                role: "reviewer".into(),
-                name: "Reviewer".into(),
-                surfaces: vec!["caller-test.echo".into(), "caller-test.nuke".into()],
-                ceiling: "safe".into(),
-            })
-        });
-        let act = |action: &str, token: &str, grant: Option<&str>| {
-            let mut params = serde_json::json!({ "action": action, "args": {}, "agent_token": token });
-            if let Some(grant) = grant {
-                params["grant"] = grant.into();
-            }
-            call(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "app.act", "params": params }).to_string())
-        };
-
-        let reply = act("echo", "tok-reach-reviewer", None);
-        assert_eq!(reply["result"]["result"]["agent_token"], "tok-reach-reviewer", "on its surfaces it runs: {reply}");
-
-        let reply = act("who", "tok-reach-reviewer", None);
-        let err = reply["error"]["message"].as_str().unwrap_or_default();
-        assert!(err.starts_with("REACH: caller-test.who is outside the Reviewer's reach"), "{reply}");
-        assert!(err.contains("`deepseek:c-reach1` is the Reviewer"), "{err}");
-        assert_eq!(reply["error"]["code"], -32602, "a policy answer, not a transport fault");
-
-        // A grade off the ladder is refused by the reach before the machine's ceiling is asked.
-        let reply = act("nuke", "tok-reach-reviewer", None);
-        assert!(reply["error"]["message"].as_str().unwrap_or_default().starts_with("REACH: caller-test.nuke is graded"), "{reply}");
-
-        // Refused by the reach, a person's Allow is not used up on it.
-        let reply = act("who", "tok-reach-reviewer", Some("fresh-reach"));
-        assert!(reply["error"]["message"].as_str().unwrap_or_default().starts_with("REACH:"), "{reply}");
-        spend_for_render(open(), "fresh-reach", &serde_json::json!({"out": "x.png"}))
-            .expect("the reach's refusal spent nothing");
-
-        // Another agent's token, with no reach, is not held; and the person's call has none.
-        let reply = act("who", "tok-no-reach", None);
-        assert!(reply["error"].is_null(), "{reply}");
-        let reply = call(r#"{"jsonrpc":"2.0","id":9,"method":"app.act","params":{"action":"who","args":{}}}"#);
-        assert!(reply["error"].is_null(), "{reply}");
-    }
-
-    #[test]
-    fn every_dispatch_gets_its_own_name() {
-        let first = next_action_id("app-notes");
-        let second = next_action_id("app-notes");
-        assert_ne!(first, second, "two waits must not key on the same id");
-        assert!(first.starts_with("app-notes#"), "{first}");
     }
 }

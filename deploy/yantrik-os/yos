@@ -1591,7 +1591,8 @@ def cmd_listen(argv):
 
 PROTOCOL = 1
 LADDER = ("safe", "standard", "sensitive", "dangerous")
-PARAM_TYPES = ("string", "number", "integer", "boolean")
+# `yantrik_ipc_contracts::control_surface::PARAM_TYPES`: what a parameter may be declared as.
+PARAM_TYPES = ("string", "number", "integer", "boolean", "array", "object")
 # How long a describe may take before the checker says so. A describe reads a few properties on a
 # UI thread; half a second is already a surface a mind waits on.
 DESCRIBE_BUDGET = 0.5
@@ -1609,7 +1610,17 @@ UNRECOVERABLE_PHRASES = ("not recoverable", "cannot be undone", "can't be undone
 NO_SUCH_ACTION = "yos-check-no-such-action"
 NO_SUCH_METHOD = "app.yos_check_no_such_method"
 UNDECLARED = "yos_check_undeclared"
-PLACEHOLDER = {"string": "yos-check", "number": 0, "integer": 0, "boolean": False}
+PLACEHOLDER = {"string": "yos-check", "number": 0, "integer": 0, "boolean": False,
+               "array": [], "object": {}}
+# One value of the wrong type for each declared type, and how the dispatch names what arrived
+# (`yantrik_surface::check_value`): the `types` probe sends one and expects that sentence.
+MISTYPED = {"string": (0, "a number"), "number": ("yos-check", "a string"),
+            "integer": ("yos-check", "a string"), "boolean": ("yos-check", "a string"),
+            "array": ("yos-check", "a string"), "object": ("yos-check", "a string")}
+WANTED = {"string": "a string", "number": "a number", "integer": "an integer",
+          "boolean": "a boolean", "array": "an array", "object": "an object"}
+WANTED_ITEMS = {"string": "strings", "number": "numbers", "integer": "integers",
+                "boolean": "booleans", "array": "arrays", "object": "objects"}
 
 # docs/schema/describe.schema.json, carried here because `yos` ships alone and stdlib-only.
 # yos-selftest.py fails when the two differ.
@@ -1651,6 +1662,10 @@ DESCRIBE_SCHEMA = {
                                            "(on return) or only started (later).",
                             "enum": ["on return", "later"]},
                 "parameters": {"$ref": "#/$defs/parameters"},
+                "expected_seconds": {"description": "How long a call usually takes to answer, "
+                                                    "when the app knows it is more than a "
+                                                    "moment; a client sizes its timeout by it.",
+                                     "type": "integer"},
             },
         },
         "parameters": {
@@ -1667,12 +1682,19 @@ DESCRIBE_SCHEMA = {
             "type": "object",
             "required": ["type", "description"],
             "properties": {
-                "type": {"description": "A JSON Schema primitive. Version 1 checks presence, not "
-                                        "type: the dispatch refuses a missing required argument "
-                                        "and an undeclared one, and hands the value to the "
-                                        "handler as it came.",
-                         "enum": ["string", "number", "integer", "boolean"]},
+                "type": {"description": "A JSON Schema type. The dispatch refuses a missing "
+                                        "required argument, an undeclared one, and one of "
+                                        "another type, before the handler runs.",
+                         "enum": ["string", "number", "integer", "boolean", "array", "object"]},
                 "description": {"type": "string"},
+                "enum": {"description": "For a string: the only values it may take.",
+                         "type": "array", "items": {"type": "string"}},
+                "items": {"description": "For an array: the type of every item.",
+                          "type": "object", "required": ["type"],
+                          "properties": {"type": {"enum": ["string", "number", "integer",
+                                                           "boolean", "array", "object"]}}},
+                "default": {"description": "What the handler is given when the argument is left "
+                                           "out. A parameter with one is not required."},
             },
         },
     },
@@ -1967,6 +1989,10 @@ def check_surface(path, label, services_too=False):
             kind = (spec or {}).get("type") if isinstance(spec, dict) else None
             if kind not in PARAM_TYPES:
                 bad_params.append("%s(%s) is typed %s" % (a.get("name"), name, json.dumps(kind)))
+            elif kind == "array" and isinstance(spec.get("items"), dict) \
+                    and spec["items"].get("type") not in PARAM_TYPES:
+                bad_params.append("%s(%s) is an array of %s" % (a.get("name"), name,
+                                                              json.dumps(spec["items"].get("type"))))
             lower = name.lower()
             if any(w in lower for w in SECRET_WORDS) and name not in SECRET_PERMITTED:
                 secrets.append("%s(%s)" % (a.get("name"), name))
@@ -2039,7 +2065,7 @@ def check_surface(path, label, services_too=False):
     if not (protocol == PROTOCOL and protocol_dispatch):
         why = ("it does not publish protocol 1" if protocol != PROTOCOL else
                "its unknown-action refusal is not the protocol dispatch's")
-        for check in ("missing", "undeclared", "stale"):
+        for check in ("missing", "undeclared", "types", "stale"):
             report.add(check, "skip", "not probed: %s, so nothing promises it refuses before a "
                        "handler runs" % why)
         return report
@@ -2051,7 +2077,7 @@ def check_surface(path, label, services_too=False):
                 and not unrecoverable(a.get("description"))]
     eligible.sort(key=lambda a: LADDER.index(a["permission"]))  # safe first
     if not eligible:
-        for check in ("missing", "undeclared", "stale"):
+        for check in ("missing", "undeclared", "types", "stale"):
             report.add(check, "skip", "no action graded safe or standard (within this machine's "
                        "%s ceiling) that can be undone; yos check names nothing else" % ceiling)
         return report
@@ -2060,10 +2086,17 @@ def check_surface(path, label, services_too=False):
         params = a.get("parameters") or {}
         return list((params.get("properties") or {}).keys()), list(params.get("required") or [])
 
+    def placeholder(spec):
+        spec = spec if isinstance(spec, dict) else {}
+        if "default" in spec:
+            return spec["default"]
+        if spec.get("enum"):
+            return spec["enum"][0]
+        return PLACEHOLDER.get(spec.get("type"), "yos-check")
+
     def placeholders(a):
         props = (a.get("parameters") or {}).get("properties") or {}
-        return {n: PLACEHOLDER.get((props.get(n) or {}).get("type"), "yos-check")
-                for n in declared(a)[1]}
+        return {n: placeholder(props.get(n)) for n in declared(a)[1]}
 
     def gated(check, reply):
         why = _gated(reply)
@@ -2102,6 +2135,35 @@ def check_surface(path, label, services_too=False):
         else:
             report.add("undeclared", "fail", "%s with `%s` → %s\nthe protocol says: -32602 %s"
                        % (a["name"], UNDECLARED, json.dumps(got or reply.get("result"))[:300], want))
+
+    # One argument of the wrong type, the rest as the action wants them.
+    typed = next(((x, n, s) for x in eligible
+                  for n, s in sorted(((x.get("parameters") or {}).get("properties") or {}).items())
+                  if isinstance(s, dict) and s.get("type") in MISTYPED), None)
+    if typed is None:
+        report.add("types", "skip", "no eligible action declares an argument")
+    else:
+        x, name, spec = typed
+        value, arrived = MISTYPED[spec["type"]]
+        wanted = WANTED[spec["type"]]
+        if spec["type"] == "array" and (spec.get("items") or {}).get("type") in WANTED_ITEMS:
+            wanted = "an array of " + WANTED_ITEMS[spec["items"]["type"]]
+        reply = _probe(report, path, x["name"], dict(placeholders(x), **{name: value}), stale)
+        if reply is not None and not gated("types", reply):
+            want = "`%s` argument `%s` must be %s, and %s arrived" % (x["name"], name, wanted, arrived)
+            got = _refusal(reply)
+            if got == (-32602, want):
+                report.add("types", "pass", "%s with %s=%s → -32602 %s"
+                           % (x["name"], name, json.dumps(value), want))
+            elif got and got[0] == -32602 and str(got[1]).startswith("STALE:"):
+                report.add("types", "warn", "%s with %s=%s was not refused for its type; the "
+                           "revision guard stopped it instead. Checking types is a protocol-1 "
+                           "addition (docs/surface-protocol.md §5, step 9)"
+                           % (x["name"], name, json.dumps(value)))
+            else:
+                report.add("types", "fail", "%s with %s=%s → %s\nthe protocol says: -32602 %s"
+                           % (x["name"], name, json.dumps(value),
+                              json.dumps(got or reply.get("result"))[:300], want))
 
     reply = _probe(report, path, a["name"], placeholders(a), stale)
     if reply is not None and not gated("stale", reply):
