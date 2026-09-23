@@ -19,8 +19,8 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::recipe::{
-    AggregateOp, Condition, ErrorAction, FilterOp, Recipe, RecipeStatus, RecipeStep, RecipeStore,
-    RenderFormat, StoredStep, WaitCondition, CANCELLED, PAUSED_FROM_VAR,
+    clock_text, waited_on, AggregateOp, Condition, ErrorAction, FilterOp, Recipe, RecipeStatus, RecipeStep,
+    RecipeStore, RenderFormat, StoredStep, Trail, WaitCondition, CANCELLED, PAUSED_FROM_VAR, UNREADABLE,
 };
 
 /// How many recipes the desk reads. The built-in definitions alone are about fifty.
@@ -35,9 +35,6 @@ const SUMMARY_MAX: usize = 120;
 /// How long one line of a step's opened definition may be.
 const DETAIL_MAX: usize = 600;
 
-/// What `get_steps` stands in for a step whose JSON it could not read.
-const UNREADABLE: &str = "PARSE ERROR: ";
-
 type Vars = HashMap<String, serde_json::Value>;
 
 /// One recipe, as the desk shows it.
@@ -51,8 +48,8 @@ pub struct RecipeView {
     /// `cancelled` is how the store keeps a cancel — failed, with [`CANCELLED`] — told apart,
     /// because a person's decision is not a fault and is not drawn as one.
     pub status: String,
-    /// The store's step pointer, 0-based: the step running or next to run. A recipe waiting has
-    /// already moved past the step it waits on, which is `current_step - 1`.
+    /// The store's step pointer, 0-based: the step running or next to run. A recipe waiting at the
+    /// top has already moved past the step it waits on; one waiting inside a Branch stands at the Branch.
     pub current_step: usize,
     pub created_at: f64,
     pub updated_at: f64,
@@ -107,7 +104,7 @@ pub struct StepView {
     /// Where it stands on the row: done | current | waiting | failed | skipped | pending |
     /// not_taken (passed over, or never reached) | paused (a paused recipe stopped before it) |
     /// stopped (a cancelled or failed recipe stopped before it) | unknown (the store no longer
-    /// has its record: built-in steps are rewritten at every start).
+    /// has its record: built-in steps were rewritten at every start, before #176).
     pub state: String,
     /// The head of what it produced: its output, its answer, or the error it failed with.
     pub result: Option<String>,
@@ -137,16 +134,12 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
     let blocked = recipe.status == RecipeStatus::Waiting || paused_from_waiting;
     let cur = recipe.current_step;
 
-    // The step it waits on is the one it has just moved past, when that step is a wait or a
-    // question. Both executors advance the pointer before they wait.
-    let waiting_on = if blocked && cur > 0 {
-        steps
-            .get(cur - 1)
-            .filter(|s| matches!(s.step, RecipeStep::WaitFor { .. } | RecipeStep::AskUser { .. }))
-            .map(|s| s.step_index)
-    } else {
-        None
-    };
+    // What it waits on: where the executor's `_wait` record says — a wait or a question at the
+    // top, or one inside a Branch, drawn at the Branch — or, for a recipe that began to wait
+    // before there was a record, the step just behind the pointer.
+    let waited = if blocked { waited_on(recipe, steps, vars).filter(|w| w.on.is_some()) } else { None };
+    let waiting_on = waited.as_ref().map(|w| w.step);
+    let trail = Trail::read(vars);
 
     let finished = matches!(recipe.status, RecipeStatus::Done | RecipeStatus::Failed);
     let touched = |s: &StoredStep| s.status != "pending";
@@ -169,6 +162,10 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
             let i = s.step_index;
             if waiting_on == Some(i) {
                 return "waiting";
+            }
+            // Running here now — even a step marked from a loop's last round.
+            if recipe.status == RecipeStatus::Running && i == cur {
+                return "current";
             }
             match s.status.as_str() {
                 "done" => return "done",
@@ -208,13 +205,13 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
         if matches!(*state, "pending" | "current" | "paused" | "waiting") {
             to_be_set.extend(produces(&s.step));
         }
-        step_views.push(step_view(s, state, unbound, vars));
+        step_views.push(step_view(s, state, unbound, vars, &trail));
     }
 
-    let waiting_step = waiting_on.and_then(|i| steps.iter().find(|s| s.step_index == i));
-    let question = waiting_step.and_then(|s| match &s.step {
-        RecipeStep::AskUser { question, store_as, choices } => Some(QuestionView {
-            step: s.step_index,
+    let waited_step = waited.as_ref().and_then(|w| w.on.as_ref());
+    let question = waited.as_ref().and_then(|w| match &w.on {
+        Some(RecipeStep::AskUser { question, store_as, choices }) => Some(QuestionView {
+            step: w.step,
             text: crate::recipe::resolve_vars(question, vars),
             choices: choices
                 .as_deref()
@@ -227,12 +224,13 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
         _ => None,
     });
     let waiting_for = if blocked {
-        Some(match waiting_step.map(|s| &s.step) {
+        Some(match waited_step {
             Some(RecipeStep::AskUser { .. }) => "your answer".to_string(),
-            Some(RecipeStep::WaitFor { condition, timeout_secs }) => wait_text(condition, *timeout_secs),
-            // Waiting with no wait behind it. `get_expired_waiting` resumes these at the next
-            // message the companion handles.
-            _ => "the next message to resume it".to_string(),
+            Some(RecipeStep::WaitFor { condition, timeout_secs }) => {
+                timer_text(condition, *timeout_secs, waited.as_ref().and_then(|w| w.until))
+            }
+            // Waiting with no wait behind it: the worker's clock resumes it within seconds.
+            _ => "the clock to resume it".to_string(),
         })
     } else {
         None
@@ -262,22 +260,13 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
     }
 }
 
-fn step_view(s: &StoredStep, state: &str, unbound: Vec<String>, vars: &Vars) -> StepView {
+fn step_view(s: &StoredStep, state: &str, unbound: Vec<String>, vars: &Vars, trail: &Trail) -> StepView {
     let (kind, label, summary, detail) = describe_step(&s.step);
     let store_as = store_as_of(&s.step).map(str::to_string);
+    let path = path_of(s, state, trail);
 
-    let path = match (&s.step, s.result.as_deref()) {
-        (RecipeStep::JumpIf { target_step, .. }, Some(r)) if r == "jumped" || r.starts_with("jump:") => {
-            Some(format!("jumped to step {}", target_step + 1))
-        }
-        (RecipeStep::JumpIf { .. }, Some("continued" | "ok")) => Some(format!("went on to step {}", s.step_index + 2)),
-        (RecipeStep::Branch { then_steps, .. }, Some("then")) => Some(format!("took then ({})", count(then_steps.len()))),
-        (RecipeStep::Branch { else_steps, .. }, Some("else")) => Some(format!("took else ({})", count(else_steps.len()))),
-        _ => None,
-    };
-
-    // What it produced. The store's `result` column is uneven — the tool's whole output from one
-    // executor, "ok" from the other — so a step that keeps a variable is read from the variable,
+    // What it produced. The store's `result` column is uneven — the tool's whole output, or a
+    // marker ("ok", "done") in older records — so a step that keeps a variable is read from the variable,
     // and the markers the executors write in place of a result are not results.
     let result = if s.status == "failed" {
         s.result.as_deref().map(|r| head(r, RESULT_HEAD))
@@ -303,6 +292,99 @@ fn step_view(s: &StoredStep, state: &str, unbound: Vec<String>, vars: &Vars) -> 
         agent: None,
         detail: detail.into_iter().map(|l| clip(&l, DETAIL_MAX)).collect(),
     }
+}
+
+/// The way a JumpIf or a Branch went, from the executor's trail — a Branch step by step, a loop
+/// with its rounds — or, for a record from before there was a trail, from its result's marker.
+fn path_of(s: &StoredStep, state: &str, trail: &Trail) -> Option<String> {
+    let i = s.step_index;
+    match &s.step {
+        RecipeStep::JumpIf { target_step, .. } => {
+            if s.status != "done" {
+                return None;
+            }
+            let back = *target_step <= i;
+            let jumps = trail.jumps(i);
+            match s.result.as_deref() {
+                Some(r) if r == "jumped" || r.starts_with("jump:") => Some(if back && jumps > 0 {
+                    format!("looped back to step {} ({} so far)", target_step + 1, times(jumps))
+                } else {
+                    format!("jumped to step {}", target_step + 1)
+                }),
+                Some("continued" | "ok") => Some(if back && jumps > 0 {
+                    format!("went on to step {} after looping back {}", i + 2, times(jumps))
+                } else {
+                    format!("went on to step {}", i + 2)
+                }),
+                _ => None,
+            }
+        }
+        RecipeStep::Branch { then_steps, else_steps, .. } => {
+            let arm = trail.way(i).filter(|a| matches!(*a, "then" | "else"));
+            let shown = matches!(state, "done" | "current" | "waiting" | "failed" | "paused" | "stopped");
+            match arm {
+                Some(arm) if shown => {
+                    let list = if arm == "then" { then_steps } else { else_steps };
+                    let went: Vec<String> = trail
+                        .subs(i)
+                        .iter()
+                        .enumerate()
+                        .map(|(k, outcome)| {
+                            let label = list.get(k).map(|st| describe_step(st).1).unwrap_or_else(|| "a step".into());
+                            match outcome.as_str() {
+                                "done" | "waited" => label,
+                                other => format!("{label} ({other})"),
+                            }
+                        })
+                        .collect();
+                    let so_far = if went.is_empty() {
+                        if list.is_empty() { "nothing to do".to_string() } else { String::new() }
+                    } else {
+                        went.join(" → ")
+                    };
+                    let in_progress = s.status != "done" && matches!(state, "current" | "waiting" | "paused");
+                    let mut line = match (in_progress, so_far.is_empty()) {
+                        (true, true) => format!("taking {arm}"),
+                        (true, false) => format!("taking {arm}: {so_far}"),
+                        (false, true) => format!("took {arm}"),
+                        (false, false) => format!("took {arm}: {so_far}"),
+                    };
+                    if let Some(t) = trail.left(i) {
+                        line.push_str(&format!(", then went to step {}", t + 1));
+                    }
+                    if trail.runs(i) > 1 {
+                        line.push_str(&format!(" · round {}", trail.runs(i)));
+                    }
+                    Some(line)
+                }
+                _ => match s.result.as_deref() {
+                    Some("then") if s.status == "done" => Some(format!("took then ({})", count(then_steps.len()))),
+                    Some("else") if s.status == "done" => Some(format!("took else ({})", count(else_steps.len()))),
+                    _ => None,
+                },
+            }
+        }
+        _ => None,
+    }
+}
+
+fn times(n: u64) -> String {
+    if n == 1 { "1 time".into() } else { format!("{n} times") }
+}
+
+/// A step's kind, as the desk names it: tool, think, jump_if, branch…
+pub fn kind_of(step: &RecipeStep) -> &'static str {
+    describe_step(step).0
+}
+
+/// A step's name on its recipe's row: the tool's name, "Think", "Ask you", "Wait"…
+pub fn stage_label(step: &RecipeStep) -> String {
+    describe_step(step).1
+}
+
+/// The variable a step keeps what it produced in.
+pub fn store_as(step: &RecipeStep) -> Option<&str> {
+    store_as_of(step)
 }
 
 /// Kind, stage label, one-line summary and the opened definition of a step.
@@ -445,7 +527,7 @@ fn inputs(step: &RecipeStep) -> Vec<String> {
             texts.push(prompt);
             names.extend(source_vars.iter().cloned());
         }
-        // Format's `input_vars` are not read by either executor; only its template is.
+        // Format's `input_vars` are not read by the executor; only its template is.
         RecipeStep::Format { template, .. } => texts.push(template),
         RecipeStep::Validate { input_var, .. }
         | RecipeStep::Render { input_var, .. }
@@ -547,8 +629,17 @@ fn condition_text(c: &Condition) -> String {
     }
 }
 
-/// What a WaitFor waits on. Its clock is the store's `updated_at` and the executors read time in
-/// UTC, so a time of day is said in UTC.
+/// What a waiting timer waits for, and — once it is waiting — the time it wakes: "15m to pass,
+/// until 08:15 UTC". A time of day already says its time. The engine's clock is UTC.
+fn timer_text(condition: &WaitCondition, timeout: Option<u64>, until: Option<f64>) -> String {
+    let base = wait_text(condition, timeout);
+    match until.map(clock_text) {
+        Some(at) if at != base => format!("{base}, until {at}"),
+        _ => base,
+    }
+}
+
+/// What a WaitFor waits on. The executor reads time in UTC, so a time of day is said in UTC.
 fn wait_text(condition: &WaitCondition, timeout: Option<u64>) -> String {
     let base = match condition {
         WaitCondition::Duration { seconds } => format!("{} to pass", duration(*seconds)),
@@ -599,7 +690,7 @@ fn aggregate_text(op: &AggregateOp) -> &'static str {
     }
 }
 
-/// What the executors write in the result column in place of a result.
+/// What the executor writes, or wrote, in the result column in place of a result.
 fn is_marker(result: &str) -> bool {
     matches!(
         result,
@@ -1130,7 +1221,7 @@ mod tests {
         conn
     }
 
-    /// What both executors do on an AskUser: mark it, advance past it, and wait.
+    /// What the executor did on an AskUser before `_wait`: mark it, advance past it, and wait.
     fn put_the_question(conn: &Connection, id: &str, step: usize) {
         RecipeStore::complete_step(conn, id, step, "asked");
         RecipeStore::update_status(conn, id, &RecipeStatus::Waiting, step + 1);
@@ -1246,5 +1337,99 @@ mod tests {
         assert_eq!(RecipeStore::get(&conn, &id).unwrap().status, RecipeStatus::Paused);
         assert!(RecipeStore::get_expired_waiting(&conn).is_empty());
         assert!(RecipeStore::get_resumable(&conn).is_empty());
+    }
+
+    /// 2026-09-23 08:00:00 UTC.
+    const EIGHT_AM: f64 = 1_790_150_400.0;
+
+    /// A timer says when it wakes (#176): "waiting for 15m to pass, until 08:15 UTC" — on the row,
+    /// in the mind panel's line and in `describe`, all of which read `waiting_for`.
+    #[test]
+    fn a_timer_says_when_it_wakes() {
+        let steps = stored(
+            vec![RecipeStep::WaitFor { condition: WaitCondition::Duration { seconds: 900 }, timeout_secs: None }, tool("send", json!({}), "x")],
+            &["done"],
+        );
+        let vars = Vars::from([("_wait".into(), json!({"step": 0, "since": EIGHT_AM, "until": EIGHT_AM + 900.0}))]);
+        let v = view(&recipe(RecipeStatus::Waiting, 1), &steps, &vars);
+        assert_eq!(states(&v), ["waiting", "pending"]);
+        assert_eq!(v.waiting_for.as_deref(), Some("15m to pass, until 08:15 UTC"));
+        assert_eq!(one_line(&v), "Tidy downloads — step 1 of 2, Wait, waiting for 15m to pass, until 08:15 UTC");
+
+        // A time of day says just that time.
+        let at_nine = stored(vec![RecipeStep::WaitFor { condition: WaitCondition::Time { hour: 9, minute: 0 }, timeout_secs: None }], &["done"]);
+        let vars = Vars::from([("_wait".into(), json!({"step": 0, "since": EIGHT_AM, "until": EIGHT_AM + 3600.0}))]);
+        assert_eq!(view(&recipe(RecipeStatus::Waiting, 1), &at_nine, &vars).waiting_for.as_deref(), Some("09:00 UTC"));
+    }
+
+    /// A question asked inside a Branch is drawn where the recipe stands — at the Branch, which is
+    /// not finished — with its choices and an answer box (#176).
+    #[test]
+    fn a_question_inside_a_branch_is_drawn_at_the_branch() {
+        let steps = stored(
+            vec![
+                tool("draft", json!({}), "draft"),
+                RecipeStep::Branch {
+                    condition: "urgent".into(),
+                    then_steps: vec![RecipeStep::Notify { message: "Urgent: {{draft}}".into() }, ask("Send {{draft}} now?", &["yes", "no"], "send")],
+                    else_steps: vec![],
+                },
+                RecipeStep::Notify { message: "Sent: {{send}}".into() },
+            ],
+            &["done"],
+        );
+        let vars = Vars::from([
+            ("draft".into(), json!("the memo")),
+            ("urgent".into(), json!(true)),
+            ("_wait".into(), json!({"step": 1, "inner": [["then", 1]], "since": EIGHT_AM})),
+            ("_branch".into(), json!([{"step": 1, "arm": "then", "next": 2}])),
+            ("_trail".into(), json!({"1": {"runs": 1, "went": "then", "subs": ["done", "waiting"]}})),
+        ]);
+        let v = view(&recipe(RecipeStatus::Waiting, 1), &steps, &vars);
+        assert_eq!(states(&v), ["done", "waiting", "pending"]);
+        let q = v.question.as_ref().expect("the question the branch asks");
+        assert_eq!((q.step, q.text.as_str(), q.store_as.as_str()), (1, "Send the memo now?", "send"));
+        assert_eq!(q.choices, ["yes", "no"]);
+        assert_eq!(v.waiting_for.as_deref(), Some("your answer"));
+        assert!(v.can.answer);
+        assert_eq!(v.steps[1].path.as_deref(), Some("taking then: Notify → Ask you (waiting)"));
+        assert!(v.steps[2].unbound.is_empty(), "the answer will set {{send}}: {:?}", v.steps[2].unbound);
+    }
+
+    /// The path a Branch took, step by step, and the rounds a loop went (#176).
+    #[test]
+    fn a_branch_shows_the_steps_it_took_and_a_loop_its_rounds() {
+        let steps = vec![
+            tool("count", json!({}), "n"),
+            RecipeStep::Branch {
+                condition: "urgent".into(),
+                then_steps: vec![RecipeStep::Notify { message: "!".into() }, ask("Send it?", &["yes", "no"], "ok")],
+                else_steps: vec![tool("archive", json!({}), "a")],
+            },
+            RecipeStep::JumpIf { condition: Condition::Not { inner: Box::new(Condition::VarGt { var: "n".into(), threshold: 2.0 }) }, target_step: 0 },
+            RecipeStep::Notify { message: "done".into() },
+        ];
+        // Finished after three rounds: the Branch took then on the last, the loop went back twice.
+        let mut s = stored(steps.clone(), &["done", "done", "done", "done"]);
+        s[1].result = Some("then".into());
+        s[2].result = Some("continued".into());
+        let trail = json!({
+            "0": {"runs": 3},
+            "1": {"runs": 3, "went": "then", "subs": ["done", "answered"]},
+            "2": {"runs": 3, "went": "continued", "jumps": 2},
+            "3": {"runs": 1},
+        });
+        let v = view(&recipe(RecipeStatus::Done, 4), &s, &Vars::from([("_trail".into(), trail)]));
+        assert_eq!(v.steps[1].path.as_deref(), Some("took then: Notify → Ask you (answered) · round 3"));
+        assert_eq!(v.steps[2].path.as_deref(), Some("went on to step 4 after looping back 2 times"));
+
+        // Mid-loop: just jumped back, the loop's steps are to come again and the jump says so.
+        let mut s = stored(steps, &["pending", "pending", "done"]);
+        s[2].result = Some("jumped".into());
+        let trail = json!({"0": {"runs": 1}, "1": {"runs": 1, "went": "else", "subs": ["skipped"]}, "2": {"runs": 1, "went": "jumped", "jumps": 1}});
+        let v = view(&recipe(RecipeStatus::Running, 0), &s, &Vars::from([("_trail".into(), trail)]));
+        assert_eq!(states(&v), ["current", "pending", "done", "pending"]);
+        assert_eq!(v.steps[2].path.as_deref(), Some("looped back to step 1 (1 time so far)"));
+        assert_eq!(v.steps[1].path, None, "a step to come again shows no path until it goes one");
     }
 }

@@ -107,6 +107,17 @@ fn dispatch(
     // This is the one join every typed message passes through, so this is where the clock goes.
     super::notifications::note_user_message();
 
+    // A word to a recipe — the answer to its question, or "pause the digest" — goes where the
+    // Recipes screen's presses go, whichever mind is answering: the worker's `recipe_view::apply`.
+    // Read from the published recipes, so nothing here waits on the worker. The companion's
+    // interjection classifier was never wired to the chat, so only the screen could answer,
+    // pause or cancel a recipe (#176).
+    if let Some(word) = crate::recipes::said_in_chat(text) {
+        let reply = crate::recipes::act_from_chat(bridge.handle(), word);
+        streaming::stream_into(ui_weak.clone(), reply, text, streams);
+        return;
+    }
+
     let Some(host) = super::harness::host() else {
         // No host yet (very early boot). The builtin is the only thing that could answer.
         builtin_turn(ui_weak, bridge, text, streams);
@@ -372,6 +383,27 @@ mod tests {
             !dispatch.contains("start_ai_stream"),
             "a road to the built-in that bypasses the relay is a turn that never counts"
         );
+    }
+
+    /// A word to a recipe — its answer, or "pause the digest" — goes where the Recipes screen's
+    /// presses go, whichever mind is answering, and before any mind is asked (#176). The
+    /// companion's interjection classifier was never wired to the chat, so only the screen could
+    /// answer, pause or cancel a recipe.
+    #[test]
+    fn a_word_to_a_recipe_goes_where_the_recipes_screen_s_presses_go() {
+        let dispatch = SELF_SRC
+            .split_once("fn dispatch(")
+            .expect("dispatch")
+            .1
+            .split_once("/// Wire on_send_message and on_lens_submit callbacks.")
+            .expect("the wiring doc comment marks the end of dispatch")
+            .0;
+        let recipes = dispatch
+            .find("crate::recipes::said_in_chat(")
+            .expect("dispatch asks the published recipes whether the line speaks to one");
+        let mind = dispatch.find("harness::host()").expect("dispatch reads the harness host");
+        assert!(recipes < mind, "a word to a recipe is taken before any mind is asked");
+        assert!(dispatch.contains("crate::recipes::act_from_chat("), "and it acts through the screen's own path");
     }
 
     #[test]
