@@ -515,7 +515,7 @@ fn main() {
         say(&app, &notice);
     }
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-presentation");
 
     // One last draft after the event loop has stopped, so work that was typed inside the
     // debounce window is still offered back on the next start.

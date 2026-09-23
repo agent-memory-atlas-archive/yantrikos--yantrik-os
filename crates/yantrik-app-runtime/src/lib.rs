@@ -13,10 +13,12 @@
 //! slint::include_modules!();
 //!
 //! fn main() {
-//!     init_tracing("notes");
+//!     init_tracing("yantrik-notes");
 //!     let app = NotesApp::new().unwrap();
 //!     // wire callbacks...
-//!     app.run().unwrap();
+//!     // Not `run().unwrap()`: a logout ends the loop with an error, and that is not a crash.
+//!     run_until_closed(&app, "yantrik-notes");
+//!     // shutdown: runs however the loop ended
 //! }
 //! ```
 
@@ -29,8 +31,11 @@ pub use yantrik_ipc_transport;
 
 pub use yantrik_ipc_transport::SyncRpcClient;
 
+pub use event_loop::run_until_closed;
+
 pub mod companion;
 pub mod control;
+pub mod event_loop;
 pub mod instance;
 pub mod notify;
 pub mod problems;
@@ -55,7 +60,9 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Commonly-needed imports for app authors.
 pub mod prelude {
-    pub use crate::{companion, control, init_tracing, instance, notify, service, theme, SyncRpcClient};
+    pub use crate::{
+        companion, control, init_tracing, instance, notify, run_until_closed, service, theme, SyncRpcClient,
+    };
     pub use serde_json;
     pub use slint;
     pub use tracing;

@@ -21,7 +21,7 @@ fn main() {
     app.global::<AccentPreset>().set_index(theme.accent_index);
 
     wire(&app);
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-spreadsheet");
 }
 
 fn wire(app: &SpreadsheetApp) {

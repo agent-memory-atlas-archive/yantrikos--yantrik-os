@@ -136,7 +136,7 @@ fn main() {
     show_all(&app, &state);
     publish_control(&app, state.clone());
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-snippet-manager");
 }
 
 // ── What the window shows ────────────────────────────────────────────

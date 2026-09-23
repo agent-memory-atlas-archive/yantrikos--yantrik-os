@@ -160,7 +160,7 @@ fn main() {
     }
 
     publish_control(&app, state.clone());
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-document-editor");
 
     // The last checkpoint, once the event loop has stopped and nothing else can be typed.
     let b = state.borrow();

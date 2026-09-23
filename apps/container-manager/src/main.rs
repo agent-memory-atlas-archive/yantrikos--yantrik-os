@@ -176,7 +176,7 @@ fn main() {
     }
     refresh_agent_rail(&app);
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-container-manager");
 }
 
 // ── Reading the runtime into the window ──────────────────────────────

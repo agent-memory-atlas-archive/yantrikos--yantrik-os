@@ -84,7 +84,7 @@ fn main() {
                 .join(".local/share/yantrik/notes")
         });
     let s = wire(&ui, dir, true);
-    ui.run().unwrap();
+    run_until_closed(&ui, "yantrik-notes");
     let mut b = s.borrow_mut();
     b.timer.stop();
     let _ = b.jobs.send(Job::Stop);
