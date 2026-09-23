@@ -17,12 +17,13 @@
 //! The error cannot say which one it is. Slint flattens winit's error into a string,
 //! `PlatformError::Other("Error running winit event loop: Exit Failure: 1")`, and winit 0.30's
 //! `ExitFailure` means only that the connection to the display failed: `1` when a flush of it
-//! failed, the errno when a read did. A compositor that has gone away fails it. So does a
-//! compositor that is still running and closed *our* connection because we sent it something
-//! illegal — a protocol error, which is a bug in us. Read during a dispatch that one arrives as
-//! `EPROTO` (calloop-wayland-source's mapping), but caught by the flush first it is `1`, exactly
-//! what a logout looks like. And a display can be lost first by the renderer, whose error says
-//! nothing about Wayland at all.
+//! failed or the failure carried no errno, the errno otherwise. A compositor that has gone away
+//! fails it (in a live run, a dispatch error with no errno: `1`). So does a compositor that is
+//! still running and closed *our* connection because we sent it something illegal — a protocol
+//! error, which is a bug in us. Read during a dispatch that one arrives as `EPROTO`
+//! (calloop-wayland-source's mapping), but caught by the flush first it is `1`, exactly what a
+//! logout looks like. And a display can be lost first by the renderer, whose error says nothing
+//! about Wayland at all.
 //!
 //! So the display is asked instead of the error. When the loop ends in an error, the socket named
 //! by `WAYLAND_DISPLAY` is connected to: a compositor that has gone refuses. One that is still
