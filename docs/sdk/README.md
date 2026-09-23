@@ -55,4 +55,5 @@ output of running something. [`samples/test_guide.py`](samples/test_guide.py) fi
 its file, line for line, regenerates each output, and fails when either has drifted; CI runs it.
 [`samples/tests/desktop_files.rs`](samples/tests/desktop_files.rs) reads every `.desktop` file the
 guide quotes with the shell's own parser. The transcripts of `yos` sessions were captured from
-real runs of the examples.
+real runs of the examples (socket paths shown as a desktop session has them, long refusals cut
+with `…`).
