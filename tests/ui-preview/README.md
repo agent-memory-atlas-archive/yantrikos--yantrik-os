@@ -107,8 +107,10 @@ the taskbar and the mind panel — from fixture data (two agents, one waiting fo
 recipe in flight, three recent actions; the names are fixtures, not a running machine) and sends
 real pointer events: an agent's row opens the Agents screen on the Active tab with that agent
 selected, the strip is present over the Agents and Files screens and opens the panel there, and
-the chevron folds it. It writes the desktop (dark, light, agent mode, and with nothing known yet)
-and the Agents screen with the strip and with the panel open, beside the output path.
+the chevron folds it. With the panel open beside Files, a click at the far right of the title-bar
+row must land on the panel, not on the Files window's × — the maximized window stops short of
+the panel. It writes the desktop (dark, light, agent mode, and with nothing known yet) and the
+Agents and Files screens with the strip and with the panel open, beside the output path.
 
 ```sh
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/mind-panel.png 1280 800 verify-mind-panel

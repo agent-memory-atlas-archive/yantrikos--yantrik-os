@@ -1,8 +1,9 @@
 //! The mind panel, drawn by the whole shell — app.slint's `App`, not a copy of its layout — from
 //! fixture data, with real pointer events: an agent's row opens that agent in the Agents screen,
 //! the strip is there over another screen and opens the panel, the chevron folds it, and it is on
-//! the Files screen too. Renders the desktop (dark, light, agent mode) and the other screens with
-//! the strip and with the panel open beside them.
+//! the Files screen too — where, open, the maximized Files window stops short of it. Renders the
+//! desktop (dark, light, agent mode) and the other screens with the strip and with the panel open
+//! beside them.
 use super::*;
 use slint::{ModelRc, VecModel};
 use std::cell::RefCell;
@@ -208,6 +209,14 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     click(w, 1258., 460.);
     draw();
     assert!(log.borrow()[before..].contains(&"expand:elsewhere:true".to_string()), "the strip is on Files too: {:?}", log.borrow());
+    // Open beside Files: the maximized Files window stops short of the card instead of running
+    // under it. Its × is the last thing in its title bar, so it must now sit left of the card.
+    save(&settle(), &path("files-open"), width, height)?;
+    for x in [1244., 1250., 1256.] {
+        click(w, x, 50.);
+        draw();
+    }
+    assert_eq!(ui.get_current_screen(), 8, "the far right of the title-bar row is the panel's room, not Files' ×");
     ui.global::<MindPanelState>().set_elsewhere_expanded(false);
 
     // The desktop in the light theme, and in agent mode (where the machine's load and services live).
