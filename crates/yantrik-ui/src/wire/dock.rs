@@ -512,7 +512,7 @@ pub fn launchable_app_ids(installed: &[DesktopEntry]) -> Vec<&'static str> {
 ///
 /// Chromium first: it is what this OS installs, and the browser tools drive it. The flags keep
 /// what the old hardcoded launch had — native Wayland, no first-run wizard, no default-browser
-/// nag, and no GPU, which a VM does not have. The rest open as they are.
+/// nag. The rest open as they are.
 ///
 /// The profile is the browser's own. The visible browser used to run from
 /// `--user-data-dir=/tmp/chromium-visible`, because a headless instance might hold the default
@@ -548,7 +548,11 @@ const CHROMIUM_FLAGS: &[&str] = &[
     "--ozone-platform=wayland",
     "--no-first-run",
     "--no-default-browser-check",
-    "--disable-gpu",
+    // No "--disable-gpu". It was here on the reasoning that a VM has no GPU, and it cost every
+    // machine WebGL: the flag also switches off SwiftShader, the software renderer Chromium
+    // uses precisely when there is no GPU. The desktop Browser answered
+    // getContext("webgl") with null for every page, and no Arcade game could draw in it (#133).
+    // The browser tools already leave it out when headed, for the same reason.
     "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=9222",
     "--remote-allow-origins=http://127.0.0.1:9222",
