@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=My Surface
+Comment=A to-do list a mind can read, add to, tick off and search
+# my_surface.py, installed as a program called my-surface where the shell looks for programs:
+# /opt/yantrik/bin, or anywhere on PATH (README.md, "Install it").
+Exec=my-surface
+Terminal=false
+Categories=Utility;
+# The surface this program publishes (docs/sdk/found-while-closed.md). With these keys the
+# desktop lists it while it is closed, opens it by any of its names, and routes its
+# notifications' buttons to it.
+X-Yantrik-Surface=my-surface
+X-Yantrik-Purpose=A to-do list: add tasks, tick them off, search them
+X-Yantrik-Aliases=my-tasks

@@ -1,0 +1,13 @@
+[package]
+name = "hello-surface"
+version = "0.1.0"
+edition = "2021"
+description = "The smallest complete surface: a counter a mind can read, add to and, with the person's Allow, reset"
+publish = false
+
+# Run it with `cargo run -p hello-surface`. Its test (tests/yos_check.rs) serves it as a program on
+# a private machine and holds it to the protocol with the OS's own checker, `yos check`.
+
+[dependencies]
+yantrik-surface = { workspace = true }
+serde_json = { workspace = true }

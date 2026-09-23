@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """The smallest complete surface: a list a mind can read, add to and clear.
 
-    python3 hello_surface.py          # binds app-hello.sock and answers until Ctrl-C
+    python3 examples/hello_surface.py     # binds app-hello.sock and answers until Ctrl-C
 
     yos describe hello                # the summary, the state, the actions and their grades
     yos act hello add text=milk
     yos act hello add text=eggs count=2
     yos act hello clear               # sensitive: in ask mode the person is asked first
+    yos check hello                   # does it keep the protocol? (sdk/python/tests/test_example.py)
 
 Everything a caller can rely on — the envelopes, the revision, the refusals, the grades,
 the ceiling, the mode and the grant — comes from `yantrik_surface`. What is written here is
-only what this app is.
+only what this app is. The Rust twin is `examples/hello-surface`; the guide is `docs/sdk/`.
 """
 
 import os
@@ -19,8 +20,9 @@ import threading
 import time
 from typing import Annotated
 
-# Run from a checkout without installing: the package is one directory up.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+# Run from a checkout without installing: the package is at sdk/python. Installed
+# (`pip install ./sdk/python`), this line finds nothing there and changes nothing.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sdk", "python"))
 
 from yantrik_surface import Refusal, Surface  # noqa: E402
 

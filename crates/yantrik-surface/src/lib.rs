@@ -16,12 +16,12 @@
 //!
 //! # Hello, surface
 //!
-//! [`examples/hello_surface.rs`](https://github.com/yantrikos/yantrik-os/blob/main/crates/yantrik-surface/examples/hello_surface.rs)
+//! [`examples/hello-surface`](https://github.com/yantrikos/yantrik-os/blob/main/examples/hello-surface/src/main.rs)
 //! is the smallest complete surface: a counter a mind can read, add to, and — with the person's
 //! Allow — reset. Run it, and drive it the way a mind does:
 //!
 //! ```text
-//! cargo run -p yantrik-surface --example hello_surface
+//! cargo run -p hello-surface
 //! yos describe counter                 # the count, and three actions with their grades
 //! yos act counter increment by=2       # standard: runs in every mode
 //! yos act counter increment by=two     # refused: `by` must be an integer
@@ -30,6 +30,8 @@
 //!
 //! It is the Rust twin of `crates/yantrik-harness/examples/echo_harness.rs`: everything in it
 //! that is not the counter is the entire cost of putting something where a mind can find it.
+//! The guide for authors — quickstarts, grades, designing a `describe`, `.desktop` keys, `yos
+//! check` — is `docs/sdk/`, and `templates/rust-surface` is a starting point to copy.
 //!
 //! # Found while closed
 //!
@@ -41,7 +43,7 @@
 //! ```text
 //! [Desktop Entry]
 //! Name=Counter
-//! Exec=/usr/bin/hello_surface
+//! Exec=/usr/bin/hello-surface
 //! X-Yantrik-Surface=counter
 //! X-Yantrik-Purpose=a number a mind can read and add to
 //! X-Yantrik-Aliases=tally

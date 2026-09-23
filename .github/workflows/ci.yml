@@ -185,3 +185,14 @@ jobs:
       # and it replays the policy vectors generated from gate::decide once they are in the tree.
       - name: The Python surface SDK answers like the Rust dispatch
         run: python3 -m unittest discover -s sdk/python/tests -v
+
+      # What an outside author copies and reads (the surface SDK's piece F): the Python template,
+      # held to the protocol by the real `yos check`; the LibreOffice adapter, built only on the
+      # public SDK, driven against a fake UNO and over a real socket (its run against a real
+      # LibreOffice skips here: no soffice); and the guide in docs/sdk, whose every code block must
+      # still be in the file it quotes. The Rust template and examples run in the cargo test job.
+      - name: The SDK's template, LibreOffice adapter and guide hold
+        run: |
+          python3 -m unittest discover -s templates/python-surface/tests -v
+          python3 -m unittest discover -s adapters/libreoffice/tests -v
+          python3 -m unittest discover -s docs/sdk/samples -v

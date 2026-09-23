@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""yantrik-libreoffice-adapter — serve LibreOffice's Yantrik surface over UNO.
+
+The command a `.desktop` file names in `X-Yantrik-Adapter`: the shell starts it beside
+LibreOffice with YANTRIK_SURFACE and YANTRIK_APP_PID set, and stops it when LibreOffice exits.
+Run by hand it serves until stopped; `--headless` starts a LibreOffice of its own.
+
+It runs with the system's python3, because that is the Python python3-uno is built for. The
+adapter package (`yantrik_libreoffice`) sits one directory above this script, found through any
+symlink to it; the surface SDK (`yantrik_surface`) sits beside the package when installed, and at
+sdk/python in a checkout of yantrik-os. An installed copy of either is used only when neither is
+there.
+"""
+
+import os
+import sys
+
+_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+for _candidate in (_root, os.path.join(_root, "..", "..", "sdk", "python")):
+    _candidate = os.path.normpath(_candidate)
+    if os.path.isdir(_candidate) and _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
+
+from yantrik_libreoffice.adapter import main  # noqa: E402
+
+sys.exit(main())

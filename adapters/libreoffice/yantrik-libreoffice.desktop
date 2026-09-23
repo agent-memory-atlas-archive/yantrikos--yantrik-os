@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=LibreOffice
+GenericName=Office Suite
+Comment=Documents, spreadsheets and presentations in LibreOffice
+# LibreOffice, listening on its UNO pipe so the adapter below can reach it (bin/yantrik-libreoffice).
+# Found where the shell looks for programs: /opt/yantrik/bin, or anywhere on PATH.
+Exec=yantrik-libreoffice %U
+Icon=libreoffice-startcenter
+Terminal=false
+Categories=Office;
+Keywords=document;spreadsheet;writer;calc;odt;docx;ods;xlsx;pdf;
+# The surface, and the separate process that provides it: LibreOffice cannot host one itself, so
+# the shell starts the adapter beside it with YANTRIK_SURFACE and YANTRIK_APP_PID, and stops it
+# when LibreOffice exits (docs/sdk/found-while-closed.md). The purpose is written against the
+# desktop's own yDoc, which keeps Markdown documents: this is for office files.
+X-Yantrik-Surface=libreoffice
+X-Yantrik-Purpose=office files — .odt, .docx, .ods, .xlsx, .csv — opened, read, written and saved in LibreOffice, and exported to PDF
+X-Yantrik-Aliases=writer;calc
+X-Yantrik-Adapter=yantrik-libreoffice-adapter

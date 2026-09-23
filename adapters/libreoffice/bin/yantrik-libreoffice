@@ -1,0 +1,14 @@
+#!/bin/sh
+# yantrik-libreoffice — LibreOffice as this desktop opens it.
+#
+# The same LibreOffice, with one difference: it listens on a UNO pipe, so its adapter
+# (yantrik-libreoffice-adapter, which the shell starts beside it) can reach it. The pipe is
+# `yantrik-libreoffice` unless YANTRIK_LIBREOFFICE_PIPE says otherwise; the adapter reads the same
+# variable. Every argument is LibreOffice's own and is passed through, so the .desktop file's %U
+# still opens the files it is given.
+#
+# A LibreOffice that is already running takes this request and starts listening on the pipe as
+# well (LibreOffice passes --accept on to the running instance), and this process exits.
+#
+# YANTRIK_SOFFICE names another LibreOffice program; the tests use it.
+exec "${YANTRIK_SOFFICE:-soffice}" "--accept=pipe,name=${YANTRIK_LIBREOFFICE_PIPE:-yantrik-libreoffice};urp;" "$@"
