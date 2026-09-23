@@ -8,7 +8,8 @@
 //! 1. When the host hands an agent its first turn, the assignment carries an agent token — 128
 //!    random bits, known to the shell and that harness. The harness passes it to the `yos-mcp` it
 //!    starts for that conversation (`YANTRIK_AGENT_TOKEN`), and every act from that bridge carries
-//!    it.
+//!    it — beside `args` on `app.act`, never among them, because the arguments are what an
+//!    approval card shows and an audit line keeps.
 //! 2. The shell resolves the token to the agent **and** checks that the process on the socket
 //!    (its pid from `SO_PEERCRED`, `yantrik_app_runtime::control::caller()`) descends from the
 //!    harness process that attached — the host records that pid from the peer credentials at
@@ -119,8 +120,10 @@ fn verify(
     caller_pid: Option<u32>,
 ) -> Result<AgentId, String> {
     if token.trim().is_empty() {
-        return Err("`agent_token` is empty. An agent's commands carry the token its harness was \
-                    given with the agent's first turn; a call without one belongs to no agent."
+        return Err("no agent token came with this call, so it belongs to no agent. An agent's \
+                    calls carry the token its harness was given with the agent's first turn, \
+                    beside `args` on app.act (`agent_token`; `yos act --agent-token`, or \
+                    YANTRIK_AGENT_TOKEN in yos's environment) — never among the arguments."
             .to_string());
     }
     let Some((agent, harness)) = found else {
@@ -192,7 +195,8 @@ mod tests {
         let err = NoAgents.resolve("0123456789abcdef", Some(std::process::id())).unwrap_err();
         assert!(err.starts_with(NO_AGENT), "{err}");
         let err = NoAgents.resolve("  ", Some(std::process::id())).unwrap_err();
-        assert!(err.contains("`agent_token` is empty"), "{err}");
+        assert!(err.contains("no agent token came with this call"), "{err}");
+        assert!(err.contains("beside `args`"), "and it says where the token goes: {err}");
     }
 
     #[cfg(target_os = "linux")]

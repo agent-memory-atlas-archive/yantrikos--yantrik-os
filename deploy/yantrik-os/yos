@@ -51,6 +51,14 @@ Conventions worth knowing:
     Allow, and acts again carrying the grant. `--no-ask` hands the refusal back instead, and
     `--grant <id>` carries a grant you already hold. `describe` needs nothing.
 
+  * an `act` made for one of the person's agents carries that agent's token BESIDE the
+    arguments, never among them: `--agent-token <t>`, or `YANTRIK_AGENT_TOKEN` in the
+    environment a harness started this in (an `agent_token=` argument is lifted out the same
+    way). The arguments are what an approval card shows and the audit log keeps; a token there
+    is a token anyone reading either could replay. The shell's `agent_run` / `agent_job` /
+    `agent_input` / `agent_kill` need it, and `agent_run` and `agent_job` are given as long as
+    their `wait` says (120 s when it says nothing) before this gives up on the answer.
+
   * `describe` and `act` take a short name. `shell` means `app-shell`, `notes` means
     `app-notes`; anything else is used as given, so `yos describe weather` reaches the
     weather service directly. An app answers to every name it is known by — `containers`
@@ -707,7 +715,8 @@ def act_after_asking(target, action, params, refusal):
 
     if status == "granted":
         try:
-            return request(target, "app.act", dict(params, grant=request_id))
+            return request(target, "app.act", dict(params, grant=request_id),
+                           timeout=act_timeout(action, params["args"]))
         except Unreachable as e:
             die("the person allowed %s.%s, but it did not go through: %s" % (app, action, plain(e)))
     if status == "denied":
@@ -720,9 +729,52 @@ def act_after_asking(target, action, params, refusal):
         "away from the keyboard; run this again when they are back." % (app, action, APPROVAL_WAIT))
 
 
+# Where a harness puts the token of the agent it runs, for every `yos` its mind starts.
+AGENT_TOKEN_ENV = "YANTRIK_AGENT_TOKEN"
+# How long an act is given by default, and by how much an act that was told to `wait` is given
+# longer than its wait: the shell answers `agent_run` when the command ends or the wait runs out.
+ACT_TIMEOUT = 40
+WAIT_MARGIN = 20
+# Actions that wait for a command, and how long they wait when not told (the shell's default).
+WAITING_ACTIONS = {"agent_run": 120, "agent_job": 120}
+
+
+def act_timeout(action, args):
+    """How long to wait for an act's answer: longer than the act itself was told to wait."""
+    wait = args.get("wait", WAITING_ACTIONS.get(action))
+    if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
+        return max(ACT_TIMEOUT, float(wait) + WAIT_MARGIN)
+    return ACT_TIMEOUT
+
+
+def take_agent_token(argv):
+    """The agent token off a command line, and the command line without it.
+
+    `--agent-token <t>` first, then an `agent_token=<t>` argument, then the environment a
+    harness started this in. Read as the text it is — never through `read_value`, which would
+    turn a token made of digits into a number.
+    """
+    token = None
+    if "--agent-token" in argv:
+        at = argv.index("--agent-token")
+        if at + 1 >= len(argv):
+            die("--agent-token needs the token your harness was given")
+        token = argv[at + 1]
+        argv = argv[:at] + argv[at + 2:]
+    rest = []
+    for arg in argv:
+        if arg.startswith("agent_token="):
+            token = token or arg.split("=", 1)[1]
+        else:
+            rest.append(arg)
+    token = (token or os.environ.get(AGENT_TOKEN_ENV, "")).strip()
+    return (token or None), rest
+
+
 def cmd_act(argv):
     if len(argv) < 2:
-        die("usage: yos act <target> <action> [key=value ...] [--full] [--grant <id>] [--no-ask]")
+        die("usage: yos act <target> <action> [key=value ...] [--full] [--grant <id>] [--no-ask] "
+            "[--agent-token <t>]")
     # The reply carries a full `describe` of the app as it stands after the action. That is
     # the right thing to send and the wrong thing to print: filling six fields of the
     # installer printed the same 180-line shell state six times, and an agent pays for every
@@ -741,6 +793,11 @@ def cmd_act(argv):
         grant = argv[at + 1]
         argv = argv[:at] + argv[at + 2:]
     argv = [a for a in argv if a not in ("--full", "--no-ask")]
+    # Beside the arguments, never among them: see the conventions at the top.
+    agent_token, argv = take_agent_token(argv)
+    if len(argv) < 2:
+        die("usage: yos act <target> <action> [key=value ...] [--full] [--grant <id>] [--no-ask] "
+            "[--agent-token <t>]")
     target, action = argv[0], argv[1]
     pairs = argv[2:]
     params = {"action": action, "args": parse_args(pairs, declared_types(target, action, pairs))}
@@ -750,8 +807,10 @@ def cmd_act(argv):
         params["expect_revision"] = params["args"].pop("expect_revision")
     if grant:
         params["grant"] = grant
+    if agent_token:
+        params["agent_token"] = agent_token
     try:
-        reply = request(target, "app.act", params)
+        reply = request(target, "app.act", params, timeout=act_timeout(action, params["args"]))
     except Unreachable as e:
         # A refusal for want of a grant is a question, not an ending — unless the caller said
         # it would do its own asking, or already brought a grant that did not hold.

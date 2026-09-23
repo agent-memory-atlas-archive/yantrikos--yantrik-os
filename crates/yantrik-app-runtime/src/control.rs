@@ -923,6 +923,71 @@ impl Drop for CallerScope {
     }
 }
 
+// ── Which agent a call is for ───────────────────────────────────────
+//
+// A mind running as one of the person's agents carries a token its harness was given (design
+// `agents-workspace-2026-09-23.md`, decision 3). It travels BESIDE `args` on `app.act`, the way a
+// grant does, and never inside them — because `args` is what gets shown and kept: the approval
+// card draws it, `record_unasked_action` writes it to `mind-audit.jsonl`, a grant is bound to it.
+// A token in any of those is a token anyone reading the screen or the log can replay.
+//
+// So the dispatch lifts the token off the call, strips any copy a caller put inside `args`, and
+// hands it to the handler the way it hands over the caller: for the duration of the one dispatch,
+// on the thread the handler runs on. What the token is worth is the handler's business — the
+// shell resolves it against the kernel's account of the caller; here it is only carried.
+
+/// The key an agent token travels under: beside `args` on `app.act`, never inside them.
+pub const AGENT_TOKEN: &str = "agent_token";
+
+thread_local! {
+    /// The agent token of the dispatch currently running on THIS thread, or `None`.
+    static CURRENT_AGENT_TOKEN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The agent token the call being handled carried beside its `args`, inside an action handler.
+/// `None` when it carried none, or outside a dispatch.
+///
+/// Like [`caller`], it is a fact about the call and not a verdict: nothing here checks it.
+pub fn agent_token() -> Option<String> {
+    CURRENT_AGENT_TOKEN.with(|cell| cell.borrow().clone())
+}
+
+/// Installs a dispatch's token for its duration and puts back what was there, panic or not.
+struct AgentTokenScope(Option<String>);
+
+impl AgentTokenScope {
+    fn enter(token: Option<String>) -> AgentTokenScope {
+        AgentTokenScope(CURRENT_AGENT_TOKEN.with(|cell| cell.replace(token)))
+    }
+}
+
+impl Drop for AgentTokenScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        CURRENT_AGENT_TOKEN.with(|cell| *cell.borrow_mut() = previous);
+    }
+}
+
+/// The token a call carries, from beside its `args` — and any copy inside `args` taken out.
+///
+/// The copy inside is removed and NOT used. Defence in depth: whatever put it there has already
+/// shown it to anything that prints the arguments, and honouring it would teach callers that
+/// the arguments are a place a token may go.
+fn agent_token_of(params: &serde_json::Value, args: &mut serde_json::Value) -> Option<String> {
+    if args.as_object_mut().and_then(|given| given.remove(AGENT_TOKEN)).is_some() {
+        tracing::warn!(
+            "an agent token arrived inside `args`; it was removed and not used. It travels beside \
+             `args` on app.act, never among them"
+        );
+    }
+    params
+        .get(AGENT_TOKEN)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
 // ── Answers that take time ──────────────────────────────────────────
 //
 // A handler has the three seconds of `UI_ROUNDTRIP`, on the thread that paints the window. Some
@@ -1203,7 +1268,10 @@ impl ControlRpc {
                         message: "act needs a non-empty `action`".into(),
                     });
                 }
-                let args = params.get("args").cloned().unwrap_or(serde_json::json!({}));
+                let mut args = params.get("args").cloned().unwrap_or(serde_json::json!({}));
+                // Lifted off before anything reads `args` — the grant below is bound to them —
+                // and out of `args` if a caller put it there. See `agent_token`.
+                let token = agent_token_of(&params, &mut args);
                 // Optional, and deliberately so: a caller acting on its own initiative has nothing
                 // to compare against, and demanding a revision it never read would only teach it
                 // to send back whatever it last saw.
@@ -1239,10 +1307,13 @@ impl ControlRpc {
                     // audit log is the shell's job; this is the runtime's own record.
                     caller_pid = who.map(|c| c.pid).unwrap_or(0),
                     caller_uid = who.map(|c| c.uid).unwrap_or(0),
+                    // Whether one came, never the token itself.
+                    agent_token = token.is_some(),
                     "app.act"
                 );
                 let id = action_id.clone();
                 let outcome = on_ui_thread(who, move |reg| {
+                    let _agent = AgentTokenScope::enter(token);
                     reg.act(&action, &args, expect.as_deref(), &id, &authority)
                 })
                 .map_err(|m| ServiceError { code: -32000, message: m })?;
@@ -2449,9 +2520,19 @@ mod tests {
                                 .or_else(|work| work())
                         }),
                     ),
+                    (
+                        // What a handler that records or shows its arguments would record or
+                        // show — an approval card, an audit line — and the token beside them.
+                        Action::new("echo", "Answer with the arguments and the agent token as the handler got them")
+                            .risk("safe")
+                            .arg(Param::text("command").optional()),
+                        Box::new(|args| {
+                            Ok(serde_json::json!({ "args": args, "agent_token": agent_token() }))
+                        }),
+                    ),
                 ],
             }));
-            serve_rpc(APP, 2);
+            serve_rpc(APP, 3);
 
             // Thirty seconds is a bound on a hung server, not a budget for a slow one: the server
             // binds on its own thread after building a tokio runtime, and the failure this loop
@@ -2546,6 +2627,62 @@ mod tests {
         );
         assert_eq!(refused["error"]["message"], "refused after 10 ms", "{refused}");
         assert_eq!(refused["error"]["code"], -32602, "an application refusal, not a transport fault");
+    }
+
+    /// The token rides beside `args` and reaches the handler through `agent_token()`; `args` —
+    /// what an approval card shows and an audit line keeps — never holds it, even when a caller
+    /// puts it there.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_token_reaches_the_handler_beside_the_arguments_and_never_among_them() {
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":1,"method":"app.act","params":{"action":"echo","args":{"command":"ls"},"agent_token":"tok-7f3a"}}"#,
+        );
+        let seen = &reply["result"]["result"];
+        assert_eq!(seen["agent_token"], "tok-7f3a", "the handler reads the token: {reply}");
+        assert_eq!(seen["args"], serde_json::json!({"command": "ls"}), "and its args are only args: {reply}");
+
+        // Smuggled inside `args` as well: taken out, not used, and not refused as an undeclared
+        // argument either — the call goes on as if it had never been there.
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":2,"method":"app.act","params":{"action":"echo","args":{"command":"ls","agent_token":"smuggled"},"agent_token":"tok-7f3a"}}"#,
+        );
+        assert_eq!(reply["result"]["result"]["args"], serde_json::json!({"command": "ls"}), "{reply}");
+        assert_eq!(reply["result"]["result"]["agent_token"], "tok-7f3a", "the one beside args wins: {reply}");
+        assert!(!reply.to_string().contains("smuggled"), "nothing in the reply carries it: {reply}");
+
+        // Only inside `args`: stripped, and the handler sees no token at all.
+        let reply = call(
+            r#"{"jsonrpc":"2.0","id":3,"method":"app.act","params":{"action":"echo","args":{"agent_token":"smuggled"}}}"#,
+        );
+        assert_eq!(reply["result"]["result"]["args"], serde_json::json!({}), "{reply}");
+        assert!(reply["result"]["result"]["agent_token"].is_null(), "{reply}");
+
+        // No token, no token.
+        let reply = call(r#"{"jsonrpc":"2.0","id":4,"method":"app.act","params":{"action":"echo","args":{}}}"#);
+        assert!(reply["result"]["result"]["agent_token"].is_null(), "{reply}");
+    }
+
+    #[test]
+    fn an_agent_token_is_current_only_while_its_own_dispatch_runs() {
+        assert_eq!(agent_token(), None);
+        {
+            let _outer = AgentTokenScope::enter(Some("tok-a".into()));
+            assert_eq!(agent_token().as_deref(), Some("tok-a"));
+            {
+                let _inner = AgentTokenScope::enter(None);
+                assert_eq!(agent_token(), None, "a nested call without one has none");
+            }
+            assert_eq!(agent_token().as_deref(), Some("tok-a"));
+        }
+        assert_eq!(agent_token(), None, "and nothing is left behind for the next dispatch");
+
+        let mut args = serde_json::json!({"command": "ls", "agent_token": "x"});
+        let params = serde_json::json!({"agent_token": "  tok-b  "});
+        assert_eq!(agent_token_of(&params, &mut args).as_deref(), Some("tok-b"));
+        assert_eq!(args, serde_json::json!({"command": "ls"}));
+        let mut args = serde_json::json!({});
+        assert_eq!(agent_token_of(&serde_json::json!({"agent_token": " "}), &mut args), None, "blank is none");
     }
 
     #[test]
