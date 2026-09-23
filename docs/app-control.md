@@ -191,6 +191,14 @@ decision 3). The MCP bridge started with `YANTRIK_AGENT_TOKEN` passes it to `yos
 environment — never on the command line — and offers the agent's terminal as `run_command`,
 `command_status`, `command_input` and `command_kill`. See [harness.md](harness.md).
 
+The same token decides which agent's pane an approval card is drawn in (`request_approval` puts
+it on `Verified.agent`, and the card names it), and who is asking for `new_agent` (sensitive),
+`send_to_agent` and `stop_agent` (standard), and `read_agent` and `show_agent` (safe) —
+`control_agents.rs`. A call with no token is the person's; one whose token is not believed is
+refused. `consume_approval` refuses a grant asked for another agent when the caller carries a
+token. An app's own dispatch spends a grant without one (#116), so a grant is not yet bound to
+its agent on that path.
+
 The rule lives in `yantrik_ipc_transport::gate` (re-exported as `yantrik_app_runtime::control`), so
 a service that answers `app.act` in its own handler meets it too, without linking Slint. System
 Monitor, Notifications and Weather do: each lifts an agent token off the call, then calls

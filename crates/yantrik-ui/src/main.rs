@@ -54,6 +54,8 @@ mod control_editor;
 mod control_agent_terminal;
 /// A recipe on the shell's surface: answer_recipe / pause_recipe / resume_recipe / cancel_recipe.
 mod control_recipes;
+/// Agents on the shell's surface: new_agent / send_to_agent / stop_agent / read_agent / show_agent.
+mod control_agents;
 mod jobs;
 mod cards;
 mod clipboard;

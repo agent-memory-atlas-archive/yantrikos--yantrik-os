@@ -44,6 +44,12 @@ pub const KEEP_AGENTS: usize = 24;
 pub const PERSIST_TURNS: usize = 50;
 pub const PERSIST_BYTES: usize = 64 * 1024;
 
+/// What [`Store::transcript`] gives one reader: at most this much in all, the newest of any one
+/// block of text, and the last lines of a card's output.
+pub const TRANSCRIPT_BYTES: usize = 32 * 1024;
+const TRANSCRIPT_TEXT: usize = 4 * 1024;
+const TRANSCRIPT_OUTPUT_LINES: usize = 8;
+
 pub struct Store {
     agents: Vec<Agent>,
     next_seq: u64,
@@ -306,9 +312,11 @@ impl Store {
         let agent = &mut self.agents[i];
         let args = serde_json::json!({ "command": command, "cwd": cwd });
         match find_card(agent, job, Provenance::Verified) {
-            // Its output got here first; the start fills in what it was.
-            Some(card) if card.running() => card.args = args,
-            Some(_) => agent.refused += 1,
+            // Its output — or, for a command quicker than the call that started it, its end — got
+            // here first; the start fills in what it was. Not a second start: the shell is the
+            // only feeder of its own cards, and job ids are never reused, so the same id is the
+            // same command reported in the other order.
+            Some(card) => card.args = args,
             None => {
                 let start = Event::ToolStart { call: job.into(), name: "agent_run".into(), target: String::new(), args };
                 apply(agent, &start, Provenance::Verified, now);
@@ -403,9 +411,13 @@ impl Store {
     }
 
     /// The shell drew an approval card for this agent. Verified by construction: only the shell
-    /// calls this. The row moves to Needs you.
+    /// calls this, with the agent its token named. The row moves to Needs you, and the session
+    /// gets the card itself — the shell's, bound to `request` — where the agent's work is.
+    ///
+    /// An agent the store has not heard of is made known: a token the host issued, checked against
+    /// the caller's process, is evidence enough that it exists.
     pub fn approval_asked(&mut self, id: &AgentId, request: &str, what: &str) {
-        let Some(i) = self.index(id) else { return };
+        let i = self.known(id);
         let now = self.now();
         let agent = &mut self.agents[i];
         if agent.pending_approvals.iter().any(|r| r == request) {
@@ -413,22 +425,59 @@ impl Store {
         }
         agent.pending_approvals.push(request.to_string());
         agent.approvals_asked += 1;
-        turn_for_verified(agent, now).items.push(Item::Note(format!("Asked you: {what}")));
+        turn_for_verified(agent, now).items.push(Item::Approval(Approval {
+            request: request.to_string(),
+            what: what.to_string(),
+            outcome: ApprovalOutcome::Pending,
+            record: String::new(),
+            asked: now,
+            settled: None,
+        }));
         set_state(agent, State::WaitingForYou, now);
         self.mark(i);
     }
 
     /// The person answered it.
     pub fn approval_answered(&mut self, id: &AgentId, request: &str, allowed: bool) {
+        let outcome = if allowed { ApprovalOutcome::Allowed } else { ApprovalOutcome::Denied };
+        self.approval_settled(id, request, outcome, "");
+    }
+
+    /// An approval asked for this agent is over: answered, run out, or withdrawn. `record` is the
+    /// line it leaves — the approval store's own, when it had one — and empty says it plainly.
+    /// Only an answer counts as answered; a request that ran out or was taken back was not.
+    pub fn approval_settled(&mut self, id: &AgentId, request: &str, outcome: ApprovalOutcome, record: &str) {
+        if outcome == ApprovalOutcome::Pending {
+            return;
+        }
         let Some(i) = self.index(id) else { return };
         let now = self.now();
         let agent = &mut self.agents[i];
         let Some(at) = agent.pending_approvals.iter().position(|r| r == request) else { return };
         agent.pending_approvals.remove(at);
-        agent.approvals_answered += 1;
-        turn_for_verified(agent, now)
-            .items
-            .push(Item::Note(if allowed { "You allowed it.".into() } else { "You denied it.".into() }));
+        if matches!(outcome, ApprovalOutcome::Allowed | ApprovalOutcome::Denied) {
+            agent.approvals_answered += 1;
+        }
+        let line = if record.trim().is_empty() { settled_line(outcome, now) } else { record.trim().to_string() };
+        let card = agent
+            .turns
+            .iter_mut()
+            .rev()
+            .flat_map(|t| t.items.iter_mut().rev())
+            .find_map(|item| match item {
+                Item::Approval(a) if a.request == request => Some(a),
+                _ => None,
+            });
+        match card {
+            Some(card) => {
+                card.outcome = outcome;
+                card.record = line;
+                card.settled = Some(now);
+            }
+            // Its turn was let go (a long session keeps the newest turns); the answer still
+            // belongs in the session.
+            None => turn_for_verified(agent, now).items.push(Item::Note(line)),
+        }
         if agent.state == State::WaitingForYou && agent.pending_approvals.is_empty() {
             let next = if agent.cards().any(Card::running) {
                 State::RunningTool
@@ -513,6 +562,92 @@ impl Store {
         Some(details)
     }
 
+    /// The agents `parent` started (`shell.new_agent`), oldest first.
+    pub fn children_of(&self, parent: &AgentId) -> Vec<AgentId> {
+        let mut children: Vec<&Agent> =
+            self.agents.iter().filter(|a| a.meta.parent.as_ref() == Some(parent)).collect();
+        children.sort_by_key(|a| (a.meta.started, a.seq));
+        children.into_iter().map(|a| a.meta.id.clone()).collect()
+    }
+
+    /// An agent's last `last` turns as plain text — what `read_agent` answers with: the prompts,
+    /// the mind's text, each card on one line with how it went and the end of its output, each
+    /// approval with how it came out, and the shell's notes. Bounded at [`TRANSCRIPT_BYTES`],
+    /// oldest cut first, so what is kept is the newest.
+    pub fn transcript(&self, id: &AgentId, last: usize) -> Option<String> {
+        let agent = self.agent(id)?;
+        let mut out: Vec<String> = Vec::new();
+        let status = if agent.status.is_empty() { String::new() } else { format!(" — {}", agent.status) };
+        let from = agent.turns.len().saturating_sub(last.max(1));
+        out.push(format!(
+            "{} · {} · \"{}\" · {}{status}. {} turn{} in all; the last {} here.",
+            agent.meta.id,
+            agent.meta.mind,
+            agent.meta.title,
+            agent.state.label(),
+            agent.turns.len(),
+            if agent.turns.len() == 1 { "" } else { "s" },
+            agent.turns.len() - from,
+        ));
+        for turn in &agent.turns[from..] {
+            out.push(String::new());
+            if turn.prompt.is_empty() {
+                out.push(format!("── turn {} ──", turn.n));
+            } else {
+                out.push(format!("── turn {} ── asked: {}", turn.n, clip_text(&turn.prompt, TRANSCRIPT_TEXT)));
+            }
+            for item in &turn.items {
+                match item {
+                    Item::Text(text) => {
+                        let text = text.last(TRANSCRIPT_TEXT);
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            out.push(text.to_string());
+                        }
+                    }
+                    // The mind's reasoning is folded on screen and left out here: it is not what
+                    // the agent said, and a reader asking for the session wants the session.
+                    Item::Thinking(_) => {}
+                    Item::Note(note) => out.push(format!("(the desktop: {note})")),
+                    Item::Approval(a) => out.push(match a.outcome {
+                        ApprovalOutcome::Pending => format!("[asked the person] {} — waiting for an answer", a.what),
+                        _ => format!("[asked the person] {} — {}", a.what, a.record),
+                    }),
+                    Item::Card(card) => {
+                        let how = match (card.state, card.exit_code) {
+                            (CallState::Running, _) => "running".to_string(),
+                            (_, Some(code)) => format!("{} · exit {code}", card.state.key()),
+                            (state, None) => state.key().to_string(),
+                        };
+                        out.push(format!(
+                            "[{} call] {} — {how}",
+                            card.provenance.key(),
+                            clip_text(&card.as_call().summary(), TRANSCRIPT_TEXT)
+                        ));
+                        let tail = card.output.tail_lines(TRANSCRIPT_OUTPUT_LINES);
+                        for line in tail.lines() {
+                            out.push(format!("    {line}"));
+                        }
+                    }
+                }
+            }
+            match (turn.ended, turn.ok) {
+                (None, _) => out.push("(still working)".to_string()),
+                (Some(_), Some(false)) => out.push("(this turn did not finish)".to_string()),
+                _ => {}
+            }
+        }
+        let mut text = out.join("\n");
+        if text.len() > TRANSCRIPT_BYTES {
+            let mut from = text.len() - TRANSCRIPT_BYTES;
+            while !text.is_char_boundary(from) {
+                from += 1;
+            }
+            text = format!("… (the start is cut; this is the newest {} of it)\n{}", bytes(TRANSCRIPT_BYTES as u64), &text[from..]);
+        }
+        Some(text)
+    }
+
     // ── On disk ───────────────────────────────────────────────────────
 
     /// The agents whose files are out of date, as `(file, contents)`, and the files of agents that
@@ -594,6 +729,41 @@ fn set_state(agent: &mut Agent, state: State, now: u64) {
         agent.state = state;
         agent.since = now;
     }
+}
+
+/// The line a settled approval leaves when the approval store had none to give.
+fn settled_line(outcome: ApprovalOutcome, at: u64) -> String {
+    let when = hhmm(at);
+    match outcome {
+        ApprovalOutcome::Pending => String::new(),
+        ApprovalOutcome::Allowed => format!("Allowed — {when}"),
+        ApprovalOutcome::Denied => format!("Denied — {when}"),
+        ApprovalOutcome::Expired => format!("Not answered in time — {when}"),
+        ApprovalOutcome::Withdrawn => format!("Withdrawn by the desktop — {when}"),
+    }
+}
+
+/// Local `HH:MM` for a unix time.
+fn hhmm(unix: u64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(unix as i64, 0)
+        .single()
+        .map(|t| t.format("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+/// `text` trimmed, and at most its first `max` bytes, cut on a character and marked when cut.
+fn clip_text(text: &str, max: usize) -> String {
+    let flat = text.trim();
+    if flat.len() <= max {
+        return flat.to_string();
+    }
+    let mut end = max;
+    while !flat.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &flat[..end])
 }
 
 /// One event's text, cut at [`EVENT_CAP`] on a character.
@@ -909,6 +1079,18 @@ enum ItemRecord {
     Thinking(String),
     Note(String),
     Card(CardRecord),
+    Approval(ApprovalRecord),
+}
+
+#[derive(Serialize, Deserialize)]
+struct ApprovalRecord {
+    request: String,
+    what: String,
+    outcome: ApprovalOutcome,
+    #[serde(default)]
+    record: String,
+    asked: u64,
+    settled: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -977,6 +1159,14 @@ fn serialize(agent: &Agent) -> String {
                 Item::Text(t) => ItemRecord::Text(t.last(PERSIST_BYTES)),
                 Item::Thinking(t) => ItemRecord::Thinking(t.last(PERSIST_BYTES)),
                 Item::Note(n) => ItemRecord::Note(n.clone()),
+                Item::Approval(a) => ItemRecord::Approval(ApprovalRecord {
+                    request: a.request.clone(),
+                    what: a.what.clone(),
+                    outcome: a.outcome,
+                    record: a.record.clone(),
+                    asked: a.asked,
+                    settled: a.settled,
+                }),
                 Item::Card(c) => ItemRecord::Card(CardRecord {
                     call: c.call.clone(),
                     name: c.name.clone(),
@@ -1057,6 +1247,21 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
                 ItemRecord::Text(t) => Item::Text(Capped::restore(TEXT_CAP, &t, t.len() as u64, 0)),
                 ItemRecord::Thinking(t) => Item::Thinking(Capped::restore(TEXT_CAP, &t, t.len() as u64, 0)),
                 ItemRecord::Note(n) => Item::Note(n),
+                // A request still waiting when the shell stopped is gone with the shell: requests
+                // are held in memory, so nobody can answer it now, and it is never drawn with
+                // buttons again.
+                ItemRecord::Approval(a) => Item::Approval(Approval {
+                    outcome: if a.outcome == ApprovalOutcome::Pending { ApprovalOutcome::Withdrawn } else { a.outcome },
+                    record: if a.outcome == ApprovalOutcome::Pending {
+                        "Withdrawn — the desktop restarted while it waited".to_string()
+                    } else {
+                        a.record
+                    },
+                    settled: if a.outcome == ApprovalOutcome::Pending { Some(now) } else { a.settled },
+                    request: a.request,
+                    what: a.what,
+                    asked: a.asked,
+                }),
                 ItemRecord::Card(c) => Item::Card(Card {
                     call: c.call,
                     name: c.name,
@@ -1360,6 +1565,106 @@ mod tests {
         // An agent the store had not heard of is made known by its first command.
         s.command_output(&id("deepseek:c2"), "job-9", b"x");
         assert!(s.agent(&id("deepseek:c2")).is_some());
+    }
+
+    /// A command that ends before the call that started it gets to say so is still one card: its
+    /// output, its end, then its start filling in what it was — and no refusal counted for it.
+    #[test]
+    fn a_command_quicker_than_its_own_start_is_one_card_and_no_refusal() {
+        let (mut s, _) = store();
+        let pi = id("pi:c1");
+        s.open_turn(&pi, "go");
+        s.command_output(&pi, "job-q", b"done\r\n");
+        s.command_finished(&pi, "job-q", "true && echo done", Some(0), false);
+        s.command_started(&pi, "job-q", "true && echo done", "/home/p");
+        let agent = s.agent(&pi).unwrap();
+        let cards: Vec<&Card> = agent.cards().collect();
+        assert_eq!(cards.len(), 1, "one command, one card");
+        assert_eq!(cards[0].args, json!({"command": "true && echo done", "cwd": "/home/p"}));
+        assert_eq!((cards[0].state, cards[0].exit_code), (CallState::Ok, Some(0)));
+        assert_eq!(agent.refused, 0);
+    }
+
+    /// Design decision 4, in the store: the approval is an item of the session — the request id,
+    /// what was asked, how it came out — settled once; an answer counts as answered and an expiry
+    /// does not; and one still waiting when the shell stops comes back withdrawn, never waiting.
+    #[test]
+    fn an_approval_waits_in_the_session_settles_once_and_a_restart_withdraws_it() {
+        let dir = scratch_dir("approvals");
+        let (mut s, _) = store();
+        let ds = id("deepseek:c-02be44");
+        s.open_turn(&ds, "release notes");
+        s.approval_asked(&ds, "appr-1", "files.move");
+        s.approval_asked(&ds, "appr-1", "files.move"); // the same card asked twice is one card
+        let approvals = |s: &Store| -> Vec<Approval> {
+            s.agent(&ds).unwrap().turns.iter().flat_map(|t| t.items.iter()).filter_map(|i| match i {
+                Item::Approval(a) => Some(a.clone()),
+                _ => None,
+            }).collect()
+        };
+        assert_eq!(approvals(&s).len(), 1);
+        assert_eq!(approvals(&s)[0].outcome, ApprovalOutcome::Pending);
+        assert_eq!(s.agent(&ds).unwrap().state, State::WaitingForYou);
+
+        s.approval_settled(&ds, "appr-1", ApprovalOutcome::Expired, "");
+        s.approval_settled(&ds, "appr-1", ApprovalOutcome::Allowed, "late"); // settled once
+        let settled = &approvals(&s)[0];
+        assert_eq!(settled.outcome, ApprovalOutcome::Expired);
+        assert!(settled.record.starts_with("Not answered in time"), "{}", settled.record);
+        let d = s.details(&ds).unwrap();
+        assert_eq!((d.approvals_asked, d.approvals_answered), (1, 0), "nobody answered it");
+        assert_eq!(s.agent(&ds).unwrap().state, State::Thinking, "no longer waiting on the person");
+
+        // One more, still waiting when the shell stops.
+        s.approval_asked(&ds, "appr-2", "shell.agent_run");
+        s.save(&dir).unwrap();
+        let back = Store::load(&dir, Box::new(|| 1_800_000_000));
+        let agent = back.agent(&ds).unwrap();
+        let kept: Vec<&Approval> = agent.turns.iter().flat_map(|t| t.items.iter()).filter_map(|i| match i {
+            Item::Approval(a) => Some(a),
+            _ => None,
+        }).collect();
+        assert_eq!(kept.len(), 2);
+        assert_eq!((kept[0].outcome, kept[1].outcome), (ApprovalOutcome::Expired, ApprovalOutcome::Withdrawn));
+        assert!(kept[1].record.contains("restarted"), "{}", kept[1].record);
+        assert!(agent.pending_approvals.is_empty(), "nothing is waiting after a restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_agents_children_and_its_transcript_are_read_from_the_session() {
+        let (mut s, clock) = store();
+        let parent = id("pi:c-par");
+        s.open_turn(&parent, "plan the release");
+        for n in 0..2 {
+            clock.fetch_add(1, Ordering::SeqCst);
+            let mut meta = AgentMeta::new(id(&format!("pi:c-kid{n}")), "pi");
+            meta.parent = Some(parent.clone());
+            s.upsert_agent(meta);
+        }
+        assert_eq!(s.children_of(&parent), vec![id("pi:c-kid0"), id("pi:c-kid1")]);
+        assert!(s.children_of(&id("pi:c-kid0")).is_empty());
+
+        s.text(&parent, "Two helpers are on it.");
+        s.event(&parent, &Event::Thinking { delta: "private reasoning".into() }, Provenance::Reported);
+        s.event(&parent, &start("r1", "bash", json!({"command": "ls"})), Provenance::Reported);
+        s.event(&parent, &output("r1", "a\nb\n"), Provenance::Reported);
+        s.event(&parent, &end("r1", false, Some(2)), Provenance::Reported);
+        s.close_turn(&parent, true);
+        let text = s.transcript(&parent, 3).unwrap();
+        for said in ["pi:c-par", "plan the release", "Two helpers are on it.", "[reported call] bash command=\"ls\" — failed · exit 2", "    b"] {
+            assert!(text.contains(said), "{said:?} missing:\n{text}");
+        }
+        assert!(!text.contains("private reasoning"), "thinking is not the session:\n{text}");
+        // Bounded, newest kept.
+        for n in 0..60 {
+            s.open_turn(&parent, &format!("turn {n}"));
+            s.text(&parent, &"x".repeat(4000));
+            s.close_turn(&parent, true);
+        }
+        let text = s.transcript(&parent, 20).unwrap();
+        assert!(text.len() <= TRANSCRIPT_BYTES + 200, "{}", text.len());
+        assert!(text.contains("turn 59") && text.starts_with("… (the start is cut"), "{}", &text[..80]);
     }
 
     #[test]

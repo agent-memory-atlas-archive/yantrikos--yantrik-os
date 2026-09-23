@@ -69,6 +69,21 @@ pub fn jobs() -> &'static Jobs {
                 report_late(&done);
             }
         });
+        // And every command is a verified card in its own agent's pane: its bytes as they come off
+        // the PTY, and its end with the process's own exit code. Keyed by the job's owner — the
+        // agent the terminal started it for — so one agent's output can never land in another's
+        // card. On the job's worker thread; the store is behind a lock of its own, so no hop to
+        // the UI thread is needed.
+        jobs.on_output(|agent, job, bytes| crate::agents::store().command_output(agent, &job.0, bytes));
+        jobs.on_finish(|answer| {
+            crate::agents::store().command_finished(
+                &answer.agent,
+                &answer.job.0,
+                &answer.command,
+                answer.exit_code(),
+                answer.killed,
+            )
+        });
         jobs
     })
 }
@@ -281,6 +296,23 @@ impl Call {
     }
 }
 
+/// Who the call being dispatched is for, as far as the shell can establish it:
+///
+/// - `None` — no agent token came with it: the person's own `yos act`, or a caller that runs as
+///   no agent. Such a caller is treated as it always was.
+/// - `Some(Ok(agent))` — the token names a live agent and the caller descends from the harness it
+///   was issued to.
+/// - `Some(Err(why))` — a token came and was not believed. Never read as "no agent": a caller that
+///   presented a token is not the person.
+///
+/// Read inside a dispatch, on the handler's thread, where the token and the caller are set — the
+/// same place [`Call::current`] reads them — and nowhere else. The token itself goes no further.
+pub fn calling_agent() -> Option<Result<AgentId, String>> {
+    let call = Call::current();
+    call.token.as_ref()?;
+    Some(call.agent())
+}
+
 /// Hand the work to the socket's side; run it here only when called without a socket.
 fn later(work: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Result<Value, String> {
     control::answer_later(work)
@@ -435,7 +467,13 @@ fn agent_run(args: &Value, call: Call) -> Result<Value, String> {
     let wait = wait_arg(args)?;
     later(move || {
         let agent = call.agent()?;
-        let answer = jobs().run(&agent, &command, cwd, wait)?;
+        // Started, then carded, then waited on: the card opens in the agent's pane the moment the
+        // command exists, and fills as its terminal does. `run` would be the same two steps with
+        // nothing between them.
+        let job = jobs().start(&agent, &command, cwd)?;
+        let started_in = jobs().answer(&job).map(|a| a.cwd.display().to_string()).unwrap_or_default();
+        crate::agents::store().command_started(&agent, &job.0, &command, &started_in);
+        let answer = jobs().job(&agent, &job, wait)?;
         told(&answer);
         Ok(answer_json(&answer))
     })
@@ -494,21 +532,32 @@ fn agent_kill(args: &Value, call: Call) -> Result<Value, String> {
 /// How much of a command line `describe` repeats.
 const COMMAND_CLIP: usize = 160;
 
+/// Every command running now, oldest first, with the agent it runs for: its job, its command
+/// line (cut), how long, and whether it seems to be waiting for input.
+pub fn running_jobs() -> Vec<(AgentId, Value)> {
+    // Nothing has ever run: say so without starting the store for it.
+    let Some(jobs) = JOBS.get() else { return Vec::new() };
+    jobs.list()
+        .into_iter()
+        .filter_map(|summary| {
+            let JobState::Running { waiting_for_input } = summary.state else { return None };
+            let command: String = summary.command.chars().take(COMMAND_CLIP).collect();
+            let entry = json!({
+                "job": summary.job,
+                "command": if summary.command.chars().count() > COMMAND_CLIP { format!("{command}…") } else { command },
+                "elapsed_secs": summary.elapsed.as_secs(),
+                "waiting_for_input": waiting_for_input,
+            });
+            Some((summary.agent, entry))
+        })
+        .collect()
+}
+
 /// `describe shell` → `agent_jobs`: per agent, the commands running now.
 pub fn for_describe() -> Value {
-    // Nothing has ever run: say so without starting the store for it.
-    let Some(jobs) = JOBS.get() else { return json!([]) };
     let mut by_agent: Vec<(String, Vec<Value>)> = Vec::new();
-    for summary in jobs.list() {
-        let JobState::Running { waiting_for_input } = summary.state else { continue };
-        let command: String = summary.command.chars().take(COMMAND_CLIP).collect();
-        let entry = json!({
-            "job": summary.job,
-            "command": if summary.command.chars().count() > COMMAND_CLIP { format!("{command}…") } else { command },
-            "elapsed_secs": summary.elapsed.as_secs(),
-            "waiting_for_input": waiting_for_input,
-        });
-        let agent = summary.agent.to_string();
+    for (agent, entry) in running_jobs() {
+        let agent = agent.to_string();
         match by_agent.iter_mut().find(|(a, _)| *a == agent) {
             Some((_, list)) => list.push(entry),
             None => by_agent.push((agent, vec![entry])),
@@ -529,6 +578,53 @@ mod tests {
 
     fn call(token: &str) -> Call {
         Call { pid: Some(std::process::id()), token: Some(token.to_string()) }
+    }
+
+    /// One job's card in its agent's pane, once the store has its end: `(args, provenance, exit
+    /// code, output)`. Asked again until the end is there — the terminal answers a waiting call
+    /// before its finish listeners have run.
+    fn settled_card(agent: &AgentId, job: &str) -> (Value, crate::agents::Provenance, Option<i32>, String) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let found = crate::agents::store().read(|s| {
+                s.agent(agent)?
+                    .cards()
+                    .find(|c| c.call == job && !c.running())
+                    .map(|c| (c.args.clone(), c.provenance, c.exit_code, c.output.all()))
+            });
+            if let Some(found) = found {
+                return found;
+            }
+            assert!(std::time::Instant::now() < deadline, "no settled card for {job} in {agent}'s pane");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Each command's terminal lands in the card of the agent it runs for, and in no other — two
+    /// agents' commands running side by side, one output each.
+    #[test]
+    fn a_commands_output_reaches_its_own_agents_card_and_no_other() {
+        let a = AgentId::new("pi", "c-glue-out");
+        let b = AgentId::new("deepseek", "c-glue-out");
+        let ja = jobs().start(&a, "printf 'from-a-1\\n'; sleep 0.3; printf 'from-a-2\\n'", None).unwrap();
+        let jb = jobs().start(&b, "printf 'from-b\\n'; sleep 0.1; exit 3", None).unwrap();
+        jobs().job(&a, &ja, Duration::from_secs(10)).unwrap();
+        jobs().job(&b, &jb, Duration::from_secs(10)).unwrap();
+
+        let (_, provenance, exit, output) = settled_card(&a, &ja.0);
+        assert_eq!((provenance, exit), (crate::agents::Provenance::Verified, Some(0)));
+        assert!(output.contains("from-a-1") && output.contains("from-a-2"), "{output:?}");
+        assert!(!output.contains("from-b"), "another agent's output is not in this card: {output:?}");
+
+        let (_, _, exit, output) = settled_card(&b, &jb.0);
+        assert_eq!(exit, Some(3), "the process's own exit code");
+        assert!(output.contains("from-b") && !output.contains("from-a"), "{output:?}");
+
+        // Neither job's card is in the other agent's pane at all.
+        crate::agents::store().read(|s| {
+            assert!(s.agent(&a).unwrap().cards().all(|c| c.call != jb.0));
+            assert!(s.agent(&b).unwrap().cards().all(|c| c.call != ja.0));
+        });
     }
 
     /// The token is not an argument of any of the four, so nothing that shows or keeps
@@ -576,6 +672,15 @@ mod tests {
         assert_eq!(done["tail"], "hi", "{done}");
         assert_eq!(done["agent"], "pi:c-shell", "the agent is the token's");
         assert!(!done.to_string().contains("t-pi"), "the answer does not repeat the token: {done}");
+        // And it is a verified card in pi's pane: the command and where it started, its output,
+        // the process's own exit code — and nothing of the token.
+        let pi_agent = AgentId::new("pi", "c-shell");
+        let job = done["job"].as_str().unwrap().to_string();
+        let card = settled_card(&pi_agent, &job);
+        assert_eq!(card.0["command"], "cd /tmp && echo hi", "{card:?}");
+        assert!(card.0["cwd"].as_str().is_some_and(|c| !c.is_empty()), "{card:?}");
+        assert_eq!((card.1, card.2), (crate::agents::Provenance::Verified, Some(0)));
+        assert!(card.3.contains("hi") && !card.3.contains("t-pi"), "{card:?}");
 
         let slow = agent_run(&json!({"command": "sleep 30", "wait": 0.5}), call("t-pi")).unwrap();
         assert_eq!(slow["running"], true, "{slow}");

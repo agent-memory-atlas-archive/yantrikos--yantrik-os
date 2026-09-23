@@ -826,6 +826,51 @@ impl Card {
     }
 }
 
+/// How an approval the shell asked for this agent came out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalOutcome {
+    /// On the person's screen now: in this pane and in the Lens, one request id.
+    Pending,
+    Allowed,
+    Denied,
+    /// Nobody answered before the request ran out.
+    Expired,
+    /// Taken back by the shell: the agent was stopped, its harness went, or the shell restarted
+    /// while it was waiting. Refused, never granted.
+    Withdrawn,
+}
+
+impl ApprovalOutcome {
+    pub fn key(self) -> &'static str {
+        match self {
+            ApprovalOutcome::Pending => "pending",
+            ApprovalOutcome::Allowed => "allowed",
+            ApprovalOutcome::Denied => "denied",
+            ApprovalOutcome::Expired => "expired",
+            ApprovalOutcome::Withdrawn => "withdrawn",
+        }
+    }
+}
+
+/// An approval the shell drew for this agent (design decision 4). Only the shell makes one — from
+/// the agent its token names — so it is verified by construction, and what it draws is the shell's
+/// own card, never anything the agent said: `request` is the shell's request id, and the card's
+/// words and buttons come from the shell's approval store under that id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approval {
+    /// The shell's request id (`appr-7`). Allow and Deny in the pane answer exactly this one.
+    pub request: String,
+    /// What was asked, as `app.action`.
+    pub what: String,
+    pub outcome: ApprovalOutcome,
+    /// The line it leaves once settled — the approval store's own record when it still had one
+    /// ("Allowed once: shell.agent_run — 21:04").
+    pub record: String,
+    pub asked: u64,
+    pub settled: Option<u64>,
+}
+
 /// One thing in a turn, in the order it happened.
 #[derive(Debug)]
 pub enum Item {
@@ -835,6 +880,8 @@ pub enum Item {
     Card(Card),
     /// Something the shell says about the session: a stop asked for, a turn cut short.
     Note(String),
+    /// An approval the shell asked the person for, on this agent's behalf.
+    Approval(Approval),
 }
 
 /// One prompt and everything that came of it.

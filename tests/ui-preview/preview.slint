@@ -278,6 +278,34 @@ export component SettingsProbe inherits Window {
 import { AgentsScreen } from "agents.slint";
 export { AgentsState, AgentWindow, AgentTabData, AgentRowData, AgentRunData, AgentItemData, AgentHeaderData, AgentDetailsData, AgentMindData } from "agents.slint";
 export { ToolCallData } from "components/tool_call.slint";
+export { ApprovalRequest } from "components/intent_lens.slint";
+import { IntentLens } from "components/intent_lens.slint";
+
+// The Lens in a conversation with an attached mind: its header's "open in Agents".
+export component LensAgentsProbe inherits Window {
+    width: 1280px;
+    height: 800px;
+    default-font-family: Theme.font-ui;
+    background: Theme.bg-deep;
+    in property <bool> can-open: true;
+    in-out property <int> opened: 0;
+    in-out property <int> closed: 0;
+    IntentLens {
+        width: 100%;
+        height: 100%;
+        is-open: true;
+        chat-mode: true;
+        mind-name: "pi";
+        can-open-in-agents: root.can-open;
+        messages: [
+            { role: "user", content: "tidy the photos folder" },
+            { role: "assistant", content: "I'll find duplicates by hash first." },
+        ];
+        open-in-agents => { root.opened += 1; }
+        close-lens => { root.closed += 1; }
+    }
+}
+
 export component AgentsProbe inherits Window {
     in property <length> canvas-width: 1280px;
     in property <length> canvas-height: 800px;

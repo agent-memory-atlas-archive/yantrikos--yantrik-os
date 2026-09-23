@@ -40,6 +40,11 @@ export struct LensResult {
 // would be asking them to approve something they had not read.
 export struct ApprovalRequest {
     id: string,
+    // Which of the person's agents is asking (`pi:c-7f3a91`), or "" for a caller that is no agent.
+    // Established by the shell from the agent token beside the request, checked against the
+    // caller's process — never from the request's words. The same card is drawn in that agent's
+    // pane on the Agents screen, under the same id (design/agents-workspace-2026-09-23.md, 4).
+    agent: string,
     // What the caller CALLS itself. Nothing authenticates it; the card says so underneath.
     requester: string,
     // What this MACHINE knows: the program the kernel says opened the socket, resolved through
@@ -223,6 +228,29 @@ export component ApprovalCard inherits Rectangle {
                 }
                 Text {
                     text: "verified by this machine · the kernel said so, not the caller";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
+
+            // Which agent — one row, only when there is one, in the same value-over-label shape.
+            // From the token the shell issued that agent, checked against the process above, so it
+            // sits with the machine's facts rather than with the caller's claim.
+            if root.data.agent != "" : VerticalLayout {
+                spacing: 0px;
+
+                Text {
+                    text: "agent " + root.data.agent;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-micro;
+                    font-weight: 600;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+                Text {
+                    text: "named by the token the desktop gave it · also asked in its pane";
                     color: Theme.text-dim;
                     font-size: Theme.fs-micro;
                     wrap: no-wrap;
@@ -672,6 +700,9 @@ export component IntentLens inherits Rectangle {
     in property <bool> chat-mode: false;
     /// The mind answering, shown in the chat header. A conversation should say who it is with.
     in property <string> mind-name: "";
+    /// Whether the conversation is one of the mind's agents — an attached mind's `<id>:main` — and
+    /// so has the whole of itself, every card and command, on the Agents screen.
+    in property <bool> can-open-in-agents: false;
     in property <[MessageData]> messages: [];
     in property <bool> is-generating: false;
 
@@ -701,6 +732,8 @@ export component IntentLens inherits Rectangle {
     callback close-lens();
     callback send-message(string);
     callback mic-pressed();
+    // "open in Agents": the Agents screen, with this conversation's agent selected.
+    callback open-in-agents();
 
     // Internal state
     in-out property <string> input-text: "";
@@ -879,6 +912,32 @@ export component IntentLens inherits Rectangle {
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                         overflow: elide;
+                    }
+                    // The Lens is the quick question; the whole of the conversation — every call as
+                    // a card, every command with its output — is this mind's agent on the Agents
+                    // screen (design/agents-workspace-2026-09-23.md, "The shape").
+                    if root.can-open-in-agents : agents-hit := TouchArea {
+                        width: agents-label.preferred-width + 16px;
+                        height: 28px;
+                        y: (parent.height - 28px) / 2;
+                        mouse-cursor: pointer;
+                        clicked => { root.open-in-agents(); }
+
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: 6px;
+                            background: agents-hit.has-hover ? Theme.hover-fill : transparent;
+                        }
+                        agents-label := Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "open in Agents";
+                            color: agents-hit.has-hover ? Theme.text-primary : Theme.accent;
+                            font-size: Theme.fs-caption;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                     close-hit := TouchArea {
                         width: 28px;

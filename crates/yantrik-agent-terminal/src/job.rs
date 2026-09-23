@@ -444,8 +444,8 @@ impl Job {
         lock(&self.screen).process(bytes);
         lock(&self.output).push(bytes);
         self.touch();
-        let sink = shared.on_output.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(sink) = sink {
+        let sinks = shared.on_output.read().unwrap_or_else(|e| e.into_inner()).clone();
+        for sink in sinks {
             sink(&self.agent, &self.id, bytes);
         }
     }

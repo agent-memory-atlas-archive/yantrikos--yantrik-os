@@ -1387,6 +1387,10 @@ pub fn publish(
     // A recipe's question answered, and a recipe paused, resumed or cancelled — answer_recipe,
     // pause_recipe, resume_recipe, cancel_recipe. See `control_recipes`.
     let surface = crate::control_recipes::actions(surface, ctx.bridge.handle());
+    // ── Agents glue: new_agent / send_to_agent / stop_agent / read_agent / show_agent — how a
+    // mind hands work to another agent. The caller's agent comes from its token. See
+    // `control_agents` and design/agents-workspace-2026-09-23.md, decision 1.
+    let surface = crate::control_agents::actions(surface, ui);
     crate::control_editor::actions(surface, ui).serve();
 }
 

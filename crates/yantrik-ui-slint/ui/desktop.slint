@@ -116,6 +116,10 @@ export component DesktopScreen inherits Rectangle {
     callback approval-allow-session(string);
     callback approval-deny(string);
 
+    // The Lens's "open in Agents": whether the conversation is an agent's, and the press.
+    in property <bool> lens-can-open-in-agents: false;
+    callback lens-open-in-agents();
+
     // Urges (for quiet queue)
     in property <[UrgeCardData]> urges: [];
 
@@ -1012,6 +1016,8 @@ export component DesktopScreen inherits Rectangle {
         // So the conversation header says who is answering — the same name the status bar
         // chip and the machine rail carry, rather than a generic "Conversation".
         mind-name: root.active-harness-name;
+        can-open-in-agents: root.lens-can-open-in-agents;
+        open-in-agents => { root.lens-open-in-agents(); }
         messages: root.messages;
         is-generating: root.is-generating;
         suggestions: root.lens-suggestions;

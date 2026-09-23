@@ -38,7 +38,11 @@ What it is actually checking, in one line each:
     through `yos`'s environment and it is on no command line, argument, card, audit line or
     answer; `terminal.run` goes to `shell.agent_run` with no window raised; the command tools are
     listed only with a token, keep the shell's grades, and are given as long as their wait. And
-    without a token, all of that is exactly as it was.
+    without a token, all of that is exactly as it was;
+  * the other-agent tools — new_agent, send_to_agent, stop_agent, read_agent — are listed only with
+    a token, keep the shell's grades (new_agent asks in `ask`), pass the shell's own argument names
+    and nothing else, answer in the shell's sentences, never carry the token, and reading another
+    agent's session taints this one as reading private state does.
 """
 
 import importlib.util
@@ -166,6 +170,21 @@ SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
   act: agent_kill(job)  [standard, settles later]
        Stop one of your commands.
          job: string - the job id agent_run answered with
+  act: new_agent(mind, task)  [sensitive, settles on return]
+       Start another agent and give it a task.
+         mind: string - which mind
+         task: string - what it is to do
+  act: send_to_agent(agent, text)  [standard, settles on return]
+       Say more to an agent you started.
+         agent: string - the agent
+         text: string - what to say to it
+  act: stop_agent(agent)  [standard, settles on return]
+       Stop an agent you started.
+         agent: string - the agent
+  act: read_agent(agent, last?)  [safe, settles on return]
+       Read an agent's recent turns as text.
+         agent: string - the agent
+         last?: number - how many of its latest turns
 """
 DESCRIBE_TERMINAL = """Terminal - 1 tab
 revision: 7e57
@@ -358,6 +377,28 @@ if argv[:1] == ["act"]:
             answer.update(running=False, exit_code=0, cwd_after="/tmp")
         if state.get("echo_token"):
             answer["tail"] = "token=%s" % os.environ.get("YANTRIK_AGENT_TOKEN")
+        envelope(answer)
+        raise SystemExit(0)
+    if target == "shell" and action in ("new_agent", "send_to_agent", "stop_agent", "read_agent"):
+        # The shell's answers, in the shapes `control_agents.rs` gives them: a sentence under
+        # `said`, and for read_agent the session as text.
+        child = args.get("agent", "pi:c-child1")
+        answer = {"agent": child}
+        if action == "new_agent":
+            answer.update(mind=args.get("mind"), parent="pi:c-7f3a91", state="thinking",
+                          said="Started `pi:c-child1` on pi, started by `pi:c-7f3a91`. It has none "
+                               "of your grants.")
+        elif action == "send_to_agent":
+            answer.update(sent=True, said="Sent to `%s`; it is working on it now." % child)
+        elif action == "stop_agent":
+            answer.update(stopped=True, commands_killed=1, said="Stopped `%s`, and killed 1 command." % child)
+        else:
+            answer.update(state="done", turns=1,
+                          text="%s · pi · \"write the changelog\" · done.\n\n── turn 1 ── asked: write "
+                               "the changelog\nDone: 12 entries.\n[verified call] agent_run command=\"git "
+                               "log\" — ok · exit 0" % child)
+        if state.get("echo_token"):
+            answer["said"] = answer["text"] = "token=%s" % os.environ.get("YANTRIK_AGENT_TOKEN")
         envelope(answer)
         raise SystemExit(0)
     envelope({"done": True})
@@ -1448,6 +1489,96 @@ with tempfile.TemporaryDirectory() as d:
         module.subprocess.run = real_run
     check("and run_command's wait reaches the act's own timeout",
           seen.get("timeout") == 630, seen)
+
+    # ── 23. Handing work to another agent ───────────────────────────────────────────────
+    #
+    # design/agents-workspace-2026-09-23.md, decision 1: `new_agent`, `send_to_agent`,
+    # `stop_agent` and `read_agent` are the shell's, offered to a mind only when it runs as one of
+    # the person's agents. The shell's grades stand (new_agent sensitive, send and stop standard,
+    # read safe), which agent is asking rides beside the arguments and nowhere else, and reading
+    # another agent's session counts as reading private state.
+    AGENTS_TOOLS = ["new_agent", "send_to_agent", "stop_agent", "read_agent"]
+    CHILD = "pi:c-child1"
+
+    # 23a. Without a token none of them is listed or callable.
+    module, state = case(tmp, "agents-notoken", ceiling=None)
+    replies, _, _ = served(module, LIST, {"id": 2, "method": "tools/call", "params": {
+        "name": "new_agent", "arguments": {"mind": "pi", "task": "x"}}})
+    names = [t["name"] for t in replies[1]["result"]["tools"]]
+    check("without a token the other-agent tools are not listed", not set(AGENTS_TOOLS) & set(names), names)
+    check("and new_agent cannot be called", "no such tool" in json.dumps(replies[2].get("error")), replies[2])
+    check("and nothing reached the desktop", not read(state).get("acted"), read(state))
+
+    # 23b. With a token, in `ask`: new_agent puts a card up — shell.new_agent, sensitive, the mind
+    # and the task and nothing else — and the other three run unasked, each as the shell's own
+    # action with the shell's argument names.
+    module, state = case(tmp, "agents-grades", answer="granted", ceiling=None, token=TOKEN)
+    told = {}
+    for name, args in (("new_agent", {"mind": "pi", "task": "write the changelog"}),
+                       ("send_to_agent", {"agent": CHILD, "text": "and the release notes"}),
+                       ("stop_agent", {"agent": CHILD}),
+                       ("read_agent", {"agent": CHILD, "last": 2})):
+        told[name] = module.call_tool(module.AGENT_BY_NAME[name], args)
+    s = read(state)
+    reqs = s.get("requests", [])
+    check("new_agent asks; send_to_agent, stop_agent and read_agent do not",
+          [r.get("action") for r in reqs] == ["new_agent"], reqs)
+    check("the card is shell.new_agent, sensitive, with the mind and the task alone",
+          reqs and (reqs[0].get("app"), reqs[0].get("grade"), reqs[0].get("args_json"))
+          == ("shell", "sensitive", {"mind": "pi", "task": "write the changelog"}), reqs)
+    check("each runs as the shell's own action, with the shell's argument names",
+          [(a["action"], a["args"]) for a in s.get("acted", [])] == [
+              ("new_agent", {"mind": "pi", "task": "write the changelog"}),
+              ("send_to_agent", {"agent": CHILD, "text": "and the release notes"}),
+              ("stop_agent", {"agent": CHILD}),
+              ("read_agent", {"agent": CHILD, "last": 2})], s.get("acted"))
+    check("the grant rides on the new_agent it was minted for, and only there",
+          [a.get("grant") for a in s.get("acted", [])] == ["appr-1", None, None, None], s.get("acted"))
+    check("every one carries the token, and it leaks into none of them",
+          all(c["env_token"] == TOKEN for c in s.get("carried", [])) and not leaks(state, *[t[0] for t in told.values()]),
+          leaks(state, *[t[0] for t in told.values()]))
+    check("a mind reads the shell's sentences, not its JSON",
+          "Started `pi:c-child1`" in told["new_agent"][0] and "none of your grants" in told["new_agent"][0]
+          and told["stop_agent"][0].startswith("Stopped `pi:c-child1`")
+          and not any(t[0].lstrip().startswith("{") for t in told.values()),
+          {k: v[0] for k, v in told.items()})
+    check("read_agent answers with the session as text",
+          "── turn 1 ── asked: write the changelog" in told["read_agent"][0]
+          and "exit 0" in told["read_agent"][0] and not told["read_agent"][1], told["read_agent"])
+
+    # 23c. Reading another agent's session is reading private state: putting data into a page is
+    # refused afterwards, as it is after os_describe.
+    module, state = case(tmp, "agents-taint", mode="auto", ceiling=None, token=TOKEN)
+    text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "hello"})
+    check("before reading another agent, typing into a page is not refused by the taint",
+          not text.startswith("REFUSED"), text)
+    module.call_tool(module.AGENT_BY_NAME["read_agent"], {"agent": CHILD})
+    text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "secret"})
+    check("after read_agent, it is", text.startswith("REFUSED") and "read_agent" in text, text)
+
+    # 23d. In `auto`, new_agent runs unasked and is written down — without the token; a token a
+    # mind puts among the arguments is dropped; and one the desktop echoes back is scrubbed.
+    module, state = case(tmp, "agents-auto", mode="auto", ceiling=None, token=TOKEN, echo_token=True)
+    replies, out, err = served(module, {"id": 2, "method": "tools/call", "params": {
+        "name": "new_agent", "arguments": {"mind": "pi", "task": "tidy", "agent_token": "f" * 32}}})
+    text = replies[2]["result"]["content"][0]["text"]
+    s = read(state)
+    audited = (s.get("audited") or [{}])[0]
+    check("in auto, new_agent runs unasked and lands in the record, as the shell's action",
+          not s.get("requests") and (audited.get("app"), audited.get("action"), audited.get("args_json"))
+          == ("shell", "new_agent", {"mind": "pi", "task": "tidy"}), s)
+    check("a token among the arguments is never sent, shown or recorded",
+          s["acted"][0]["args"] == {"mind": "pi", "task": "tidy"} and "f" * 32 not in json.dumps(s), s)
+    check("and a token the desktop echoed is scrubbed from everything the bridge sends",
+          TOKEN not in out and TOKEN not in err and "token=[agent token]" in text and not leaks(state), text)
+    # Only the shell's own argument names go through: nothing a model adds rides along — not a
+    # parent it names for itself, not a grant.
+    module, state = case(tmp, "agents-extra", mode="auto", ceiling=None, token=TOKEN)
+    module.call_tool(module.AGENT_BY_NAME["stop_agent"],
+                     {"agent": CHILD, "parent": "pi:c-7f3a91", "grant": "appr-1"})
+    s = read(state)
+    check("an argument the shell does not take is not sent",
+          [a["args"] for a in s.get("acted", [])] == [{"agent": CHILD}], s.get("acted"))
 
 print()
 if failures:

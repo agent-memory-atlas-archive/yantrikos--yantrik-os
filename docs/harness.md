@@ -171,6 +171,29 @@ client that wants the exit code as a number. A call that waits for a command can
 its wait on top of an `os_act`'s own budget, so a client allows `wait_seconds` more than its
 usual timeout (`mcp_timeout` in the Python library does, and so does pi's extension).
 
+And it offers the ways to hand work to another agent — also only with a token:
+
+| tool | runs | grade |
+|---|---|---|
+| `new_agent {mind, task}` | `shell.new_agent` | sensitive: a card in `ask` mode, in the asking agent's pane |
+| `send_to_agent {agent, text}` | `shell.send_to_agent` | standard |
+| `stop_agent {agent}` | `shell.stop_agent` | standard |
+| `read_agent {agent, last?}` | `shell.read_agent` | safe |
+
+`new_agent` answers at once with the new agent's id (`pi:c-1a2b3c`); its row on the Agents screen
+says who started it. The shell holds the caller to its token, never to an argument: an agent
+another agent started cannot start agents of its own, one agent holds at most three running at
+once, the desktop's cap of six still applies, and an agent may send to, stop and read only the
+agents it started (and read itself). A child starts with nothing of its parent's — its first turn
+is its task and the desktop's context, with a token of its own, and a grant asked for one agent
+is not spent by another through `consume_approval`. Stop on a parent stops its children.
+`read_agent` answers with the agent's recent turns as text, and counts as reading private state
+for the bridge's taint rule: after it, the bridge will not type into a page.
+
+An approval a call with a token asks for is drawn in that agent's pane as well as in the Lens —
+the same card under the same request id, so answering either answers both — and the card names
+the agent. A token that does not check out puts the card in no pane and says so on it.
+
 Without a token, the bridge behaves exactly as it did.
 
 **Notes for the next turn.** A command still running when its call returned (`running: true`)
