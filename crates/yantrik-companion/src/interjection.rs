@@ -98,7 +98,7 @@ pub fn handle(conn: &Connection, interjection: &Interjection) -> Option<String> 
             let waiting = RecipeStore::list(conn, Some("waiting"), 10);
             let mut cancelled = 0;
             for recipe in running.iter().chain(waiting.iter()) {
-                RecipeStore::set_error(conn, &recipe.id, "Cancelled by user");
+                RecipeStore::set_error(conn, &recipe.id, crate::recipe::CANCELLED);
                 cancelled += 1;
             }
             if cancelled > 0 {
@@ -110,14 +110,12 @@ pub fn handle(conn: &Connection, interjection: &Interjection) -> Option<String> 
         Interjection::Pause => {
             let running = RecipeStore::list(conn, Some("running"), 10);
             let mut paused = 0;
+            // Paused, not Waiting: a `waiting` recipe whose last step was not a WaitFor is
+            // resumed by `get_expired_waiting` at the next message, so this pause never held.
             for recipe in &running {
-                RecipeStore::update_status(
-                    conn,
-                    &recipe.id,
-                    &RecipeStatus::Waiting,
-                    recipe.current_step,
-                );
-                paused += 1;
+                if RecipeStore::pause(conn, &recipe.id).is_ok() {
+                    paused += 1;
+                }
             }
             if paused > 0 {
                 Some(format!(
@@ -167,6 +165,39 @@ pub fn handle(conn: &Connection, interjection: &Interjection) -> Option<String> 
             None
         }
     }
+}
+
+/// Answer the question a waiting recipe asked, from somewhere other than the chat — the Recipes
+/// screen, or `answer_recipe` on the shell's control surface.
+///
+/// The chat's own path, not a second one: [`handle`] with [`Interjection::AnswerAskUser`], which
+/// stores the answer under the step's `store_as`, marks the step done with it and sets the recipe
+/// running. What this adds is the refusal when there is no question to answer, so a caller learns
+/// that rather than having its text dropped. The caller signals the executor afterwards.
+pub fn answer(conn: &Connection, recipe_id: &str, text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("the answer is empty".to_string());
+    }
+    let recipe = RecipeStore::get(conn, recipe_id).ok_or_else(|| format!("no recipe `{recipe_id}`"))?;
+    let asking = recipe.status == RecipeStatus::Waiting
+        && recipe.current_step > 0
+        && matches!(
+            RecipeStore::get_steps(conn, recipe_id).get(recipe.current_step - 1).map(|s| &s.step),
+            Some(crate::recipe::RecipeStep::AskUser { .. })
+        );
+    if !asking {
+        return Err(format!(
+            "`{}` is not waiting for an answer (it is {})",
+            recipe.name,
+            recipe.status.as_str()
+        ));
+    }
+    handle(
+        conn,
+        &Interjection::AnswerAskUser { recipe_id: recipe_id.to_string(), answer: text.to_string() },
+    )
+    .ok_or_else(|| format!("`{}` could not take the answer", recipe.name))
 }
 
 // ── Pattern Matching ──

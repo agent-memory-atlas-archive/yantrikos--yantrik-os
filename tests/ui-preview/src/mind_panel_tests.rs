@@ -155,6 +155,33 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     assert!(log.borrow().contains(&"tab:active".to_string()), "on the Active tab: {:?}", log.borrow());
     assert!(log.borrow().contains(&"select:deepseek:main".to_string()), "with the agent that needs the person selected: {:?}", log.borrow());
 
+    // A recipe's row opens the Recipes screen with that recipe opened. Swept down past the agent
+    // rows, which open Agents; the sweep goes back to the desktop after each of those.
+    {
+        let l = log.clone();
+        ui.global::<RecipesState>().on_show(move |id| l.borrow_mut().push(format!("show-recipe:{id}")));
+        ui.global::<RecipesState>().set_rows(ModelRc::new(VecModel::from(super::recipes_tests::rows())));
+        ui.global::<RecipesState>().set_loaded(true);
+    }
+    let mut y = 296.;
+    ui.set_current_screen(1);
+    draw();
+    while y < 600. && ui.get_current_screen() != 35 {
+        click(w, x, y);
+        draw();
+        if ui.get_current_screen() != 1 && ui.get_current_screen() != 35 {
+            ui.set_current_screen(1);
+            draw();
+        }
+        y += 4.;
+    }
+    assert_eq!(ui.get_current_screen(), 35, "a recipe row went to the Recipes screen; log {:?}", log.borrow());
+    assert!(log.borrow().contains(&"show-recipe:rcp_1".to_string()), "with that recipe shown: {:?}", log.borrow());
+    // The Recipes screen in the shell: maximized, it stops short of the panel's strip.
+    save(&settle(), &path("recipes-strip"), width, height)?;
+    ui.set_current_screen(34);
+    draw();
+
     // Over another screen: the strip, which opens the panel for everywhere-but-the-desktop.
     save(&settle(), &path("agents-strip"), width, height)?;
     click(w, 1258., 460.);
@@ -213,6 +240,6 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     draw();
     save(&settle(), &path("unknown"), width, height)?;
     ui.hide()?;
-    println!("PASS: panel open on the desktop; an agent row opens it in Agents (Active tab, selected); the strip is on Agents and Files and opens the panel; the chevron folds it; light, agent-mode and unknown states rendered");
+    println!("PASS: panel open on the desktop; an agent row opens it in Agents (Active tab, selected); a recipe row opens it in Recipes; the strip is on Agents and Files and opens the panel; the chevron folds it; light, agent-mode and unknown states rendered");
     Ok(())
 }

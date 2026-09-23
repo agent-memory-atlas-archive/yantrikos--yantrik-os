@@ -52,6 +52,8 @@ mod control_files;
 mod control_editor;
 /// Agents' commands on the shell's surface: agent_run / agent_job / agent_input / agent_kill.
 mod control_agent_terminal;
+/// A recipe on the shell's surface: answer_recipe / pause_recipe / resume_recipe / cancel_recipe.
+mod control_recipes;
 mod jobs;
 mod cards;
 mod clipboard;
@@ -82,6 +84,9 @@ mod notifications;
 mod onboarding;
 mod icons;
 mod render_backend;
+/// Every recipe the companion holds, as the worker last published them: the Recipes screen,
+/// `describe shell` and the mind panel read this and never wait on the worker.
+mod recipes;
 mod running;
 mod streaming;
 mod system_context;

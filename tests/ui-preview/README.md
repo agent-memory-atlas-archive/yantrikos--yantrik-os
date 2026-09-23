@@ -113,3 +113,17 @@ and the Agents screen with the strip and with the panel open, beside the output 
 ```sh
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/mind-panel.png 1280 800 verify-mind-panel
 ```
+
+## Recipes
+
+`verify-recipes` draws the production Recipes screen from fixture data — a recipe waiting on
+the person's answer, one running, one waiting on a timer, one paused, one failed on an unbound
+`{{topic}}`, one done after taking a jump, and a built-in never run — and sends real pointer and
+key events: a choice answers, a typed answer goes on Answer and on Enter and never empty, a row
+opens from its name, a tab filters, Pause reaches the recipe shown, and Cancel asks before it
+cancels. It writes the screen, the screen with a running recipe opened, the cancel question, the
+Finished tab with the failed recipe opened, and the light theme beside the output path.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/recipes.png 1280 1000 verify-recipes
+```

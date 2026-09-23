@@ -277,6 +277,8 @@ export global Icons {
              : id == "studio"        ? self.spark
              // Agents: one pane per agent. People, because each row is someone working.
              : id == "agents"        ? self.people
+             // Recipes: every recipe as its stages, in order. A list, because a recipe is one.
+             : id == "recipes"       ? self.list
              : "";
     }
 

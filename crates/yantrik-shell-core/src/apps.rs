@@ -106,6 +106,13 @@ DesktopEntry {
             categories: "Utility;".into(), comment: "Your agents and what each one is doing".into(),
             app_id: "agents".into(), icon_char: "A".into(),
         },
+        // Every recipe the companion holds, drawn as its stages as it runs.
+        // design/desk-and-mind-2026-09-23.md, section 4.
+        DesktopEntry {
+            name: "Recipes".into(), exec: "__builtin__".into(), icon: String::new(),
+            categories: "Utility;".into(), comment: "Recipes and how each one is flowing".into(),
+            app_id: "recipes".into(), icon_char: "R".into(),
+        },
 DesktopEntry {
             name: "Skills".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "System;".into(), comment: "Install companion skills".into(),

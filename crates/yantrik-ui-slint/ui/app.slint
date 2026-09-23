@@ -37,6 +37,9 @@ import { ProblemReportScreen, ProblemRow } from "problem_report.slint";
 // are exported so the shell can create a window per agent and fill each one.
 import { AgentsScreen, AgentsState } from "agents.slint";
 export { AgentWindow, AgentsState, AgentTabData, AgentRowData, AgentRunData, AgentItemData, AgentHeaderData, AgentDetailsData, AgentMindData } from "agents.slint";
+// Recipes (screen 35): every recipe as its stages. The global is exported so the shell can fill it.
+import { RecipesScreen, RecipesState } from "recipes.slint";
+export { RecipesState, RecipeTabData, RecipeRowData, RecipeStageData, RecipeStepData } from "recipes.slint";
 import { CommandItem } from "components/command_palette.slint";
 import { ContentBlock, MessageData } from "components/message_bubble.slint";
 import { ToolCallData } from "components/tool_call.slint";
@@ -196,7 +199,7 @@ export component App inherits Window {
     // crates/yantrik-ui/src/mind_panel.rs). Focus mode keeps it to the strip.
     property <bool> mind-panel-shown: root.current-screen == 1
         || (root.current-screen >= 4 && root.current-screen <= 31)
-        || root.current-screen == 33 || root.current-screen == 34;
+        || root.current-screen == 33 || root.current-screen == 34 || root.current-screen == 35;
     property <bool> mind-panel-open: root.mind-panel-shown
         && !(root.current-screen == 1 && root.focus-mode)
         && (root.current-screen == 1 ? MindPanelState.desktop-expanded : MindPanelState.elsewhere-expanded);
@@ -2701,6 +2704,38 @@ export component App inherits Window {
             }
         }
 
+        // Recipes — every recipe the companion holds, drawn as its stages. Everything on it reads
+        // the RecipesState global; see recipes.slint and crates/yantrik-ui/src/wire/recipes.rs.
+        if current-screen == 35 : WindowFrame {
+            x: root.window-maximized ? 0px : root.window-x;
+            y: root.window-maximized ? Theme.status-bar-height : root.window-y;
+            width: root.window-maximized ? parent.width - root.mind-panel-reserve : root.window-w;
+            height: root.window-maximized ? parent.height - Theme.taskbar-height - Theme.status-bar-height : root.window-h;
+            is-maximized <=> root.window-maximized;
+            win-x <=> root.window-x;
+            win-y <=> root.window-y;
+            win-w <=> root.window-w;
+            win-h <=> root.window-h;
+            icon-path: Icons.list;
+            icon-color: Theme.accent;
+            title: Tr.title-recipes;
+            close => {
+                if (root.minimized-screen == 35) { root.minimized-screen = 0; }
+                root.current-screen = 1; root.navigate(1);
+            }
+            minimize => {
+                root.minimized-screen = 35;
+                root.minimized-title = Tr.title-recipes;
+                root.minimized-app-id = "recipes";
+                root.current-screen = 1; root.navigate(1);
+            }
+            animate x, y, width, height { duration: 200ms; easing: ease-out; }
+
+            RecipesScreen {
+                width: 100%; height: 100%;
+            }
+        }
+
         // Spreadsheet
         // ── Document Editor (screen 30) ──
         // Presentation (screen 31)
@@ -2776,7 +2811,7 @@ export component App inherits Window {
             }
         }
 
-        if current-screen == 1 || (current-screen >= 4 && current-screen <= 31) || current-screen == 33 || current-screen == 34 : Rectangle {
+        if current-screen == 1 || (current-screen >= 4 && current-screen <= 31) || current-screen == 33 || current-screen == 34 || current-screen == 35 : Rectangle {
             width: 100%;
             height: parent.height;
             y: 0;
@@ -2865,6 +2900,13 @@ export component App inherits Window {
             open-agents => {
                 root.current-screen = 34;
                 root.navigate(34);
+            }
+            // A recipe row opens the Recipes screen with that recipe opened below its row.
+            recipes-screen: 35;
+            open-recipe(id) => {
+                root.current-screen = 35;
+                root.navigate(35);
+                RecipesState.show(id);
             }
             // Straight to Settings > Harnesses, as the status bar's mind chip does.
             open-mind => {

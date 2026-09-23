@@ -320,6 +320,9 @@ pub enum RecipeStatus {
     Running,
     /// Paused waiting for a condition.
     Waiting,
+    /// Held by a person (`RecipeStore::pause`). Neither executor picks it up — `get_resumable`
+    /// takes `running` and `get_expired_waiting` takes `waiting` — until `RecipeStore::resume`.
+    Paused,
     /// Successfully completed all steps.
     Done,
     /// Failed with an error.
@@ -332,6 +335,7 @@ impl RecipeStatus {
             Self::Pending => "pending",
             Self::Running => "running",
             Self::Waiting => "waiting",
+            Self::Paused => "paused",
             Self::Done => "done",
             Self::Failed => "failed",
         }
@@ -340,12 +344,22 @@ impl RecipeStatus {
         match s {
             "running" => Self::Running,
             "waiting" => Self::Waiting,
+            "paused" => Self::Paused,
             "done" => Self::Done,
             "failed" => Self::Failed,
             _ => Self::Pending,
         }
     }
 }
+
+/// The error a cancelled recipe carries. A cancel is stored as a failure with this text — the
+/// way the chat's "cancel" has always stored it — so every reader that knows `failed` keeps
+/// working, and the Recipes screen can still tell a person's decision from a fault.
+pub const CANCELLED: &str = "Cancelled by user";
+
+/// The variable `RecipeStore::pause` keeps the status it paused from in, so `resume` puts the
+/// recipe back exactly where it was: running, or still waiting on its timer or its question.
+pub const PAUSED_FROM_VAR: &str = "_paused_from";
 
 /// A recipe definition + runtime state.
 #[derive(Debug, Clone)]
@@ -427,7 +441,10 @@ impl RecipeStore {
         steps: &[RecipeStep],
         trigger: Option<&TriggerType>,
     ) -> String {
-        let id = format!("rcp_{}", &uuid7::uuid7().to_string()[..8]);
+        // The UUID's last 12 hex digits: its counter's low bits and its random tail. The first 8
+        // were the millisecond clock's top bits, the same for ~65 s, so a second recipe made in
+        // that minute collided with the first on the primary key and panicked (#173).
+        let id = format!("rcp_{}", &uuid7::uuid7().to_string()[24..]);
         let now = now_ts();
 
         conn.execute(
@@ -617,6 +634,52 @@ impl RecipeStore {
         .ok();
     }
 
+    /// Hold a running or waiting recipe where it is. Returns the status it was paused from.
+    ///
+    /// The step pointer does not move and nothing is marked, so `resume` is exact: a recipe paused
+    /// while waiting on a timer or on a person's answer goes back to waiting on it.
+    pub fn pause(conn: &Connection, recipe_id: &str) -> Result<RecipeStatus, String> {
+        let recipe = Self::get(conn, recipe_id).ok_or_else(|| format!("no recipe `{recipe_id}`"))?;
+        match recipe.status {
+            RecipeStatus::Running | RecipeStatus::Waiting => {
+                Self::set_var(conn, recipe_id, PAUSED_FROM_VAR, &serde_json::json!(recipe.status.as_str()));
+                Self::update_status(conn, recipe_id, &RecipeStatus::Paused, recipe.current_step);
+                Ok(recipe.status)
+            }
+            other => Err(format!("`{}` is {}, and only a running or waiting recipe can be paused", recipe.name, other.as_str())),
+        }
+    }
+
+    /// Put a paused recipe back to what it was doing. Returns the status it resumes as.
+    ///
+    /// `running` means the caller should signal the executor; `waiting` means it waits again —
+    /// for its answer, or for its timer, which (like every `update_status`) counts from now.
+    pub fn resume(conn: &Connection, recipe_id: &str) -> Result<RecipeStatus, String> {
+        let recipe = Self::get(conn, recipe_id).ok_or_else(|| format!("no recipe `{recipe_id}`"))?;
+        if recipe.status != RecipeStatus::Paused {
+            return Err(format!("`{}` is {}, not paused", recipe.name, recipe.status.as_str()));
+        }
+        let from = Self::get_vars(conn, recipe_id)
+            .get(PAUSED_FROM_VAR)
+            .and_then(|v| v.as_str().map(RecipeStatus::from_str))
+            .filter(|s| *s == RecipeStatus::Waiting)
+            .unwrap_or(RecipeStatus::Running);
+        Self::update_status(conn, recipe_id, &from, recipe.current_step);
+        Ok(from)
+    }
+
+    /// Stop a recipe for good, as the chat's "cancel" does: failed, with [`CANCELLED`].
+    pub fn cancel(conn: &Connection, recipe_id: &str) -> Result<(), String> {
+        let recipe = Self::get(conn, recipe_id).ok_or_else(|| format!("no recipe `{recipe_id}`"))?;
+        match recipe.status {
+            RecipeStatus::Running | RecipeStatus::Waiting | RecipeStatus::Paused => {
+                Self::set_error(conn, recipe_id, CANCELLED);
+                Ok(())
+            }
+            other => Err(format!("`{}` is {}, and there is nothing to cancel", recipe.name, other.as_str())),
+        }
+    }
+
     /// Mark a step as done with a result.
     pub fn complete_step(conn: &Connection, recipe_id: &str, step_index: usize, result: &str) {
         conn.execute(
@@ -771,7 +834,7 @@ impl RecipeStore {
     /// Count running/waiting recipes.
     pub fn active_count(conn: &Connection) -> usize {
         conn.query_row(
-            "SELECT COUNT(*) FROM recipes WHERE status IN ('running', 'waiting', 'pending')",
+            "SELECT COUNT(*) FROM recipes WHERE status IN ('running', 'waiting', 'paused', 'pending')",
             [],
             |row| row.get::<_, i64>(0),
         )
@@ -841,6 +904,11 @@ impl RecipeStore {
                             expired.push(id);
                         }
                     }
+                    // A question waits for its answer, which `interjection::answer` delivers by
+                    // setting the recipe running again. Resuming it here — as the arm below did —
+                    // walked the recipe on at the next chat message with `{{store_as}}` unbound,
+                    // so no question a recipe asked was ever waited for.
+                    RecipeStep::AskUser { .. } => {}
                     _ => {
                         // Stuck in waiting but not on a WaitFor step — resume it
                         expired.push(id);
@@ -910,6 +978,7 @@ impl RecipeStore {
             let icon = match r.status {
                 RecipeStatus::Running => "▶",
                 RecipeStatus::Waiting => "⏸",
+                RecipeStatus::Paused => "‖",
                 RecipeStatus::Pending => "○",
                 _ => "?",
             };

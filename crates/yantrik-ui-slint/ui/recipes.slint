@@ -1,0 +1,639 @@
+// Recipes — every recipe the companion holds, drawn as its stages (screen 35).
+//
+// Each recipe is one row of its stages, left to right: a done stage ticked, the current one lit, a
+// failed one red with its error under the row, a waiting one saying what it waits for, the ones to
+// come dim, and a stage a jump passed over struck out. A recipe waiting for a person's answer draws
+// its question and choices right in its row. The selected recipe opens below its row: every step,
+// what it does, where it stands, the way it went and what it produced — and Pause, Resume, Cancel.
+//
+// Everything here reads one global, RecipesState, which the shell fills from
+// crates/yantrik-ui/src/wire/recipes.rs out of the companion's recipe store. Step kinds are an
+// open set: a kind this file does not know is drawn as a plain stage. See
+// design/desk-and-mind-2026-09-23.md, section 4.
+
+import { Theme } from "theme.slint";
+import { Icon, Icons } from "components/icon.slint";
+import { YButton } from "components/y_button.slint";
+import { YInput } from "components/y_input.slint";
+
+export struct RecipeTabData {
+    id: string,            // active | finished | not_run | all
+    label: string,
+    count: int,
+}
+
+// One stage on a recipe's row.
+export struct RecipeStageData {
+    number: string,        // "3" — people count from one
+    kind: string,          // tool | think | ask_user | wait_for | … (open)
+    label: string,         // the tool's name, "Think", "Ask you"…
+    state: string,         // done | current | waiting | failed | skipped | pending | not_taken | paused | stopped | unknown
+}
+
+// One step, opened: the selected recipe's detail.
+export struct RecipeStepData {
+    number: string,
+    kind: string,
+    label: string,
+    summary: string,       // what it does, in one line; placeholders as written
+    state: string,
+    state-label: string,   // "done", "waiting for you", "not run"…
+    result: string,        // the head of what it produced, or the error it failed with
+    path: string,          // JumpIf / Branch: the way it went
+    unbound: string,       // "{{topic}} has no value — it is sent as written"
+    agent: string,         // the catalog agent that runs it (none yet)
+    detail: string,        // its whole definition, a line per field
+}
+
+export struct RecipeRowData {
+    id: string,
+    name: string,
+    status: string,        // pending | running | waiting | paused | done | failed | cancelled
+    status-label: string,  // "running", "waiting for you", "built-in, never run"…
+    progress: string,      // "step 3 of 7"
+    when: string,          // "updated 21:06"
+    error: string,         // "Step 4 failed: …"
+    waiting-for: string,   // "Waiting for 5m to pass"
+    question: string,
+    choices: [string],
+    template: bool,
+    unbound: string,       // "2 steps with an input nothing sets"
+    can-answer: bool,
+    can-pause: bool,
+    can-resume: bool,
+    can-cancel: bool,
+    stages: [RecipeStageData],
+}
+
+export global RecipesState {
+    in-out property <[RecipeTabData]> tabs: [];
+    in-out property <string> tab: "all";
+    in-out property <[RecipeRowData]> rows: [];
+    // The recipe opened below its row, and its steps.
+    in-out property <string> selected: "";
+    in-out property <[RecipeStepData]> steps: [];
+    // Whether the companion has published its recipes yet.
+    in-out property <bool> loaded: false;
+    in-out property <string> empty: "";
+    // What the last press came to.
+    in-out property <string> notice: "";
+    in-out property <bool> notice-ok: true;
+
+    callback select-tab(string);
+    // Open or close a recipe below its row.
+    callback select(string);
+    // Open a recipe from elsewhere (the mind panel's rows): opened, never toggled shut, on a tab
+    // that lists it.
+    callback show(string);
+    callback answer(string, string);
+    callback pause(string);
+    callback resume(string);
+    callback cancel(string);
+    callback dismiss-notice();
+}
+
+component RecipeTab inherits Rectangle {
+    in property <RecipeTabData> tab;
+    in property <bool> active;
+    callback clicked;
+    width: chip.preferred-width;
+    height: 32px;
+    border-radius: 8px;
+    background: root.active ? Theme.accent-glow : ta.has-hover ? Theme.hover-fill : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    chip := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 6px;
+        Text {
+            text: root.tab.label;
+            color: root.active ? Theme.text-primary : Theme.text-secondary;
+            font-size: Theme.fs-caption;
+            font-weight: root.active ? 600 : 400;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.tab.count;
+            color: Theme.text-dim;
+            font-size: Theme.fs-caption;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// A stage's mark: ticked, lit, red, waiting, dim.
+component StageDot inherits Rectangle {
+    in property <string> state;
+    in property <string> kind;
+    in property <string> number;
+    property <color> tone:
+        root.state == "done" ? Theme.color-success
+      : root.state == "current" ? Theme.accent
+      : root.state == "failed" ? Theme.color-danger
+      : root.state == "waiting" || root.state == "paused" ? Theme.amber
+      : Theme.text-dim;
+    width: 26px;
+    height: 26px;
+    border-radius: 13px;
+    border-width: root.state == "current" ? 3px : 1.5px;
+    border-color: root.state == "current" ? Theme.accent-glow-strong : root.tone;
+    background: root.state == "done" ? Theme.color-success-dim
+        : root.state == "current" ? Theme.accent
+        : root.state == "failed" ? Theme.color-danger-dim
+        : root.state == "waiting" || root.state == "paused" ? Theme.amber-glow
+        : transparent;
+    opacity: root.state == "not_taken" || root.state == "unknown" ? 0.45 : 1.0;
+
+    if root.state == "done" : Icon { commands: Icons.check; size: 14px; tint: Theme.color-success; thickness: 2px; }
+    if root.state == "failed" : Icon { commands: Icons.close; size: 12px; tint: Theme.color-danger; thickness: 2px; }
+    if root.state == "waiting" : Icon { commands: root.kind == "ask_user" ? Icons.chat : Icons.clock; size: 14px; tint: Theme.amber; }
+    if root.state == "paused" : Icon { commands: Icons.pause; size: 12px; tint: Theme.amber; thickness: 2px; }
+    if root.state == "stopped" : Icon { commands: Icons.stop; size: 10px; tint: Theme.text-dim; }
+    if root.state == "skipped" : Icon { commands: Icons.arrow-right; size: 12px; tint: Theme.text-dim; }
+    if root.state == "current" || root.state == "pending" || root.state == "not_taken" || root.state == "unknown" : Text {
+        text: root.number;
+        color: root.state == "current" ? Theme.text-on-accent : Theme.text-dim;
+        font-size: Theme.fs-micro;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    // Passed over: struck through.
+    if root.state == "not_taken" : Rectangle {
+        width: 30px;
+        height: 1.5px;
+        background: Theme.text-dim;
+    }
+}
+
+// One stage on the row: its mark, and its name under it.
+component StageChip inherits Rectangle {
+    in property <RecipeStageData> stage;
+    width: 84px;
+    height: 52px;
+    VerticalLayout {
+        spacing: 5px;
+        alignment: start;
+        HorizontalLayout {
+            alignment: center;
+            StageDot { state: root.stage.state; kind: root.stage.kind; number: root.stage.number; }
+        }
+        Text {
+            text: root.stage.label;
+            color: root.stage.state == "current" ? Theme.text-primary
+                : root.stage.state == "failed" ? Theme.color-danger
+                : root.stage.state == "waiting" ? Theme.amber
+                : root.stage.state == "done" ? Theme.text-secondary
+                : Theme.text-dim;
+            font-size: Theme.fs-micro;
+            font-weight: root.stage.state == "current" || root.stage.state == "waiting" ? 600 : 400;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component StatusPill inherits Rectangle {
+    in property <string> status;
+    in property <string> label;
+    in property <bool> template;
+    property <color> tone:
+        root.template ? Theme.text-dim
+      : root.status == "running" ? Theme.accent
+      : root.status == "waiting" || root.status == "paused" ? Theme.amber
+      : root.status == "done" ? Theme.color-success
+      : root.status == "failed" ? Theme.color-danger
+      : Theme.text-dim;
+    width: pill.preferred-width;
+    height: 22px;
+    border-radius: 11px;
+    border-width: 1px;
+    border-color: root.tone;
+    background: transparent;
+    pill := HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 5px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle { width: 6px; height: 6px; border-radius: 3px; background: root.tone; }
+        }
+        Text {
+            text: root.label;
+            color: root.tone;
+            font-size: Theme.fs-micro;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// A question the recipe is waiting on: asked right in its row, answered from its choices or a box.
+component QuestionBox inherits Rectangle {
+    in property <RecipeRowData> recipe;
+    border-radius: 10px;
+    background: Theme.tint-amber;
+    border-width: 1px;
+    border-color: Theme.amber-glow-strong;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            VerticalLayout {
+                alignment: start;
+                padding-top: 1px;
+                Icon { commands: Icons.chat; size: 16px; tint: Theme.amber; }
+            }
+            Text {
+                text: root.recipe.question;
+                color: Theme.text-primary;
+                font-size: Theme.fs-body;
+                font-weight: 600;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+        }
+        if root.recipe.choices.length > 0 : HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            for choice in root.recipe.choices : YButton {
+                label: choice;
+                variant: 1;
+                size: 0;
+                clicked => { RecipesState.answer(root.recipe.id, choice); }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            answer := YInput {
+                horizontal-stretch: 1;
+                placeholder: root.recipe.choices.length > 0 ? "or answer in your own words…" : "your answer…";
+                accepted(text) => {
+                    RecipesState.answer(root.recipe.id, text);
+                    self.value = "";
+                }
+            }
+            YButton {
+                label: "Answer";
+                icon-path: Icons.send;
+                variant: 0;
+                size: 0;
+                disabled: answer.value == "";
+                clicked => {
+                    RecipesState.answer(root.recipe.id, answer.value);
+                    answer.value = "";
+                }
+            }
+        }
+    }
+}
+
+// One step of the opened recipe.
+component StepLine inherits Rectangle {
+    in property <RecipeStepData> step;
+    HorizontalLayout {
+        spacing: 10px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+        VerticalLayout {
+            alignment: start;
+            StageDot { state: root.step.state; kind: root.step.kind; number: root.step.number; }
+        }
+        VerticalLayout {
+            spacing: 3px;
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.step.label;
+                    color: root.step.state == "not_taken" || root.step.state == "unknown" ? Theme.text-dim : Theme.text-primary;
+                    font-size: Theme.fs-caption;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.step.summary;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.step.state-label;
+                    color: root.step.state == "failed" ? Theme.color-danger
+                        : root.step.state == "waiting" || root.step.state == "paused" ? Theme.amber
+                        : root.step.state == "current" ? Theme.accent
+                        : root.step.state == "done" ? Theme.color-success
+                        : Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
+            if root.step.path != "" : Text {
+                text: "↳ " + root.step.path;
+                color: Theme.accent;
+                font-size: Theme.fs-micro;
+            }
+            if root.step.unbound != "" : Text {
+                text: "⚠ " + root.step.unbound;
+                color: Theme.color-warning;
+                font-size: Theme.fs-micro;
+                wrap: word-wrap;
+            }
+            if root.step.agent != "" : Text {
+                text: "run by " + root.step.agent;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-micro;
+            }
+            if root.step.result != "" : Rectangle {
+                background: Theme.bg-input;
+                border-radius: 4px;
+                HorizontalLayout {
+                    padding: 6px;
+                    Text {
+                        text: root.step.result;
+                        color: root.step.state == "failed" ? Theme.color-danger : Theme.text-primary;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+            if root.step.detail != "" : Text {
+                text: root.step.detail;
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// One recipe: its name and state, its stages, what it waits on, and — selected — its steps.
+component RecipeCard inherits Rectangle {
+    in property <RecipeRowData> recipe;
+    in property <bool> selected;
+    property <bool> confirming: false;
+    border-radius: 12px;
+    background: Theme.bg-card;
+    border-width: 1px;
+    border-color: root.selected ? Theme.accent : root.recipe.can-answer ? Theme.amber-glow-strong : Theme.border-subtle;
+    opacity: root.recipe.template ? 0.8 : 1.0;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        // Name and state. A click opens or closes the recipe.
+        Rectangle {
+            height: 24px;
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { RecipesState.select(root.recipe.id); }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        commands: root.selected ? Icons.chevron-down : Icons.chevron-right;
+                        size: 12px;
+                        tint: Theme.text-dim;
+                    }
+                }
+                Text {
+                    text: root.recipe.name;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body-strong;
+                    font-weight: 600;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                if root.recipe.unbound != "" : Text {
+                    text: "⚠ " + root.recipe.unbound;
+                    color: Theme.color-warning;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.recipe.progress;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.recipe.when;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    StatusPill { status: root.recipe.status; label: root.recipe.status-label; template: root.recipe.template; }
+                }
+            }
+        }
+
+        // The stages, left to right, joined where the recipe went through.
+        Rectangle {
+            height: 54px;
+            clip: true;
+            stages-flick := Flickable {
+                viewport-width: max(stages-flick.width, stages.preferred-width);
+                viewport-height: stages-flick.height;
+                Rectangle {
+                    width: max(stages-flick.width, stages.preferred-width);
+                    height: 54px;
+                    // Under the stages, so a click anywhere on the row opens the recipe too.
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { RecipesState.select(root.recipe.id); }
+                    }
+                    stages := HorizontalLayout {
+                        alignment: start;
+                        spacing: 0px;
+                        for stage[i] in root.recipe.stages : HorizontalLayout {
+                            spacing: 0px;
+                            if i > 0 : Rectangle {
+                                width: 14px;
+                                height: 52px;
+                                // Joined in colour once the recipe has come through to this stage.
+                                Rectangle {
+                                    y: 12px;
+                                    height: 2px;
+                                    background: stage.state == "done" || stage.state == "current" || stage.state == "waiting" || stage.state == "failed"
+                                        ? Theme.color-success : Theme.separator;
+                                }
+                            }
+                            StageChip { stage: stage; }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.recipe.error != "" : Text {
+            text: root.recipe.error;
+            color: root.recipe.status == "cancelled" ? Theme.text-secondary : Theme.color-danger;
+            font-size: Theme.fs-caption;
+            wrap: word-wrap;
+        }
+        if root.recipe.waiting-for != "" && !root.recipe.can-answer : HorizontalLayout {
+            spacing: 6px;
+            Icon { commands: Icons.clock; size: 13px; tint: Theme.amber; }
+            Text {
+                text: root.recipe.waiting-for;
+                color: Theme.amber;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+        }
+        if root.recipe.can-answer : QuestionBox { recipe: root.recipe; }
+
+        if root.selected : VerticalLayout {
+            spacing: 4px;
+            Rectangle { height: 1px; background: Theme.separator; }
+            for step in RecipesState.steps : StepLine { step: step; }
+            if root.recipe.can-pause || root.recipe.can-resume || root.recipe.can-cancel : HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                padding-top: 4px;
+                if root.confirming : Text {
+                    text: "Cancel stops it for good; it cannot be resumed.";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    vertical-alignment: center;
+                }
+                if root.confirming : YButton {
+                    label: "Keep it";
+                    variant: 1;
+                    size: 0;
+                    clicked => { root.confirming = false; }
+                }
+                if root.confirming : YButton {
+                    label: "Cancel recipe";
+                    icon-path: Icons.stop;
+                    variant: 3;
+                    size: 0;
+                    clicked => {
+                        root.confirming = false;
+                        RecipesState.cancel(root.recipe.id);
+                    }
+                }
+                if !root.confirming && root.recipe.can-pause : YButton {
+                    label: "Pause";
+                    icon-path: Icons.pause;
+                    variant: 1;
+                    size: 0;
+                    clicked => { RecipesState.pause(root.recipe.id); }
+                }
+                if !root.confirming && root.recipe.can-resume : YButton {
+                    label: "Resume";
+                    icon-path: Icons.play;
+                    variant: 0;
+                    size: 0;
+                    clicked => { RecipesState.resume(root.recipe.id); }
+                }
+                if !root.confirming && root.recipe.can-cancel : YButton {
+                    label: "Cancel";
+                    icon-path: Icons.stop;
+                    variant: 2;
+                    size: 0;
+                    clicked => { root.confirming = true; }
+                }
+            }
+        }
+    }
+}
+
+component NoticeBar inherits Rectangle {
+    height: 34px;
+    border-radius: 8px;
+    background: RecipesState.notice-ok ? Theme.accent-glow : Theme.color-danger-dim;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 6px;
+        spacing: 8px;
+        Text {
+            text: RecipesState.notice;
+            color: RecipesState.notice-ok ? Theme.text-primary : Theme.color-danger;
+            font-size: Theme.fs-caption;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        YButton {
+            label: "Dismiss";
+            icon-path: Icons.close;
+            icon-only: true;
+            variant: 2;
+            size: 0;
+            clicked => { RecipesState.dismiss-notice(); }
+        }
+    }
+}
+
+export component RecipesScreen inherits Rectangle {
+    background: Theme.bg-surface;
+
+    VerticalLayout {
+        padding: Theme.sp-4;
+        spacing: Theme.sp-3;
+
+        HorizontalLayout {
+            height: 34px;
+            spacing: 4px;
+            for tab in RecipesState.tabs : RecipeTab {
+                tab: tab;
+                active: tab.id == RecipesState.tab;
+                clicked => { RecipesState.select-tab(tab.id); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: RecipesState.loaded ? "from the companion's recipe store, as it runs" : "waiting for the companion…";
+                color: Theme.text-dim;
+                font-size: Theme.fs-micro;
+                vertical-alignment: center;
+            }
+        }
+
+        if RecipesState.notice != "" : NoticeBar { }
+
+        if RecipesState.rows.length == 0 : Text {
+            text: RecipesState.empty;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-caption;
+            wrap: word-wrap;
+        }
+
+        flick := Flickable {
+            vertical-stretch: 1;
+            viewport-width: self.width;
+            viewport-height: list.preferred-height;
+            // A Rectangle between the Flickable and the layout, as the Agents screen does: a
+            // Flickable whose child is a layout takes that layout's height as its own.
+            Rectangle {
+                width: flick.width;
+                height: list.preferred-height;
+                list := VerticalLayout {
+                    spacing: 10px;
+                    padding-right: 6px;
+                    for row in RecipesState.rows : RecipeCard {
+                        recipe: row;
+                        selected: row.id == RecipesState.selected;
+                    }
+                }
+            }
+        }
+    }
+}

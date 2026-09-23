@@ -12,7 +12,7 @@
 //! |---|---|
 //! | Now — the mind, its model, the mode and the ceiling | the harness host; the mode chip's own properties |
 //! | Context — project, memory store, minds | `active-project`; the companion's memory count; the host's list |
-//! | Working — agents at work, recipes in flight | the Agents store; the companion's `RecipeStore`, read on its worker |
+//! | Working — agents at work, recipes in flight | the Agents store; the Recipes screen's copy of the companion's recipes (`crate::recipes`) |
 //! | Recent actions | the mind audit, through [`recent_acts`] — the one function the ledger (#148) replaces |
 //!
 //! What is not known says so. A number that has not been read is never drawn as zero.
@@ -86,7 +86,7 @@ const DESKTOP_SCREEN: i32 = 1;
 /// The screens the panel is drawn on: the same ones the taskbar is on. `mind-panel-shown` in
 /// app.slint says the same thing, and a test holds the two together.
 pub fn shown_on(screen: i32) -> bool {
-    screen == DESKTOP_SCREEN || (4..=31).contains(&screen) || screen == 33 || screen == 34
+    screen == DESKTOP_SCREEN || (4..=31).contains(&screen) || screen == 33 || screen == 34 || screen == 35
 }
 
 /// What the person chose, per place. Open on the desktop and a strip everywhere else until they
@@ -265,115 +265,74 @@ pub struct RecipeLine {
     pub status: String,
 }
 
-/// What the companion's worker last read. `None` until it has read once — which, on a machine
-/// whose companion could not start, is forever, and the panel says so.
-static RECIPES: Mutex<Option<Vec<RecipeLine>>> = Mutex::new(None);
-
 /// Whether the companion's worker has reached its command loop. The memory count it pushes is
 /// only a count once this is true; before it, the property's zero is only a default.
 static WORKER_UP: AtomicBool = AtomicBool::new(false);
 
-/// Called by the companion's worker (bridge.rs) before it waits for each command: read the recipes
-/// in flight off the connection it owns.
-///
-/// On the worker because the store is the companion's: a second connection to the same file from
-/// this process is what the engine refuses to write beside (yantrikdb issue #225).
-///
-/// Every time, not throttled. The read is two indexed selects and a step list for at most six
-/// recipes — well under a millisecond — and a throttle would skip exactly the read that matters:
-/// a recipe's last steps can finish within a second of each other, and the next command after
-/// that may be the minute-long think tick, so a skipped read is a minute of "running" for a
-/// recipe that is done.
-pub fn publish_from_worker(conn: &rusqlite::Connection) {
+/// Called by the companion's worker (bridge.rs) before it waits for each command.
+pub fn worker_up() {
     WORKER_UP.store(true, Ordering::Relaxed);
-    let lines = recipes_in_flight(conn, RECIPE_ROWS * 2);
-    *RECIPES.lock().unwrap_or_else(|e| e.into_inner()) = Some(lines);
 }
 
-/// The recipes in flight, as last read. The one function the panel reads them through, so the
-/// Recipes screen's read API can take its place without the panel changing.
+/// The recipes in flight. The one function the panel reads them through, and it reads the Recipes
+/// screen's own copy (`crate::recipes`, published by the companion's worker, which owns the store),
+/// so the panel, that screen and `describe shell` say the same thing about a recipe. `None` until
+/// the worker has published once — which, on a machine whose companion could not start, is
+/// forever, and the panel says so.
 pub fn recipes() -> Option<Vec<RecipeLine>> {
-    RECIPES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    crate::recipes::in_flight().map(|views| recipes_in_flight(&views, RECIPE_ROWS * 2))
 }
 
-/// Running and waiting recipes, newest first, one line each. `pending` is left out: that is the
-/// status a recipe *definition* carries before it has ever run — every built-in template sits
-/// there — and none of them is in flight.
-///
-/// Read-only, and nothing here can panic on a store it does not like: a query that fails is an
-/// empty list, a step that does not parse is named as unreadable.
-pub fn recipes_in_flight(conn: &rusqlite::Connection, cap: usize) -> Vec<RecipeLine> {
-    use yantrik_companion::recipe::RecipeStore;
-    let mut found = RecipeStore::list(conn, Some("running"), cap);
-    found.extend(RecipeStore::list(conn, Some("waiting"), cap));
-    found.sort_by(|a, b| b.updated_at.partial_cmp(&a.updated_at).unwrap_or(std::cmp::Ordering::Equal));
-    found.truncate(cap);
-    found
+/// Running, waiting and paused recipes, one line each, in the desk's order: the ones waiting on
+/// the person first. `pending` is left out: that is the status a recipe *definition* carries
+/// before it has ever run — every built-in template sits there — and none of them is in flight.
+pub fn recipes_in_flight(views: &[yantrik_companion::recipe_view::RecipeView], cap: usize) -> Vec<RecipeLine> {
+    views
         .iter()
-        .map(|r| {
-            let steps = steps_of(conn, &r.id);
-            recipe_line(r, &steps)
-        })
+        .filter(|v| yantrik_companion::recipe_view::is_in_flight(v))
+        .take(cap)
+        .map(recipe_line)
         .collect()
 }
 
-/// A recipe's steps in order, as parsed; `None` for one whose JSON does not parse.
-fn steps_of(conn: &rusqlite::Connection, recipe: &str) -> Vec<Option<yantrik_companion::recipe::RecipeStep>> {
-    let Ok(mut stmt) = conn.prepare("SELECT step_json FROM recipe_steps WHERE recipe_id = ?1 ORDER BY step_index") else {
-        return Vec::new();
+/// "step 3 of 7 · running web_search", from the stage the Recipes screen lights.
+pub fn recipe_line(v: &yantrik_companion::recipe_view::RecipeView) -> RecipeLine {
+    let total = v.steps.len();
+    let step = match crate::recipes::focus(v) {
+        Some(s) => format!("step {} of {total} · {}", s.index + 1, step_words(v, s)),
+        None if total == 0 => "no steps recorded".to_string(),
+        None => format!("step {} of {total}", (v.current_step + 1).min(total)),
     };
-    let Ok(rows) = stmt.query_map([recipe], |row| row.get::<_, String>(0)) else {
-        return Vec::new();
-    };
-    rows.filter_map(|r| r.ok()).map(|json| serde_json::from_str(&json).ok()).collect()
+    RecipeLine { id: v.id.clone(), name: v.name.clone(), step, status: v.status.clone() }
 }
 
-/// "step 3 of 7 · running web_search", from where the recipe is and what that step is.
-pub fn recipe_line(
-    recipe: &yantrik_companion::recipe::Recipe,
-    steps: &[Option<yantrik_companion::recipe::RecipeStep>],
-) -> RecipeLine {
-    let at = recipe.current_step;
-    let what = match steps.get(at) {
-        Some(Some(step)) => step_words(step),
-        Some(None) => "a step that could not be read".to_string(),
-        None if steps.is_empty() => "no steps recorded".to_string(),
-        None => "past its last step".to_string(),
-    };
-    let step = if steps.is_empty() {
-        what
-    } else {
-        format!("step {} of {} · {what}", (at + 1).min(steps.len()), steps.len())
-    };
-    RecipeLine {
-        id: recipe.id.clone(),
-        name: recipe.name.clone(),
-        step,
-        status: recipe.status.as_str().to_string(),
-    }
-}
-
-/// What a step does, in a few words.
-pub fn step_words(step: &yantrik_companion::recipe::RecipeStep) -> String {
-    use yantrik_companion::recipe::{RecipeStep as S, WaitCondition};
-    match step {
-        S::Tool { tool_name, .. } => format!("running {tool_name}"),
-        S::Think { .. } => "thinking".into(),
-        S::ThinkCited { .. } => "writing, with sources".into(),
-        S::JumpIf { .. } | S::Branch { .. } => "deciding".into(),
-        S::WaitFor { condition: WaitCondition::Duration { seconds }, .. } => {
-            format!("waiting {}", for_how_long(*seconds).replace("just now", "a moment"))
+/// What the lit stage is doing, in a few words.
+pub fn step_words(v: &yantrik_companion::recipe_view::RecipeView, s: &yantrik_companion::recipe_view::StepView) -> String {
+    let doing = match s.kind.as_str() {
+        "tool" => format!("running {}", s.label),
+        "think" => "thinking".into(),
+        "think_cited" => "writing, with sources".into(),
+        "jump_if" | "branch" => "deciding".into(),
+        "wait_for" => format!("waiting for {}", v.waiting_for.as_deref().unwrap_or("its time")),
+        "notify" => "telling you something".into(),
+        "ask_user" => {
+            let question = v.question.as_ref().map(|q| q.text.as_str()).unwrap_or(s.summary.as_str());
+            format!("asking you: {}", one_line(question, 60))
         }
-        S::WaitFor { condition: WaitCondition::Time { hour, minute }, .. } => format!("waiting until {hour:02}:{minute:02}"),
-        S::Notify { .. } => "telling you something".into(),
-        S::AskUser { question, .. } => format!("asking you: {}", one_line(question, 60)),
-        S::Validate { .. } => "checking its sources".into(),
-        S::Render { .. } => "laying out the result".into(),
-        S::Format { .. } => "formatting".into(),
-        S::Filter { .. } => "filtering".into(),
-        S::Sort { .. } => "sorting".into(),
-        S::Aggregate { .. } => "totalling".into(),
-        S::Extract { .. } => "extracting".into(),
+        "validate" => "checking its sources".into(),
+        "render" => "laying out the result".into(),
+        "format" => "formatting".into(),
+        "filter" => "filtering".into(),
+        "sort" => "sorting".into(),
+        "aggregate" => "totalling".into(),
+        "extract" => "extracting".into(),
+        // A kind added later (the Agent step) reads by its label until it has words here.
+        _ => s.label.clone(),
+    };
+    match (v.status.as_str(), s.state.as_str()) {
+        ("paused", "waiting") => format!("paused while {doing}"),
+        ("paused", _) => format!("paused before {}", s.label),
+        _ => doing,
     }
 }
 
@@ -999,8 +958,9 @@ mod tests {
     }
 
     #[test]
-    fn recipes_in_flight_are_read_from_the_companions_store_one_line_each() {
+    fn recipes_in_flight_are_the_recipes_screen_s_own_one_line_each() {
         use yantrik_companion::recipe::{RecipeStatus, RecipeStep, RecipeStore, WaitCondition};
+        use yantrik_companion::recipe_view;
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         RecipeStore::ensure_tables(&conn);
         let tool = |name: &str| RecipeStep::Tool {
@@ -1009,39 +969,47 @@ mod tests {
             store_as: "x".into(),
             on_error: Default::default(),
         };
-        // Fixed ids through `ensure_builtin`: `create` names a recipe after the first eight hex
-        // digits of a UUIDv7, which are the top bits of its millisecond clock, so two made within
-        // about a minute of each other share an id and the second insert fails.
-        let recipe = |id: &str, name: &str, steps: &[RecipeStep], status: RecipeStatus, at: usize| {
-            RecipeStore::ensure_builtin(&conn, id, name, "", steps);
-            if status != RecipeStatus::Pending {
-                RecipeStore::update_status(&conn, id, &status, at);
+        // Each where the executors leave it: a wait or a question marked, and the pointer past it.
+        let recipe = |name: &str, steps: &[RecipeStep], status: RecipeStatus, at: usize| {
+            let id = RecipeStore::create(&conn, name, "", steps, None);
+            for done in 0..at.min(steps.len()) {
+                RecipeStore::complete_step(&conn, &id, done, "asked");
             }
+            if status != RecipeStatus::Pending {
+                RecipeStore::update_status(&conn, &id, &status, at);
+            }
+            id
         };
         let think = RecipeStep::Think { prompt: "sum up".into(), store_as: "y".into(), fallback_template: None };
-        recipe("rcp_digest", "Morning digest", &[tool("calendar_today"), tool("web_search"), think], RecipeStatus::Running, 1);
+        recipe("Morning digest", &[tool("calendar_today"), tool("web_search"), think], RecipeStatus::Running, 1);
         let ask = RecipeStep::AskUser { question: "Which days are you travelling?".into(), store_as: "days".into(), choices: None };
-        recipe("rcp_week", "Plan the week", &[ask], RecipeStatus::Waiting, 0);
+        recipe("Plan the week", &[ask, tool("book")], RecipeStatus::Waiting, 1);
         let wait = RecipeStep::WaitFor { condition: WaitCondition::Time { hour: 17, minute: 5 }, timeout_secs: None };
-        recipe("rcp_remind", "Remind me", &[wait], RecipeStatus::Waiting, 0);
+        recipe("Remind me", &[wait, tool("notify")], RecipeStatus::Waiting, 1);
+        let held = recipe("Weekly backup", &[tool("disk_usage"), tool("run_command")], RecipeStatus::Running, 1);
+        RecipeStore::pause(&conn, &held).unwrap();
         // A definition that has never run, and one that finished: neither is in flight.
-        recipe("rcp_template", "Built-in template", &[tool("noop")], RecipeStatus::Pending, 0);
-        recipe("rcp_done", "Done already", &[tool("noop")], RecipeStatus::Done, 1);
+        recipe("Built-in template", &[tool("noop")], RecipeStatus::Pending, 0);
+        recipe("Done already", &[tool("noop")], RecipeStatus::Done, 1);
 
-        let lines = recipes_in_flight(&conn, 10);
+        let lines = recipes_in_flight(&recipe_view::list(&conn), 10);
         let names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(lines.len(), 3, "running and waiting only: {names:?}");
-        assert!(!names.contains(&"Built-in template") && !names.contains(&"Done already"), "{names:?}");
+        assert_eq!(lines.len(), 4, "running, waiting and paused only: {names:?}");
+        assert_eq!(names[0], "Plan the week", "the one waiting on the person first: {names:?}");
         let line = |name: &str| lines.iter().find(|l| l.name == name).unwrap().clone();
         assert_eq!(line("Morning digest").step, "step 2 of 3 · running web_search");
         assert_eq!(line("Morning digest").status, "running");
-        assert_eq!(line("Plan the week").step, "step 1 of 1 · asking you: Which days are you travelling?");
+        // The question it waits on, not the step after it that the pointer names.
+        assert_eq!(line("Plan the week").step, "step 1 of 2 · asking you: Which days are you travelling?");
         assert_eq!(line("Plan the week").status, "waiting");
-        assert_eq!(line("Remind me").step, "step 1 of 1 · waiting until 17:05");
+        assert_eq!(line("Remind me").step, "step 1 of 2 · waiting for 17:05 UTC");
+        assert_eq!(line("Weekly backup").step, "step 2 of 2 · paused before run_command");
+        assert_eq!(line("Weekly backup").status, "paused");
+        assert_eq!(recipes_in_flight(&recipe_view::list(&conn), 2).len(), 2, "capped");
 
         // A store without the tables is an empty list, never a panic on the companion's worker.
         let bare = rusqlite::Connection::open_in_memory().unwrap();
-        assert!(recipes_in_flight(&bare, 10).is_empty());
+        assert!(recipe_view::list(&bare).is_empty());
     }
 
     #[test]
@@ -1198,11 +1166,11 @@ mod tests {
 
         // The panel is drawn on the taskbar's screens, and Rust agrees about which those are.
         let shown = app.split("property <bool> mind-panel-shown:").nth(1).expect("mind-panel-shown").split(';').next().unwrap().to_string();
-        for part in ["current-screen == 1", "current-screen >= 4", "current-screen <= 31", "current-screen == 33", "current-screen == 34"] {
+        for part in ["current-screen == 1", "current-screen >= 4", "current-screen <= 31", "current-screen == 33", "current-screen == 34", "current-screen == 35"] {
             assert!(shown.contains(part), "mind-panel-shown covers `{part}`: {shown}");
         }
-        assert!(app.contains("current-screen == 1 || (current-screen >= 4 && current-screen <= 31) || current-screen == 33 || current-screen == 34 : Rectangle"), "the taskbar's own condition is the one mirrored");
-        for screen in [1, 4, 8, 31, 33, 34] {
+        assert!(app.contains("current-screen == 1 || (current-screen >= 4 && current-screen <= 31) || current-screen == 33 || current-screen == 34 || current-screen == 35 : Rectangle"), "the taskbar's own condition is the one mirrored");
+        for screen in [1, 4, 8, 31, 33, 34, 35] {
             assert!(shown_on(screen), "screen {screen}");
         }
         for screen in [0, 2, 3, 32] {

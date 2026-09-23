@@ -172,6 +172,7 @@ impl Tool for ListRecipesTool {
             let icon = match r.status {
                 crate::recipe::RecipeStatus::Running => "▶",
                 crate::recipe::RecipeStatus::Waiting => "⏸",
+                crate::recipe::RecipeStatus::Paused => "‖",
                 crate::recipe::RecipeStatus::Done => "✓",
                 crate::recipe::RecipeStatus::Failed => "✗",
                 crate::recipe::RecipeStatus::Pending => "○",
@@ -208,7 +209,7 @@ impl Tool for RunRecipeTool {
                     "properties": {
                         "recipe_id": {
                             "type": "string",
-                            "description": "The recipe ID to run (e.g., 'rcp_abc12345')"
+                            "description": "The recipe ID to run (e.g., 'rcp_7f3a9c01b2d4')"
                         },
                         "variables": {
                             "type": "object",
@@ -251,8 +252,11 @@ impl Tool for RunRecipeTool {
             }
         }
 
-        // Reset to step 0 and mark as pending (bridge will pick it up via ProcessRecipeStep)
-        RecipeStore::update_status(&ctx.db.conn(), recipe_id, &crate::recipe::RecipeStatus::Pending, 0);
+        // Reset to step 0 and mark as running: the worker starts every running recipe after the
+        // turn that ran this tool (`RecipeStore::get_resumable`). This said `Pending`, which
+        // `get_resumable` stopped taking so the ~50 built-in definitions would not all run at
+        // boot — and from then on nothing this tool queued ever started.
+        RecipeStore::update_status(&ctx.db.conn(), recipe_id, &crate::recipe::RecipeStatus::Running, 0);
 
         // Reset all steps to pending
         ctx.db.conn().execute(
