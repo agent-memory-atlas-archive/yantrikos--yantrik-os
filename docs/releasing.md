@@ -27,16 +27,19 @@ under test, as the person, in their session:
 - the shell answers and names its build; the mind mode is published for apps to read;
 - every action on every surface declares a grade;
 - every app opens and answers on its surface; every desktop screen shows when asked;
-- no launch failed and no window is listed twice;
 - a sensitive act without a grant is refused through `yos --no-ask` and through a raw socket call;
 - the machine ceiling holds on a service (`system-monitor.kill_process` does not kill);
 - a notification is filed under who sent it;
 - the Agents workspace is wired; the bundle carries its changelog;
-- the shell is idle when idle (CPU and memory bounds), and nothing crashed during the run.
+- the shell is idle when idle (CPU and memory bounds), and nothing crashed during the run;
+- last, in every tier: no launch failed, no window is listed twice, and no window of the run's own
+  is left open.
 
 **Tier rc** adds every attached mind answering a one-word request, and the browser being drivable
-through `yos web`. With `--interactive` it also puts up an approval card for the person to allow,
-and has pi run `exit 3` through its own terminal to see the exit code arrive in its pane.
+through `yos web` — in a tab of the run's own (`YOS_WEB_TAB`), closed after; the browser too when
+the run started it, and never a tab or window the person had open. With `--interactive` it also
+puts up an approval card for the person to allow, and has pi run `exit 3` through its own terminal
+to see the exit code arrive in its pane.
 
 Every check prints what it saw. PASS and SKIP (with its reason) do not fail a run; FAIL does.
 

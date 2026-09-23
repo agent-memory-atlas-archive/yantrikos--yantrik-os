@@ -286,6 +286,29 @@ class TestGrants(support.MachineCase):
         message = self.refusal(lambda: s.act(call))
         self.assertTrue(message.startswith("GRANT:") and "already used" in message, message)
 
+    def test_a_grant_is_not_spent_on_a_call_its_own_arguments_refuse(self):
+        shell = Shell()
+        s, _ = sysmon(shell)
+        for args, refusal in (
+                ({"pid": "forty-two"},
+                 "`kill_process` argument `pid` must be an integer, and a string arrived"),
+                ({}, "`kill_process` needs argument `pid`"),
+                ({"pid": 42, "signal": 9}, "`kill_process` has no argument `signal`; it takes: pid")):
+            self.assertEqual(self.refusal(lambda a=args: s.act({"action": "kill_process",
+                                                                "args": a, "grant": "ok-1"})),
+                             refusal)
+        self.assertEqual(shell.calls, [], "the arguments were answered before anything was spent")
+        self.assertTrue(s.act({"action": "kill_process", "args": {"pid": 42},
+                               "grant": "ok-1"})["accepted"], "the same grant, the call right")
+        self.assertEqual(shell.spent, ["ok-1"])
+
+    def test_a_grant_is_bound_to_the_arguments_as_sent(self):
+        shell = Shell()
+        s, _ = sysmon(shell)
+        message = self.refusal(lambda: s.act({"action": "kill_process", "args": {"pid": "42"},
+                                              "grant": "ok-2"}))
+        self.assertIn("approved for another call", message, "\"42\" on the call is not 42 on the card")
+
     def test_a_grant_that_does_not_hold_ends_the_call_in_the_shells_words(self):
         fragment = ('"GRANT: `{id}` does not authorise {app_id}.{action} — {why} Nothing was run; '
                     'a grant covers one action, once, with the arguments the person was shown."')

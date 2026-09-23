@@ -148,13 +148,17 @@ Say in the description what cannot be undone ("It is not recoverable", "cannot b
 "permanently"…): the approval card shows it in red, and the dispatch asks about such an action in
 every mode but `bypass`, whatever its grade above `safe` — and no session rule covers it.
 
-What happens to a call, in order — the same order every door uses:
+What happens to a call, in order — the same order every door uses (docs/surface-protocol.md
+§5). First its arguments: a missing one, one the action does not take, and one of the wrong type
+are refused before anything else is asked, so a person's Allow is never used up on a call that was
+never going to run. Then:
 
 1. **The ceiling** — `tool_permission` in `~/.config/yantrik/settings.yaml`, `sensitive` when
    unset. Above it nothing runs: not with a mode, not with a grant. Refused with `CEILING:`.
 2. **The grant** — if the call carries one, it is spent through the shell's
-   `consume_approval`, bound to this app, this action and these exact arguments. Only after the
-   ceiling has passed, so a person's Allow is never used up on an act that cannot run; and only
+   `consume_approval`, bound to this app, this action and these exact arguments, as they were
+   sent. Only after the arguments and the ceiling have passed, so a person's Allow is never used up
+   on an act that cannot run; and only
    to the desktop's own shell — the process listening on `app-shell.sock` must be a
    `yantrik-ui` binary, or the grant is not offered to it.
 3. **The mode** — `plan`, `ask`, `auto` or `bypass`, published by the shell in
@@ -193,8 +197,12 @@ call.
 Before your handler runs, the dispatch refuses a missing argument, one the action does not take,
 and one of the wrong type, in the crate's sentences — `` `add` argument `count` must be an
 integer, and a string arrived `` names the kind that arrived, never the value, which may be a
-PIN. `null` for an optional argument is the same as leaving it out, and the handler gets the
-declared default. For a table of actions rather than decorated functions, build
+PIN. Your handler always gets the type it declared, and a caller is met halfway: what converts
+without loss is converted first — an integer for `str` becomes its digits (`which: 1` is `"1"`),
+a string that is exactly a number for `int` or `float` becomes the number (`"12"` is 12; `"1.5"`,
+`"12abc"` and `" 12"` are not integers), and `"true"`/`"false"` for `bool` become the booleans.
+Nothing else is converted, and nothing in a list or a dict. `null` for an optional argument is the
+same as leaving it out, and the handler gets the declared default. For a table of actions rather than decorated functions, build
 `Action(name, purpose, grade, [Param(...), ...])` and `surface.add_action(spec, handler)`, where
 the handler takes the arguments as one dict.
 

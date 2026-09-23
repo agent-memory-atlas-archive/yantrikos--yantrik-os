@@ -610,13 +610,13 @@ fn publish_control(app: &DownloadManagerApp, engine: Engine) {
             // reply as the settled state would misreport a transfer that is still writing.
             Action::new("pause", "Stop a running download, keeping what has arrived")
                 .defers()
-                .arg(Param::number("id")),
+                .arg(Param::integer("id")),
             reporting(engine.clone(), window.clone(), |engine, id| engine.pause(id)),
         )
         .action(
             Action::new("resume", "Continue a paused or failed download")
                 .defers()
-                .arg(Param::number("id")),
+                .arg(Param::integer("id")),
             reporting(engine.clone(), window.clone(), |engine, id| engine.resume(id)),
         )
         .action(
@@ -627,19 +627,19 @@ fn publish_control(app: &DownloadManagerApp, engine: Engine) {
             Action::new("cancel", "Stop a download and delete the partial file")
                 .risk("sensitive")
                 .defers()
-                .arg(Param::number("id")),
+                .arg(Param::integer("id")),
             reporting(engine.clone(), window.clone(), |engine, id| engine.cancel(id)),
         )
         .action(
             Action::new("retry", "Start a failed download again from the beginning")
                 .defers()
-                .arg(Param::number("id")),
+                .arg(Param::integer("id")),
             reporting(engine.clone(), window.clone(), |engine, id| engine.retry(id)),
         )
         .action(
             Action::new("verify", "Hash a finished file again and compare it with a checksum")
                 .defers()
-                .arg(Param::number("id"))
+                .arg(Param::integer("id"))
                 .arg(
                     Param::text("sha256")
                         .optional()
@@ -693,7 +693,7 @@ fn publish_control(app: &DownloadManagerApp, engine: Engine) {
         )
         .action(
             Action::new("open_folder", "Show a download's folder in the file manager")
-                .arg(Param::number("id")),
+                .arg(Param::integer("id")),
             reporting(engine, window, open_folder),
         )
         .serve();

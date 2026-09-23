@@ -51,6 +51,10 @@ What it is checking, in one line each:
     shell's link, a closed one is named as closed with how to open it, and `yos ls` lists it as
     `(closed)` with what it is for — from the shell's listing, or from the files when no desktop
     answers;
+  * a socket that answers but not `app.describe` — the harness host, the store behind an app —
+    is named nowhere in `yos ls` (only under `--all`, as the desktop's own), so no mind is invited
+    to describe it (#190); describing it anyway says what it is, and the store behind a closed app
+    says the app is closed and how to open it;
   * `yos` writes nothing to `app-shell.sock` unless a `yantrik-ui` binary is what listens there;
   * and the socket-directory chain is the transport's, in its order.
 """
@@ -289,6 +293,17 @@ class ProtocolSurface:
                 return refuse(("`%s` has no argument `%s`; it takes: %s"
                                % (name, key, ", ".join(declared))) if declared else
                               "`%s` takes no arguments, but `%s` was given" % (name, key))
+        kinds = {"string": (str, "a string"), "boolean": (bool, "a boolean")}
+        arrived = lambda v: ("a boolean" if isinstance(v, bool) else "a number"
+                             if isinstance(v, (int, float)) else "a string"
+                             if isinstance(v, str) else "an object")
+        for p, pspec in spec["parameters"]["properties"].items():
+            kind, wanted = kinds[pspec["type"]]
+            value = args.get(p)
+            if value is not None and not (isinstance(value, kind)
+                                          and (kind is bool or not isinstance(value, bool))):
+                return refuse("`%s` argument `%s` must be %s, and %s arrived"
+                              % (name, p, wanted, arrived(value)))
         current = fnv(self.summary, self.state)
         if params.get("expect_revision") not in (None, current):
             return refuse("STALE: this app is at revision %s and you acted on %s. It now reports: "
@@ -727,7 +742,7 @@ def main():
               and all(("  pass  %s" % c) in out for c in (
                   "ping", "describe", "protocol", "schema", "grades", "params", "secrets",
                   "revision", "steady", "method", "empty", "unknown", "missing", "undeclared",
-                  "stale")), out + err)
+                  "types", "stale")), out + err)
         check("no handler ran: every act it sent was one the dispatch refuses first",
               hello.ran == [], hello.ran)
         acts = [c["params"] for c in hello_svc.calls if c["method"] == "app.act"]
@@ -744,7 +759,7 @@ def main():
             answer = {}
         rows = (answer.get("surfaces") or [{}])[0].get("checks") or []
         check("--json says the same, as JSON",
-              answer.get("ok") is True and len(rows) == 15
+              answer.get("ok") is True and len(rows) == 16
               and {r["status"] for r in rows} == {"pass"}, out)
         out, err, code = run(lambda: yos.cmd_check([str(sockets / "app-hello.sock")]))
         check("a socket can be named by its path, for a surface under development",
@@ -884,6 +899,40 @@ def main():
                   "Can be opened with `act shell open_app name=<name>`" in out, out)
             check("and an open one is not listed as closed",
                   "howdy " in out and not re.search(r"^    howdy +\(closed\)", out, re.M), out)
+
+            print("yos ls, with sockets that answer but are not surfaces (#190)")
+            # The harness host, as it refuses anything but its own protocol; the store behind a
+            # closed app, in the transport's words; and a service that is a surface.
+            unknown = lambda code, words: (lambda _s, asked: {"__error__": {
+                "code": code, "message": words % asked["method"]}})
+            plumbing = [
+                FakeService(sockets / "harness.sock", unknown(
+                    -32000, "unknown method `%s`; this service speaks: harness.attach, harness.poll")),
+                FakeService(sockets / "quiet.sock", unknown(-32601, "Unknown method: %s")),
+                FakeService(sockets / "weather.sock", lambda _s, asked: (
+                    {"app": "weather", "summary": "Weather — 21°C", "state": {}, "actions": []}
+                    if asked["method"] == "app.describe" else {})),
+            ]
+            for svc in plumbing:
+                svc.start()
+                services.append(svc)
+            out, err, code = run(lambda: yos.cmd_ls([]))
+            line = next((l for l in out.splitlines() if l.startswith("Services answering:")), "")
+            check("a service that answers describe is listed as answering", "weather" in line, out)
+            check("one that does not is named nowhere in the listing a mind reads",
+                  "harness" not in out and "quiet" not in line, out)
+            out, err, code = run(lambda: yos.cmd_ls(["--all"]))
+            check("--all names it, as the desktop's own and not a surface",
+                  re.search(r"^The desktop's own, not surfaces \(they do not answer describe\): "
+                            r".*harness", out, re.M) is not None, out)
+            out, err, code = run(lambda: yos.cmd_describe(["harness"]))
+            check("describing it anyway says what it is and where to look instead",
+                  code == 1 and "plumbing, not an app or a service" in err and "`yos ls`" in err
+                  and "harness.attach" in err, err)
+            out, err, code = run(lambda: yos.cmd_describe(["hush"]))
+            check("and the store behind a closed app says the app is closed and how to open it",
+                  code == 1 and "hush is closed (quiet: nothing to see here" in err
+                  and "open_app name=quiet" in err and "plumbing" not in err, err)
 
             print("yos ls, with no desktop answering")
             shell_reply_before = shell.reply

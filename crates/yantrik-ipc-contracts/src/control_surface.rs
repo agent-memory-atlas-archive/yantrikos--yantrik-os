@@ -5,16 +5,16 @@
 //! grades:
 //!
 //! * A **Slint window** (the shell, notes, email) answers from a live view-model on the UI
-//!   thread. That path lives in `yantrik-app-runtime::control`, which owns the registry, the
-//!   thread hand-off, and the revision guard.
-//! * A **standalone service** (weather, system-monitor, network) answers synchronously inside
-//!   `ServiceHandler::handle`, with no Slint and no UI thread.
+//!   thread. `yantrik-app-runtime::control` owns the thread hand-off.
+//! * A **standalone service** (weather, system-monitor, notifications) answers synchronously
+//!   inside `ServiceHandler::handle`, with no Slint and no UI thread.
 //!
-//! Both need the same `View`, the same action schema, and the same revision hash. Those are pure
-//! data with no dependency on Slint or tokio, so they live here — the one crate both sides
-//! already depend on — rather than in the Slint runtime, which a headless service must not pull
-//! in. `yantrik-app-runtime::control` re-exports these types, so existing `control::View` /
-//! `control::Action` callers are unaffected.
+//! Both dispatch through `yantrik-surface`, which holds the registry, the argument checks and the
+//! revision guard with no UI dependency. Both need the same `View`, the same action schema, and
+//! the same revision hash. Those are pure data with no dependency on Slint or tokio, so they live
+//! here — the one crate every side already depends on — rather than in the Slint runtime, which
+//! a headless service must not pull in. `yantrik-surface` and `yantrik-app-runtime::control`
+//! re-export these types, so existing `control::View` / `control::Action` callers are unaffected.
 
 use serde::{Deserialize, Serialize};
 
@@ -79,34 +79,122 @@ impl View {
     }
 }
 
+/// The JSON Schema types an argument can be declared with, in the words `describe` publishes.
+///
+/// `enum` is not among them because JSON Schema does not make it a type: an enum is a `string`
+/// with a list of `values` beside it, which is how it is published and how it is checked.
+pub const PARAM_TYPES: [&str; 6] = ["string", "number", "integer", "boolean", "array", "object"];
+
 /// One argument of an action.
+///
+/// Published as a JSON Schema property, and checked by the dispatch against what a call carries:
+/// an argument of the wrong type is refused with a sentence that names what was wanted and what
+/// arrived, before the handler runs. The handler can rely on the declaration.
+///
+/// | constructor              | published                                        | accepts                    |
+/// |--------------------------|--------------------------------------------------|----------------------------|
+/// | [`Param::text`]          | `{"type":"string"}`                              | a JSON string              |
+/// | [`Param::number`]        | `{"type":"number"}`                              | any JSON number            |
+/// | [`Param::integer`]       | `{"type":"integer"}`                             | a number written whole: `3`, not `3.0` |
+/// | [`Param::flag`]          | `{"type":"boolean"}`                             | `true` or `false`          |
+/// | [`Param::one_of`]        | `{"type":"string","enum":[…]}`                   | one of the listed strings  |
+/// | [`Param::array`]         | `{"type":"array","items":{"type":…}}`            | a JSON array, every item of the item type |
+/// | [`Param::object`]        | `{"type":"object"}`                              | a JSON object              |
+///
+/// Every property also carries `description`, and `default` when one is declared. `null` for an
+/// optional argument is the same as leaving it out.
 #[derive(Clone, Debug)]
 pub struct Param {
     pub name: String,
-    /// JSON Schema primitive: `string`, `number`, `integer`, `boolean`.
+    /// JSON Schema type: one of [`PARAM_TYPES`].
     pub kind: &'static str,
     pub required: bool,
     pub description: String,
+    /// The only values a `string` argument may take, published as `enum`. Empty for any string.
+    pub values: Vec<String>,
+    /// The type of every item of an `array` argument, published as `items`. `None` otherwise.
+    pub items: Option<&'static str>,
+    /// What the handler is given when the caller leaves this argument out, published as
+    /// `default`. Declaring one makes the argument optional.
+    pub default: Option<serde_json::Value>,
 }
 
 impl Param {
+    fn of(name: &str, kind: &'static str) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            required: true,
+            description: String::new(),
+            values: Vec::new(),
+            items: None,
+            default: None,
+        }
+    }
     pub fn text(name: &str) -> Self {
-        Self { name: name.into(), kind: "string", required: true, description: String::new() }
+        Self::of(name, "string")
     }
     pub fn number(name: &str) -> Self {
-        Self { name: name.into(), kind: "number", required: true, description: String::new() }
+        Self::of(name, "number")
+    }
+    /// A whole number: a pid, a count, an index. `3.0` is refused, because a handler reading it
+    /// with `as_u64` would find nothing there and blame the caller for leaving it out.
+    pub fn integer(name: &str) -> Self {
+        Self::of(name, "integer")
     }
     pub fn flag(name: &str) -> Self {
-        Self { name: name.into(), kind: "boolean", required: true, description: String::new() }
+        Self::of(name, "boolean")
+    }
+    /// One of a fixed set of strings, published as JSON Schema `enum` so a caller can see the
+    /// choices before it guesses, and refused by the dispatch with the choices named when it
+    /// guesses anyway.
+    pub fn one_of(name: &str, values: &[&str]) -> Self {
+        let mut p = Self::of(name, "string");
+        p.values = values.iter().map(|v| v.to_string()).collect();
+        p
+    }
+    /// A list whose every item is `item` — one of [`PARAM_TYPES`] except `array`: `"string"`,
+    /// `"number"`, `"integer"`, `"boolean"` or `"object"`.
+    pub fn array(name: &str, item: &'static str) -> Self {
+        let mut p = Self::of(name, "array");
+        p.items = Some(item);
+        p
+    }
+    /// A JSON object, handed to the handler as it arrived. For arguments that are themselves a
+    /// set of named values — another action's arguments, a settings patch.
+    pub fn object(name: &str) -> Self {
+        Self::of(name, "object")
     }
     /// Mark this argument optional. The handler must cope with it being absent.
     pub fn optional(mut self) -> Self {
         self.required = false;
         self
     }
+    /// What the handler is given when the caller leaves this argument out. Makes it optional:
+    /// an argument with a default is one the caller may omit.
+    pub fn default(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.default = Some(value.into());
+        self.required = false;
+        self
+    }
     pub fn describe(mut self, description: &str) -> Self {
         self.description = description.into();
         self
+    }
+
+    /// This argument as a JSON Schema property.
+    pub fn schema(&self) -> serde_json::Value {
+        let mut property = serde_json::json!({ "type": self.kind, "description": self.description });
+        if !self.values.is_empty() {
+            property["enum"] = serde_json::json!(self.values);
+        }
+        if let Some(item) = self.items {
+            property["items"] = serde_json::json!({ "type": item });
+        }
+        if let Some(default) = &self.default {
+            property["default"] = default.clone();
+        }
+        property
     }
 }
 
@@ -129,6 +217,12 @@ pub struct Action {
     /// to a worker returns long before the result exists, and a caller told only that the call
     /// succeeded would report a build as finished the moment it began.
     pub deferred: bool,
+    /// How long a call usually takes to answer, in seconds, when the app knows it is more than a
+    /// moment: a render, an export, a command whose exit code is the answer. Published as
+    /// `expected_seconds` so a caller can size its timeout to the action instead of guessing one
+    /// number for every action on the machine. `None` — the default — says nothing, and a caller
+    /// keeps its own.
+    pub expected_seconds: Option<u32>,
 }
 
 impl Action {
@@ -142,7 +236,15 @@ impl Action {
             // Most actions are a property write and are finished when they return. The ones that
             // are not have to say so.
             deferred: false,
+            expected_seconds: None,
         }
+    }
+
+    /// Declare how long a call to this usually takes to answer. See
+    /// [`Action::expected_seconds`](Action#structfield.expected_seconds).
+    pub fn expected_seconds(mut self, seconds: u32) -> Self {
+        self.expected_seconds = Some(seconds);
+        self
     }
 
     pub fn arg(mut self, param: Param) -> Self {
@@ -174,15 +276,12 @@ impl Action {
         let mut properties = serde_json::Map::new();
         let mut required = Vec::new();
         for p in &self.params {
-            properties.insert(
-                p.name.clone(),
-                serde_json::json!({ "type": p.kind, "description": p.description }),
-            );
+            properties.insert(p.name.clone(), p.schema());
             if p.required {
                 required.push(serde_json::Value::String(p.name.clone()));
             }
         }
-        serde_json::json!({
+        let mut schema = serde_json::json!({
             "name": self.name,
             "description": self.description,
             "permission": self.permission,
@@ -192,7 +291,12 @@ impl Action {
                 "properties": serde_json::Value::Object(properties),
                 "required": required,
             }
-        })
+        });
+        // Only when declared: an action that says nothing publishes exactly what it always did.
+        if let Some(seconds) = self.expected_seconds {
+            schema["expected_seconds"] = seconds.into();
+        }
+        schema
     }
 }
 
@@ -279,12 +383,14 @@ mod tests {
 
     /// A revision pinned against the Python port, byte for byte.
     ///
-    /// `apps/blender/addon/yantrik_surface/wire.py` recomputes this hash in Python — an addon
-    /// inside somebody else's program cannot link this crate — and `tests/blender-core/test_wire.py`
-    /// asserts the same vector with the same hex. The two implementations can only drift if one of
-    /// them changes what it hashes, and whichever side moves, its test fails with this vector in
-    /// the message. If this hash is ever deliberately changed, change it in both files in the same
-    /// commit.
+    /// `sdk/python/yantrik_surface/wire.py` recomputes this hash in Python — the Python SDK, which
+    /// Blender's addon is built on, because an addon inside somebody else's program cannot link
+    /// this crate. `sdk/python/tests/test_revision.py` asserts the same vector with the same hex
+    /// (and reads it out of this test, by this function's name), as do
+    /// `tests/blender-core/test_wire.py` and `deploy/yantrik-os/surface-vectors.json`. The two
+    /// implementations can only drift if one of them changes what it hashes, and whichever side
+    /// moves, its test fails with this vector in the message. If this hash is ever deliberately
+    /// changed, change it everywhere it is pinned in the same commit.
     #[test]
     fn revision_vector_shared_with_the_python_port() {
         let view = View::new("Blender — \"monkey.blend\", 3 objects, Cycles 1920x1080").state(
@@ -314,6 +420,53 @@ mod tests {
             }),
         );
         assert_eq!(view.revision(), "6d6dd36469ee8664");
+    }
+
+    /// What an existing declaration publishes is byte for byte what it published before the
+    /// richer types existed: `type` and `description`, nothing else, and no `expected_seconds`.
+    #[test]
+    fn the_three_original_types_publish_what_they_always_did() {
+        let schema = Action::new("open", "Open")
+            .arg(Param::text("title").describe("The title"))
+            .arg(Param::number("zoom").optional())
+            .arg(Param::flag("focus").optional())
+            .schema();
+        let props = &schema["parameters"]["properties"];
+        assert_eq!(props["title"], serde_json::json!({"type": "string", "description": "The title"}));
+        assert_eq!(props["zoom"], serde_json::json!({"type": "number", "description": ""}));
+        assert_eq!(props["focus"], serde_json::json!({"type": "boolean", "description": ""}));
+        assert!(schema.get("expected_seconds").is_none(), "{schema}");
+    }
+
+    /// Each richer type as the JSON Schema a model is handed and the Python port mirrors.
+    #[test]
+    fn the_richer_types_publish_as_json_schema() {
+        let schema = Action::new("export", "Export the document")
+            .arg(Param::integer("page"))
+            .arg(Param::one_of("format", &["pdf", "png"]).default("pdf"))
+            .arg(Param::array("tags", "string").optional())
+            .arg(Param::object("options").optional())
+            .arg(Param::integer("dpi").default(150).describe("Dots per inch"))
+            .expected_seconds(20)
+            .schema();
+        let props = &schema["parameters"]["properties"];
+        assert_eq!(props["page"], serde_json::json!({"type": "integer", "description": ""}));
+        assert_eq!(
+            props["format"],
+            serde_json::json!({"type": "string", "description": "", "enum": ["pdf", "png"], "default": "pdf"})
+        );
+        assert_eq!(
+            props["tags"],
+            serde_json::json!({"type": "array", "description": "", "items": {"type": "string"}})
+        );
+        assert_eq!(props["options"], serde_json::json!({"type": "object", "description": ""}));
+        assert_eq!(
+            props["dpi"],
+            serde_json::json!({"type": "integer", "description": "Dots per inch", "default": 150})
+        );
+        // A default makes an argument optional; only `page` is required.
+        assert_eq!(schema["parameters"]["required"], serde_json::json!(["page"]));
+        assert_eq!(schema["expected_seconds"], 20);
     }
 
     #[test]

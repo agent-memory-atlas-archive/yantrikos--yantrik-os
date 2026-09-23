@@ -670,6 +670,18 @@ pub fn publish(
                 // whatever window was in front, and nothing a caller could read said it was
                 // open at all: `failed_launches` was empty because nothing had failed.
                 .with("launcher", serde_json::json!({ "open": ui.get_app_grid_open() }))
+                // The mode menu over the status bar's chip, for the same reason again:
+                // `show_mind_audit` opens it, and a caller that opened it has to be able to see
+                // that it is still there and put it away (`close_mind_menu`) (#184).
+                .with(
+                    "mind_menu",
+                    crate::control_approvals::mind_menu_for_describe(
+                        ui.get_mind_menu_open(),
+                        ui.get_mind_menu_audit_open(),
+                        ui.get_mind_menu_confirming(),
+                        screen,
+                    ),
+                )
                 .with("incognito", ui.get_settings_incognito_mode())
                 .with("settings", serde_json::json!({"category":ui.get_settings_category(),"query":ui.get_settings_query().to_string(),"dark":ui.get_settings_dark_mode(),"accent":ui.get_settings_accent_color().to_string(),"wallpaper":ui.get_wallpaper_path().to_string(),"save_error":ui.get_settings_save_error(),"save_status":ui.get_settings_save_status().to_string(),"auto_lock_secs":ui.get_settings_auto_lock_secs()}))
         }

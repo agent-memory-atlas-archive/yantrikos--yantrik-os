@@ -157,6 +157,80 @@ pub(crate) fn fill(g: &AgentsState, popped: bool) {
     });
 }
 
+/// The first live catalog run (#190): the Red team finished, the Active tab empty beside six
+/// complete, and its answer — headings, bold labels, italics, backticks, a list, a fence — as the
+/// shell hands it to the pane: one item per block of the Lens's parser (`crate::markdown`), a
+/// paragraph's and a list's styles made by `StyledText::from_markdown`, as `markdown::styled` does.
+/// The last paragraph is still arriving, with its `**` not yet closed.
+fn red_team(g: &AgentsState) {
+    let tab = |id: &str, label: &str, count: i32| AgentTabData { id: id.into(), label: label.into(), count };
+    g.set_tabs(ModelRc::new(VecModel::from(vec![
+        tab("active", "Active", 0),
+        tab("needs_you", "Needs you", 0),
+        tab("complete", "Complete", 6),
+        tab("all", "All", 6),
+    ])));
+    g.set_tab("active".into());
+    g.set_rows(ModelRc::new(VecModel::from(Vec::<AgentRowData>::new())));
+    g.set_empty_note("Nothing running. 6 complete.".into());
+    g.set_selected("".into());
+    g.set_has_agent(true);
+    g.set_header(AgentHeaderData {
+        id: "deepseek:c-4e1f07".into(),
+        mind: "deepseek".into(),
+        title: "attack the plan to ship 0.4 on Friday".into(),
+        state: "done".into(),
+        label: "done".into(),
+        since: "21:14".into(),
+        status: "".into(),
+        note: "".into(),
+        can_send: true,
+        send_hint: "".into(),
+        can_stop: false,
+    });
+    let mut details = g.get_details();
+    details.mind = "deepseek".into();
+    details.role = "Red team".into();
+    details.reach = "nothing on this desktop beyond asking the person and reading its own session · at most safe".into();
+    details.calls = "3".into();
+    g.set_details(details);
+    let block = |key: &str, block: &str, text: &str, markdown: &str| AgentItemData {
+        kind: "text".into(),
+        key: key.into(),
+        block: block.into(),
+        text: text.into(),
+        styled: match block {
+            "text" | "bullet" => slint::StyledText::from_markdown(markdown).expect("markdown StyledText takes"),
+            _ => slint::StyledText::from_plain_text(text),
+        },
+        ..Default::default()
+    };
+    g.set_items(ModelRc::new(VecModel::from(vec![
+        AgentItemData { kind: "prompt".into(), key: "t1".into(), text: "attack the plan to ship 0.4 on Friday".into(), ..Default::default() },
+        block("t1.0.0", "heading", "Strongest point", "Strongest point"),
+        block(
+            "t1.0.1",
+            "text",
+            "How: the notes ship before the migration is tested, and release-check --tier rc is the only gate between them.",
+            "**How:** the notes ship *before* the migration is tested, and `release-check --tier rc` is the only gate between them.",
+        ),
+        block(
+            "t1.0.2",
+            "bullet",
+            "\u{2022} Risk: a failed migration leaves ~/.local/share/yantrik half-written, and the next boot reads a store that is neither the old one nor the new one\n\u{2022} Mitigation: run it on a copy first\n1. snapshot the folder\n2. migrate the copy",
+            "\u{2022} **Risk:** a failed migration leaves `~/.local/share/yantrik` half-written, and the next boot reads a store that is *neither* the old one nor the new one\n\u{2022} *Mitigation:* run it on a copy first\n1. snapshot the folder\n2. migrate the copy",
+        ),
+        block("t1.0.3", "heading", "What I would check", "What I would check"),
+        block(
+            "t1.0.4",
+            "code",
+            "cp -a ~/.local/share/yantrik /tmp/y-copy\nrelease-check --tier rc --interactive --json /tmp/rc.json --only browser --only \"no window\" --skip blender",
+            "cp -a ~/.local/share/yantrik /tmp/y-copy\nrelease-check --tier rc --interactive --json /tmp/rc.json --only browser --only \"no window\" --skip blender",
+        ),
+        block("t1.0.5", "text", "Verdict: it is **still arriving", "Verdict: it is **still arriving"),
+    ])));
+}
+
 fn save(pixels: &slint::SharedPixelBuffer<slint::Rgb8Pixel>, path: &str, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), width, height);
     encoder.set_color(png::ColorType::Rgb);
@@ -321,6 +395,34 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     let pressed: Vec<String> = log.borrow()[before..].iter().filter(|e| e.starts_with("allow") || e.starts_with("deny")).cloned().collect();
     assert!(pressed.is_empty(), "an answered card has no buttons: {pressed:?}");
     save(&draw(), &output.replace(".png", "-approval-answered.png"), width, height)?;
+
+    // #190: a finished Red team, still open in the middle column, with the Active tab empty — the
+    // list says what is true of the other tabs — and its answer drawn from its markdown.
+    red_team(&g);
+    draw();
+    draw();
+    let rich = draw();
+    save(&rich, &output.replace(".png", "-markdown.png"), width, height)?;
+    // The styles are drawn, not only parsed: the same paragraph as plain text is another picture.
+    let styled_at = |items: &ModelRc<AgentItemData>| {
+        (0..slint::Model::row_count(items)).find(|&i| slint::Model::row_data(items, i).is_some_and(|it| it.key == "t1.0.1")).unwrap()
+    };
+    let items = g.get_items();
+    let row = styled_at(&items);
+    let mut paragraph = slint::Model::row_data(&items, row).unwrap();
+    let styled = paragraph.styled.clone();
+    paragraph.styled = slint::StyledText::from_plain_text(&paragraph.text);
+    slint::Model::set_row_data(&items, row, paragraph.clone());
+    draw();
+    let flat = draw();
+    assert_ne!(rich.as_bytes(), flat.as_bytes(), "bold, italic and code are drawn: the paragraph differs from its plain text");
+    paragraph.styled = styled;
+    slint::Model::set_row_data(&items, row, paragraph);
+    ui.set_light(true);
+    draw();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    save(&draw(), &output.replace(".png", "-markdown-light.png"), width, height)?;
+    ui.set_light(false);
     ui.hide()?;
 
     // One agent in its own window: the same components, its own global.

@@ -65,6 +65,12 @@ export struct AgentItemData {
     // For an approval: the shell's own card, from the shell's approval store under one request id
     // — the same data the Lens draws. Never anything the agent said.
     approval: ApprovalRequest,
+    // For the mind's text, one markdown block per item (the Lens's parser, crate::markdown):
+    // text | heading | bullet | code, or "" for plain text drawn as it is. `text` is the block
+    // with its markers stripped; `styled` is a paragraph's or a list's bold, italic, inline code
+    // and links, which one StyledText draws and a Text cannot.
+    block: string,
+    styled: styled-text,
 }
 
 export struct AgentHeaderData {
@@ -121,6 +127,9 @@ export global AgentsState {
     in-out property <[AgentTabData]> tabs: [];
     in-out property <string> tab: "active";
     in-out property <[AgentRowData]> rows: [];
+    // What the list says when this tab has no one in it — what is true of the other tabs
+    // ("Nothing running. 6 complete."). The shell's sentence (`empty_note`).
+    in-out property <string> empty-note: "";
     in-out property <string> selected: "";
     // Whether the pointer is over the list. Rows do not move under it.
     in-out property <bool> list-hovered: false;
@@ -312,6 +321,8 @@ component ItemView inherits Rectangle {
     VerticalLayout {
         padding-top: 2px;
         padding-bottom: 2px;
+        // A list sits in from the paragraphs around it.
+        padding-left: root.item.kind == "text" && root.item.block == "bullet" ? 8px : 0px;
 
         if root.item.kind == "prompt" : Rectangle {
             border-radius: 10px;
@@ -338,7 +349,44 @@ component ItemView inherits Rectangle {
             }
         }
 
-        if root.item.kind == "text" : Text {
+        // The mind's text, a markdown block per item. A paragraph or a list is one StyledText —
+        // the only element that draws bold, italic and code inside one wrapped run, on the
+        // software renderer as on the GPU one. A heading and a code block are drawn as the Lens's
+        // bubble draws them. Each wrapping text is a direct child of this layout, or sized from
+        // its own preferred height: a text inside a nested layout is measured at its unwrapped
+        // width, and the lines past the first are cut off.
+        if root.item.kind == "text" && (root.item.block == "text" || root.item.block == "bullet") : StyledText {
+            text: root.item.styled;
+            default-color: Theme.text-primary;
+            default-font-size: Theme.fs-body;
+            link-color: Theme.accent;
+        }
+        if root.item.kind == "text" && root.item.block == "heading" : Text {
+            text: root.item.text;
+            color: Theme.amber-light;
+            font-size: Theme.font-title;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+        if root.item.kind == "text" && root.item.block == "code" : Rectangle {
+            background: Theme.bg-input;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            height: code.preferred-height + 16px;
+            code := Text {
+                x: 10px;
+                y: 8px;
+                width: parent.width - 20px;
+                text: root.item.text;
+                color: Theme.cyan-light;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-small;
+                wrap: word-wrap;
+            }
+        }
+        // Text with no block: drawn as it is.
+        if root.item.kind == "text" && root.item.block == "" : Text {
             text: root.item.text;
             color: Theme.text-primary;
             font-size: Theme.fs-body;
@@ -854,9 +902,7 @@ export component AgentsScreen inherits Rectangle {
                         padding: Theme.sp-2;
                         spacing: 4px;
                         if AgentsState.rows.length == 0 : Text {
-                            text: AgentsState.tab == "needs_you" ? "Nothing is waiting on you."
-                                : AgentsState.tab == "complete" ? "Nothing has finished yet."
-                                : "No agents yet. New agent starts one; a question in the Lens to an attached mind shows up here too.";
+                            text: AgentsState.empty-note;
                             color: Theme.text-secondary;
                             font-size: Theme.fs-caption;
                             wrap: word-wrap;

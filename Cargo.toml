@@ -17,6 +17,7 @@ members = [
     "crates/yantrik-ui-slint",
     "crates/yantrik-ipc-transport",
     "crates/yantrik-service-sdk",
+    "crates/yantrik-surface",
     "crates/yantrikdb-server",
     "crates/yantrik",
     "crates/yantrik-ui",
@@ -130,6 +131,7 @@ yantrik-shell-core = { path = "crates/yantrik-shell-core" }
 yantrik-ui-kit = { path = "crates/yantrik-ui-kit" }
 yantrik-ipc-transport = { path = "crates/yantrik-ipc-transport" }
 yantrik-service-sdk = { path = "crates/yantrik-service-sdk" }
+yantrik-surface = { path = "crates/yantrik-surface" }
 yantrik-app-runtime = { path = "crates/yantrik-app-runtime" }
 yantrik-manifest = { path = "crates/yantrik-manifest" }
 yantrik-version = { path = "crates/yantrik-version" }

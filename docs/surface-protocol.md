@@ -173,13 +173,54 @@ An **action**:
 | `description` | What it does, in the app's words. The dispatch reads it (§7): wording that says the action cannot be undone changes when a person is asked. |
 | `permission` | Its **grade**: `safe` < `standard` < `sensitive` < `dangerous`. An action declared without one is `standard`. |
 | `settles` | `"on return"` — the work is done when the act answers — or `"later"` — the act only starts it. |
-| `parameters` | A JSON Schema object: `type` `"object"`, `properties` (each `{type, description}`; `description` MAY be empty), `required` (names, in declaration order). |
+| `parameters` | A JSON Schema object: `type` `"object"`, `properties` (each `{type, description}` and, when declared, `enum`, `items` and `default`; `description` MAY be empty), `required` (names, in declaration order). |
+| `expected_seconds` | Optional integer: how long a call usually takes to answer, when the app knows it is more than a moment (a render, an export). A client SHOULD size its timeout by it; absent, the client keeps its own. |
 
-**Parameter types.** `type` is one of `string`, `number`, `integer`, `boolean`. Version 1 checks
-**presence, not type**: the dispatch refuses a missing required argument and an argument the
-action does not declare (§5), and hands every value to the handler as it came. A client SHOULD send
-each value as its declared type (`yos act` reads `key=value` by the declared type, so `id=67` is
-the string `"67"` for a `string` parameter and the number `67` for a `number` one).
+**Parameter types.** `type` is one of `string`, `number`, `integer`, `boolean`, `array`,
+`object`, and the dispatch checks it (§5, step 7): an argument of another type is refused before
+the handler runs — unless it converts to the declared type without loss (below). What each
+accepts as it is:
+
+| declared | published | accepts |
+| --- | --- | --- |
+| `string` | `{"type": "string"}` | a JSON string — not a number, even one that spells an id |
+| `number` | `{"type": "number"}` | any JSON number |
+| `integer` | `{"type": "integer"}` | a JSON number written without a fraction or exponent: `3`, not `3.0` or `3e0` (stricter than JSON Schema, on purpose: a handler reading `3.0` as an integer finds nothing) |
+| `boolean` | `{"type": "boolean"}` | `true` or `false` |
+| enum | `{"type": "string", "enum": ["low", "normal"]}` | one of the listed strings, exactly |
+| `array` | `{"type": "array", "items": {"type": "string"}}` | a JSON array whose every item is of the `items` type |
+| `object` | `{"type": "object"}` | a JSON object |
+
+`null` for an optional argument is the same as leaving it out; for a required one it is a value of
+the wrong type. A parameter MAY carry `default`: what the handler is given when the caller leaves
+the argument out (or sends `null`), and a parameter with a default is not required. A client SHOULD
+send each value as its declared type (`yos act` reads `key=value` by the declared type, so `id=67`
+is the string `"67"` for a `string` parameter and the number `67` for an `integer` one).
+
+**Conversion without loss.** A handler always receives the type it declared; a caller is met
+halfway. A value that is not of the declared type but converts to it without losing anything is
+converted — after every check and after any grant is spent (§5, step 12), so the call as sent is
+what is checked and what a grant is bound to — and anything else is refused:
+
+| declared | arrives as | the handler reads |
+| --- | --- | --- |
+| `string`, and an enum | an integer: `67`, `-3` | its decimal digits: `"67"`; an enum's list is then checked on those |
+| `integer` | a string that is exactly an integer: `"12"`, `"-4"` | the integer |
+| `number` | a string that is exactly an integer or a decimal: `"12"`, `"1.5"` | the number |
+| `boolean` | `"true"` or `"false"` | `true` or `false` |
+
+"Exactly" is a grammar, not a best effort: `-?(0|[1-9][0-9]*)` in ASCII digits, and for a number
+optionally `.` and one digit or more after it; an integer string outside what a JSON integer holds
+(`i64` below zero, `u64` from zero) is not one. So `"1.5"` for an integer, `"12abc"`, `" 12"`,
+`"12 "`, `"+12"`, `"012"`, `"1e3"`, `".5"`, `"1."`, `"1_000"` and other scripts' digits are
+refused, as is a number with a fraction for text (its text is not one thing: `1.5`, `1.50`,
+`1.5e0`), `"True"` and `1` for a boolean, a value in another case for an enum (`Low` is not `low`),
+and anything for an array or an object, or inside one. A declared `default` is the author's and is
+held to the exact type. `deploy/yantrik-os/dispatch-vectors.json` (`coerce`) is every row of this,
+generated from the Rust dispatch and replayed by the Python SDK.
+
+Type checking and conversion are additions to version 1 (see Changes): a client that predates
+them already handles the refusal, which is `-32602` like every other in §5.
 
 `describe` is never gated: reading a surface needs no grade, no mode and no grant.
 
@@ -202,15 +243,32 @@ refusal of the act itself is error `-32602`, whose `message` is the sentence giv
 | --- | --- | --- |
 | 1 | an `action` | `` act needs a non-empty `action` `` |
 | 2 | the action exists | `` unknown action `<name>`; this app offers: <a>, <b>, … `` (every action, in declaration order) |
-| 3 | the ceiling, on the grade | `CEILING: …` (§7) |
-| 4 | the grant, if the call carries one — spent only now, past the ceiling | ``GRANT: `<id>` does not authorise <app>.<action> — <the shell's reason> Nothing was run; a grant covers one action, once, with the arguments the person was shown.`` |
-| 5 | the mode, the session rules and the description | `GRANT: …` (§7) |
-| 6 | every required argument is present | `` `<action>` needs argument `<param>` `` (the first missing, in declaration order) |
-| 7 | no argument the action does not declare | `` `<action>` has no argument `<key>`; it takes: <p1>, <p2>, … `` — or, for an action with none, `` `<action>` takes no arguments, but `<key>` was given `` (the first undeclared key in sorted order; the list in declaration order) |
-| 8 | `expect_revision`, when given, is the current revision | `STALE: this app is at revision <current> and you acted on <expected>. It now reports: <summary>. Read it again before deciding.` |
-| 9 | the handler | the handler's own sentence, as it returned it |
+| 3 | the calling agent's reach, when the call carries an `agent_token` whose role has one (`yantrik_ipc_transport::reach`) | `REACH: …` — the act is outside the role's surfaces, or above its ceiling; a reach file that cannot be read refuses every token-carrying call |
+| 4 | `args` is an object (absent or `null` is none) | `` `<action>` takes its arguments as an object of named values, and <kind> arrived `` |
+| 5 | every required argument is present | `` `<action>` needs argument `<param>` `` (the first missing, in declaration order) |
+| 6 | no argument the action does not declare | `` `<action>` has no argument `<key>`; it takes: <p1>, <p2>, … `` — or, for an action with none, `` `<action>` takes no arguments, but `<key>` was given `` (the first undeclared key in sorted order; the list in declaration order) |
+| 7 | every argument is of its declared type, or converts to it without loss (§4) | `` `<action>` argument `<param>` must be <wanted>, and <kind> arrived `` — or, for an enum, `` `<action>` argument `<param>` must be one of `<v1>`, `<v2>`, …, and another string arrived `` — or, for an array item, `` `<action>` argument `<param>` must be <wanted>, and `<param>[<i>]` is <kind> `` (the first wrong argument in declaration order) |
+| 8 | the ceiling, on the grade | `CEILING: …` (§7) |
+| 9 | the grant, if the call carries one — spent only now, past the arguments and the ceiling, against the arguments **as sent** | ``GRANT: `<id>` does not authorise <app>.<action> — <the shell's reason> Nothing was run; a grant covers one action, once, with the arguments the person was shown.`` |
+| 10 | the mode, the session rules and the description | `GRANT: …` (§7) |
+| 11 | `expect_revision`, when given, is the current revision | `STALE: this app is at revision <current> and you acted on <expected>. It now reports: <summary>. Read it again before deciding.` |
+| 12 | the handler, with every argument converted to its declared type (§4) and every declared default filled in | the handler's own sentence, as it returned it |
 
-Steps 8 and 9 happen in **one turn** of the surface's own serialization (a window's UI thread):
+Steps 4 to 7 come before the ceiling and the grant so that a call its own arguments refuse is
+refused for them — and a person's Allow is never used up on a call that was never going to run:
+the same grant then runs the call made right. A grant is bound to the arguments as they were sent
+and shown on the card, never to the converted form the handler reads. The `order` section of
+`deploy/yantrik-os/dispatch-vectors.json` holds this order to the sentence, with the grants spent
+after each call, and every implementation replays it.
+
+In step 7, `<wanted>` is `a string`, `a number`, `an integer`, `a boolean`, `an object`, `an array`,
+or `an array of <items>s` (`strings`, `numbers`, `integers`, `booleans`, `objects`, `arrays`), and
+`<kind>` names what arrived — `null`, `a boolean`, `a number`, `a number with a fraction` (where an
+integer was wanted), `a string`, `an array`, `an object` — **never its value**: a number a caller
+sends may be a PIN, a year of birth or a dose, and a refusal is shown, logged and handed to a model.
+The declaration is what a caller corrects from.
+
+Steps 11 and 12 happen in **one turn** of the surface's own serialization (a window's UI thread):
 between the revision check and the handler nothing else can change what the app shows, and the
 view in the reply is read in the same turn, after the handler.
 
@@ -233,13 +291,14 @@ An accepted act answers (schema: `act.schema.json`, the root; `act_json`'s own o
 | --- | --- |
 | `accepted` | Always `true`: the guard passed and the handler ran. It never means "done". |
 | `settled` | `true` when the action's `settles` is `"on return"`, `false` when `"later"`: the work was started and is not finished. A client MUST NOT report a `settled: false` act as complete. |
-| `action_id` | A name for this dispatch, unique within the surface's run: `<service-id>#<n>`. |
+| `action_id` | A name for this dispatch, unique within the surface's run: `<service-id>#<n>`, where `<service-id>` is the socket's name — `app-notes#7` for a window, `weather#12` for a service. |
 | `result` | The handler's answer, any JSON. |
 | `revision`, `summary`, `state` | The view **after** the action. |
 
 A handler that owes its caller a result that takes longer than the surface's turn may finish its
-answer off that turn (`control::answer_later`): the reply then waits for the work, `result` is the
-work's value (or its refusal, as `-32602`), and the view is read again afterwards.
+answer off that turn (`yantrik_surface::answer_later`, re-exported as `control::answer_later`): the
+reply then waits for the work, `result` is the work's value (or its refusal, as `-32602`), and the
+view is read again afterwards. Such an action SHOULD declare `expected_seconds` (§4).
 
 ## 6. `revision`
 
@@ -269,7 +328,7 @@ Floats are where ports go wrong: `json.dumps` in Python writes `1e-05` where `se
 `0.00001`, and `1.5e-07` for `1.5e-7`. The vectors' `revision_float_edges` pin those renderings.
 A port MUST match them; a surface SHOULD keep very small and very large floats out of `state`.
 
-A revision is compared for equality only. `expect_revision` (§5, step 8) is the atomic guard;
+A revision is compared for equality only. `expect_revision` (§5, step 11) is the atomic guard;
 comparing revisions in the client and then acting rebuilds the race it closes.
 
 ## 7. The decision: grades, ceiling, mode, grant
@@ -352,7 +411,7 @@ all `safe` actions):
 The surface's dispatch spends the grant through the shell's `consume_approval {request_id, app,
 action, args_json}` — once, only past the ceiling, and only to a `yantrik-ui` process (§3) — and
 the shell refuses it unless it is granted, unspent, unexpired and bound to exactly this app,
-action and these arguments. A grant that does not hold ends the call (§5, step 4). `yos act`, the
+action and these arguments. A grant that does not hold ends the call (§5, step 9). `yos act`, the
 MCP bridge and the companion's `app_action` do these three steps on a caller's behalf.
 
 ## 9. Error codes
@@ -379,43 +438,35 @@ a program and exits non-zero when a surface breaks it:
 | `protocol` | `protocol` is present and is `1`. |
 | `schema` | the describe matches `describe.schema.json`. |
 | `grades` | every action is graded on the ladder. |
-| `params` | every parameter has a v1 type, and every required one is declared. |
+| `params` | every parameter has a type from §4 (an array's `items` too), and every required one is declared. |
 | `secrets` | no parameter is named like a secret — the shell's rule: `passphrase`, `password`, `passwd`, `pin`, `secret`, `credential`, `unlock` (`pinned` excepted). |
 | `revision` | the published revision is §6's hash of the summary and state (a warning when a float may render differently). |
 | `steady` | an unchanged view keeps its revision across reads. |
 | `method`, `empty`, `unknown` | an unknown method, an empty action and an unknown action are refused with the right code and words. |
-| `missing`, `undeclared`, `stale` | a missing argument, an undeclared one and a stale `expect_revision` are refused with the right code and words. |
+| `missing`, `undeclared`, `types`, `stale` | a missing argument, an undeclared one, one of the wrong type (one no dispatch converts: `true` for text, a non-numeric string for anything else) and a stale `expect_revision` are refused with the right code and words. `types` is a warning, not a failure, when the revision guard refused the mistyped argument instead: type checking is an addition to version 1. |
 
-It never runs an action. The last three are sent only to a surface that publishes `protocol: 1`
+It never runs an action. The last four are sent only to a surface that publishes `protocol: 1`
 and refused the unknown action exactly as §5 says; they name an action graded `safe` or `standard`
-that does not say it cannot be undone, and they all carry a stale `expect_revision` besides, so a
-surface that skipped an argument check is still stopped by its revision guard before a handler
-runs.
+that does not say it cannot be undone, with every other required argument given a value its
+declaration accepts (an enum's first value, a declared default), and they all carry a stale
+`expect_revision` besides, so a surface that skipped an argument check is still stopped by its
+revision guard before a handler runs.
 
 ## Known deviations
 
 What the code in this repository does that this document does not, so nobody mistakes it for the
 protocol:
 
-- **The three services that answer `app.act` themselves** (weather, system-monitor, notifications)
-  refuse an unknown action with `-32601` and "this service offers", name every dispatch
-  `<service>#act`, and do not refuse undeclared arguments or check `expect_revision`. They publish
-  `protocol: 1` through the shared `describe_json`, and `yos check` fails them on `unknown`. The
-  surface SDK's piece B moves them onto the shared dispatch.
 - **network-service and calendar-service** answer `app.describe` and no `app.act` at all: an act
   there is `-32601 Unknown method: app.act`, where a surface with no actions owes
   `` unknown action `<name>`; this app offers: `` with an empty list.
 - **Services that are not surfaces** answer an unknown method in their own ways — the companion's
   socket with `-32602`, the harness host with `-32000` — where the transport's convention is
   `-32601`. They publish no `describe`, so they are outside this protocol; `yos check --all`
-  skips them.
-- **Rust dispatch:** a non-string `expect_revision` is ignored (no guard) and a non-object `args`
-  is read as no arguments. A client MUST send a string and an object.
-- **The Python surface SDK** (`sdk/python/yantrik_surface`), and Blender's addon, which is built on
-  it: checks each argument against its published type and refuses a non-object `args`
-  (`` `<action>` takes its arguments as an object of named values, and an array arrived ``), in the
-  words of the Rust `yantrik-surface` crate (piece B of the SDK design) — where the Rust dispatch
-  on `main` checks presence, not type (§4). It replays `surface-vectors.json` in full.
+  skips them, and `yos ls` (a mind's `os_apps`) does not list them — only `yos ls --all` names
+  them, as the desktop's own.
+- **Rust dispatch:** a non-string `expect_revision` is ignored (no guard). A client MUST send a
+  string.
 
 ## Changes
 
@@ -424,3 +475,25 @@ protocol:
   every door decides alike; owned names (bind only over a dead socket; the shell's peer checked
   before a grant is spent); surfaces declared in `.desktop` files, so they are found while closed
   (§3).
+- **1, extended** (the surface SDK's piece B, `crates/yantrik-surface`): parameters gain `integer`
+  enforced as written, `array` with `items`, `object`, `enum` and `default`, and actions gain
+  `expected_seconds`; the dispatch refuses a non-object `args` (§5, step 4) and an argument of the wrong
+  type (step 7), both `-32602`, which a version-1 client already treats as an answer; the three
+  services that answered `app.act` themselves dispatch through the shared crate, so they now keep
+  §5 — `-32602` and "this app offers" for an unknown action, per-call `action_id`s, undeclared
+  arguments and `expect_revision` refused. The Python SDK (`sdk/python/yantrik_surface`) publishes
+  the same shapes and refuses in the same words. Nothing a version-1 client relied on changed
+  shape.
+- **1, extended: arguments before the grant** (the coordinator's call on #191): the arguments
+  (§5, steps 4–7) are checked before the ceiling, the mode and any grant, where they used to come
+  after — so a malformed call is refused without using up the person's Allow, and the same grant
+  then runs the call made right. A grant is spent against the arguments as sent. The agent's reach
+  (#188) is written in as step 3. A caller over the ceiling with a mistake in its arguments now
+  hears about the mistake first, and about the ceiling once it is fixed; that is the price of
+  never spending a grant on a call that cannot run.
+- **1, extended: conversion without loss** (the coordinator's call on #191): an integer for text,
+  a string that is exactly a number for a number or an integer, and `"true"`/`"false"` for a
+  boolean are converted to the declared type for the handler (§4) instead of refused; everything
+  else is refused in step 7's sentence, as before. Handlers keep the strictness; callers — a model
+  sending `which: 1` — are not bounced. The Rust dispatch and the Python SDK convert identically,
+  held by `deploy/yantrik-os/dispatch-vectors.json`.

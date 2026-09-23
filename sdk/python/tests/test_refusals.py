@@ -135,7 +135,8 @@ class TestTheOrder(support.MachineCase):
     def test_a_handler_refusal_is_the_apps_own_sentence(self):
         self.assertEqual(self.refusal(lambda: self.act("open_note", title="Ghost")),
                          "there is no note called `Ghost`")
-        support.quoted(self, C, "Err(message) => Err(ServiceError { code: -32602, message }),")
+        support.quoted(self, C, "ServiceError { code: REFUSED, message }")
+        support.quoted(self, C, "pub const REFUSED: i32 = -32602;")
 
     def test_an_unknown_method_names_the_two_it_serves(self):
         fragment = 'format!("unknown method `{other}`; this app serves app.describe, app.act")'
@@ -159,7 +160,8 @@ class TestTheOrder(support.MachineCase):
 
 
 class TestTheGateInTheDispatch(support.MachineCase):
-    """The ceiling and the mode, as the dispatch meets them: before the arguments."""
+    """The ceiling and the mode, as the dispatch meets them: after the arguments, which are
+    answered first so that a malformed call never uses up a person's grant."""
 
     ceiling = None  # the default: sensitive
     mode = None     # the default: ask
@@ -168,24 +170,33 @@ class TestTheGateInTheDispatch(support.MachineCase):
         super().setUp()
         self.s = notes()
 
-    def test_the_ceiling_comes_before_the_arguments(self):
+    def test_the_arguments_come_before_the_ceiling_and_the_mode(self):
+        self.assertEqual(self.refusal(lambda: self.s.act({"action": "wipe_disk"})),
+                         "`wipe_disk` needs argument `disk`")
+        self.assertEqual(self.refusal(lambda: self.s.act({"action": "rename_note",
+                                                          "args": {"title": True}})),
+                         "`rename_note` argument `title` must be a string, and a boolean arrived")
+
+    def test_the_ceiling_refuses_a_well_formed_call(self):
         fragment = ('"CEILING: {app_id}.{action} is graded `{graded}`, above this machine\'s '
                     '`{ceiling}` ceiling (`tool_permission` in ~/.config/yantrik/settings.yaml), '
                     'so it was not run. An action at that grade needs a person to authorise it '
                     'directly — raise the ceiling in Settings if that is the intent."')
         support.quoted(self, G, fragment)
-        message = self.refusal(lambda: self.s.act({"action": "wipe_disk"}))
+        message = self.refusal(lambda: self.s.act({"action": "wipe_disk",
+                                                   "args": {"disk": "sda"}}))
         self.assertEqual(message, support.render(
             fragment.strip('"'), app_id="notes", action="wipe_disk", graded="dangerous",
             ceiling="sensitive"))
 
-    def test_the_mode_comes_before_the_arguments(self):
+    def test_the_mode_refuses_a_well_formed_call(self):
         fragment = ('"GRANT: {app}.{action} is graded `{graded}` and this machine is in {mode} '
                     'mode, which runs nothing above `{allowed}` without asking — so it was not '
                     'run. {HOW}"')
         support.quoted(self, G, fragment)
         support.quoted(self, G, 'const HOW: &str = "%s";' % support.GATE_HOW)
-        message = self.refusal(lambda: self.s.act({"action": "rename_note"}))
+        message = self.refusal(lambda: self.s.act({"action": "rename_note",
+                                                   "args": {"title": "x"}}))
         self.assertEqual(message, support.render(
             fragment.strip('"'), app="notes", action="rename_note", graded="sensitive",
             mode="ask", allowed="standard", HOW=support.GATE_HOW))
@@ -254,16 +265,20 @@ class TestWrongType(support.MachineCase):
     def test_each_type_is_named_by_the_kind_that_arrived(self):
         support.quoted(self, B, '"`{action}` argument `{}` must be {}, and {} arrived"',
                        skip=False)
-        self.assertEqual(self.says(label=5),
+        self.assertEqual(self.says(label=True),
+                         "`set` argument `label` must be a string, and a boolean arrived")
+        self.assertEqual(self.says(label=2.5),
                          "`set` argument `label` must be a string, and a number arrived")
-        self.assertEqual(self.says(whole="3"),
+        self.assertEqual(self.says(whole="3x"),
+                         "`set` argument `whole` must be an integer, and a string arrived")
+        self.assertEqual(self.says(whole="3.0"),
                          "`set` argument `whole` must be an integer, and a string arrived")
         self.assertEqual(self.says(whole=2.5),
                          "`set` argument `whole` must be an integer, and a number with a fraction "
                          "arrived")
         self.assertEqual(self.says(whole=True),
                          "`set` argument `whole` must be an integer, and a boolean arrived")
-        self.assertEqual(self.says(real="0.5"),
+        self.assertEqual(self.says(real="0.5.1"),
                          "`set` argument `real` must be a number, and a string arrived")
         self.assertEqual(self.says(on="yes"),
                          "`set` argument `on` must be a boolean, and a string arrived")
@@ -275,8 +290,20 @@ class TestWrongType(support.MachineCase):
                          "`must` argument `n` must be an integer, and null arrived")
 
     def test_the_value_itself_is_never_repeated(self):
-        message = self.says(label=271828)
+        message = self.says(whole="271828x")
         self.assertNotIn("271828", message)
+
+    def test_what_converts_without_loss_reaches_the_handler_as_its_declared_type(self):
+        support.quoted(self, B, "pub fn coerced(p: &Param, value: &Value) -> Option<Value>",
+                       skip=False)
+        out = self.s.act({"action": "set", "args": {"label": 5, "whole": "3", "real": "0.5",
+                                                    "on": "true", "colour": "green"}})
+        self.assertEqual(out["result"], {"whole": 3, "real": 0.5})
+        self.assertEqual(self.got["label"], "5")
+        self.assertEqual(self.says(colour="Green"),
+                         "`set` argument `colour` must be one of `red`, `green`, and another "
+                         "string arrived")
+        self.assertIn("an array of strings", self.says(tags=[1]), "nothing inside an array")
 
     def test_an_enum_names_its_values(self):
         support.quoted(self, B, '"`{action}` argument `{}` must be one of {}, and another string '
@@ -298,7 +325,7 @@ class TestWrongType(support.MachineCase):
         self.assertEqual(self.refusal(lambda: self.s.act({"action": "set", "args": [1]})),
                          "`set` takes its arguments as an object of named values, and an array "
                          "arrived")
-        # After the unknown action and the gate, as the crate checks it.
+        # After the unknown action, before the gate, as the crate checks it.
         self.assertTrue(self.refusal(lambda: self.s.act({"action": "nope", "args": "x"}))
                         .startswith("unknown action `nope`"))
 

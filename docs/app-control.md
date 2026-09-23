@@ -94,6 +94,20 @@ Call `serve()` from the thread that owns the window, **after** the app's initial
 `protocol: 1`, computes the revision, and runs every check in the spec's order before your handler
 sees a call. Then run `yos check notes` (below) and fix what it says.
 
+**A surface with no window** — a service, an adapter for somebody else's program, a tool — uses the
+same dispatch without Slint: `yantrik_surface::Surface` (re-exported by `yantrik-service-sdk`).
+`Surface::new(id).describe(…).action(…).serve()` binds `app-<id>.sock`; a service that already
+serves methods of its own keeps its `ServiceHandler` and hands `app.describe` / `app.act` to
+`Surface::answer`. `crates/yantrik-surface/examples/hello_surface.rs` is the smallest complete one.
+Like any app, it is found while closed by the keys in its `.desktop` file (below).
+
+**Parameters are typed, and the type is checked.** `Param::text`, `number`, `integer`, `flag`,
+`one_of` (an enum), `array` (of a type) and `object`, each optionally `.default(…)`; `describe`
+publishes them as JSON Schema, and your handler always reads the declared type: what a caller
+sends that converts without loss is converted (`"12"` for an integer, `67` for text), and anything
+else is refused before your handler runs (spec §4, §5 step 7). Declare what the handler reads: an
+id read with `as_i64` is an `integer`, not a `number`. `Action::expected_seconds(n)` tells a caller how long to wait.
+
 ### Rules that are not optional
 
 **Every action calls the callback the button calls.** `ui.invoke_open_note(…)`, not a
@@ -324,8 +338,8 @@ protocol and one that keeps nothing, and the runtime's own tests run it against 
 machine, with `--json` for CI — holds a surface to the spec: the describe against the schema, every
 grade on the ladder, every parameter typed, no parameter named like a secret, `protocol` present, the
 revision computed as the spec says and steady while the view is, describe under 500 ms, and an
-unknown method, an empty action, an unknown action, a missing argument, an undeclared one and a
-stale `expect_revision` each refused with the right code and the spec's words. It prints what it
+unknown method, an empty action, an unknown action, a missing argument, an undeclared one, one of
+the wrong type and a stale `expect_revision` each refused with the right code and the spec's words. It prints what it
 saw and exits non-zero on a failure. It never runs an action: every act it sends is one the
 protocol's dispatch refuses before a handler (the spec, §10, says how it makes sure).
 

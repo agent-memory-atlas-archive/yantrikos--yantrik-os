@@ -13,7 +13,8 @@ dependencies beyond the standard library, and does no interpretation: it speaks 
 protocol and prints what came back.
 
     yos ls                              which surfaces are up, and which can be opened
-    yos ls --all                        ... and sockets left behind by closed windows
+    yos ls --all                        ... and sockets left behind by closed windows, and the
+                                        desktop's own sockets that are not surfaces
     yos describe shell                  what the desktop is showing
     yos describe notes                  what an app is showing
     yos check notes                     does a surface keep the protocol (docs/surface-protocol.md)
@@ -38,6 +39,7 @@ protocol and prints what came back.
     yos web click <n>                   click element n from `yos web`
     yos web type <n> <text>             type into element n
     yos web tabs                        what is open
+    YOS_WEB_TAB=<id> yos web ...        drive that tab (a DevTools target id), not the first
     yos web listen [secs]               what the page SAYS OUT LOUD — records the audio
                                         the machine is playing and transcribes it
 
@@ -418,6 +420,20 @@ def request(name, method, params=None, timeout=40):
             raise Unreachable("%s closed the connection without answering" % name)
         reply = json.loads(buf)
         if "error" in reply:
+            if method == "app.describe" and no_describe(reply):
+                # Not a surface at all. When an app of that name is declared, this is the service
+                # behind its closed window, and the way forward is to open the app; otherwise it
+                # is the desktop's own plumbing, which `yos ls` does not offer (#190).
+                surface = declared_surface(name)
+                if surface:
+                    raise Unreachable(
+                        "%s is closed%s. Open it first: act shell open_app name=%s — then "
+                        "describe %s." % (name, (" (%s: %s)" % (surface["id"], surface["purpose"]))
+                                         if surface["purpose"] else "", surface["id"], surface["id"]))
+                raise Unreachable(
+                    "%s is part of the desktop's plumbing, not an app or a service to describe: "
+                    "it does not answer describe. `yos ls` lists what can be described. "
+                    "(%s said: %s)" % (name, name, reply["error"].get("message", "unknown")))
             raise Unreachable(
                 "%s.%s refused: %s" % (name, method, reply["error"].get("message", "unknown")))
         return reply["result"]
@@ -616,6 +632,50 @@ def ensure_service(name):
         die("the %s service is not running and the desktop could not start it" % name)
 
 
+def no_describe(reply):
+    """Whether a JSON-RPC reply to `app.describe` says the socket has no such method: a service
+    that is not a surface. Each says it its own way — the transport's -32601, the companion's
+    socket -32602, the harness host -32000 (docs/surface-protocol.md) — and what they all say is
+    that the method is unknown."""
+    error = reply.get("error") if isinstance(reply, dict) else None
+    if not isinstance(error, dict):
+        return False
+    return error.get("code") == -32601 or "unknown method" in str(error.get("message", "")).lower()
+
+
+def _describable(path, timeout=2.0):
+    """Whether the socket at `path` answers `app.describe`. False only when it says plainly that
+    it has no such method: a describe that is slow, or fails some other way, is still a surface's,
+    and a surface is listed rather than hidden. Never raises: this is a listing."""
+    try:
+        s = open_socket(path, timeout)
+    except (OSError, Unreachable):
+        return True
+    try:
+        s.sendall(b'{"jsonrpc":"2.0","id":1,"method":"app.describe","params":{}}\n')
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(1 << 20)
+            if not chunk:
+                break
+            buf += chunk
+        return not no_describe(json.loads(buf))
+    except (OSError, ValueError):
+        return True
+    finally:
+        s.close()
+
+
+def _describable_all(paths):
+    """`_describable` for each path, asked at once, so the listing waits for the slowest service
+    rather than for all of them in turn."""
+    if not paths:
+        return []
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
+        return list(pool.map(_describable, paths))
+
+
 def _one_line(path):
     """An app's own one-line summary, or nothing. Never raises: this is a listing."""
     try:
@@ -685,7 +745,17 @@ def cmd_ls(argv):
             elif name.startswith("app-"):
                 apps.append((name[4:], _one_line(path)))
             else:
-                services.append(name)
+                services.append((name, path))
+
+    # A socket that answers and has no `app.describe` is not a surface: it is the desktop's own
+    # plumbing — the harness host minds attach through, the companion's socket, a journal, the
+    # store behind an app. It was listed below beside the services, and a mind read `harness` off
+    # this listing, described it, and spent a failed call finding out it was not one (#190). Each
+    # service is asked once, all at once, and left out only when it says plainly that it has no
+    # such method.
+    speaks = _describable_all([path for _, path in services])
+    internal = [name for (name, _), ok in zip(services, speaks) if not ok]
+    services = [name for (name, _), ok in zip(services, speaks) if ok]
 
     print("Open now (describe these by name):")
     for name, summary in apps:
@@ -694,8 +764,8 @@ def cmd_ls(argv):
     if not apps:
         print("    (nothing)")
     print("Services answering: %s" % (", ".join(services) or "(none)"))
-    print("    a service shares a name with its app (weather, calendar, email); the app is the")
-    print("    window, and `describe <name>` means the window whenever it is open.")
+    print("    a service shares a name with its app (weather, calendar); the app is the window,")
+    print("    and `describe <name>` means the window whenever it is open.")
 
     shell = os.path.join(SOCKET_DIRS[0], "app-shell.sock")
     openable, from_disk = [], False
@@ -743,6 +813,9 @@ def cmd_ls(argv):
     print("    and waits (120 s). `describe shell` shows the mode; `describe` never asks.")
     if raw and stale:
         print("Closed, socket left behind: %s" % ", ".join(stale))
+    if raw and internal:
+        print("The desktop's own, not surfaces (they do not answer describe): %s"
+              % ", ".join(internal))
 
 
 def cmd_describe(argv):
@@ -1195,6 +1268,15 @@ def _page():
             "name=browser — then `yos web go <url>`. If a browser window is already open, it "
             "was not started by the desktop; close it and open it that way.")
     pages = [t for t in tabs if t.get("type") == "page"]
+    # A caller that opened a tab of its own names it, and every `yos web` drives that tab and no
+    # other — release-check does, so a check of the browser never navigates a person's page.
+    # Otherwise the first page the browser lists, which is the one most recently active.
+    wanted = os.environ.get("YOS_WEB_TAB", "").strip()
+    if wanted:
+        mine = [t for t in pages if t.get("id") == wanted]
+        if not mine:
+            die("the tab YOS_WEB_TAB names (%s) is not open in this browser" % wanted)
+        return mine[0]
     if not pages:
         die("the browser is running but has no page open")
     return pages[0]
@@ -1509,7 +1591,8 @@ def cmd_listen(argv):
 
 PROTOCOL = 1
 LADDER = ("safe", "standard", "sensitive", "dangerous")
-PARAM_TYPES = ("string", "number", "integer", "boolean")
+# `yantrik_ipc_contracts::control_surface::PARAM_TYPES`: what a parameter may be declared as.
+PARAM_TYPES = ("string", "number", "integer", "boolean", "array", "object")
 # How long a describe may take before the checker says so. A describe reads a few properties on a
 # UI thread; half a second is already a surface a mind waits on.
 DESCRIBE_BUDGET = 0.5
@@ -1527,7 +1610,19 @@ UNRECOVERABLE_PHRASES = ("not recoverable", "cannot be undone", "can't be undone
 NO_SUCH_ACTION = "yos-check-no-such-action"
 NO_SUCH_METHOD = "app.yos_check_no_such_method"
 UNDECLARED = "yos_check_undeclared"
-PLACEHOLDER = {"string": "yos-check", "number": 0, "integer": 0, "boolean": False}
+PLACEHOLDER = {"string": "yos-check", "number": 0, "integer": 0, "boolean": False,
+               "array": [], "object": {}}
+# One value of the wrong type for each declared type that no dispatch converts (a number for text
+# and a numeric string for a number are converted, docs/surface-protocol.md §4), and how the
+# dispatch names what arrived (`yantrik_surface::check_value`): the `types` probe sends one and
+# expects that sentence.
+MISTYPED = {"string": (True, "a boolean"), "number": ("yos-check", "a string"),
+            "integer": ("yos-check", "a string"), "boolean": ("yos-check", "a string"),
+            "array": ("yos-check", "a string"), "object": ("yos-check", "a string")}
+WANTED = {"string": "a string", "number": "a number", "integer": "an integer",
+          "boolean": "a boolean", "array": "an array", "object": "an object"}
+WANTED_ITEMS = {"string": "strings", "number": "numbers", "integer": "integers",
+                "boolean": "booleans", "array": "arrays", "object": "objects"}
 
 # docs/schema/describe.schema.json, carried here because `yos` ships alone and stdlib-only.
 # yos-selftest.py fails when the two differ.
@@ -1569,6 +1664,10 @@ DESCRIBE_SCHEMA = {
                                            "(on return) or only started (later).",
                             "enum": ["on return", "later"]},
                 "parameters": {"$ref": "#/$defs/parameters"},
+                "expected_seconds": {"description": "How long a call usually takes to answer, "
+                                                    "when the app knows it is more than a "
+                                                    "moment; a client sizes its timeout by it.",
+                                     "type": "integer"},
             },
         },
         "parameters": {
@@ -1585,12 +1684,19 @@ DESCRIBE_SCHEMA = {
             "type": "object",
             "required": ["type", "description"],
             "properties": {
-                "type": {"description": "A JSON Schema primitive. Version 1 checks presence, not "
-                                        "type: the dispatch refuses a missing required argument "
-                                        "and an undeclared one, and hands the value to the "
-                                        "handler as it came.",
-                         "enum": ["string", "number", "integer", "boolean"]},
+                "type": {"description": "A JSON Schema type. The dispatch refuses a missing "
+                                        "required argument, an undeclared one, and one of "
+                                        "another type, before the handler runs.",
+                         "enum": ["string", "number", "integer", "boolean", "array", "object"]},
                 "description": {"type": "string"},
+                "enum": {"description": "For a string: the only values it may take.",
+                         "type": "array", "items": {"type": "string"}},
+                "items": {"description": "For an array: the type of every item.",
+                          "type": "object", "required": ["type"],
+                          "properties": {"type": {"enum": ["string", "number", "integer",
+                                                           "boolean", "array", "object"]}}},
+                "default": {"description": "What the handler is given when the argument is left "
+                                           "out. A parameter with one is not required."},
             },
         },
     },
@@ -1830,9 +1936,7 @@ def check_surface(path, label, services_too=False):
         except (OSError, ValueError, Unreachable) as e:
             report.add("describe", "fail", "app.describe did not answer: %s" % e)
             return report
-        refused = _refusal(reply)
-        if services_too and refused and (refused[0] == -32601
-                                         or "unknown method" in str(refused[1]).lower()):
+        if services_too and no_describe(reply):
             # Not every service says so with -32601 (the companion's socket answers -32602, the
             # harness host -32000); what they all say is that the method is unknown.
             report.add("describe", "skip", "answers, but has no app.describe — a service, not a "
@@ -1887,6 +1991,10 @@ def check_surface(path, label, services_too=False):
             kind = (spec or {}).get("type") if isinstance(spec, dict) else None
             if kind not in PARAM_TYPES:
                 bad_params.append("%s(%s) is typed %s" % (a.get("name"), name, json.dumps(kind)))
+            elif kind == "array" and isinstance(spec.get("items"), dict) \
+                    and spec["items"].get("type") not in PARAM_TYPES:
+                bad_params.append("%s(%s) is an array of %s" % (a.get("name"), name,
+                                                              json.dumps(spec["items"].get("type"))))
             lower = name.lower()
             if any(w in lower for w in SECRET_WORDS) and name not in SECRET_PERMITTED:
                 secrets.append("%s(%s)" % (a.get("name"), name))
@@ -1959,7 +2067,7 @@ def check_surface(path, label, services_too=False):
     if not (protocol == PROTOCOL and protocol_dispatch):
         why = ("it does not publish protocol 1" if protocol != PROTOCOL else
                "its unknown-action refusal is not the protocol dispatch's")
-        for check in ("missing", "undeclared", "stale"):
+        for check in ("missing", "undeclared", "types", "stale"):
             report.add(check, "skip", "not probed: %s, so nothing promises it refuses before a "
                        "handler runs" % why)
         return report
@@ -1971,7 +2079,7 @@ def check_surface(path, label, services_too=False):
                 and not unrecoverable(a.get("description"))]
     eligible.sort(key=lambda a: LADDER.index(a["permission"]))  # safe first
     if not eligible:
-        for check in ("missing", "undeclared", "stale"):
+        for check in ("missing", "undeclared", "types", "stale"):
             report.add(check, "skip", "no action graded safe or standard (within this machine's "
                        "%s ceiling) that can be undone; yos check names nothing else" % ceiling)
         return report
@@ -1980,10 +2088,17 @@ def check_surface(path, label, services_too=False):
         params = a.get("parameters") or {}
         return list((params.get("properties") or {}).keys()), list(params.get("required") or [])
 
+    def placeholder(spec):
+        spec = spec if isinstance(spec, dict) else {}
+        if "default" in spec:
+            return spec["default"]
+        if spec.get("enum"):
+            return spec["enum"][0]
+        return PLACEHOLDER.get(spec.get("type"), "yos-check")
+
     def placeholders(a):
         props = (a.get("parameters") or {}).get("properties") or {}
-        return {n: PLACEHOLDER.get((props.get(n) or {}).get("type"), "yos-check")
-                for n in declared(a)[1]}
+        return {n: placeholder(props.get(n)) for n in declared(a)[1]}
 
     def gated(check, reply):
         why = _gated(reply)
@@ -2022,6 +2137,35 @@ def check_surface(path, label, services_too=False):
         else:
             report.add("undeclared", "fail", "%s with `%s` → %s\nthe protocol says: -32602 %s"
                        % (a["name"], UNDECLARED, json.dumps(got or reply.get("result"))[:300], want))
+
+    # One argument of the wrong type, the rest as the action wants them.
+    typed = next(((x, n, s) for x in eligible
+                  for n, s in sorted(((x.get("parameters") or {}).get("properties") or {}).items())
+                  if isinstance(s, dict) and s.get("type") in MISTYPED), None)
+    if typed is None:
+        report.add("types", "skip", "no eligible action declares an argument")
+    else:
+        x, name, spec = typed
+        value, arrived = MISTYPED[spec["type"]]
+        wanted = WANTED[spec["type"]]
+        if spec["type"] == "array" and (spec.get("items") or {}).get("type") in WANTED_ITEMS:
+            wanted = "an array of " + WANTED_ITEMS[spec["items"]["type"]]
+        reply = _probe(report, path, x["name"], dict(placeholders(x), **{name: value}), stale)
+        if reply is not None and not gated("types", reply):
+            want = "`%s` argument `%s` must be %s, and %s arrived" % (x["name"], name, wanted, arrived)
+            got = _refusal(reply)
+            if got == (-32602, want):
+                report.add("types", "pass", "%s with %s=%s → -32602 %s"
+                           % (x["name"], name, json.dumps(value), want))
+            elif got and got[0] == -32602 and str(got[1]).startswith("STALE:"):
+                report.add("types", "warn", "%s with %s=%s was not refused for its type; the "
+                           "revision guard stopped it instead. Checking types is a protocol-1 "
+                           "addition (docs/surface-protocol.md §5, step 7)"
+                           % (x["name"], name, json.dumps(value)))
+            else:
+                report.add("types", "fail", "%s with %s=%s → %s\nthe protocol says: -32602 %s"
+                           % (x["name"], name, json.dumps(value),
+                              json.dumps(got or reply.get("result"))[:300], want))
 
     reply = _probe(report, path, a["name"], placeholders(a), stale)
     if reply is not None and not gated("stale", reply):

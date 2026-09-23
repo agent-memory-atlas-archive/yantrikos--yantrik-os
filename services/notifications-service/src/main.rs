@@ -54,12 +54,13 @@ mod store;
 
 use std::sync::Arc;
 
-use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
 use yantrik_ipc_contracts::notifications::*;
 use yantrik_ipc_transport::peer_identity::{self, Program};
 use yantrik_ipc_transport::PeerCred;
+#[cfg(test)]
 use yantrik_service_sdk::gate::{self, Authority};
 use yantrik_service_sdk::prelude::*;
+use yantrik_service_sdk::{caller, Action, Param, Surface, View};
 
 /// The id this surface publishes, and the app a grant for one of its actions is bound to.
 const APP: &str = "notifications";
@@ -98,13 +99,22 @@ fn main() {
     }
 
     ServiceBuilder::new("notifications")
-        .handler(NotificationsHandler { store, link })
+        .handler(NotificationsHandler::new(store, link))
         .run();
 }
 
 struct NotificationsHandler {
     store: Arc<store::Store>,
     link: Arc<freedesktop::Link>,
+    /// `app.describe` and `app.act`, dispatched as an app window's are.
+    surface: Surface,
+}
+
+impl NotificationsHandler {
+    fn new(store: Arc<store::Store>, link: Arc<freedesktop::Link>) -> NotificationsHandler {
+        let surface = notifications_surface(store.clone(), link.clone());
+        NotificationsHandler { store, link, surface }
+    }
 }
 
 impl ServiceHandler for NotificationsHandler {
@@ -141,6 +151,14 @@ impl NotificationsHandler {
         params: serde_json::Value,
         peer: Option<PeerCred>,
     ) -> Result<serde_json::Value, ServiceError> {
+        // The agent-facing surface: what the machine is trying to tell the person, right now, in
+        // one line and a small list — without opening the notification centre — and the four
+        // things a mind may do about it. The ceiling and the mode are read per call, as an app
+        // window's dispatch reads them. The desktop's own senders do not come this way: they call
+        // `notifications.add` below.
+        if let Some(answer) = self.surface.answer(method, &params, peer) {
+            return answer;
+        }
         match method {
             LIST => Ok(serde_json::to_value(self.store.list()).unwrap_or_default()),
 
@@ -216,14 +234,6 @@ impl NotificationsHandler {
                 }))
             }
 
-            // The agent-facing surface: what the machine is trying to tell the person, right
-            // now, in one line and a small list — without opening the notification centre.
-            "app.describe" => Ok(describe_json(APP, &self.describe_view(), &notification_actions())),
-            // The ceiling and the mode as the files say them now, read per call as an app
-            // window's dispatch reads them. The desktop's own senders do not come this way: they
-            // call `notifications.add` above.
-            "app.act" => self.act(&params, peer, Authority::now()),
-
             other => Err(ServiceError {
                 code: -32601,
                 message: format!("Unknown method: {other}"),
@@ -231,213 +241,177 @@ impl NotificationsHandler {
         }
     }
 
-    /// Everything the machine is currently trying to say, newest first, with the counts a caller
-    /// reading one line needs — and, plainly, whether the freedesktop door is open.
-    fn describe_view(&self) -> View {
-        let showing = self.store.list();
-        let unread = self.store.unread();
-        let critical = showing
-            .iter()
-            .filter(|n| n.urgency == Urgency::Critical && !n.read)
-            .count();
-        let (_showing, held) = self.store.held();
-
-        let summary = if showing.is_empty() {
-            "Notifications — nothing pending".to_string()
-        } else if critical > 0 {
-            format!(
-                "Notifications — {} showing, {unread} unread, {critical} critical",
-                showing.len()
-            )
-        } else {
-            format!("Notifications — {} showing, {unread} unread", showing.len())
-        };
-
-        let items: Vec<serde_json::Value> = showing
-            .iter()
-            .take(20)
-            .map(|n| {
-                serde_json::json!({
-                    "id": n.id,
-                    "app": n.app,
-                    "title": n.title,
-                    "body": n.body,
-                    "urgency": n.urgency.as_str(),
-                    "source": n.source.as_str(),
-                    // Who this machine says sent it, beside `app`, which is who they said. A
-                    // caller reading this list can compare the two, which is the whole point.
-                    "sender": n.sender,
-                    "read": n.read,
-                    "at": n.created_at,
-                    "actions": n.actions.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-
-        let mut view = View::new(summary)
-            .with("count", showing.len() as i64)
-            .with("unread", unread as i64)
-            .with("critical", critical as i64)
-            .with("held", held as i64)
-            .with("revision", self.store.revision() as i64)
-            .with("store", self.store.path().display().to_string())
-            // Not a boolean: when this door is shut the caller needs to know who shut it, and
-            // `false` would send them looking through logs for the name.
-            .with("freedesktop", self.link.status())
-            .with("notifications", serde_json::Value::Array(items));
-
-        // Failure said twice: the person sees an empty notification centre, and a caller reading
-        // this sees why it is empty.
-        if let Some(notice) = self.store.load_notice() {
-            view = view.with("notice", notice.to_string());
-        }
-        view
-    }
-
-    /// Dispatch `app.act`.
-    ///
-    /// Every action first meets the rule an app window's dispatch enforces — the machine's
-    /// ceiling, then any grant, then the person's mode (`gate::permit`) — on the grade this
-    /// surface publishes for it. This handler used to dispatch straight away, whatever the
-    /// ceiling said (#153). Everything here is `standard`, which the mode runs unasked in every
-    /// mode (`SOCKET_FLOOR`), so what this changes in practice is the ceiling: a machine set to
-    /// `safe` refuses `notify` on this door as it refuses every app's `standard` actions.
+    /// `app.act` under a pinned authority, as the socket's dispatch runs it with
+    /// `Authority::now()`. The tests' door.
+    #[cfg(test)]
     fn act(
         &self,
         params: &serde_json::Value,
         peer: Option<PeerCred>,
-        mut authority: Authority,
+        authority: Authority,
     ) -> Result<serde_json::Value, ServiceError> {
-        let action = params["action"].as_str().unwrap_or("").trim();
-        let mut args = params
-            .get("args")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-        // Lifted off before anything reads `args`, and out of them if a caller put it there: a grant
-        // is spent against the arguments, and an agent token is not one. It says whose reach to
-        // hold the call to, below.
-        let token = gate::agent_token_of(params, &mut args);
-        if action.is_empty() {
-            return Err(bad_request("act needs a non-empty `action`".to_string()));
-        }
-        // An action this service does not have is answered as that, before a grant is looked
-        // at: nothing is spent on a call that could never run.
-        let graded = published_grade(action).ok_or_else(|| unknown_action(action))?;
-        // An agent started from a catalog role is held to the role's reach first (agents catalog).
-        yantrik_service_sdk::reach::permits(token.as_deref(), APP, action, graded).map_err(bad_request)?;
-        let grant = gate::grant_of(params);
-        gate::permit(&mut authority, APP, action, graded, &published_purpose(action), &args, grant.as_deref())
-            .map_err(bad_request)?;
-        tracing::info!(
-            action,
-            ceiling = %authority.ceiling,
-            mode = %authority.mode.name,
-            granted = authority.granted,
-            // Whether one came, never the token itself.
-            agent_token = token.is_some(),
-            "app.act"
-        );
-        match action {
-            // The one a mind reaches for when it says "I'll tell you when it's done" — and then
-            // has to actually tell them.
-            "notify" => {
-                let title = required_str(&args, "title")?;
-                let who = who_is_calling(peer);
-                let (app, sender) = attribute(args["app"].as_str().unwrap_or_default(), &who);
-                let stored = self.store.add_from(
-                    AddRequest {
-                        app,
-                        title,
-                        body: args["body"].as_str().unwrap_or_default().to_string(),
-                        urgency: Urgency::parse(args["urgency"].as_str().unwrap_or("normal")),
-                        source: Source::Yantrik,
-                        ..Default::default()
-                    },
-                    Some(sender),
-                );
-                tracing::info!(
-                    id = %stored.id,
-                    app = %stored.app,
-                    sender = %who.line(),
-                    "notification stored by `notify`"
-                );
-                // The caller is told what it was filed under and what was recorded about it,
-                // so a mind that said `Yantrik` learns on the spot that the row will not.
-                Ok(act_json(
-                    APP,
-                    "notifications#act",
-                    true,
-                    serde_json::json!({ "id": stored.id, "app": stored.app, "sender": stored.sender }),
-                    &self.describe_view(),
-                ))
-            }
-            "dismiss" => {
-                let id = required_str(&args, "id")?;
-                let Some(n) = self.store.get(&id) else {
-                    return Err(bad_request(format!("no notification with id `{id}`")));
-                };
-                let changed = self.store.dismiss(&id);
-                if changed {
-                    self.link.closed(&n, freedesktop::CloseReason::DismissedByUser);
-                }
-                Ok(act_json(
-                    APP,
-                    "notifications#act",
-                    true,
-                    serde_json::json!({ "dismissed": id, "already": !changed }),
-                    &self.describe_view(),
-                ))
-            }
-            "dismiss_all" => {
-                let showing = self.store.showing();
-                let cleared = self.store.dismiss_all();
-                for n in &showing {
-                    self.link.closed(n, freedesktop::CloseReason::DismissedByUser);
-                }
-                Ok(act_json(
-                    APP,
-                    "notifications#act",
-                    true,
-                    serde_json::json!({ "dismissed": cleared }),
-                    &self.describe_view(),
-                ))
-            }
-            "mark_read" => {
-                let id = optional_str(&args, "id")?;
-                let count = self.store.mark_read(id.as_deref());
-                Ok(act_json(
-                    APP,
-                    "notifications#act",
-                    true,
-                    serde_json::json!({ "marked_read": count }),
-                    &self.describe_view(),
-                ))
-            }
-            // Published and graded, but no arm here: a mistake in this file, and still not a
-            // dispatch. `every_published_action_has_a_handler` keeps it from shipping.
-            other => Err(unknown_action(other)),
-        }
+        self.surface.act(params, peer, authority)
     }
+}
+
+/// Everything the machine is currently trying to say, newest first, with the counts a caller
+/// reading one line needs — and, plainly, whether the freedesktop door is open.
+fn describe_view(store: &store::Store, link: &freedesktop::Link) -> View {
+    let showing = store.list();
+    let unread = store.unread();
+    let critical = showing
+        .iter()
+        .filter(|n| n.urgency == Urgency::Critical && !n.read)
+        .count();
+    let (_showing, held) = store.held();
+
+    let summary = if showing.is_empty() {
+        "Notifications — nothing pending".to_string()
+    } else if critical > 0 {
+        format!(
+            "Notifications — {} showing, {unread} unread, {critical} critical",
+            showing.len()
+        )
+    } else {
+        format!("Notifications — {} showing, {unread} unread", showing.len())
+    };
+
+    let items: Vec<serde_json::Value> = showing
+        .iter()
+        .take(20)
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "app": n.app,
+                "title": n.title,
+                "body": n.body,
+                "urgency": n.urgency.as_str(),
+                "source": n.source.as_str(),
+                // Who this machine says sent it, beside `app`, which is who they said. A
+                // caller reading this list can compare the two, which is the whole point.
+                "sender": n.sender,
+                "read": n.read,
+                "at": n.created_at,
+                "actions": n.actions.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    let mut view = View::new(summary)
+        .with("count", showing.len() as i64)
+        .with("unread", unread as i64)
+        .with("critical", critical as i64)
+        .with("held", held as i64)
+        .with("revision", store.revision() as i64)
+        .with("store", store.path().display().to_string())
+        // Not a boolean: when this door is shut the caller needs to know who shut it, and
+        // `false` would send them looking through logs for the name.
+        .with("freedesktop", link.status())
+        .with("notifications", serde_json::Value::Array(items));
+
+    // Failure said twice: the person sees an empty notification centre, and a caller reading
+    // this sees why it is empty.
+    if let Some(notice) = store.load_notice() {
+        view = view.with("notice", notice.to_string());
+    }
+    view
+}
+
+/// The notifications surface, answering on the service's own socket.
+///
+/// Every action first meets the rule an app window's dispatch enforces — the machine's ceiling,
+/// then any grant, then the person's mode — on the grade this surface publishes for it, and the
+/// argument checks. This service used to dispatch straight away, whatever the ceiling said (#153).
+/// Everything here is `standard`, which the mode runs unasked in every mode (`SOCKET_FLOOR`), so
+/// what the gate changes in practice is the ceiling: a machine set to `safe` refuses `notify` on
+/// this door as it refuses every app's `standard` actions.
+fn notifications_surface(store: Arc<store::Store>, link: Arc<freedesktop::Link>) -> Surface {
+    let mut surface = Surface::new(APP).socket_name("notifications").describe({
+        let (store, link) = (store.clone(), link.clone());
+        move || describe_view(&store, &link)
+    });
+    for spec in notification_actions() {
+        let (store, link) = (store.clone(), link.clone());
+        surface = match spec.name.as_str() {
+            "notify" => surface.action(spec, move |args| notify(&store, args)),
+            "dismiss" => surface.action(spec, move |args| dismiss(&store, &link, args)),
+            "dismiss_all" => surface.action(spec, move |_| dismiss_all(&store, &link)),
+            "mark_read" => surface.action(spec, move |args| mark_read(&store, args)),
+            // Published and graded, but no handler here: a mistake in this file.
+            // `every_published_action_has_a_handler` keeps it from shipping.
+            _ => surface,
+        };
+    }
+    surface
+}
+
+/// The one a mind reaches for when it says "I'll tell you when it's done" — and then has to
+/// actually tell them.
+///
+/// Who sent it is what the kernel says opened the socket, read now — the dispatch hands the
+/// caller to this handler (`caller()`) for exactly this call — and never what the call says.
+fn notify(store: &store::Store, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let title = required_str(args, "title").map_err(|e| e.message)?;
+    let who = who_is_calling(caller().map(PeerCred::from));
+    let (app, sender) = attribute(args["app"].as_str().unwrap_or_default(), &who);
+    let stored = store.add_from(
+        AddRequest {
+            app,
+            title,
+            body: args["body"].as_str().unwrap_or_default().to_string(),
+            urgency: Urgency::parse(args["urgency"].as_str().unwrap_or("normal")),
+            source: Source::Yantrik,
+            ..Default::default()
+        },
+        Some(sender),
+    );
+    tracing::info!(
+        id = %stored.id,
+        app = %stored.app,
+        sender = %who.line(),
+        "notification stored by `notify`"
+    );
+    // The caller is told what it was filed under and what was recorded about it, so a mind that
+    // said `Yantrik` learns on the spot that the row will not.
+    Ok(serde_json::json!({ "id": stored.id, "app": stored.app, "sender": stored.sender }))
+}
+
+fn dismiss(
+    store: &store::Store,
+    link: &freedesktop::Link,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let id = required_str(args, "id").map_err(|e| e.message)?;
+    let Some(n) = store.get(&id) else {
+        return Err(format!("no notification with id `{id}`"));
+    };
+    let changed = store.dismiss(&id);
+    if changed {
+        link.closed(&n, freedesktop::CloseReason::DismissedByUser);
+    }
+    Ok(serde_json::json!({ "dismissed": id, "already": !changed }))
+}
+
+fn dismiss_all(store: &store::Store, link: &freedesktop::Link) -> Result<serde_json::Value, String> {
+    let showing = store.showing();
+    let cleared = store.dismiss_all();
+    for n in &showing {
+        link.closed(n, freedesktop::CloseReason::DismissedByUser);
+    }
+    Ok(serde_json::json!({ "dismissed": cleared }))
+}
+
+fn mark_read(store: &store::Store, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let id = optional_str(args, "id").map_err(|e| e.message)?;
+    let count = store.mark_read(id.as_deref());
+    Ok(serde_json::json!({ "marked_read": count }))
 }
 
 /// The grade this surface publishes for `action`, from the same table `describe` hands out, so
 /// the grade a caller is shown and the grade that is enforced cannot come apart.
+#[cfg(test)]
 fn published_grade(action: &str) -> Option<&'static str> {
     notification_actions().into_iter().find(|a| a.name == action).map(|a| a.permission)
-}
-
-/// What this surface says `action` does — the sentence `gate::permit` reads for "cannot be undone",
-/// from the same table `describe` publishes, so what a caller is shown is what is enforced.
-fn published_purpose(action: &str) -> String {
-    notification_actions().into_iter().find(|a| a.name == action).map(|a| a.description).unwrap_or_default()
-}
-
-fn unknown_action(action: &str) -> ServiceError {
-    let offered: Vec<String> = notification_actions().into_iter().map(|a| a.name).collect();
-    ServiceError {
-        code: -32601,
-        message: format!("unknown action `{action}`; this service offers: {}", offered.join(", ")),
-    }
 }
 
 /// What the notifications service can be asked to do.
@@ -931,10 +905,7 @@ mod tests {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_file(&path);
-        NotificationsHandler {
-            store: Arc::new(store::Store::open(path)),
-            link: Arc::new(freedesktop::Link::new()),
-        }
+        NotificationsHandler::new(Arc::new(store::Store::open(path)), Arc::new(freedesktop::Link::new()))
     }
 
     fn at(ceiling: &str, mode: &str) -> Authority {
@@ -1071,10 +1042,138 @@ mod tests {
                 at("dangerous", "ask"),
             )
             .unwrap_err();
-        assert_eq!(err.code, -32601);
+        assert_eq!(err.code, -32602);
         assert_eq!(
             err.message,
-            "unknown action `clear_history`; this service offers: notify, dismiss, dismiss_all, mark_read"
+            "unknown action `clear_history`; this app offers: notify, dismiss, dismiss_all, mark_read"
         );
+    }
+
+    /// Arguments are checked as on every app's door: an undeclared one is named, and one of the
+    /// wrong type is refused by the dispatch with what arrived — where before this surface moved
+    /// onto the shared dispatch, `notify body=7` stored an empty body in silence.
+    #[test]
+    fn the_arguments_are_checked_as_an_apps_are() {
+        let h = handler();
+        let err = h
+            .act(&serde_json::json!({ "action": "notify", "args": { "title": "x", "colour": "red" } }), None, at("sensitive", "ask"))
+            .unwrap_err();
+        assert_eq!((err.code, err.message.as_str()), (-32602, "`notify` has no argument `colour`; it takes: title, body, urgency, app"));
+        let err = h
+            .act(&serde_json::json!({ "action": "notify", "args": { "title": "x", "body": true } }), None, at("sensitive", "ask"))
+            .unwrap_err();
+        assert_eq!(err.message, "`notify` argument `body` must be a string, and a boolean arrived");
+        let err = h
+            .act(&serde_json::json!({ "action": "notify", "args": {} }), None, at("sensitive", "ask"))
+            .unwrap_err();
+        assert_eq!(err.message, "`notify` needs argument `title`");
+        assert!(h.store.list().is_empty(), "nothing was stored by a refused call");
+
+        // The handler's own sentences still stand behind the dispatch's.
+        let err = h
+            .act(&serde_json::json!({ "action": "dismiss", "args": { "id": "404" } }), None, at("sensitive", "ask"))
+            .unwrap_err();
+        assert_eq!(err.message, "no notification with id `404`");
+    }
+
+    /// Each act has its own name on the service's own socket, and answers with the view after it.
+    #[test]
+    fn every_act_gets_its_own_action_id_and_the_view_after_it() {
+        let h = handler();
+        let first = h.act(&notify(None), None, at("sensitive", "ask")).unwrap();
+        let second = h.act(&notify(None), None, at("sensitive", "ask")).unwrap();
+        assert_ne!(first["action_id"], second["action_id"]);
+        assert!(first["action_id"].as_str().unwrap().starts_with("notifications#"), "{first}");
+        assert_eq!(second["state"]["count"], 2, "{second}");
+        assert_eq!(second["summary"], "Notifications — 2 showing, 2 unread");
+    }
+
+    /// The surface declares nothing the dispatch cannot check.
+    #[test]
+    fn the_surface_is_declared_soundly() {
+        assert!(handler().surface.registry().problems().is_empty());
+    }
+
+    /// End to end over a real socket: the service's own handler, bound the way `run_service`
+    /// binds it, answering `app.act notify` through the shared dispatch — and the kernel's account
+    /// of the caller reaching `notify` across it, which is what files the row under the program
+    /// that really sent it (#114). The same call made with no socket has no caller to attribute.
+    #[cfg(unix)]
+    #[test]
+    fn notify_over_a_real_socket_is_attributed_to_the_program_that_opened_it() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        // The ceiling and the mode are read from the files, as on a real call: an empty home
+        // is the shipped defaults, `sensitive` and `ask`, under which `notify` runs unasked.
+        let root = std::env::temp_dir().join(format!("notifications-socket-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::env::set_var("HOME", root.join("home"));
+        let address = root.join("notifications-test.sock").display().to_string();
+
+        let h = handler();
+        let store = h.store.clone();
+        {
+            let address = address.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+                let _ = runtime.block_on(RpcServer::new(&address).serve(Arc::new(h)));
+            });
+        }
+        let call = |request: serde_json::Value| -> serde_json::Value {
+            for _ in 0..500 {
+                if let Ok(mut socket) = UnixStream::connect(&address) {
+                    socket.write_all(format!("{request}\n").as_bytes()).unwrap();
+                    let mut line = String::new();
+                    BufReader::new(socket).read_line(&mut line).unwrap();
+                    return serde_json::from_str(&line).expect(&line);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("nothing ever bound {address}");
+        };
+
+        let reply = call(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "app.act",
+            "params": { "action": "notify", "args": { "title": "Build finished", "app": "Yantrik" } },
+        }));
+        let answer = &reply["result"];
+        assert_eq!(answer["accepted"], true, "{reply}");
+        assert_eq!(answer["settled"], true);
+        assert!(answer["action_id"].as_str().unwrap().starts_with("notifications#"), "{reply}");
+        let sender = &answer["result"]["sender"];
+        assert_ne!(sender["verified"], peer_identity::UNIDENTIFIED, "the caller did not cross the dispatch: {reply}");
+        assert!(sender["pid"].as_i64().unwrap_or(0) > 0, "{reply}");
+        // A test binary is not the desktop, so the desktop's own name is not granted to it.
+        assert_ne!(answer["result"]["app"], "Yantrik", "{reply}");
+        assert_eq!(store.list()[0].title, "Build finished");
+
+        // The refusals are the dispatch's, with the codes an app's are given.
+        let reply = call(serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "app.act",
+            "params": { "action": "clear_history", "args": {} },
+        }));
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        let reply = call(serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "app.act",
+            "params": { "action": "dismiss", "args": { "id": 67 } },
+        }));
+        // An id sent as the number it spells is the id: the handler reads "67" and says there is
+        // no such notification, in its own words — not a refusal about JSON.
+        assert_eq!(reply["error"]["message"], "no notification with id `67`", "{reply}");
+        let reply = call(serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "app.act",
+            "params": { "action": "dismiss", "args": { "id": 6.7 } },
+        }));
+        assert_eq!(reply["error"]["message"], "`dismiss` argument `id` must be a string, and a number arrived", "{reply}");
+
+        // And `describe` over the same socket reports what was stored.
+        let reply = call(serde_json::json!({ "jsonrpc": "2.0", "id": 4, "method": "app.describe", "params": {} }));
+        assert_eq!(reply["result"]["app"], "notifications", "{reply}");
+        assert_eq!(reply["result"]["state"]["count"], 1, "{reply}");
+
+        // Made with no socket, the same call has nobody to attribute it to.
+        let direct = handler().act(&notify(None), None, at("sensitive", "ask")).unwrap();
+        assert_eq!(direct["result"]["sender"]["verified"], peer_identity::UNIDENTIFIED);
     }
 }
