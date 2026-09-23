@@ -4,7 +4,7 @@
 //! "The OS holds the desk; you bring the mind." The desk is the desktop and the apps; the mind is
 //! whichever one is answering, and every agent working. This panel keeps it in view: expanded on
 //! the desktop, a slim strip over everything else, the person's choice kept per place. It replaces
-//! the machine rail's companion section (piece 3 of the desk-and-mind design, PR #165).
+//! the machine rail's companion section (section 3 of design/desk-and-mind-2026-09-23.md).
 //!
 //! Four parts, each from the one place that knows it:
 //!
