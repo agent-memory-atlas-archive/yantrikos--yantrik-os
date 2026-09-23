@@ -133,7 +133,10 @@ pub fn resolve_action(action_id: &str, installed_apps: &[DesktopEntry]) -> LensA
         // First check installed / built-in apps
         for entry in installed_apps {
             if entry.app_id == app_id {
-                if entry.exec == "__builtin__" {
+                // An app that declares a surface opens through the dock's dispatch, like its tile
+                // and `open_app` do, so its adapter comes up with it and its window is registered
+                // under the id every other launch uses.
+                if entry.exec == "__builtin__" || entry.surface.is_some() {
                     return LensAction::LaunchBuiltin(app_id.to_string());
                 }
                 return LensAction::Launch(entry.exec.clone());

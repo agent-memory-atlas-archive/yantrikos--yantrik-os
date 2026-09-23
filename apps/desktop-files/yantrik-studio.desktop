@@ -7,3 +7,8 @@ Exec=/opt/yantrik/bin/yantrik-studio
 Icon=yantrik
 Categories=Graphics;
 Keywords=image;picture;generate;comfyui;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+# Written against Images on purpose: the two are one word apart, and looking and making are the
+# difference. No `images` alias here: that name is the viewer's.
+X-Yantrik-Surface=studio
+X-Yantrik-Purpose=make pictures from a sentence, on your own GPU or a hosted service; they land as files

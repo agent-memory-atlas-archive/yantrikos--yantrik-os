@@ -559,6 +559,16 @@ class StateTests(unittest.TestCase):
         # is the only place that says so, which is why this parses the listing.
         self.assertNotIn("sysmonitor", [name for name, _, _ in apps])
 
+    def test_a_closed_row_is_read_for_what_the_app_is_for(self):
+        # `yos ls` marks a closed app `(closed)` and lists its other names after its purpose; the
+        # decider is shown the purpose, not the markup around it.
+        listing = ("Can be opened with `act shell open_app name=<name>`, then described by that name:\n"
+                   "    calendar           (closed)  events and appointments\n"
+                   "    system-monitor     (closed)  CPU, memory, disk and processes  (also sysmonitor)\n")
+        self.assertEqual(apps_from_listing(listing), [
+            ("calendar", "events and appointments", "closed"),
+            ("system-monitor", "CPU, memory, disk and processes", "closed")])
+
     def test_prose_under_a_heading_is_not_read_as_an_app(self):
         # Two indented lines of prose sit under "Services answering", and a reader that takes
         # every indented line as an entry reads `a` and `window,` as apps of this desktop.

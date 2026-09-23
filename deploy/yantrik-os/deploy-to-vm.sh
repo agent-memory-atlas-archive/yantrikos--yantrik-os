@@ -137,6 +137,38 @@ rsync -a -e "$RSYNC_RSH" "$PROJECT_ROOT/crates/yantrik-design-tokens/slint/fonts
   "$TARGET_HOST:$REMOTE/share/fonts/"
 echo "   labwc theme + Barlow/JetBrains Mono"
 
+say "Application entries (.desktop): how the shell finds this OS's apps"
+# The shell has no table of our apps any more: each one declares its control surface, what it is
+# for and its other names in its own .desktop file (X-Yantrik-Surface / -Purpose / -Aliases), the
+# way an app somebody else wrote does. This script shipped the binaries and not those files, so a
+# machine deployed with it kept whatever entries an older release left — VM 520 had 14 of 17, none
+# with the keys: Arcade could not be opened at all, and no app of ours was listed while closed,
+# answered to an alias, or could have a notification button carried out.
+#
+# The same set a release installs (shipped-desktop-files.sh: everything in apps/desktop-files but a
+# shelved app's), into $REMOTE/share/applications, which the session puts on XDG_DATA_DIRS and the
+# shell searches regardless. Through /tmp and `sudo install`, so a file some earlier deploy left
+# owned by root is replaced rather than refused.
+#
+# A copy an older deploy put in /usr/share/applications comes first in the search order and would
+# shadow the new one with its old keys, so any such copy of one of these entries is replaced too.
+# Nothing else there is touched.
+mapfile -t DESKTOP < <("$SCRIPT_DIR/shipped-desktop-files.sh")
+[ "${#DESKTOP[@]}" -gt 0 ] || { echo "FAIL: no .desktop files to ship"; exit 1; }
+STAGE="/tmp/yantrik-desktop-files.$$"
+"${SSH[@]}" "rm -rf $STAGE && mkdir -p $STAGE"
+rsync -a -e "$RSYNC_RSH" "${DESKTOP[@]}" "$TARGET_HOST:$STAGE/"
+"${SSH[@]}" "set -e
+  sudo install -d -m 755 -o \$(id -u) -g \$(id -g) $REMOTE/share/applications
+  sudo install -m 644 -o \$(id -u) -g \$(id -g) $STAGE/*.desktop $REMOTE/share/applications/
+  for f in $STAGE/*.desktop; do
+    old=/usr/share/applications/\$(basename \"\$f\")
+    if [ -e \"\$old\" ]; then sudo install -m 644 \"\$f\" \"\$old\"; echo \"   replaced the older copy in \$old\"; fi
+  done
+  rm -rf $STAGE"
+printf '%s\n' "${DESKTOP[@]##*/}" | paste -sd' ' - | fold -sw 76 | sed 's/^/   /'
+echo "   ${#DESKTOP[@]} entries -> $REMOTE/share/applications (the shell picks them up within seconds)"
+
 say "Config (backend: $BACKEND)"
 CONFIG_SRC="$PROJECT_ROOT/config/yantrik-ollama.yaml"
 [ "$BACKEND" = "candle" ] && CONFIG_SRC="$PROJECT_ROOT/config/yantrik-os.yaml"
@@ -201,5 +233,5 @@ exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml' \
 SESSION
 "${SSH[@]}" "chmod +x $REMOTE/bin/yantrik-session"
 
-say "Done"
+say "Done: binaries, yos/yos-mcp/release-check, models, chrome, .desktop entries, session"
 "${SSH[@]}" "ls $REMOTE/bin | tr '\n' ' '; echo; echo; echo 'start:  setsid $REMOTE/bin/yantrik-session &'"

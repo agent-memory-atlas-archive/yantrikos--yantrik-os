@@ -7,3 +7,8 @@ Exec=/opt/yantrik/bin/yantrik-image-viewer
 Icon=yantrik
 Categories=Graphics;Viewer;
 Keywords=image;photo;picture;viewer;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+# `image` is the id the shell registers its window under; `images` is the older spelling.
+X-Yantrik-Surface=image-viewer
+X-Yantrik-Purpose=view pictures
+X-Yantrik-Aliases=images;image

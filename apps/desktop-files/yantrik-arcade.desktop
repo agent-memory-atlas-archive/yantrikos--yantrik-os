@@ -7,3 +7,6 @@ Exec=/opt/yantrik/bin/yantrik-arcade
 Icon=yantrik
 Categories=Game;
 Keywords=arcade;games;builder;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=arcade
+X-Yantrik-Purpose=game making: small JSON specs in, one playable HTML game out

@@ -91,6 +91,7 @@ mod render_backend;
 mod recipes;
 mod running;
 mod streaming;
+mod surfaces;
 mod system_context;
 mod telegram;
 mod terminal;

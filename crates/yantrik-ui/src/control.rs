@@ -763,7 +763,13 @@ pub fn publish(
                 // The launcher's own path: it resolves the binary, enforces one window per app,
                 // and focuses the running one instead of starting a second.
                 ui.invoke_launch_app(name.clone().into());
-                Ok(serde_json::json!({ "launching": name }))
+                // And the name to describe it by once it is up, which is not always the name it
+                // was opened by (`sysmonitor` opens what answers as `system-monitor`).
+                let mut answer = serde_json::json!({ "launching": name });
+                if let Some(surface) = crate::wire::dock::surface_for(&name, &catalogue) {
+                    answer["describe_as"] = surface.into();
+                }
+                Ok(answer)
             },
         )
         .action(
@@ -811,6 +817,9 @@ pub fn publish(
                 let catalogue = refresh_catalogue.clone();
                 move |_args| {
                     let count = catalogue.refresh();
+                    // And the new surfaces' other names, so `describe <alias>` works at once
+                    // rather than on the watcher's next look.
+                    crate::surfaces::link_aliases(&catalogue.get());
                     Ok(serde_json::json!({ "apps": count }))
                 }
             },

@@ -7,3 +7,6 @@ Exec=/opt/yantrik/bin/yantrik-email
 Icon=yantrik
 Categories=Network;Email;
 Keywords=email;mail;imap;smtp;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=email
+X-Yantrik-Purpose=read and send mail

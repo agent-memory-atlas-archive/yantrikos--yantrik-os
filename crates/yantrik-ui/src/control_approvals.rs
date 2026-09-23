@@ -542,7 +542,22 @@ fn settle_grade(
 /// action that acquired such a sentence would still be asked about as long as the bridge kept
 /// relaying the purpose it reads out of `describe`.
 fn published_detail(app: &str, action: &str) -> Result<(String, String), String> {
-    let Some(surface) = surface_for(app) else {
+    published_detail_in(
+        &yantrik_ipc_transport::server::socket_dir(),
+        &crate::apps::Catalogue::shared().get(),
+        app,
+        action,
+    )
+}
+
+/// [`published_detail`], against a catalogue and a socket directory the caller names.
+fn published_detail_in(
+    dir: &std::path::Path,
+    installed: &[crate::apps::DesktopEntry],
+    app: &str,
+    action: &str,
+) -> Result<(String, String), String> {
+    let Some(surface) = surface_in(app, installed, dir) else {
         return Err(format!(
             "there is no app called `{app}` on this desktop, so nothing was put in front of the \
              person. `os_apps` lists the names this machine uses."
@@ -563,14 +578,19 @@ fn published_detail(app: &str, action: &str) -> Result<(String, String), String>
             });
     }
 
-    let address = format!("app-{surface}");
-    if !yantrik_app_runtime::service::is_up(&address) {
+    // The window's socket, and when the window is shut, the service's — which publishes the same
+    // surface under the same id and meets the same gate (issue #161). System Monitor's
+    // `kill_process` is the case: with the window closed, `yos act system-monitor kill_process`
+    // reaches `system-monitor.sock`, is refused for want of a grant, and asking for that grant
+    // answered "not running … open it first" — so the action could never be approved at all.
+    let Some(address) = surface_address(dir, &surface) else {
         return Err(format!(
-            "`{app}` is not running, so this machine could not check what `{action}` is graded \
-             and did not put a card in front of the person. Open it first."
+            "`{app}` is not running — neither its window nor a service answers as `{surface}` — \
+             so this machine could not check what `{action}` is graded and did not put a card in \
+             front of the person. Open it first."
         ));
-    }
-    let reply = yantrik_ipc_transport::SyncRpcClient::for_service(&address)
+    };
+    let reply = yantrik_ipc_transport::SyncRpcClient::new(&address)
         .with_timeout(GRADE_LOOKUP)
         .call("app.describe", serde_json::json!({}))
         .map_err(|e| {
@@ -600,27 +620,58 @@ fn published_detail(app: &str, action: &str) -> Result<(String, String), String>
         })
 }
 
+/// Where a surface answers right now: its window's socket, or else its service's.
+///
+/// The window first, as every client resolves a name (docs/surface-protocol.md, "Resolving a
+/// name"): it is what the person is looking at, and it is the one an act would reach. A socket
+/// file nobody listens on is a closed window, not an answer.
+fn surface_address(dir: &std::path::Path, surface: &str) -> Option<String> {
+    [format!("app-{surface}.sock"), format!("{surface}.sock")]
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|path| {
+            #[cfg(unix)]
+            {
+                std::os::unix::net::UnixStream::connect(path).is_ok()
+            }
+            #[cfg(not(unix))]
+            {
+                path.exists()
+            }
+        })
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 /// The control surface an app name answers on.
 ///
-/// Three routes, because an app has up to three names. "Downloads" is opened as `downloads` and
-/// described as `download-manager`, and only the launcher's catalogue knows that; the desktop
-/// itself is `shell` and is in no catalogue because nothing opens it; and a surface can be
-/// answering under its own name without being in the launcher at all, which is not a reason to
-/// pretend it does not exist.
+/// The desktop's catalogue first: `shell` and `yantrik` are the desktop, a screen is part of
+/// it, and every app that declares a surface in its `.desktop` file answers to its id, its
+/// aliases and what it is called — "Downloads" is described as `download-manager`, an approval
+/// asked for `container-manager` (the app's name everywhere but on its socket) is bound to
+/// `containers`. Then a surface answering under its own name without being in the catalogue at
+/// all, which is not a reason to pretend it does not exist: an app's window, or a service.
 fn surface_for(app: &str) -> Option<String> {
+    surface_in(
+        app,
+        &crate::apps::Catalogue::shared().get(),
+        &yantrik_ipc_transport::server::socket_dir(),
+    )
+}
+
+/// [`surface_for`], against a catalogue and a socket directory the caller names.
+fn surface_in(
+    app: &str,
+    installed: &[crate::apps::DesktopEntry],
+    dir: &std::path::Path,
+) -> Option<String> {
     let key = app.trim().to_lowercase();
     if key.is_empty() {
         return None;
     }
-    if key == "shell" || key == "yantrik" {
-        return Some("shell".to_string());
-    }
-    // Any spelling the launcher knows, not only the one the listing prints: an approval asked
-    // for `container-manager` — the app's name everywhere but on its socket — was refused as
-    // "there is no app called that on this desktop" while the app was open.
-    let routed = crate::wire::dock::surface_for(&key).map(str::to_string);
-    routed.or_else(|| {
-        yantrik_app_runtime::control::running_apps().into_iter().find(|id| *id == key)
+    crate::wire::dock::surface_for(&key, installed).or_else(|| {
+        let folded = crate::apps::fold_name(&key);
+        (crate::apps::is_surface_name(&folded) && surface_address(dir, &folded).is_some())
+            .then_some(folded)
     })
 }
 
@@ -2073,5 +2124,101 @@ mod control_approvals_tests {
         assert!(grant_belongs("appr-2", "", &child).is_err(), "nor one the person asked for");
         assert!(grant_belongs("appr-1", "pi:c-parent", &Some(Err("no".into()))).is_err(), "a token not believed spends nothing");
         assert!(grant_belongs("appr-1", "pi:c-parent", &None).is_ok(), "an app's own dispatch, as before");
+    }
+}
+
+/// Approvals for a surface whose window is shut: its service answers for it (issue #161).
+#[cfg(all(test, unix))]
+mod service_surface_approval_tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::path::{Path, PathBuf};
+
+    use super::{published_detail_in, surface_in};
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("yantrik-approvals-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A socket that answers `app.describe` with `describe`, as a service's own dispatch does.
+    fn serve(path: &Path, describe: serde_json::Value) {
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue; // somebody asking whether anything is here
+                }
+                let asked: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let reply = serde_json::json!({ "jsonrpc": "2.0", "id": asked["id"], "result": describe });
+                let mut stream = stream;
+                let _ = stream.write_all(format!("{reply}\n").as_bytes());
+            }
+        });
+    }
+
+    fn sysmon(grade: &str, description: &str) -> serde_json::Value {
+        serde_json::json!({
+            "app": "system-monitor",
+            "summary": "System — CPU 3%",
+            "state": {},
+            "actions": [{
+                "name": "kill_process",
+                "description": description,
+                "permission": grade,
+                "parameters": { "type": "object", "properties": {}, "required": [] },
+            }],
+        })
+    }
+
+    #[test]
+    fn a_service_action_can_be_approved_with_its_window_shut() {
+        let dir = scratch("service");
+        let installed = crate::surfaces::shipped_catalogue();
+        // Nothing answers at all: refused, and the sentence says both places were looked in.
+        let err = published_detail_in(&dir, &installed, "system-monitor", "kill_process").unwrap_err();
+        assert!(err.contains("neither its window nor a service"), "{err}");
+
+        // The window was open once and crashed: its socket file is still there, nobody listens.
+        drop(std::os::unix::net::UnixListener::bind(dir.join("app-system-monitor.sock")).unwrap());
+        serve(&dir.join("system-monitor.sock"), sysmon("dangerous", "End a running process by PID"));
+
+        for name in ["system-monitor", "sysmonitor", "System Monitor"] {
+            assert_eq!(
+                published_detail_in(&dir, &installed, name, "kill_process"),
+                Ok(("dangerous".to_string(), "End a running process by PID".to_string())),
+                "`{name}`, with the window shut, is graded by its service"
+            );
+        }
+        let err = published_detail_in(&dir, &installed, "system-monitor", "no_such").unwrap_err();
+        assert!(err.contains("publishes no action called `no_such`"), "{err}");
+
+        // With the window open, the window is what an act reaches, so it is what is asked.
+        std::fs::remove_file(dir.join("app-system-monitor.sock")).unwrap();
+        serve(&dir.join("app-system-monitor.sock"), sysmon("sensitive", "the window's own account"));
+        assert_eq!(
+            published_detail_in(&dir, &installed, "sysmonitor", "kill_process"),
+            Ok(("sensitive".to_string(), "the window's own account".to_string()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A surface nothing declares is still found while it answers under its own name — a
+    /// service, or an app somebody started without a .desktop file.
+    #[test]
+    fn a_surface_answering_under_its_own_name_is_found_without_a_desktop_file() {
+        let dir = scratch("undeclared");
+        let installed = crate::surfaces::shipped_catalogue();
+        assert_eq!(surface_in("hello-service", &installed, &dir), None);
+        serve(&dir.join("hello-service.sock"), serde_json::json!({ "app": "hello-service", "actions": [] }));
+        assert_eq!(surface_in("Hello Service", &installed, &dir).as_deref(), Some("hello-service"));
+        // Declared names are still the catalogue's, whatever answers in the directory.
+        assert_eq!(surface_in("container-manager", &installed, &dir).as_deref(), Some("containers"));
+        assert_eq!(surface_in("yantrik", &installed, &dir).as_deref(), Some("shell"));
+        assert_eq!(surface_in("../etc", &installed, &dir), None, "not a name, whatever is on the disk");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

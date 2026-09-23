@@ -7,3 +7,7 @@ Exec=/opt/yantrik/bin/yantrik-container-manager
 Icon=yantrik
 Categories=Development;System;
 Keywords=docker;podman;container;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=containers
+X-Yantrik-Purpose=Docker or Podman containers
+X-Yantrik-Aliases=container-manager

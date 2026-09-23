@@ -7,3 +7,7 @@ Exec=/opt/yantrik/bin/yantrik-network-manager
 Icon=yantrik
 Categories=System;Network;
 Keywords=wifi;bluetooth;vpn;network;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=network
+X-Yantrik-Purpose=this machine's connections, Wi-Fi and firewall state
+X-Yantrik-Aliases=network-manager

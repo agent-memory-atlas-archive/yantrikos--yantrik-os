@@ -10,3 +10,8 @@ Exec=blender --python /opt/yantrik/share/blender/bootstrap.py
 Icon=yantrik
 Categories=Graphics;3DGraphics;
 Keywords=3d;modelling;render;animation;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+# Served by the addon the Exec line loads, not by Blender itself; the shell's Blender route
+# also checks there is an X display before starting it (#96).
+X-Yantrik-Surface=blender
+X-Yantrik-Purpose=3D scenes: model them, light them, render them

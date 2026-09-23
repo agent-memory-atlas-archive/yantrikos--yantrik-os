@@ -7,3 +7,9 @@ Exec=/opt/yantrik/bin/yantrik-document-editor
 Icon=yantrik
 Categories=Office;WordProcessor;
 Keywords=document;word;editor;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+# Three models asked to write a document each wrote a note: Notes was open with a summary that
+# fitted and this app was one word in a row of closed ones. The purpose is what tells them apart.
+X-Yantrik-Surface=documents
+X-Yantrik-Purpose=written documents — reports, letters, plans — saved as files in ~/Documents
+X-Yantrik-Aliases=document-editor

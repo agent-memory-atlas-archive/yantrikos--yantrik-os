@@ -7,3 +7,7 @@ Exec=/opt/yantrik/bin/yantrik-presentation
 Icon=yantrik
 Categories=Office;Presentation;
 Keywords=slides;presentation;powerpoint;
+# The control surface this app publishes: docs/surface-protocol.md, section 3.
+X-Yantrik-Surface=presentation
+X-Yantrik-Purpose=slide decks
+X-Yantrik-Aliases=slides

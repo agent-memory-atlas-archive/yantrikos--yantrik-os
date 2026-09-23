@@ -187,6 +187,114 @@ def requester_name(state=None):
             return str(mind["name"]).strip()
     return "an unnamed caller"
 
+# ── What os_describe says it takes ──────────────────────────────────────────────────────
+#
+# The apps a mind can describe are the ones this machine declares, not a list written here. They
+# are read from the `.desktop` files — `X-Yantrik-Surface` and `X-Yantrik-Purpose` — the same keys
+# the shell lists closed apps by (docs/app-control.md, "Findable while closed"), with the same
+# rules as `yos`'s `declared_surfaces`, which the selftest holds this copy to. Local files only:
+# `tools/list` is answered on the read loop and must not wait on a socket.
+
+OS_DESCRIBE_HEAD = ("The current state of one app or service on this computer: what it is "
+                    "showing and which actions it offers, with each action's exact name, "
+                    "arguments and permission grade. Describe an app before acting on it. "
+                    "Takes a short name: 'shell' (the desktop — windows, files, opening apps)")
+OS_DESCRIBE_TAIL = (", or a service os_apps lists as answering — a closed app's service answers "
+                    "for it under the app's name. An app with a large family of related actions "
+                    "lists that family as signatures and grades only — enough to see that an "
+                    "action exists — and says so; pass that family's prefix as `actions` to get "
+                    "what each of them does.")
+SURFACE_NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def fold_name(name):
+    return name.strip().lower().replace("_", "-").replace(" ", "-")
+
+
+def application_dirs():
+    dirs = []
+    if os.environ.get("HOME"):
+        dirs.append(os.path.join(os.environ["HOME"], ".local/share/applications"))
+    if os.environ.get("XDG_DATA_HOME"):
+        dirs.append(os.path.join(os.environ["XDG_DATA_HOME"], "applications"))
+    data_dirs = os.environ.get("XDG_DATA_DIRS")
+    if data_dirs is not None:
+        dirs.extend(os.path.join(d, "applications") for d in data_dirs.split(":") if d.strip())
+    else:
+        dirs.extend(["/usr/share/applications", "/usr/local/share/applications"])
+    dirs.append("/opt/yantrik/share/applications")
+    return list(dict.fromkeys(dirs))
+
+
+def declared_surfaces(dirs=None):
+    """`[{id, purpose, aliases}]` for every surface the installed .desktop files declare."""
+    entries, seen = [], set()
+    for directory in (dirs if dirs is not None else application_dirs()):
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for filename in names:
+            if not filename.endswith(".desktop") or filename[:-8] in seen:
+                continue
+            keys, group = {}, None
+            try:
+                with open(os.path.join(directory, filename), encoding="utf-8", errors="replace") as fh:
+                    lines = fh.read().splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                line = line.strip()
+                if line.startswith("["):
+                    group = line
+                elif group == "[Desktop Entry]" and "=" in line and not line.startswith("#"):
+                    key, value = line.split("=", 1)
+                    keys[key.strip()] = value.strip()
+            if (keys.get("Type") != "Application" or keys.get("NoDisplay") == "true"
+                    or keys.get("Hidden") == "true" or not keys.get("Name") or not keys.get("Exec")):
+                continue
+            seen.add(filename[:-8])
+            entries.append(keys)
+    entries.sort(key=lambda k: k["Name"].lower())
+    surfaces = []
+    for keys in entries:
+        sid = fold_name(keys.get("X-Yantrik-Surface", ""))
+        if not SURFACE_NAME.match(sid) or sid in ("shell", "yantrik"):
+            continue
+        mine = next((s for s in surfaces if s["id"] == sid), None)
+        if mine is None:
+            surfaces.append({"id": sid, "purpose": keys.get("X-Yantrik-Purpose", ""), "aliases": []})
+        elif not mine["purpose"]:
+            mine["purpose"] = keys.get("X-Yantrik-Purpose", "")
+    for keys in entries:
+        mine = next((s for s in surfaces
+                     if s["id"] == fold_name(keys.get("X-Yantrik-Surface", ""))), None)
+        if mine is None:
+            continue
+        for alias in (fold_name(a) for a in keys.get("X-Yantrik-Aliases", "").split(";")):
+            if (not alias or not SURFACE_NAME.match(alias) or alias == mine["id"]
+                    or alias in ("shell", "yantrik") or alias in mine["aliases"]):
+                continue
+            if not any(s is not mine and (s["id"] == alias or alias in s["aliases"])
+                       for s in surfaces):
+                mine["aliases"].append(alias)
+    return surfaces
+
+
+def os_describe_text(dirs=None):
+    """os_describe's description, naming the apps this machine declares, with what each is for."""
+    try:
+        surfaces = declared_surfaces(dirs)
+    except Exception:  # a listing must never fail over a stray file
+        surfaces = []
+    if not surfaces:
+        return OS_DESCRIBE_HEAD + OS_DESCRIBE_TAIL
+    named = "; ".join("'%s'%s" % (s["id"], (" (%s)" % s["purpose"]) if s["purpose"] else "")
+                      for s in sorted(surfaces, key=lambda s: s["id"]))
+    return (OS_DESCRIBE_HEAD + ", one of the apps this machine has, open or closed: " + named
+            + OS_DESCRIBE_TAIL)
+
+
 # Every tool is a `yos` invocation. `argv` builds the command line from the call's
 # arguments; `timeout` is generous where the work is genuinely slow (transcription runs
 # at well under real time on this hardware) and short everywhere else, so a hung browser
@@ -205,8 +313,9 @@ TOOLS = [
         # name, so this says how to read it rather than apologising for it.
         "description": "What is on this desktop: the apps that are open right now (each with a "
                        "one-line summary of what it is showing), the services that are "
-                       "answering, and the apps that are closed but can be opened, by the exact "
-                       "name to open them with. Start here. The desktop itself is `shell`: "
+                       "answering, and every app that is closed but can be opened — marked "
+                       "(closed), with what it is for and the exact name to open it with, "
+                       "whoever wrote it. Start here. The desktop itself is `shell`: "
                        "os_act on shell with open_app opens an app, and os_describe on shell "
                        "shows windows, files and the conversation. Use the names exactly as "
                        "listed — an app is sometimes opened under one name and described "
@@ -223,16 +332,12 @@ TOOLS = [
         # Named services, because a mind finds tools by the words in their descriptions: asked
         # "how much memory and CPU is this machine using?", Yantrik Mind searched its tools
         # three times, matched nothing here, and said it had no data.
-        "description": "The current state of one app or service on this computer: what it is "
-                       "showing and which actions it offers, with each action's exact name, "
-                       "arguments and permission grade. Describe an app before acting on it. "
-                       "Takes a short name: 'shell' (the desktop — windows, files, opening apps), "
-                       "'system-monitor' (this machine's CPU, memory, disk and processes), "
-                       "'weather' (local weather where this machine is), 'network' (connection "
-                       "and Wi-Fi), 'notifications', 'notes', 'calendar', 'email'. An app with a "
-                       "large family of related actions lists that family as signatures and "
-                       "grades only — enough to see that an action exists — and says so; pass "
-                       "that family's prefix as `actions` to get what each of them does.",
+        # The names are this machine's, read when the tools are listed (`os_describe_text`): the
+        # apps whose .desktop files declare a surface, each with what it is for. This listed
+        # eight names typed in here, so an app installed later — anybody's — was one a mind
+        # could only find by reading os_apps first, and the words it searches tools by ("CPU",
+        # "weather") are the apps' own purposes now rather than this file's.
+        "description": OS_DESCRIBE_HEAD + OS_DESCRIBE_TAIL,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -677,6 +782,8 @@ def offered():
 def listing(tool):
     """One tool as `tools/list` publishes it."""
     entry = {k: tool[k] for k in ("name", "description", "inputSchema", "annotations") if k in tool}
+    if tool["name"] == "os_describe":
+        entry["description"] = os_describe_text()
     if AGENT_TOKEN and tool["name"] == "os_act":
         entry["description"] = entry["description"] + OS_ACT_WITH_AGENT
     return entry

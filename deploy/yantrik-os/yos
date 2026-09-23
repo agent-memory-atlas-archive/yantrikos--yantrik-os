@@ -12,7 +12,8 @@ So this exists to make the common thing one line. It is deliberately small, has 
 dependencies beyond the standard library, and does no interpretation: it speaks the
 protocol and prints what came back.
 
-    yos ls                              which surfaces are up
+    yos ls                              which surfaces are up, and which can be opened
+    yos ls --all                        ... and sockets left behind by closed windows
     yos describe shell                  what the desktop is showing
     yos describe notes                  what an app is showing
     yos check notes                     does a surface keep the protocol (docs/surface-protocol.md)
@@ -65,7 +66,9 @@ Conventions worth knowing:
   * `describe` and `act` take a short name. `shell` means `app-shell`, `notes` means
     `app-notes`; anything else is used as given, so `yos describe weather` reaches the
     weather service directly. An app answers to every name it is known by — `containers`
-    and `container-manager` are the same window — and `yos ls` shows them together.
+    and `container-manager` are the same window — and `yos ls` shows them together. The
+    names come from each app's `.desktop` file (`X-Yantrik-Surface`, `X-Yantrik-Aliases`),
+    which is also how `yos ls` lists an app that is closed.
 
   * `act` prints the whole reply rather than a success line, because the reply is not a
     boolean. `settled: false` means the work was accepted and has not finished — a
@@ -113,6 +116,140 @@ def socket_dirs():
 SOCKET_DIRS = socket_dirs()
 
 ALIASES = {"shell": "app-shell"}
+
+
+# ── Surfaces declared in .desktop files ──
+#
+# A closed app has no socket, so the socket directory cannot say it exists. Its `.desktop` file
+# can: an app that publishes a surface declares it there (docs/app-control.md, "Findable while
+# closed"), and the shell lists it in `describe shell` → `apps` from those keys. `yos` reads the same
+# keys itself for two things the shell cannot do for it: resolving an alias when the shell's links
+# are not there (no desktop running, or a name declared a moment ago), and `yos ls` when the shell
+# is not answering. The shell's listing wins whenever there is one — it also knows which names the
+# desktop itself holds.
+
+SURFACE_KEYS = ("X-Yantrik-Surface", "X-Yantrik-Purpose", "X-Yantrik-Aliases", "X-Yantrik-Adapter")
+SURFACE_NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+YANTRIK_APPLICATIONS = "/opt/yantrik/share/applications"
+
+
+def fold_name(name):
+    """The protocol's fold: trim, lowercase, `_` and space become `-`."""
+    return name.strip().lower().replace("_", "-").replace(" ", "-")
+
+
+def application_dirs():
+    """The freedesktop application directories, in search order, as the shell scans them
+    (`yantrik_shell_core::apps::app_dirs`): the person's own first, this OS's own last."""
+    dirs = []
+    home = os.environ.get("HOME", "")
+    if home:
+        dirs.append(os.path.join(home, ".local/share/applications"))
+    if os.environ.get("XDG_DATA_HOME"):
+        dirs.append(os.path.join(os.environ["XDG_DATA_HOME"], "applications"))
+    data_dirs = os.environ.get("XDG_DATA_DIRS")
+    if data_dirs is not None:
+        dirs.extend(os.path.join(d, "applications") for d in data_dirs.split(":") if d.strip())
+    else:
+        dirs.extend(["/usr/share/applications", "/usr/local/share/applications"])
+    dirs.append(YANTRIK_APPLICATIONS)
+    seen, ordered = set(), []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d)
+            ordered.append(d)
+    return ordered
+
+
+def read_desktop_entry(stem, text):
+    """One `[Desktop Entry]` group, as the launcher reads it; None for anything it does not list."""
+    keys, group = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            group = line
+            continue
+        if group != "[Desktop Entry]" or not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        keys[key.strip()] = value.strip()
+    if (keys.get("Type") != "Application" or keys.get("NoDisplay") == "true"
+            or keys.get("Hidden") == "true" or not keys.get("Name") or not keys.get("Exec")):
+        return None
+    surface = fold_name(keys.get("X-Yantrik-Surface", ""))
+    if not SURFACE_NAME.match(surface):
+        surface = None
+    aliases = []
+    if surface:
+        for alias in (fold_name(a) for a in keys.get("X-Yantrik-Aliases", "").split(";")):
+            if alias and SURFACE_NAME.match(alias) and alias != surface and alias not in aliases:
+                aliases.append(alias)
+    return {"entry": stem, "name": keys["Name"], "surface": surface,
+            "purpose": keys.get("X-Yantrik-Purpose", "") if surface else "",
+            "aliases": aliases}
+
+
+def declared_surfaces(dirs=None):
+    """Every surface the installed `.desktop` files declare, one per id: `{id, title, purpose,
+    aliases, entry}`. The same rules as the shell's catalogue, less the ones only the shell knows
+    (which names are its own screens): an entry id found twice is the first directory's, entries
+    are taken in the order of their names, ids are settled before aliases, and a name is given to
+    the first surface that claims it."""
+    entries, seen = [], set()
+    for directory in (dirs if dirs is not None else application_dirs()):
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for filename in names:
+            if not filename.endswith(".desktop") or filename[:-8] in seen:
+                continue
+            try:
+                with open(os.path.join(directory, filename), encoding="utf-8", errors="replace") as fh:
+                    entry = read_desktop_entry(filename[:-8], fh.read())
+            except OSError:
+                continue
+            if entry is not None:
+                seen.add(entry["entry"])
+                entries.append(entry)
+    entries.sort(key=lambda e: e["name"].lower())
+    surfaces = []
+    for e in entries:
+        sid = e["surface"]
+        if not sid or sid in ("shell", "yantrik"):
+            continue
+        existing = next((s for s in surfaces if s["id"] == sid), None)
+        if existing is None:
+            surfaces.append({"id": sid, "title": e["name"], "purpose": e["purpose"],
+                             "aliases": [], "entry": e["entry"]})
+        elif not existing["purpose"]:
+            existing["purpose"] = e["purpose"]
+    for e in entries:
+        mine = next((s for s in surfaces if s["id"] == e["surface"]), None)
+        if mine is None:
+            continue
+        for alias in e["aliases"]:
+            taken = alias in ("shell", "yantrik") or any(
+                s is not mine and (s["id"] == alias or alias in s["aliases"]) for s in surfaces)
+            if not taken and alias not in mine["aliases"]:
+                mine["aliases"].append(alias)
+    return surfaces
+
+
+def declared_surface(name, surfaces=None):
+    """The declared surface a name refers to — its id, an alias, or what the app is called — or
+    None."""
+    key = fold_name(name)
+    if key.startswith("app-"):
+        key = key[4:]
+    surfaces = declared_surfaces() if surfaces is None else surfaces
+    for match in (lambda s: s["id"] == key,
+                  lambda s: key in s["aliases"],
+                  lambda s: fold_name(s["title"]) == key or fold_name(s["entry"]) == key):
+        found = next((s for s in surfaces if match(s)), None)
+        if found:
+            return found
+    return None
 
 # ── Who is answering as the shell ──
 #
@@ -181,9 +318,14 @@ def socket_candidates(name):
     The separator a caller arrived with is not part of the name either. One app is
     `container-manager` in /opt/yantrik/bin, `container_manager` in the launcher's route table
     and "Container Manager" when somebody types the words, and all three are the one window;
-    the app links every name it answers to at its socket (`control::SURFACES`), spelled with
+    the shell links every name an app's `.desktop` file declares at its socket, spelled with
     hyphens, so the folded spellings are tried too. After the literal one, so nothing that
     resolved before resolves differently now.
+
+    Last, and only when none of that found anything: the id of the surface the name is declared
+    for (an alias, or what the app is called — `System Monitor`, `yDoc`), read from the `.desktop`
+    files themselves. That is for a machine where the shell's links are not there: no desktop
+    running, or an app installed a moment ago.
     """
     key = name.lower()
     names = [ALIASES.get(key, key)]
@@ -212,6 +354,10 @@ def socket_candidates(name):
                     path = os.path.join(directory, entry)
                     if path not in seen:
                         found.append(path); seen.add(path)
+    if not found and not key.startswith("app-") and key not in ALIASES:
+        surface = declared_surface(name)
+        if surface and surface["id"] != folded:
+            return socket_candidates(surface["id"])
     return found
 
 
@@ -238,6 +384,13 @@ def request(name, method, params=None, timeout=40):
     """
     candidates = socket_candidates(name)
     if not candidates:
+        surface = declared_surface(name)
+        if surface:
+            raise Unreachable(
+                "%s is closed%s. Open it first: act shell open_app name=%s — then describe %s. "
+                "(no socket for %r yet)"
+                % (name, (" (%s: %s)" % (surface["id"], surface["purpose"])) if surface["purpose"] else "",
+                   surface["id"], surface["id"], name))
         raise Unreachable("no socket for %r (try: yos ls)" % name)
 
     last_error = None
@@ -271,6 +424,12 @@ def request(name, method, params=None, timeout=40):
 
     # The caller asked about something that is closed. Say how to open it: "its socket is
     # stale" is the mechanism, and the reader wanted to know what to do next.
+    surface = declared_surface(name)
+    if surface:
+        raise Unreachable(
+            "%s is closed%s. Open it first: act shell open_app name=%s — then describe %s."
+            % (name, (" (%s: %s)" % (surface["id"], surface["purpose"])) if surface["purpose"] else "",
+               surface["id"], surface["id"]))
     raise Unreachable(
         "%s is not open. If it is an app, open it first: act shell open_app name=%s — then "
         "describe it again. (`yos ls` shows what is open and what can be opened.)" % (name, name))
@@ -494,6 +653,11 @@ def cmd_ls(argv):
     `container-manager` in the launcher, in `/opt/yantrik/bin` and in `open_app` — and the other
     names are symlinks to the one socket. So they are collected and shown beside the app rather
     than listed as apps of their own: one window, one line, and every name it answers to on it.
+
+    Every app whose `.desktop` file declares a surface is listed whether or not it is running —
+    closed ones as `(closed)` with what they are for — from the shell's own catalogue, or, when
+    the shell is not answering, from the `.desktop` files themselves. An app somebody else wrote is
+    listed exactly as ours are. `--all` adds the sockets closed windows left behind.
     """
     raw = "--all" in argv
     apps, services, stale, also = [], [], [], {}
@@ -534,22 +698,34 @@ def cmd_ls(argv):
     print("    window, and `describe <name>` means the window whenever it is open.")
 
     shell = os.path.join(SOCKET_DIRS[0], "app-shell.sock")
-    openable = []
+    openable, from_disk = [], False
     if _answers(shell):
         try:
             openable = (call("shell", "app.describe", timeout=5).get("state") or {}).get("apps") or []
         except SystemExit:
             openable = []
+    if not openable:
+        # No desktop to ask. The apps that declare a surface are still on the disk, and a closed
+        # app is exactly what a caller cannot find any other way.
+        from_disk = True
+        openable = [{"name": s["id"], "opens": "app", "describe_as": s["id"], "for": s["purpose"],
+                     "aliases": s["aliases"]} for s in declared_surfaces()]
     running = {name for name, _ in apps}
     closed = [a for a in openable if a.get("opens") == "app" and a.get("describe_as") not in running]
     if closed:
         # One line each, with what the app is for. This was a comma-separated row of names, and
         # a row of names is how three different models, asked for a "document", each wrote a
         # note: Notes was open with a summary that fitted and `documents` was a word in a list.
-        print("Can be opened with `act shell open_app name=<name>`:")
+        # The heading's first words are what harnesses read the section by
+        # (harnesses/deepseek/yantrik_deepseek.py, `apps_from_listing`); keep them.
+        print("Can be opened with `act shell open_app name=<name>`, then described by that "
+              "name%s:" % (" (the desktop is not answering; read from the .desktop files)"
+                           if from_disk else ""))
         for a in closed:
             then = "" if a["name"] == a.get("describe_as") else "  (then describe %s)" % a["describe_as"]
-            print("    %-14s %s%s" % (a["name"], a.get("for", ""), then))
+            also = ", ".join(a.get("aliases") or [])
+            print("    %-18s (closed)  %s%s%s" % (a["name"], a.get("for", ""), then,
+                                                  ("  (also %s)" % also) if also else ""))
     screens = [a["name"] for a in openable if a.get("opens", "").startswith("a screen")]
     if screens:
         print("Screens of the desktop itself (also open_app): %s" % ", ".join(screens))

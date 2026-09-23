@@ -191,7 +191,8 @@ fn surface(given: &str) -> Result<String, String> {
     if app.is_empty() || app.contains('*') || action.is_some_and(|a| a.is_empty() || a.contains('.') || (a.contains('*') && !a.ends_with('*'))) {
         return Err(bad());
     }
-    let app = yantrik_app_runtime::control::surface_id(app).map(str::to_string).unwrap_or_else(|| app.to_lowercase());
+    // An app's names are its `.desktop` file's (`crate::surfaces`); ours from the build first.
+    let app = crate::surfaces::surface_id(app).unwrap_or_else(|| app.to_lowercase());
     Ok(match action {
         Some(action) => format!("{app}.{action}"),
         None => app,

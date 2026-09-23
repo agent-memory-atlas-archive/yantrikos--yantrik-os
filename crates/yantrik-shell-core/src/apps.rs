@@ -3,11 +3,61 @@
 //! Scans /usr/share/applications/ and ~/.local/share/applications/ for .desktop files.
 //! Parses Name, Exec, Icon, Categories, Comment, and visibility flags.
 //! Provides fuzzy search for Intent Lens integration.
+//!
+//! ## The keys a surface declares itself with
+//!
+//! An app that publishes a control surface says so in its own `.desktop` file, which every Debian
+//! app already ships (design/surface-sdk-2026-09-23.md, section 4):
+//!
+//! ```text
+//! X-Yantrik-Surface=libreoffice
+//! X-Yantrik-Purpose=Documents, spreadsheets and slides: open, read, edit and export them
+//! X-Yantrik-Aliases=writer;calc;impress
+//! X-Yantrik-Adapter=/usr/lib/yantrik/adapters/libreoffice
+//! ```
+//!
+//! That is the whole registration. The shell reads these keys, so the app is listed in
+//! `describe shell` → `apps` while it is closed, opens by its id or any alias, answers to every
+//! alias on the socket bus, and has an adapter started beside it when it cannot host a surface
+//! itself. This OS's own apps declare themselves with the same keys and get nothing more.
 
 use std::path::{Path, PathBuf};
 
+/// The `.desktop` key naming the control surface an app publishes.
+pub const KEY_SURFACE: &str = "X-Yantrik-Surface";
+/// What the app is FOR, in one line, for a reader choosing between apps it cannot see.
+pub const KEY_PURPOSE: &str = "X-Yantrik-Purpose";
+/// Other names the surface answers to, `;`-separated like every freedesktop list.
+pub const KEY_ALIASES: &str = "X-Yantrik-Aliases";
+/// A separate program that provides the surface for an app that cannot host one itself.
+pub const KEY_ADAPTER: &str = "X-Yantrik-Adapter";
+
+/// One spelling of a surface name, so the separator a caller arrived with is not part of it.
+///
+/// The protocol's fold (docs/surface-protocol.md, "Resolving a name"): trim, lowercase, and `_`
+/// and space become `-`. `Download Manager`, `download_manager` and `download-manager` are one
+/// question.
+pub fn fold_name(name: &str) -> String {
+    name.trim().to_lowercase().replace(['_', ' '], "-")
+}
+
+/// Whether `name` can be a surface's id or alias: lowercase words of letters and digits joined by
+/// single `-`, as the protocol names them.
+///
+/// Stricter than "anything a file name can hold" on purpose. Every name here becomes a file in
+/// the socket directory (`app-<name>.sock`), so a `/`, a `..` or a dot-separated reverse-DNS id
+/// would be a path, not a name — refused rather than sanitised, because a name that was quietly
+/// changed is a name nobody will ask for.
+pub fn is_surface_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.split('-').all(|word| {
+            !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
 /// A parsed .desktop entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DesktopEntry {
     /// Display name (Name= field).
     pub name: String,
@@ -23,6 +73,17 @@ pub struct DesktopEntry {
     pub app_id: String,
     /// Single-char icon for Lens display (derived from categories/name).
     pub icon_char: String,
+    /// `X-Yantrik-Surface`: the id of the control surface this app publishes, folded. `None` when
+    /// the file declares none, or declares one that is not a surface name.
+    pub surface: Option<String>,
+    /// `X-Yantrik-Purpose`: what the app is for, in one line. Empty when not said.
+    pub purpose: String,
+    /// `X-Yantrik-Aliases`: the other names the surface answers to, folded, without the id itself,
+    /// without duplicates and without anything that is not a surface name.
+    pub aliases: Vec<String>,
+    /// `X-Yantrik-Adapter`: the command that provides the surface for this app, when the app
+    /// cannot host one. Only kept beside a declared surface: an adapter for nothing is nothing.
+    pub adapter: Option<String>,
 }
 
 /// Built-in Yantrik apps that appear in the app grid alongside system apps.
@@ -31,7 +92,7 @@ pub fn builtin_apps() -> Vec<DesktopEntry> {
 DesktopEntry {
             name: "Files".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "System;FileManager;".into(), comment: "Browse files".into(),
-            app_id: "files".into(), icon_char: "F".into(),
+            app_id: "files".into(), icon_char: "F".into(), ..Default::default()
         },
 // "Editor" is NOT listed here, though the shell does have an editor screen.
         //
@@ -47,76 +108,76 @@ DesktopEntry {
         DesktopEntry {
             name: "Media Player".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "AudioVideo;Player;".into(), comment: "Music & media".into(),
-            app_id: "media".into(), icon_char: "\u{266A}".into(),
+            app_id: "media".into(), icon_char: "\u{266A}".into(), ..Default::default()
         },
         DesktopEntry {
             name: "Bond".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "Utility;".into(), comment: "Companion bond tracker".into(),
-            app_id: "bond".into(), icon_char: "\u{2665}".into(),
+            app_id: "bond".into(), icon_char: "\u{2665}".into(), ..Default::default()
         },
         DesktopEntry {
             name: "Personality".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "Utility;".into(), comment: "Companion personality evolution".into(),
-            app_id: "personality".into(), icon_char: "\u{2727}".into(),
+            app_id: "personality".into(), icon_char: "\u{2727}".into(), ..Default::default()
         },
         DesktopEntry {
             name: "Memory".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "Utility;".into(), comment: "Browse companion memories".into(),
-            app_id: "memory".into(), icon_char: "\u{25C8}".into(),
+            app_id: "memory".into(), icon_char: "\u{25C8}".into(), ..Default::default()
         },
         DesktopEntry {
             name: "Notifications".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "Utility;".into(), comment: "Notification center".into(),
-            app_id: "notifications".into(), icon_char: "N".into(),
+            app_id: "notifications".into(), icon_char: "N".into(), ..Default::default()
         },
         DesktopEntry {
             name: "System".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "System;Monitor;".into(), comment: "System dashboard".into(),
-            app_id: "system".into(), icon_char: "\u{25C9}".into(),
+            app_id: "system".into(), icon_char: "\u{25C9}".into(), ..Default::default()
         },
         DesktopEntry {
             name: "Settings".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "Settings;".into(), comment: "Yantrik settings".into(),
-            app_id: "settings".into(), icon_char: "\u{2699}".into(),
+            app_id: "settings".into(), icon_char: "\u{2699}".into(), ..Default::default()
         },
         DesktopEntry {
             name: "About".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "Utility;".into(), comment: "System info".into(),
-            app_id: "about".into(), icon_char: "\u{2139}".into(),
+            app_id: "about".into(), icon_char: "\u{2139}".into(), ..Default::default()
         },
         DesktopEntry {
             name: "Packages".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "System;PackageManager;".into(), comment: "Install and manage packages".into(),
-            app_id: "packages".into(), icon_char: "P".into(),
+            app_id: "packages".into(), icon_char: "P".into(), ..Default::default()
         },
 DesktopEntry {
             name: "Devices".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "System;HardwareSettings;".into(), comment: "Hardware device dashboard".into(),
-            app_id: "devices".into(), icon_char: "\u{2699}".into(),
+            app_id: "devices".into(), icon_char: "\u{2699}".into(), ..Default::default()
         },
         DesktopEntry {
             name: "Permissions".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "System;Security;".into(), comment: "File & system permissions".into(),
-            app_id: "permissions".into(), icon_char: "\u{2318}".into(),
+            app_id: "permissions".into(), icon_char: "\u{2318}".into(), ..Default::default()
         },
         // One pane per agent, with its work inside it: every mind's conversation, each call it
         // made as a card. design/agents-workspace-2026-09-23.md.
         DesktopEntry {
             name: "Agents".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "Utility;".into(), comment: "Your agents and what each one is doing".into(),
-            app_id: "agents".into(), icon_char: "A".into(),
+            app_id: "agents".into(), icon_char: "A".into(), ..Default::default()
         },
         // Every recipe the companion holds, drawn as its stages as it runs.
         // design/desk-and-mind-2026-09-23.md, section 4.
         DesktopEntry {
             name: "Recipes".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "Utility;".into(), comment: "Recipes and how each one is flowing".into(),
-            app_id: "recipes".into(), icon_char: "R".into(),
+            app_id: "recipes".into(), icon_char: "R".into(), ..Default::default()
         },
 DesktopEntry {
             name: "Skills".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "System;".into(), comment: "Install companion skills".into(),
-            app_id: "skills".into(), icon_char: "\u{2605}".into(),
+            app_id: "skills".into(), icon_char: "\u{2605}".into(), ..Default::default()
         },
     ]
 }
@@ -142,6 +203,15 @@ const HIDDEN_APP_IDS: &[&str] = &[
 /// Scan all XDG application directories for .desktop files.
 /// Returns built-in Yantrik apps first, then system apps sorted by name.
 pub fn scan() -> Vec<DesktopEntry> {
+    scan_in(&app_dirs())
+}
+
+/// [`scan`], over the directories given rather than the session's.
+///
+/// The directories come first-wins, the way freedesktop orders them: an entry in the person's own
+/// directory shadows one of the same name further down the list. Split out so a test can scan a
+/// directory of its own without changing the environment every other test reads.
+pub fn scan_in(dirs: &[PathBuf]) -> Vec<DesktopEntry> {
     let mut entries = builtin_apps();
     let mut seen_ids: std::collections::HashSet<String> = entries.iter().map(|e| e.app_id.clone()).collect();
 
@@ -149,9 +219,7 @@ pub fn scan() -> Vec<DesktopEntry> {
         seen_ids.insert(id.to_string());
     }
 
-    let dirs = app_dirs();
-
-    for dir in &dirs {
+    for dir in dirs {
         if !dir.is_dir() {
             continue;
         }
@@ -241,7 +309,18 @@ fn match_score(entry: &DesktopEntry, query: &str, words: &[&str]) -> u32 {
     score
 }
 
-fn app_dirs() -> Vec<PathBuf> {
+/// Where this OS installs its own .desktop entries.
+///
+/// The session puts `/opt/yantrik/share` on `XDG_DATA_DIRS`, and that is how the entries are
+/// normally found. It is also appended here, last, because this OS's own apps are now found ONLY
+/// through their .desktop files — the shell's hardcoded launch table is gone — and a shell started
+/// by anything that did not set the session's environment (a developer's restart, an older
+/// install script) would otherwise have no apps at all. Last, so any directory the session named
+/// still wins.
+pub const YANTRIK_APPLICATIONS: &str = "/opt/yantrik/share/applications";
+
+/// The application directories, in the order freedesktop says to search them.
+pub fn app_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     if let Ok(home) = std::env::var("HOME") {
@@ -252,20 +331,71 @@ fn app_dirs() -> Vec<PathBuf> {
     }
 
     if let Ok(data_dirs) = std::env::var("XDG_DATA_DIRS") {
-        for dir in data_dirs.split(':') {
+        for dir in data_dirs.split(':').filter(|d| !d.trim().is_empty()) {
             dirs.push(PathBuf::from(dir).join("applications"));
         }
     } else {
         dirs.push(PathBuf::from("/usr/share/applications"));
         dirs.push(PathBuf::from("/usr/local/share/applications"));
     }
+    dirs.push(PathBuf::from(YANTRIK_APPLICATIONS));
 
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(d.clone()));
     dirs
+}
+
+/// A number that changes whenever anything a scan would read changes: an entry added, removed,
+/// renamed or rewritten in any of `dirs`, or a directory appearing or going away.
+///
+/// The scan ran once at startup, then again whenever the launcher opened — so an app installed
+/// while the shell ran existed for the launcher and for nobody else: not for `open_app`, not in
+/// `describe shell`, not on the socket bus under its aliases. Asking this every few seconds costs
+/// one `stat` per entry, and a scan runs only when the answer moves.
+///
+/// Every entry's name, size and modification time rather than the directory's own mtime, because
+/// editing an installed entry in place — adding `X-Yantrik-Surface` to it — changes the file and
+/// not the directory, and a file that is not an entry changes the directory and nothing a scan
+/// reads.
+pub fn fingerprint(dirs: &[PathBuf]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for dir in dirs {
+        dir.hash(&mut hasher);
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            false.hash(&mut hasher);
+            continue;
+        };
+        true.hash(&mut hasher);
+        let mut files: Vec<(std::ffi::OsString, Option<std::time::SystemTime>, u64)> = read_dir
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("desktop"))
+            .map(|e| {
+                let meta = e.metadata().ok();
+                (
+                    e.file_name(),
+                    meta.as_ref().and_then(|m| m.modified().ok()),
+                    meta.map(|m| m.len()).unwrap_or(0),
+                )
+            })
+            .collect();
+        files.sort();
+        files.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn parse_desktop_file(path: &Path) -> Option<DesktopEntry> {
     let content = std::fs::read_to_string(path).ok()?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    parse_desktop_text(stem, &content)
+}
 
+/// One .desktop file's `[Desktop Entry]` group, as the launcher and the surface catalogue read it.
+///
+/// `stem` is the file's name without `.desktop`, which is the entry's id. `None` for anything the
+/// launcher does not list: not an application, hidden, or without a name or a command.
+pub fn parse_desktop_text(stem: &str, content: &str) -> Option<DesktopEntry> {
     let mut name = String::new();
     let mut exec = String::new();
     let mut icon = String::new();
@@ -275,6 +405,10 @@ fn parse_desktop_file(path: &Path) -> Option<DesktopEntry> {
     let mut no_display = false;
     let mut hidden = false;
     let mut in_desktop_entry = false;
+    let mut surface = String::new();
+    let mut purpose = String::new();
+    let mut aliases = String::new();
+    let mut adapter = String::new();
 
     for line in content.lines() {
         let line = line.trim();
@@ -305,6 +439,10 @@ fn parse_desktop_file(path: &Path) -> Option<DesktopEntry> {
                 "Type" => entry_type = value.to_string(),
                 "NoDisplay" => no_display = value == "true",
                 "Hidden" => hidden = value == "true",
+                KEY_SURFACE => surface = value.to_string(),
+                KEY_PURPOSE => purpose = value.to_string(),
+                KEY_ALIASES => aliases = value.to_string(),
+                KEY_ADAPTER => adapter = value.to_string(),
                 _ => {}
             }
         }
@@ -314,13 +452,9 @@ fn parse_desktop_file(path: &Path) -> Option<DesktopEntry> {
         return None;
     }
 
-    let app_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
-
+    let app_id = stem.to_string();
     let icon_char = derive_icon_char(&categories, &name);
+    let (surface, aliases, adapter) = surface_keys(&app_id, &surface, &aliases, &adapter);
 
     Some(DesktopEntry {
         name,
@@ -330,7 +464,50 @@ fn parse_desktop_file(path: &Path) -> Option<DesktopEntry> {
         comment,
         app_id,
         icon_char,
+        surface,
+        purpose,
+        aliases,
+        adapter,
     })
+}
+
+/// The surface keys of one entry, as far as they can be trusted.
+///
+/// A name that is not a surface name is dropped and said once in the log, with the file it came
+/// from — rather than folded into something the author never wrote. An alias equal to the id, or
+/// repeated, is dropped without comment: it names nothing new. An adapter with no surface is
+/// dropped, because the shell would be starting a process to provide nothing.
+fn surface_keys(
+    app_id: &str,
+    surface: &str,
+    aliases: &str,
+    adapter: &str,
+) -> (Option<String>, Vec<String>, Option<String>) {
+    if surface.trim().is_empty() {
+        return (None, Vec::new(), None);
+    }
+    let id = fold_name(surface);
+    if !is_surface_name(&id) {
+        tracing::warn!(
+            entry = app_id,
+            surface,
+            "{KEY_SURFACE} is not a surface name (lowercase words joined by `-`); the entry is \
+             listed as an app without a surface"
+        );
+        return (None, Vec::new(), None);
+    }
+    let mut names: Vec<String> = Vec::new();
+    for alias in aliases.split(';').map(fold_name).filter(|a| !a.is_empty()) {
+        if !is_surface_name(&alias) {
+            tracing::warn!(entry = app_id, alias, "{KEY_ALIASES} names something that is not a surface name; left out");
+            continue;
+        }
+        if alias != id && !names.contains(&alias) {
+            names.push(alias);
+        }
+    }
+    let adapter = Some(adapter.trim()).filter(|a| !a.is_empty()).map(str::to_string);
+    (Some(id), names, adapter)
 }
 
 fn strip_field_codes(exec: &str) -> String {
@@ -428,5 +605,175 @@ mod name_collision_tests {
              be the one that answers to the name.",
             clashes.join("\n")
         );
+    }
+}
+
+#[cfg(test)]
+mod surface_key_tests {
+    use super::*;
+
+    /// A directory of its own under the system temp dir, removed when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "yantrik-apps-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const LIBREOFFICE: &str = "[Desktop Entry]
+Type=Application
+Name=LibreOffice
+Exec=libreoffice %U
+X-Yantrik-Surface=libreoffice
+X-Yantrik-Purpose=Documents, spreadsheets and slides: open, read, edit and export them
+X-Yantrik-Aliases=writer;Calc; impress ;;libreoffice;writer
+X-Yantrik-Adapter=/usr/lib/yantrik/adapters/libreoffice --uno
+
+[Desktop Action new]
+X-Yantrik-Surface=not-this-one
+";
+
+    /// The four keys the design names, read the way the design writes them.
+    #[test]
+    fn the_four_keys_are_read() {
+        let entry = parse_desktop_text("libreoffice-startcenter", LIBREOFFICE).expect("an app");
+        assert_eq!(entry.surface.as_deref(), Some("libreoffice"));
+        assert_eq!(entry.purpose, "Documents, spreadsheets and slides: open, read, edit and export them");
+        // Folded, deduplicated, the id itself and empty items left out, order kept.
+        assert_eq!(entry.aliases, vec!["writer", "calc", "impress"]);
+        assert_eq!(entry.adapter.as_deref(), Some("/usr/lib/yantrik/adapters/libreoffice --uno"));
+        // A key in another group is not the entry's.
+        assert_ne!(entry.surface.as_deref(), Some("not-this-one"));
+        // And the ordinary keys are still what they were.
+        assert_eq!(entry.exec, "libreoffice");
+        assert_eq!(entry.app_id, "libreoffice-startcenter");
+    }
+
+    /// An app that says nothing is an app without a surface, exactly as before.
+    #[test]
+    fn an_entry_without_the_keys_declares_nothing() {
+        let entry = parse_desktop_text("vim", "[Desktop Entry]\nType=Application\nName=Vim\nExec=vim %F\n")
+            .expect("an app");
+        assert_eq!(entry.surface, None);
+        assert!(entry.purpose.is_empty() && entry.aliases.is_empty() && entry.adapter.is_none());
+    }
+
+    /// A surface id is folded the way every client folds a name, and one that is not a surface
+    /// name at all declares nothing — its aliases and adapter with it.
+    #[test]
+    fn a_name_that_is_not_a_surface_name_is_refused_not_rewritten() {
+        let entry = |surface: &str, aliases: &str| {
+            parse_desktop_text(
+                "x",
+                &format!(
+                    "[Desktop Entry]\nType=Application\nName=X\nExec=x\nX-Yantrik-Surface={surface}\n\
+                     X-Yantrik-Aliases={aliases}\nX-Yantrik-Adapter=/bin/x-adapter\n"
+                ),
+            )
+            .unwrap()
+        };
+        assert_eq!(entry("Download_Manager", "").surface.as_deref(), Some("download-manager"));
+        for bad in ["../../etc/passwd", "org.libreoffice.Writer", "a/b", "-x", "x--y", "caf\u{e9}"] {
+            let e = entry(bad, "fine");
+            assert_eq!(e.surface, None, "`{bad}` must not become a socket name");
+            assert!(e.aliases.is_empty() && e.adapter.is_none(), "{bad}");
+        }
+        // One bad alias is dropped; the good ones stay.
+        assert_eq!(entry("thing", "ok;../up;also ok;a.b").aliases, vec!["ok", "also-ok"]);
+        // An adapter beside no surface is nothing to start.
+        let lone = parse_desktop_text(
+            "y",
+            "[Desktop Entry]\nType=Application\nName=Y\nExec=y\nX-Yantrik-Adapter=/bin/y-adapter\n",
+        )
+        .unwrap();
+        assert_eq!(lone.adapter, None);
+    }
+
+    #[test]
+    fn surface_names_are_the_protocols() {
+        for good in ["notes", "download-manager", "image-viewer", "a1", "x-2-y"] {
+            assert!(is_surface_name(good), "{good}");
+        }
+        for bad in ["", "Notes", "notes.sock", "a_b", "a b", "-a", "a-", "a--b", ".", ".."] {
+            assert!(!is_surface_name(bad), "{bad:?}");
+        }
+        assert_eq!(fold_name("  Container Manager "), "container-manager");
+        assert_eq!(fold_name("container_manager"), "container-manager");
+    }
+
+    /// Scanning a directory finds a declared surface, and a directory the person owns shadows the
+    /// same entry further down the list.
+    #[test]
+    fn a_scan_of_given_directories_reads_the_keys_and_keeps_the_first() {
+        let mine = Scratch::new("mine");
+        let system = Scratch::new("system");
+        std::fs::write(system.0.join("libreoffice-startcenter.desktop"), LIBREOFFICE).unwrap();
+        std::fs::write(
+            mine.0.join("libreoffice-startcenter.desktop"),
+            LIBREOFFICE.replace("X-Yantrik-Aliases=writer;Calc; impress ;;libreoffice;writer", "X-Yantrik-Aliases=lo"),
+        )
+        .unwrap();
+        let found = scan_in(&[mine.0.clone(), system.0.clone()]);
+        let lo: Vec<&DesktopEntry> = found.iter().filter(|e| e.app_id == "libreoffice-startcenter").collect();
+        assert_eq!(lo.len(), 1, "one entry per id");
+        assert_eq!(lo[0].aliases, vec!["lo"], "the person's own copy wins");
+        // The shell's own screens are still there, and declare nothing.
+        assert!(found.iter().any(|e| e.app_id == "files" && e.surface.is_none()));
+    }
+
+    /// The fingerprint moves when an entry is added, rewritten in place, or removed — and does not
+    /// move when nothing changed, which is what keeps the shell from rescanning every tick.
+    #[test]
+    fn the_fingerprint_moves_exactly_when_the_directories_do() {
+        let dir = Scratch::new("fp");
+        let missing = dir.0.join("not-there");
+        let dirs = vec![dir.0.clone(), missing.clone()];
+        let before = fingerprint(&dirs);
+        assert_eq!(fingerprint(&dirs), before, "nothing changed, nothing moved");
+
+        let file = dir.0.join("thing.desktop");
+        std::fs::write(&file, "[Desktop Entry]\nType=Application\nName=Thing\nExec=thing\n").unwrap();
+        let added = fingerprint(&dirs);
+        assert_ne!(added, before, "an entry was added");
+
+        // Rewritten in place, as an update that adds the surface keys to an existing entry does.
+        std::fs::write(
+            &file,
+            "[Desktop Entry]\nType=Application\nName=Thing\nExec=thing\nX-Yantrik-Surface=thing\n",
+        )
+        .unwrap();
+        assert_ne!(fingerprint(&dirs), added, "an entry was rewritten");
+
+        std::fs::write(dir.0.join("notes.txt"), "not an entry").unwrap();
+        let with_other = fingerprint(&dirs);
+        std::fs::remove_file(dir.0.join("notes.txt")).unwrap();
+        assert_eq!(fingerprint(&dirs), with_other, "a file that is not an entry is not a change");
+
+        std::fs::create_dir_all(&missing).unwrap();
+        assert_ne!(fingerprint(&dirs), with_other, "a directory appeared");
+    }
+
+    /// Our own directory is searched even when the session forgot to name it, and after
+    /// everything the session did name.
+    #[test]
+    fn this_oss_own_entries_are_always_searched_last() {
+        let dirs = app_dirs();
+        assert_eq!(dirs.last().map(PathBuf::as_path), Some(Path::new(YANTRIK_APPLICATIONS)));
+        let unique: std::collections::HashSet<_> = dirs.iter().collect();
+        assert_eq!(unique.len(), dirs.len(), "no directory is scanned twice");
     }
 }

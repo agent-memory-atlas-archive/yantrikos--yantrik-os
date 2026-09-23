@@ -7,7 +7,8 @@ Runs ON the machine under test, as the person's user, inside their session, and 
 desktop the way everything else does: through the control surfaces, via `yos`.
 
   ci   needs no network and no minds. It is what the nightly's QEMU boot can run: every app opens
-       and answers, every screen shows, the permission gate refuses on every door, the ceiling
+       and answers, every surface a shipped .desktop file declares is listed and answers to its
+       aliases, every screen shows, the permission gate refuses on every door, the ceiling
        holds, nothing crashed, and the shell is idle when idle.
   rc   a release candidate, on a real machine with its minds attached: adds every mind answering,
        the browser being drivable, and — with --interactive — the checks a person must take part
@@ -175,6 +176,73 @@ def _apps():
     if problems:
         raise Failed("; ".join(problems))
     return "%d apps: %s" % (len(opened), ", ".join(counts))
+
+
+SHIPPED_APPLICATIONS = "/opt/yantrik/share/applications"
+
+
+@check("every surface a shipped .desktop file declares is listed, and answers to its aliases")
+def _declared():
+    """The apps are found by their .desktop files now (X-Yantrik-Surface / -Purpose / -Aliases), so
+    a machine that got the binaries and not the files has apps nobody can find while they are
+    closed, and names nothing answers to. Checked against the files this OS installs, not the
+    repository: what is on this machine is what the shell reads."""
+    declared = getattr(yos, "declared_surfaces", None)
+    if declared is None:
+        raise Failed("the installed yos cannot read .desktop declarations; it is older than the shell")
+    surfaces = declared([SHIPPED_APPLICATIONS])
+    if not surfaces:
+        raise Failed("no entry in %s declares X-Yantrik-Surface: the .desktop files are missing or "
+                     "from an older release, so no app of ours is listed while closed"
+                     % SHIPPED_APPLICATIONS)
+    listed = {a.get("describe_as"): a for a in state().get("apps", [])
+              if a.get("opens") == "app" and a.get("describe_as")}
+    socket_dir = yos.SOCKET_DIRS[0]
+    problems = []
+    for s in surfaces:
+        row = listed.get(s["id"])
+        if row is None:
+            # The first directory in the search order wins, so an older copy of the same entry
+            # earlier on XDG_DATA_DIRS hides this one — the likeliest cause after a missing program.
+            name = s["entry"] + ".desktop"
+            first = next((d for d in yos.application_dirs()
+                          if os.path.exists(os.path.join(d, name))), SHIPPED_APPLICATIONS)
+            why = ("an older %s in %s shadows it" % (name, first) if first != SHIPPED_APPLICATIONS
+                   else "is its program installed?")
+            problems.append("%s: declared by %s and not in describe shell -> apps (%s)"
+                            % (s["id"], name, why))
+            continue
+        missing = [a for a in s["aliases"] if a not in (row.get("aliases") or [])]
+        if missing:
+            problems.append("%s: the shell does not list its aliases %s" % (s["id"], missing))
+        # The shell links every alias at the surface's socket, running or not.
+        for alias in s["aliases"]:
+            link = os.path.join(socket_dir, "app-%s.sock" % alias)
+            if os.path.islink(link) and os.readlink(link) == "app-%s.sock" % s["id"]:
+                continue
+            problems.append("%s: %s is not a link to app-%s.sock" % (s["id"], link, s["id"]))
+    if problems:
+        raise Failed("; ".join(problems[:8]))
+
+    # And `open_app` by an alias opens the app it names and says what to describe it by. One app,
+    # a light one: every app was already opened by name above.
+    pick = next((s for s in surfaces if s["id"] == "system-monitor" and s["aliases"]), None) \
+        or next((s for s in surfaces if s["aliases"]), None)
+    if pick is None:
+        return "%d declared surfaces listed; none has an alias to open by" % len(surfaces)
+    alias = pick["aliases"][0]
+    answer = act("shell", "open_app", name=alias)
+    said = (answer.get("result") or {}).get("describe_as")
+    if said != pick["id"]:
+        raise Failed("open_app name=%s answered describe_as=%r, not %r" % (alias, said, pick["id"]))
+    d = wait(lambda: rpc(alias, "app.describe", timeout=10), 30, 2)
+    time.sleep(5)  # past the shell's launch grace, so closing is not read as a failed launch
+    close_test_windows()
+    if not d or d.get("app") != pick["id"]:
+        raise Failed("opened as `%s`, and describing `%s` answered %r"
+                     % (alias, alias, (d or {}).get("app")))
+    return "%d declared surfaces listed with their aliases linked; open_app %s -> %s" % (
+        len(surfaces), alias, pick["id"])
 
 
 def extra_windows():
