@@ -60,6 +60,7 @@ members = [
     "examples/hello-surface",
     "examples/hello-window",
     "templates/rust-surface",
+    "docs/sdk/samples",
 ]
 
 # ── Shared dependencies ──────────────────────────────────────────────

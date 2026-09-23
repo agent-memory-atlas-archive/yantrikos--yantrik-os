@@ -88,11 +88,11 @@ fn main() {
 
     // An author's own check: every declaration is one the dispatch can enforce.
     for problem in surface.registry().problems() {
-        eprintln!("hello_surface: {problem}");
+        eprintln!("hello-surface: {problem}");
     }
-    eprintln!("hello_surface: serving `counter` on {}; ctrl-c to stop", surface.address());
+    eprintln!("hello-surface: serving `counter` on {}; ctrl-c to stop", surface.address());
     if let Err(e) = surface.serve() {
-        eprintln!("hello_surface: could not serve: {e}");
+        eprintln!("hello-surface: could not serve: {e}");
         std::process::exit(1);
     }
 }

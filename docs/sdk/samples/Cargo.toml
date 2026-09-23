@@ -1,0 +1,16 @@
+[package]
+name = "sdk-guide-samples"
+version = "0.1.0"
+edition = "2021"
+description = "Holds docs/sdk to the code: the .desktop files the guide shows, and the describe it prints"
+publish = false
+
+# The guide's code blocks are quoted from files CI builds and runs (test_guide.py, beside this
+# file, checks each quote). This crate adds what only Rust can check: that every `.desktop` file
+# the guide quotes declares what the guide says, read by the parser the shell itself uses, and
+# that the Rust template publishes the describe the guide prints from the Python one.
+
+[dev-dependencies]
+yantrik-shell-core = { workspace = true }
+yantrik-surface = { workspace = true }
+my-surface = { path = "../../../templates/rust-surface" }
