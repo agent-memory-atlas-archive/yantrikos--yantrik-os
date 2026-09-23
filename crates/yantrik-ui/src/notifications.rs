@@ -186,6 +186,8 @@ impl NotificationMirror {
                 serde_json::json!({
                     "id": n.id,
                     "app": n.app,
+                    // Who this machine says sent it, beside `app`, which is who they said.
+                    "sender": n.sender,
                     "title": n.title,
                     "urgency": n.urgency.as_str(),
                     "read": n.read,
@@ -213,6 +215,34 @@ pub fn urgency_int(urgency: Urgency) -> i32 {
     urgency.hint_byte() as i32
 }
 
+/// The small line under a row that says who sent it — the approval card's two facts, in the
+/// card's words, on one line.
+///
+/// Notification 134 on 22 September read `Yantrik` and said something false; the mind that
+/// sent it was in `ps` the whole time, and the row had no way to say so. The row's name is
+/// what the caller said (or, when it said nothing, the program's own name); this line is what
+/// the kernel-stamped pid on the socket resolved to, and it repeats the claim only when there
+/// was one — so a reader can see a claim and a fact, and whether they agree.
+///
+/// Empty for a notification with no sender record: one from before this existed, or one from
+/// the freedesktop door, which has not asked the bus who was behind it. The row shows nothing
+/// rather than a line that would have to guess.
+pub fn sender_line(n: &Notification) -> String {
+    let Some(sender) = &n.sender else {
+        return String::new();
+    };
+    let claim = match &sender.claimed {
+        Some(name) => format!("\u{201c}{name}\u{201d} says the caller \u{b7} "),
+        None => String::new(),
+    };
+    if sender.pid == 0 {
+        // The card's words for the same situation; "verified: could not be identified" would
+        // read as if something had been verified.
+        return format!("{claim}{} by this machine", sender.verified);
+    }
+    format!("{claim}verified by this machine: {}", sender.verified)
+}
+
 /// Convert one notification to the Slint row.
 pub fn to_slint_data(n: &Notification) -> crate::NotificationData {
     crate::NotificationData {
@@ -223,6 +253,7 @@ pub fn to_slint_data(n: &Notification) -> crate::NotificationData {
         urgency: urgency_int(n.urgency),
         time_ago: crate::bridge::format_time_ago(seconds_since(&n.created_at)).into(),
         is_read: n.read,
+        sender_line: sender_line(n).into(),
         is_group_header: false,
         group_name: n.app.clone().into(),
         group_icon: first_letter(&n.app),
@@ -286,6 +317,7 @@ pub fn sync_to_ui(mirror: &NotificationMirror, ui_weak: &slint::Weak<crate::App>
             urgency: 0,
             time_ago: slint::SharedString::default(),
             is_read: true,
+            sender_line: slint::SharedString::default(),
             is_group_header: true,
             group_name: first.app.clone().into(),
             group_icon: first_letter(&first.app),
@@ -307,7 +339,7 @@ pub fn sync_to_ui(mirror: &NotificationMirror, ui_weak: &slint::Weak<crate::App>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yantrik_ipc_contracts::notifications::Source;
+    use yantrik_ipc_contracts::notifications::{Sender, Source};
 
     fn note(id: &str, app: &str, created_at: &str) -> Notification {
         Notification {
@@ -322,8 +354,55 @@ mod tests {
             actions: Vec::new(),
             source: Source::Yantrik,
             replaces_id: None,
+            sender: None,
             revision: 1,
         }
+    }
+
+    #[test]
+    fn the_row_says_who_sent_it_in_the_cards_words() {
+        // Notification 134, as the service records it now: filed under the program, the claim
+        // beside it, and the verified line the approval card would have shown for the same pid.
+        let mut n = note("134", "hermes_cli.main", "2026-09-23T00:43:53Z");
+        n.sender = Some(Sender {
+            claimed: Some("Yantrik".into()),
+            verified: "python -m hermes_cli.main gateway run --replace (pid 689)".into(),
+            pid: 689,
+            exe: "/home/yantrik/.hermes/hermes-agent/venv/bin/python".into(),
+        });
+        let line = sender_line(&n);
+        assert!(line.starts_with("\u{201c}Yantrik\u{201d} says the caller"), "{line}");
+        assert!(line.contains("verified by this machine: python -m hermes_cli.main"), "{line}");
+        assert!(line.ends_with("(pid 689)"), "{line}");
+
+        // No claim, no claim on the line: the name on the row is the machine's, and the line
+        // says only what was verified.
+        n.sender = Some(Sender {
+            claimed: None,
+            verified: "a program started from a terminal: yantrik-terminal (pid 812)".into(),
+            pid: 812,
+            exe: "/opt/yantrik/bin/yantrik-terminal".into(),
+        });
+        assert_eq!(
+            sender_line(&n),
+            "verified by this machine: a program started from a terminal: yantrik-terminal (pid 812)"
+        );
+
+        // Nothing established is said in the card's words, not as a verification of nothing.
+        n.sender = Some(Sender {
+            claimed: Some("Yantrik".into()),
+            verified: "could not be identified".into(),
+            pid: 0,
+            exe: String::new(),
+        });
+        assert_eq!(
+            sender_line(&n),
+            "\u{201c}Yantrik\u{201d} says the caller \u{b7} could not be identified by this machine"
+        );
+
+        // An old record, and a freedesktop one: no line, rather than a guess.
+        n.sender = None;
+        assert_eq!(sender_line(&n), "");
     }
 
     #[test]

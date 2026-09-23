@@ -704,11 +704,16 @@ def cmd_journal(_):
 # be told. It lands in the same store as every notification on the machine — `notify-send`,
 # Chromium, our own apps — so the toast, the notification centre and `yos describe shell`
 # all see it.
+#
+# No `--app` sends no name. This used to fill in `Yantrik`, so every line typed here — and
+# every line a mind sent through here — wore the desktop's own name (#114). The service files
+# a nameless notification under the program that called, as the kernel identified it, and
+# records both what was claimed and what it verified; `Yantrik` is kept for the shell itself.
 
 
 def cmd_notify(argv):
     urgency = "normal"
-    app = "Yantrik"
+    app = None
     words = []
     i = 0
     while i < len(argv):
@@ -723,16 +728,20 @@ def cmd_notify(argv):
         die("usage: yos notify <title> [body] [--urgency low|normal|critical] [--app NAME]")
 
     ensure_service("notifications")
-    stored = call("notifications", "notifications.add", {
-        "app": app,
+    params = {
         "title": words[0],
         "body": " ".join(words[1:]),
         "urgency": urgency,
-    })
-    # The id, because that is what `yos act notifications dismiss id=...` takes, and the
-    # urgency as the store recorded it — a typo in `--urgency` becomes `normal` rather than
-    # a refusal, and printing it is how the sender finds out.
-    print("%s  [%s] %s" % (stored["id"], stored["urgency"], stored["title"]))
+    }
+    if app is not None:
+        params["app"] = app
+    stored = call("notifications", "notifications.add", params)
+    # The id, because that is what `yos act notifications dismiss id=...` takes; the urgency
+    # as the store recorded it — a typo in `--urgency` becomes `normal` rather than a refusal,
+    # and printing it is how the sender finds out; and the name it was filed under, which is
+    # the sender's word only if they gave one.
+    print("%s  [%s] %s  (from %s)" % (stored["id"], stored["urgency"], stored["title"],
+                                     stored.get("app", "?")))
     if stored.get("body"):
         print("  %s" % stored["body"])
 

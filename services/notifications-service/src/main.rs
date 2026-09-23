@@ -33,6 +33,21 @@
 //!
 //! Do Not Disturb is *not* here. It decides whether a toast pops, which is a question about the
 //! screen; everything is stored and counted either way.
+//!
+//! ## Who sent it
+//!
+//! Found on 22 September 2026 (#114). A mind posted, as `app: "Yantrik"`, that Studio had made
+//! three pictures and one had taken 41 seconds; Studio had made one, in 0.05 s. The record in
+//! the store had the name, the false sentence and nothing about who had called. The kernel had
+//! stamped the caller's pid on the socket the whole time (`SO_PEERCRED`) and this handler was
+//! the one place that threw it away — `notify` filled in `Yantrik` for anything that gave no
+//! name, and took any name that was given at its word.
+//!
+//! The approval card already answers this properly, with two lines it refuses to merge: what
+//! the caller called itself, and the program `/proc` says opened the socket. Every notification
+//! that comes through the socket carries the same two now — see [`attribute`] — filled in at the
+//! moment the call arrives, which is the one moment the peer is certainly still there, and the
+//! shell draws them in the card's words. Nothing in the request can set any of it.
 
 mod freedesktop;
 mod store;
@@ -41,6 +56,8 @@ use std::sync::Arc;
 
 use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
 use yantrik_ipc_contracts::notifications::*;
+use yantrik_ipc_transport::peer_identity::{self, Program};
+use yantrik_ipc_transport::PeerCred;
 use yantrik_service_sdk::prelude::*;
 
 fn main() {
@@ -91,21 +108,48 @@ impl ServiceHandler for NotificationsHandler {
         "notifications"
     }
 
+    /// Nothing reaches this: the transport calls [`ServiceHandler::handle_from`] with the
+    /// peer's credentials for every request off the socket. It stays because the trait requires
+    /// it, and it answers as a request with no credentials — "could not be identified" — rather
+    /// than as anything more flattering.
     fn handle(
         &self,
         method: &str,
         params: serde_json::Value,
+    ) -> Result<serde_json::Value, ServiceError> {
+        self.dispatch(method, params, None)
+    }
+
+    fn handle_from(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        peer: Option<PeerCred>,
+    ) -> Result<serde_json::Value, ServiceError> {
+        self.dispatch(method, params, peer)
+    }
+}
+
+impl NotificationsHandler {
+    fn dispatch(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        peer: Option<PeerCred>,
     ) -> Result<serde_json::Value, ServiceError> {
         match method {
             LIST => Ok(serde_json::to_value(self.store.list()).unwrap_or_default()),
 
             ADD => {
                 let request = parse_add(&params)?;
-                let stored = self.store.add(request);
+                let who = who_is_calling(peer);
+                let (app, sender) = attribute(&request.app, &who);
+                let stored = self.store.add_from(AddRequest { app, ..request }, Some(sender));
                 tracing::info!(
                     id = %stored.id,
                     app = %stored.app,
                     urgency = stored.urgency.as_str(),
+                    sender = %who.line(),
                     "notification stored"
                 );
                 Ok(serde_json::to_value(stored).unwrap_or_default())
@@ -175,7 +219,7 @@ impl ServiceHandler for NotificationsHandler {
                 &self.describe_view(),
                 &notification_actions(),
             )),
-            "app.act" => self.act(&params),
+            "app.act" => self.act(&params, peer),
 
             other => Err(ServiceError {
                 code: -32601,
@@ -183,9 +227,7 @@ impl ServiceHandler for NotificationsHandler {
             }),
         }
     }
-}
 
-impl NotificationsHandler {
     /// Everything the machine is currently trying to say, newest first, with the counts a caller
     /// reading one line needs — and, plainly, whether the freedesktop door is open.
     fn describe_view(&self) -> View {
@@ -219,6 +261,9 @@ impl NotificationsHandler {
                     "body": n.body,
                     "urgency": n.urgency.as_str(),
                     "source": n.source.as_str(),
+                    // Who this machine says sent it, beside `app`, which is who they said. A
+                    // caller reading this list can compare the two, which is the whole point.
+                    "sender": n.sender,
                     "read": n.read,
                     "at": n.created_at,
                     "actions": n.actions.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
@@ -247,7 +292,11 @@ impl NotificationsHandler {
     }
 
     /// Dispatch `app.act`.
-    fn act(&self, params: &serde_json::Value) -> Result<serde_json::Value, ServiceError> {
+    fn act(
+        &self,
+        params: &serde_json::Value,
+        peer: Option<PeerCred>,
+    ) -> Result<serde_json::Value, ServiceError> {
         let action = params["action"].as_str().unwrap_or("").trim();
         let args = params
             .get("args")
@@ -258,19 +307,32 @@ impl NotificationsHandler {
             // has to actually tell them.
             "notify" => {
                 let title = required_str(&args, "title")?;
-                let stored = self.store.add(AddRequest {
-                    app: args["app"].as_str().unwrap_or("Yantrik").to_string(),
-                    title,
-                    body: args["body"].as_str().unwrap_or_default().to_string(),
-                    urgency: Urgency::parse(args["urgency"].as_str().unwrap_or("normal")),
-                    source: Source::Yantrik,
-                    ..Default::default()
-                });
+                let who = who_is_calling(peer);
+                let (app, sender) = attribute(args["app"].as_str().unwrap_or_default(), &who);
+                let stored = self.store.add_from(
+                    AddRequest {
+                        app,
+                        title,
+                        body: args["body"].as_str().unwrap_or_default().to_string(),
+                        urgency: Urgency::parse(args["urgency"].as_str().unwrap_or("normal")),
+                        source: Source::Yantrik,
+                        ..Default::default()
+                    },
+                    Some(sender),
+                );
+                tracing::info!(
+                    id = %stored.id,
+                    app = %stored.app,
+                    sender = %who.line(),
+                    "notification stored by `notify`"
+                );
+                // The caller is told what it was filed under and what was recorded about it,
+                // so a mind that said `Yantrik` learns on the spot that the row will not.
                 Ok(act_json(
                     "notifications",
                     "notifications#act",
                     true,
-                    serde_json::json!({ "id": stored.id, "app": stored.app }),
+                    serde_json::json!({ "id": stored.id, "app": stored.app, "sender": stored.sender }),
                     &self.describe_view(),
                 ))
             }
@@ -355,7 +417,12 @@ fn notification_actions() -> Vec<Action> {
         .arg(
             Param::text("app")
                 .optional()
-                .describe("Who is speaking, as the person would recognise it. Default: Yantrik"),
+                .describe(
+                    "Who is speaking, as the person would recognise it. Kept as your claim \
+                     beside the program this machine verified sent it; leave it out to be \
+                     filed under that program's own name. `Yantrik` is the desktop's and is \
+                     not granted to anything else",
+                ),
         ),
         Action::new("dismiss", "Dismiss one notification by id")
             .risk("standard")
@@ -368,6 +435,74 @@ fn notification_actions() -> Vec<Action> {
         .risk("standard")
         .arg(Param::text("id").optional().describe("One notification, or omit for all")),
     ]
+}
+
+// ── Who sent it ─────────────────────────────────────────────────────────────────────────────
+
+/// The desktop's own name. Granted as `app` only to the desktop itself; anything else that
+/// claims it is filed under its own program, and the claim is kept beside it.
+const OS_NAME: &str = "Yantrik";
+
+/// The desktop itself: the shell, and this service. The only callers `Yantrik` belongs to.
+const DESKTOP_BINARIES: &[&str] = &["yantrik-ui", "notifications-service"];
+
+/// The store's last resort for a row with no name, as it always was.
+const NAMELESS: &str = "unknown";
+
+/// Is the program on the socket the desktop itself?
+///
+/// Judged by the DIRECT peer, not by the first recognisable ancestor. The shell sends its own
+/// notifications from its own process, so its peer *is* `yantrik-ui`. A mind driven through a
+/// bridge the shell spawned has `yantrik-ui` above it but `yos` on the socket, and it is the
+/// mind, not the shell — the card's walk names the shell for it, which is right for a card and
+/// wrong for handing out the shell's name.
+fn is_the_desktop(who: &Program) -> bool {
+    who.direct
+        .as_ref()
+        .is_some_and(|f| DESKTOP_BINARIES.contains(&peer_identity::basename(&f.exe)))
+}
+
+/// What this machine can establish about whoever is on the socket, read now.
+///
+/// Now and not later: the peer is waiting for this call's answer, so it is alive, and for a
+/// mind's request it is `yos`, which exits the moment the answer arrives.
+fn who_is_calling(peer: Option<PeerCred>) -> Program {
+    peer_identity::resolve(peer.map(|p| p.pid))
+}
+
+/// The record of who sent a notification, and the `app` it is filed under.
+///
+/// `app_given` is the caller's word, verbatim or empty. It is kept as the claim whatever it
+/// says; what it decides is the name on the row:
+///
+/// * a name the caller gave is the name on the row — except the desktop's own, which only the
+///   desktop gets. A mind that says `Yantrik` is filed under its own program, and the row says
+///   what it claimed beside what was verified;
+/// * no name is the verified program's own name (`hermes_cli.main`, `yantrik-terminal`),
+///   `Yantrik` for the desktop itself, and `unknown` when nothing could be established. Never
+///   `Yantrik` by default, which is what this said for every nameless call from anything.
+///
+/// A caller nothing could be established about — no credentials, an unreadable `/proc` — is
+/// not the desktop. That is the direction to fail in: the name is worth taking only if the
+/// machine can say who did not get it.
+fn attribute(app_given: &str, who: &Program) -> (String, Sender) {
+    let claimed = app_given.trim();
+    let claimed = (!claimed.is_empty()).then(|| claimed.to_string());
+    let desktop = is_the_desktop(who);
+    let app = match claimed.as_deref() {
+        Some(name) if name.eq_ignore_ascii_case(OS_NAME) && !desktop => who.name(),
+        Some(name) => name.to_string(),
+        None if desktop => OS_NAME.to_string(),
+        None => who.name(),
+    };
+    let app = if app.is_empty() { NAMELESS.to_string() } else { app };
+    let sender = Sender {
+        claimed,
+        verified: who.line(),
+        pid: who.pid(),
+        exe: who.exe(),
+    };
+    (app, sender)
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────────────────────
@@ -453,10 +588,13 @@ fn optional_str(params: &serde_json::Value, key: &str) -> Result<Option<String>,
 
 /// Read an `notifications.add` payload.
 ///
-/// `body` is optional and `app` defaults, because the shortest useful call is a title — and the
-/// old handler made both `title` and `body` required, so the one-line send every caller actually
-/// wants was a -32602. Urgency is parsed leniently for the same reason: a typo in one field is
-/// not worth losing the message over.
+/// `body` is optional and `app` may be left out, because the shortest useful call is a title —
+/// and the old handler made both `title` and `body` required, so the one-line send every caller
+/// actually wants was a -32602. Urgency is parsed leniently for the same reason: a typo in one
+/// field is not worth losing the message over.
+///
+/// An absent `app` comes out empty, not as a name. Which name goes on the row is decided by
+/// [`attribute`], from what the kernel says about the caller; this parser has no such fact.
 fn parse_add(params: &serde_json::Value) -> Result<AddRequest, ServiceError> {
     let title = required_str(params, "title")?;
     let actions = params["actions"]
@@ -479,11 +617,11 @@ fn parse_add(params: &serde_json::Value) -> Result<AddRequest, ServiceError> {
 
     Ok(AddRequest {
         // `app_id` as well as `app`: the old method took `app_id`, and a caller written against
-        // it should not silently start reporting itself as "unknown".
+        // it should not silently start reporting itself as nameless.
         app: params["app"]
             .as_str()
             .or_else(|| params["app_id"].as_str())
-            .unwrap_or("unknown")
+            .unwrap_or_default()
             .to_string(),
         title,
         body: params["body"].as_str().unwrap_or_default().to_string(),
@@ -508,7 +646,9 @@ mod tests {
         let req = parse_add(&serde_json::json!({ "title": "Build finished" })).unwrap();
         assert_eq!(req.title, "Build finished");
         assert_eq!(req.body, "");
-        assert_eq!(req.app, "unknown");
+        // No name is no name. What goes on the row is `attribute`'s decision, from the caller's
+        // credentials, which a parser does not have.
+        assert_eq!(req.app, "");
         assert_eq!(req.urgency, Urgency::Normal);
         assert_eq!(req.source, Source::Yantrik);
     }
@@ -588,6 +728,129 @@ mod tests {
             optional_str(&serde_json::json!({ "id": "" }), "id").unwrap(),
             Some(String::new())
         );
+    }
+
+    // ── Who sent it ──
+
+    fn facts(pid: i32, exe: &str, cmdline: &str) -> peer_identity::ProcessFacts {
+        peer_identity::ProcessFacts {
+            pid,
+            exe: exe.into(),
+            short_cmdline: cmdline.into(),
+            started: pid as u64 * 100,
+        }
+    }
+
+    /// Hermes through the bridge, as `ps` showed it on the VM on 22 September.
+    fn hermes() -> Program {
+        peer_identity::choose(vec![
+            facts(7311, "/usr/bin/python3.11", "python3 yos act notifications notify title=x"),
+            facts(958, "/usr/bin/python3.11", "python3 yos-mcp"),
+            facts(
+                689,
+                "/home/yantrik/.hermes/hermes-agent/venv/bin/python",
+                "python -m hermes_cli.main gateway run --replace",
+            ),
+            facts(1, "/usr/lib/systemd/systemd", "systemd --user"),
+        ])
+    }
+
+    /// The shell, sending one of its own from its own process.
+    fn shell() -> Program {
+        peer_identity::choose(vec![
+            facts(7456, "/opt/yantrik/bin/yantrik-ui", "yantrik-ui config.yaml"),
+            facts(1, "/usr/lib/systemd/systemd", "systemd --user"),
+        ])
+    }
+
+    /// Somebody typing `yos notify` into the Terminal app.
+    fn terminal() -> Program {
+        peer_identity::choose(vec![
+            facts(9001, "/usr/bin/python3.11", "python3 yos notify done"),
+            facts(8800, "/usr/bin/bash", "bash"),
+            facts(812, "/opt/yantrik/bin/yantrik-terminal", "yantrik-terminal"),
+            facts(7456, "/opt/yantrik/bin/yantrik-ui", "yantrik-ui config.yaml"),
+        ])
+    }
+
+    #[test]
+    fn an_app_given_by_a_caller_that_is_not_the_desktop_is_recorded_as_a_claim() {
+        // Notification 134: the name was taken at its word and nothing else was kept. Now the
+        // name is the claim, and what the kernel established sits beside it.
+        let (app, sender) = attribute("Studio", &hermes());
+        assert_eq!(app, "Studio", "a name that is not the desktop's is the caller's to use");
+        assert_eq!(sender.claimed.as_deref(), Some("Studio"));
+        assert!(sender.verified.contains("hermes_cli.main"), "{}", sender.verified);
+        assert!(sender.verified.contains("pid 689"), "{}", sender.verified);
+        assert_eq!(sender.pid, 689);
+        assert!(sender.exe.ends_with("venv/bin/python"), "{}", sender.exe);
+    }
+
+    #[test]
+    fn no_app_given_files_it_under_the_program_that_called() {
+        // This used to say `Yantrik` for every nameless call, from anything on the machine.
+        let (app, sender) = attribute("", &hermes());
+        assert_eq!(app, "hermes_cli.main");
+        assert_eq!(sender.claimed, None, "the machine chose the name; nobody claimed it");
+        assert!(sender.verified.contains("pid 689"), "{}", sender.verified);
+
+        let (app, sender) = attribute("   ", &terminal());
+        assert_eq!(app, "yantrik-terminal");
+        assert!(
+            sender.verified.starts_with("a program started from a terminal: "),
+            "{}",
+            sender.verified
+        );
+
+        // Nothing established: the store's old last resort, and the card's words for it.
+        let (app, sender) = attribute("", &Program::unknown());
+        assert_eq!(app, NAMELESS);
+        assert_eq!(sender.verified, peer_identity::UNIDENTIFIED);
+        assert_eq!(sender.pid, 0);
+        assert_eq!(sender.exe, "");
+    }
+
+    #[test]
+    fn the_desktops_own_name_is_kept_for_the_desktop_alone() {
+        // The shell's own sends — an update waiting, a mind asking — come from its own process.
+        let (app, sender) = attribute("Yantrik", &shell());
+        assert_eq!(app, "Yantrik");
+        assert_eq!(sender.claimed.as_deref(), Some("Yantrik"));
+        assert!(sender.verified.contains("yantrik-ui"), "{}", sender.verified);
+        assert_eq!(attribute("", &shell()).0, "Yantrik", "the desktop's default is its own name");
+        let this_service = peer_identity::choose(vec![facts(
+            7469,
+            "/opt/yantrik/bin/notifications-service",
+            "notifications-service",
+        )]);
+        assert_eq!(attribute("", &this_service).0, "Yantrik");
+
+        // A mind that says `Yantrik` is filed under itself, and the claim is kept beside it —
+        // the row will say what it claimed and what was verified, and the two will differ.
+        let (app, sender) = attribute("Yantrik", &hermes());
+        assert_eq!(app, "hermes_cli.main");
+        assert_eq!(sender.claimed.as_deref(), Some("Yantrik"));
+        assert_eq!(attribute("yantrik", &hermes()).0, "hermes_cli.main", "case is not a loophole");
+        assert_eq!(attribute(" Yantrik ", &hermes()).0, "hermes_cli.main", "nor is whitespace");
+
+        // A bridge the shell itself spawned still has `yos` on the socket: it is a mind, and
+        // the card's walk naming the shell above it does not make it the shell.
+        let via_bridge = peer_identity::choose(vec![
+            facts(9101, "/usr/bin/python3.11", "python3 yos act notifications notify title=x"),
+            facts(790, "/usr/bin/python3.11", "python3 yos-mcp"),
+            facts(7456, "/opt/yantrik/bin/yantrik-ui", "yantrik-ui config.yaml"),
+        ]);
+        assert!(!is_the_desktop(&via_bridge));
+        assert_ne!(attribute("Yantrik", &via_bridge).0, "Yantrik");
+
+        // A caller nothing could be established about does not get it either.
+        let (app, sender) = attribute("Yantrik", &Program::unknown());
+        assert_eq!(app, NAMELESS);
+        assert_eq!(sender.claimed.as_deref(), Some("Yantrik"));
+
+        // Only the bare name is the desktop's. "Yantrik Companion" is a name like any other,
+        // and the row beside it says who really sent it.
+        assert_eq!(attribute("Yantrik Companion", &hermes()).0, "Yantrik Companion");
     }
 
     #[test]

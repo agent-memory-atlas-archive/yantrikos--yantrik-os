@@ -11,6 +11,9 @@ path = "src/main.rs"
 [dependencies]
 yantrik-ipc-contracts = { workspace = true }
 yantrik-service-sdk = { workspace = true }
+# For `PeerCred` and the /proc walk behind it: every notification records which program opened
+# the socket, beside the name that program gave itself (#114).
+yantrik-ipc-transport = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
