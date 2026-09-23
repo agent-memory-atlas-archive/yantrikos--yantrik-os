@@ -13,8 +13,10 @@
 //! `yantrik_companion::recipe_view`, pure and tested there.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
+use yantrik_companion::interjection::ChatWord;
 use yantrik_companion::recipe_view::{self, RecipeView};
 
 /// How a person's press went, as the worker answered it.
@@ -42,6 +44,9 @@ static PUBLISHED: OnceLock<Mutex<Snapshot>> = OnceLock::new();
 
 /// A refresh asked of the worker and not yet answered.
 static REFRESH_ASKED: AtomicBool = AtomicBool::new(false);
+
+/// Rung when the worker answers a press, for a caller waiting on it ([`outcome_after`]).
+static ANSWERED: Condvar = Condvar::new();
 
 fn published() -> std::sync::MutexGuard<'static, Snapshot> {
     PUBLISHED
@@ -72,6 +77,67 @@ pub fn record(recipe: &str, outcome: Result<String, String>) {
     };
     p.outcome = Some(Outcome { recipe: recipe.to_string(), text, ok, serial });
     p.generation += 1;
+    drop(p);
+    ANSWERED.notify_all();
+}
+
+/// The serial of the last press the worker answered — what [`outcome_after`] waits beyond.
+pub fn last_serial() -> u64 {
+    published().outcome.as_ref().map_or(0, |o| o.serial)
+}
+
+/// Wait for the worker's answer to a press on `recipe` newer than `serial`. None when none came
+/// in `timeout`: the worker may be forty seconds into a generation.
+pub fn outcome_after(recipe: &str, serial: u64, timeout: Duration) -> Option<Outcome> {
+    let answered = |s: &Snapshot| s.outcome.as_ref().is_some_and(|o| o.serial > serial && o.recipe == recipe);
+    let (p, _) = ANSWERED
+        .wait_timeout_while(published(), timeout, |s| !answered(s))
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    p.outcome.clone().filter(|_| answered(&p))
+}
+
+/// What a line typed to the desktop says to a recipe, if anything, read against the recipes as
+/// published — so the chat can ask on the UI thread, before any mind is asked, without waiting on
+/// the worker. See `interjection::from_chat`.
+pub fn said_in_chat(text: &str) -> Option<ChatWord> {
+    word_for(&snapshot(), text, now_secs())
+}
+
+fn word_for(snap: &Snapshot, text: &str, now: f64) -> Option<ChatWord> {
+    if !snap.loaded {
+        return None;
+    }
+    yantrik_companion::interjection::from_chat(&snap.views, text, now)
+}
+
+/// Do what the chat said to a recipe the way the Recipes screen does — `CompanionHandle::recipe`,
+/// which the worker answers with `recipe_view::apply` — and stream what came of it back as the
+/// reply: the worker's own sentence, its refusal, or that it is busy.
+pub fn act_from_chat(handle: crate::bridge::CompanionHandle, word: ChatWord) -> crossbeam_channel::Receiver<String> {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    std::thread::spawn(move || {
+        let reply = match word {
+            ChatWord::To { recipe_id, name, op } => {
+                let before = last_serial();
+                match handle.recipe(recipe_id.clone(), op) {
+                    Err(why) => format!("I could not reach the companion to do that to '{name}': {why}."),
+                    Ok(()) => match outcome_after(&recipe_id, before, Duration::from_secs(30)) {
+                        Some(o) if o.ok => o.text,
+                        Some(o) => format!("Not done: {}.", o.text),
+                        None => format!("Sent to '{name}'. The companion is busy; the Recipes screen shows it once done."),
+                    },
+                }
+            }
+            which => which.which_text().unwrap_or_default(),
+        };
+        let _ = tx.send(reply);
+        let _ = tx.send("__DONE__".to_string());
+    });
+    rx
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64()
 }
 
 /// The recipes as last published.
@@ -262,10 +328,33 @@ mod tests {
         publish(vec![changed]);
         assert_eq!(snapshot().generation, first + 1);
         assert_eq!(in_flight().map(|v| v.len()), Some(0));
+        let before = last_serial();
         record("rcp_1", Err("`Tidy downloads` is not waiting for an answer".into()));
         let s = snapshot();
         assert_eq!(s.generation, first + 2);
         let o = s.outcome.expect("the outcome");
         assert!(!o.ok && o.recipe == "rcp_1");
+        // What the chat waits for after a word to a recipe: the answer to that press, not an older one.
+        assert_eq!(outcome_after("rcp_1", before, Duration::ZERO).map(|o| o.serial), Some(before + 1));
+        assert_eq!(outcome_after("rcp_1", before + 1, Duration::from_millis(10)), None, "nothing newer came");
+        assert_eq!(outcome_after("rcp_2", before, Duration::from_millis(10)), None, "that one was another recipe's");
+    }
+
+    /// The chat reads the published recipes: a word to one is found there, and before the worker
+    /// has published nothing is taken as one.
+    #[test]
+    fn the_chat_reads_the_published_recipes() {
+        let snap = Snapshot { generation: 1, loaded: true, views: Arc::new(vec![waiting_recipe()]), outcome: None };
+        assert_eq!(
+            word_for(&snap, "archive", 20.0),
+            Some(ChatWord::To {
+                recipe_id: "rcp_1".into(),
+                name: "Tidy downloads".into(),
+                op: yantrik_companion::recipe_view::RecipeOp::Answer("Archive".into()),
+            })
+        );
+        assert!(matches!(word_for(&snap, "pause it", 20.0), Some(ChatWord::To { .. })));
+        assert_eq!(word_for(&snap, "what's the time", 20.0), None);
+        assert_eq!(word_for(&Snapshot::default(), "archive", 20.0), None, "nothing published yet");
     }
 }

@@ -320,7 +320,7 @@ pub enum RecipeStatus {
     Running,
     /// Paused waiting for a condition.
     Waiting,
-    /// Held by a person (`RecipeStore::pause`). Neither executor picks it up — `get_resumable`
+    /// Held by a person (`RecipeStore::pause`). The executor does not pick it up — `get_resumable`
     /// takes `running` and `get_expired_waiting` takes `waiting` — until `RecipeStore::resume`.
     Paused,
     /// Successfully completed all steps.
@@ -382,6 +382,284 @@ pub struct StoredStep {
     pub step: RecipeStep,
     pub status: String,    // "pending", "done", "failed", "skipped"
     pub result: Option<String>,
+}
+
+/// What `get_steps` stands in for a step whose JSON it could not read: a Notify with this prefix.
+pub const UNREADABLE: &str = "PARSE ERROR: ";
+
+/// Where a waiting recipe waits ([`WaitRecord`]), kept while it waits.
+pub const WAIT_VAR: &str = "_wait";
+
+/// The Branch arms a recipe is inside, outermost first, kept while it runs them.
+pub const BRANCH_VAR: &str = "_branch";
+
+/// What each step did, run by run ([`Trail`]).
+pub const TRAIL_VAR: &str = "_trail";
+
+/// How many steps a recipe has run since it last waited — what the executor's step budget counts.
+pub const SINCE_WAIT_VAR: &str = "_since_wait";
+
+/// A recipe's own step budget, when it sets one; `recipe_executor::STEP_BUDGET` otherwise.
+pub const STEP_BUDGET_VAR: &str = "_step_budget";
+
+/// Where a recipe waits, as the executor writes it when a WaitFor or an AskUser stops it: the
+/// top-level step it waits at — the wait itself, or the Branch holding it — the arms and indexes
+/// down to the waiting step when it is inside a Branch, when it began, and for a timer when it
+/// wakes. The time is absolute, so a pause does not restart a timer and a restart keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitRecord {
+    pub step: usize,
+    #[serde(default)]
+    pub inner: Vec<(String, usize)>,
+    pub since: f64,
+    #[serde(default)]
+    pub until: Option<f64>,
+}
+
+/// What a waiting recipe waits on, read from what the store holds for it ([`waited_on`]).
+#[derive(Debug, Clone)]
+pub struct Waited {
+    /// The top-level step it waits at: the WaitFor or AskUser, or the Branch that holds it.
+    pub step: usize,
+    /// Inside a Branch: the arm and index at each level, down to the waiting step.
+    pub inner: Vec<(String, usize)>,
+    /// The WaitFor or AskUser it waits on. None: `waiting` with no wait behind it.
+    pub on: Option<RecipeStep>,
+    /// When it began to wait.
+    pub since: f64,
+    /// When a timer wakes, unix seconds.
+    pub until: Option<f64>,
+}
+
+impl Waited {
+    /// Whether the wait is over at `now`. A question is over only when it is answered — the
+    /// answer sets the recipe running, so a recipe still waiting on one is never over.
+    pub fn is_over(&self, now: f64) -> bool {
+        match &self.on {
+            Some(RecipeStep::AskUser { .. }) => false,
+            Some(RecipeStep::WaitFor { .. }) => self.until.map_or(true, |u| now >= u),
+            _ => true,
+        }
+    }
+
+    /// The variable the answer goes in, when what it waits on is a person's answer.
+    pub fn store_as(&self) -> Option<&str> {
+        match &self.on {
+            Some(RecipeStep::AskUser { store_as, .. }) => Some(store_as),
+            _ => None,
+        }
+    }
+}
+
+/// What a recipe waits on, from its row, its steps and its variables. Call it for a recipe that
+/// is waiting (or paused while waiting); it does not look at the status.
+///
+/// The executor's `_wait` record says where, including inside a Branch. A recipe that began to
+/// wait before there was one is read the old way: the step just behind the pointer, with a timer
+/// counted from when the row last changed.
+pub fn waited_on(
+    recipe: &Recipe,
+    steps: &[StoredStep],
+    vars: &std::collections::HashMap<String, serde_json::Value>,
+) -> Option<Waited> {
+    let is_wait = |s: &&RecipeStep| matches!(s, RecipeStep::WaitFor { .. } | RecipeStep::AskUser { .. });
+    if let Some(record) = vars.get(WAIT_VAR).and_then(|v| serde_json::from_value::<WaitRecord>(v.clone()).ok()) {
+        let mut at = steps.iter().find(|s| s.step_index == record.step).map(|s| &s.step);
+        for (arm, k) in &record.inner {
+            at = match at {
+                Some(RecipeStep::Branch { then_steps, else_steps, .. }) => {
+                    if arm == "then" { then_steps.get(*k) } else { else_steps.get(*k) }
+                }
+                _ => None,
+            };
+        }
+        return Some(Waited {
+            step: record.step,
+            inner: record.inner,
+            on: at.filter(is_wait).cloned(),
+            since: record.since,
+            until: record.until,
+        });
+    }
+    let before = recipe.current_step.checked_sub(1);
+    let on = before
+        .and_then(|i| steps.iter().find(|s| s.step_index == i))
+        .map(|s| &s.step)
+        .filter(is_wait)
+        .cloned();
+    let until = match &on {
+        Some(RecipeStep::WaitFor { condition, timeout_secs }) => {
+            Some(wakes_at(condition, *timeout_secs, recipe.updated_at).unwrap_or(recipe.updated_at))
+        }
+        _ => None,
+    };
+    Some(Waited { step: before.unwrap_or(0), inner: Vec::new(), on, since: recipe.updated_at, until })
+}
+
+/// When a WaitFor that begins at `from` wakes: after its duration, or at the next time of day
+/// it names (UTC, as every clock in the engine is) — and no later than its timeout. None when it
+/// has nothing to wait for: a zero duration, or the very minute it names.
+///
+/// A time of day already gone by today is tomorrow's. It used to count as met, so "wait until
+/// 09:00" set at 10:00 went on at once, and a daily loop around it spun.
+pub fn wakes_at(condition: &WaitCondition, timeout_secs: Option<u64>, from: f64) -> Option<f64> {
+    let due = match condition {
+        WaitCondition::Duration { seconds: 0 } => return None,
+        WaitCondition::Duration { seconds } => from + *seconds as f64,
+        WaitCondition::Time { hour, minute } => {
+            let today = (from / 86_400.0).floor() * 86_400.0 + f64::from(*hour) * 3600.0 + f64::from(*minute) * 60.0;
+            if from < today {
+                today
+            } else if from < today + 60.0 {
+                return None;
+            } else {
+                today + 86_400.0
+            }
+        }
+    };
+    Some(match timeout_secs {
+        Some(t) => due.min(from + t as f64),
+        None => due,
+    })
+}
+
+/// A unix time as the engine's clock reads it: "08:15 UTC".
+pub fn clock_text(ts: f64) -> String {
+    let of_day = (ts.floor() as i64).rem_euclid(86_400);
+    format!("{:02}:{:02} UTC", of_day / 3600, (of_day % 3600) / 60)
+}
+
+/// What each step of a recipe did, run by run — `_trail`, keyed by the step's index: how many
+/// times it ran (`runs`), which way a JumpIf or a Branch went (`went`), how many times a JumpIf
+/// jumped (`jumps`), what each step of a Branch's arm came to (`subs`), and where a jump out of
+/// an arm went (`left`). The Recipes screen reads it to say which way a Branch went and how many
+/// rounds a loop has gone; the executor, whether a question is being asked for the first time.
+#[derive(Debug, Clone, Default)]
+pub struct Trail(serde_json::Map<String, serde_json::Value>);
+
+impl Trail {
+    pub fn read(vars: &std::collections::HashMap<String, serde_json::Value>) -> Self {
+        Self(vars.get(TRAIL_VAR).and_then(|v| v.as_object()).cloned().unwrap_or_default())
+    }
+
+    pub fn save_to(&self, conn: &Connection, recipe_id: &str) {
+        RecipeStore::set_var(conn, recipe_id, TRAIL_VAR, &serde_json::Value::Object(self.0.clone()));
+    }
+
+    fn get(&self, step: usize) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.0.get(&step.to_string()).and_then(|e| e.as_object())
+    }
+
+    fn entry(&mut self, step: usize) -> &mut serde_json::Map<String, serde_json::Value> {
+        let e = self.0.entry(step.to_string()).or_insert_with(|| serde_json::json!({}));
+        if !e.is_object() {
+            *e = serde_json::json!({});
+        }
+        e.as_object_mut().expect("an object, just made one")
+    }
+
+    fn count(&self, step: usize, key: &str) -> u64 {
+        self.get(step).and_then(|e| e.get(key)).and_then(|v| v.as_u64()).unwrap_or(0)
+    }
+
+    fn bump(&mut self, step: usize, key: &str) {
+        let n = self.count(step, key) + 1;
+        self.entry(step).insert(key.into(), n.into());
+    }
+
+    /// How many times the step has run.
+    pub fn runs(&self, step: usize) -> u64 {
+        self.count(step, "runs")
+    }
+
+    /// How many times a JumpIf has jumped.
+    pub fn jumps(&self, step: usize) -> u64 {
+        self.count(step, "jumps")
+    }
+
+    /// Which way a JumpIf (jumped, continued) or a Branch (then, else) went last.
+    pub fn way(&self, step: usize) -> Option<&str> {
+        self.get(step).and_then(|e| e.get("went")).and_then(|v| v.as_str())
+    }
+
+    /// What each step of a Branch's arm came to, on its last round: done, skipped, failed,
+    /// waiting, waited, answered.
+    pub fn subs(&self, step: usize) -> Vec<String> {
+        self.get(step)
+            .and_then(|e| e.get("subs"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Where a jump out of a Branch's arm went, 0-based.
+    pub fn left(&self, step: usize) -> Option<usize> {
+        self.get(step).and_then(|e| e.get("left")).and_then(|v| v.as_u64()).map(|n| n as usize)
+    }
+
+    pub fn ran(&mut self, step: usize) {
+        self.bump(step, "runs");
+    }
+
+    pub fn went(&mut self, step: usize, way: &str) {
+        self.entry(step).insert("went".into(), way.into());
+    }
+
+    pub fn jumped(&mut self, step: usize) {
+        self.bump(step, "jumps");
+        self.went(step, "jumped");
+    }
+
+    /// A Branch begins a round: which arm, and nothing of it run yet.
+    pub fn enter_branch(&mut self, step: usize, arm: &str) {
+        self.ran(step);
+        let e = self.entry(step);
+        e.insert("went".into(), arm.into());
+        e.insert("subs".into(), serde_json::json!([]));
+        e.remove("left");
+    }
+
+    /// One more step of the arm came to `outcome`.
+    pub fn sub(&mut self, step: usize, outcome: &str) {
+        let e = self.entry(step);
+        match e.get_mut("subs").and_then(|v| v.as_array_mut()) {
+            Some(subs) => subs.push(outcome.into()),
+            None => {
+                e.insert("subs".into(), serde_json::json!([outcome]));
+            }
+        }
+    }
+
+    /// A jump out of the arm, to `target`.
+    pub fn leave(&mut self, step: usize, target: usize) {
+        self.entry(step).insert("left".into(), target.into());
+    }
+
+    /// The last step of the arm, `from` → `to`: a wait that is over, a question answered.
+    pub fn settle_last(&mut self, step: usize, from: &str, to: &str) {
+        if let Some(last) = self.entry(step).get_mut("subs").and_then(|v| v.as_array_mut()).and_then(|a| a.last_mut()) {
+            if last.as_str() == Some(from) {
+                *last = to.into();
+            }
+        }
+    }
+
+    /// The same, straight in the store.
+    pub fn note(conn: &Connection, recipe_id: &str, step: usize, from: &str, to: &str) {
+        let mut trail = Self::read(&RecipeStore::get_vars(conn, recipe_id));
+        trail.settle_last(step, from, to);
+        trail.save_to(conn, recipe_id);
+    }
+
+    /// The JumpIf that has gone back the most, and how many times.
+    pub fn most_looped(&self) -> Option<(usize, u64)> {
+        self.0
+            .keys()
+            .filter_map(|k| k.parse::<usize>().ok())
+            .map(|i| (i, self.jumps(i)))
+            .filter(|(_, n)| *n > 0)
+            .max_by_key(|(i, n)| (*n, std::cmp::Reverse(*i)))
+    }
 }
 
 // ── SQLite Persistence ──
@@ -477,8 +755,14 @@ impl RecipeStore {
         id
     }
 
-    /// Register or update a built-in recipe with a fixed ID. Idempotent — safe to call on every boot.
-    /// Updates step definitions if the recipe already exists (handles version upgrades).
+    /// Register or update a built-in recipe with a fixed ID. Idempotent — called at every start.
+    ///
+    /// A built-in is a template: it never runs on its own id (`start_run` makes each run a recipe
+    /// of its own). This used to delete and re-insert every built-in's step rows at every start, so
+    /// a built-in that had run in place — as `run_recipe` used to run it — lost its steps' results
+    /// and states at the next start. Now a start that changes nothing touches nothing; a built-in
+    /// with a run on its own id has the run moved to an id of its own, record and all, and is
+    /// made a clean template again; and only a changed definition is rewritten.
     pub fn ensure_builtin(
         conn: &Connection,
         id: &str,
@@ -486,15 +770,33 @@ impl RecipeStore {
         description: &str,
         steps: &[RecipeStep],
     ) {
-        if Self::get(conn, id).is_some() {
-            // Update steps in place (definition may change across versions)
-            conn.execute("DELETE FROM recipe_steps WHERE recipe_id = ?1", params![id]).ok();
-            for (i, step) in steps.iter().enumerate() {
-                let step_json = serde_json::to_string(step).unwrap_or_default();
+        if let Some(existing) = Self::get(conn, id) {
+            let stored = Self::get_steps(conn, id);
+            let ran = existing.status != RecipeStatus::Pending || stored.iter().any(|s| s.status != "pending");
+            if ran {
+                if let Some(kept) = Self::copy(conn, id, true) {
+                    tracing::info!(recipe_id = %id, run = %kept, "Built-in's run kept as a recipe of its own");
+                }
                 conn.execute(
-                    "INSERT INTO recipe_steps (recipe_id, step_index, step_json) VALUES (?1, ?2, ?3)",
-                    params![id, i as i64, step_json],
-                ).ok();
+                    "UPDATE recipes SET status = 'pending', current_step = 0, error_msg = NULL WHERE id = ?1",
+                    params![id],
+                )
+                .ok();
+                conn.execute("DELETE FROM recipe_vars WHERE recipe_id = ?1", params![id]).ok();
+                Self::reset_steps(conn, id, 0, usize::MAX);
+            }
+            let wanted: Vec<String> = steps.iter().map(|s| serde_json::to_string(s).unwrap_or_default()).collect();
+            let have: Vec<String> = stored.iter().map(|s| serde_json::to_string(&s.step).unwrap_or_default()).collect();
+            if wanted != have {
+                // The definition changed across versions: the template takes the new steps.
+                conn.execute("DELETE FROM recipe_steps WHERE recipe_id = ?1", params![id]).ok();
+                for (i, step_json) in wanted.iter().enumerate() {
+                    conn.execute(
+                        "INSERT INTO recipe_steps (recipe_id, step_index, step_json) VALUES (?1, ?2, ?3)",
+                        params![id, i as i64, step_json],
+                    )
+                    .ok();
+                }
             }
             return;
         }
@@ -574,7 +876,7 @@ impl RecipeStore {
         stmt.query_map(params![recipe_id], |row| {
             let step_json: String = row.get(1)?;
             let step: RecipeStep = serde_json::from_str(&step_json)
-                .unwrap_or(RecipeStep::Notify { message: format!("PARSE ERROR: {}", step_json) });
+                .unwrap_or(RecipeStep::Notify { message: format!("{UNREADABLE}{step_json}") });
             Ok(StoredStep {
                 step_index: row.get::<_, i64>(0)? as usize,
                 step,
@@ -612,6 +914,94 @@ impl RecipeStore {
             params![recipe_id, key, val_str],
         )
         .ok();
+    }
+
+    /// Forget a recipe variable.
+    pub fn delete_var(conn: &Connection, recipe_id: &str, key: &str) {
+        conn.execute("DELETE FROM recipe_vars WHERE recipe_id = ?1 AND key = ?2", params![recipe_id, key]).ok();
+    }
+
+    /// Mark the steps in `from..to` as not run: a loop going round them again, or a template made
+    /// clean for its next run.
+    pub fn reset_steps(conn: &Connection, recipe_id: &str, from: usize, to: usize) {
+        conn.execute(
+            "UPDATE recipe_steps SET status = 'pending', result = NULL
+             WHERE recipe_id = ?1 AND step_index >= ?2 AND step_index < ?3",
+            params![recipe_id, from as i64, to.min(i64::MAX as usize) as i64],
+        )
+        .ok();
+    }
+
+    /// A new recipe with another's name, description and steps. `with_state`: its status, step
+    /// pointer, error, times, steps' records and variables too — a run moved to an id of its own.
+    /// Otherwise nothing has run: a new run of the definition. Triggers stay with the original.
+    fn copy(conn: &Connection, source_id: &str, with_state: bool) -> Option<String> {
+        let source = Self::get(conn, source_id)?;
+        let steps = Self::get_steps(conn, source_id);
+        let id = format!("rcp_{}", &uuid7::uuid7().to_string()[24..]);
+        let now = now_ts();
+        let (status, current, error, created, updated) = if with_state {
+            (source.status.as_str(), source.current_step, source.error_message.clone(), source.created_at, source.updated_at)
+        } else {
+            ("pending", 0, None, now, now)
+        };
+        conn.execute(
+            "INSERT INTO recipes (id, name, description, status, current_step, error_msg, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, source.name, source.description, status, current as i64, error, created, updated],
+        )
+        .ok()?;
+        for s in &steps {
+            let step_json = serde_json::to_string(&s.step).unwrap_or_default();
+            let (step_status, result) = if with_state { (s.status.as_str(), s.result.clone()) } else { ("pending", None) };
+            conn.execute(
+                "INSERT INTO recipe_steps (recipe_id, step_index, step_json, status, result) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, s.step_index as i64, step_json, step_status, result],
+            )
+            .ok();
+        }
+        if with_state {
+            for (key, value) in Self::get_vars(conn, source_id) {
+                Self::set_var(conn, &id, &key, &value);
+            }
+        }
+        Some(id)
+    }
+
+    /// Start a recipe, by id or by name, with these variables. Returns the id of the run.
+    ///
+    /// A run of a template — a built-in — or of a recipe that has already run is a new recipe with
+    /// the same steps, so each run keeps its own record and the template stays a template. It
+    /// used to be reset in place: steps to pending, pointer to 0, the last run's record gone. A
+    /// recipe that has never run starts on its own id. One in flight is not started over itself.
+    pub fn start_run(
+        conn: &Connection,
+        id_or_name: &str,
+        variables: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<(Recipe, String), String> {
+        let recipe = match Self::get(conn, id_or_name) {
+            Some(r) => r,
+            None => Self::find_by_name(conn, id_or_name).ok_or_else(|| format!("Recipe not found: {id_or_name}"))?,
+        };
+        if matches!(recipe.status, RecipeStatus::Running | RecipeStatus::Waiting | RecipeStatus::Paused) {
+            return Err(format!(
+                "Recipe '{}' [{}] is already {} — cancel it first to start it over.",
+                recipe.name,
+                recipe.id,
+                recipe.status.as_str()
+            ));
+        }
+        let touched = Self::get_steps(conn, &recipe.id).iter().any(|s| s.status != "pending");
+        let run = if recipe.id.starts_with("builtin_") || recipe.status != RecipeStatus::Pending || touched {
+            Self::copy(conn, &recipe.id, false).ok_or_else(|| format!("Recipe '{}' could not be copied for a new run", recipe.name))?
+        } else {
+            recipe.id.clone()
+        };
+        for (key, value) in variables.into_iter().flatten() {
+            Self::set_var(conn, &run, key, value);
+        }
+        Self::update_status(conn, &run, &RecipeStatus::Running, 0);
+        Ok((recipe, run))
     }
 
     /// Update recipe status and current step.
@@ -653,7 +1043,8 @@ impl RecipeStore {
     /// Put a paused recipe back to what it was doing. Returns the status it resumes as.
     ///
     /// `running` means the caller should signal the executor; `waiting` means it waits again —
-    /// for its answer, or for its timer, which (like every `update_status`) counts from now.
+    /// for its answer, or for its timer, which keeps the time it was set to wake at (`_wait`): a
+    /// timer that came due during the pause wakes at the clock's next tick.
     pub fn resume(conn: &Connection, recipe_id: &str) -> Result<RecipeStatus, String> {
         let recipe = Self::get(conn, recipe_id).ok_or_else(|| format!("no recipe `{recipe_id}`"))?;
         if recipe.status != RecipeStatus::Paused {
@@ -858,65 +1249,26 @@ impl RecipeStore {
             .collect()
     }
 
-    /// Get waiting recipes whose WaitFor timeout has expired.
-    /// Returns recipe IDs that should be resumed.
+    /// Waiting recipes whose wait is over now: the ones the worker's clock resumes.
     pub fn get_expired_waiting(conn: &Connection) -> Vec<String> {
-        let now = now_ts();
-        // Find waiting recipes
-        let mut stmt = conn
-            .prepare("SELECT id, current_step, updated_at FROM recipes WHERE status = 'waiting'")
-            .expect("prepare expired waiting");
+        Self::get_expired_waiting_at(conn, now_ts())
+    }
 
-        let rows: Vec<(String, usize, f64)> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)? as usize,
-                    row.get::<_, f64>(2)?,
-                ))
+    /// Waiting recipes whose wait is over at `now` ([`Waited::is_over`]): a timer whose time has
+    /// come — counted from when it began, to the next occurrence of a time of day — or a recipe
+    /// left `waiting` with no wait behind it. Never a question: its answer (the Recipes screen,
+    /// `answer_recipe`, or the chat) sets the recipe running. Resuming a question here walked the
+    /// recipe on at the next chat message with `{{store_as}}` unbound.
+    pub fn get_expired_waiting_at(conn: &Connection, now: f64) -> Vec<String> {
+        Self::list(conn, Some("waiting"), 1_000)
+            .into_iter()
+            .filter(|r| {
+                let steps = Self::get_steps(conn, &r.id);
+                let vars = Self::get_vars(conn, &r.id);
+                waited_on(r, &steps, &vars).map_or(true, |w| w.is_over(now))
             })
-            .expect("query expired waiting")
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let mut expired = Vec::new();
-        for (id, current_step, updated_at) in rows {
-            // The WaitFor step is the one BEFORE current_step (it was completed and current_step advanced)
-            let wait_step_idx = current_step.saturating_sub(1);
-            let steps = Self::get_steps(conn, &id);
-            if let Some(stored) = steps.get(wait_step_idx) {
-                match &stored.step {
-                    RecipeStep::WaitFor { condition, timeout_secs } => {
-                        let should_resume = match condition {
-                            WaitCondition::Duration { seconds } => {
-                                (now - updated_at) >= *seconds as f64
-                            }
-                            WaitCondition::Time { hour, minute } => {
-                                let (h, m) = chrono_now();
-                                h > *hour || (h == *hour && m >= *minute)
-                            }
-                        };
-                        // Also check global timeout if set
-                        let timed_out = timeout_secs
-                            .map(|t| (now - updated_at) >= t as f64)
-                            .unwrap_or(false);
-                        if should_resume || timed_out {
-                            expired.push(id);
-                        }
-                    }
-                    // A question waits for its answer, which `interjection::answer` delivers by
-                    // setting the recipe running again. Resuming it here — as the arm below did —
-                    // walked the recipe on at the next chat message with `{{store_as}}` unbound,
-                    // so no question a recipe asked was ever waited for.
-                    RecipeStep::AskUser { .. } => {}
-                    _ => {
-                        // Stuck in waiting but not on a WaitFor step — resume it
-                        expired.push(id);
-                    }
-                }
-            }
-        }
-        expired
+            .map(|r| r.id)
+            .collect()
     }
 
     /// Collect failure learnings across all recipes for context injection.
@@ -1067,4 +1419,126 @@ fn chrono_now() -> (u8, u8) {
     let hour = ((secs % 86400) / 3600) as u8;
     let minute = ((secs % 3600) / 60) as u8;
     (hour, minute)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn store() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        RecipeStore::ensure_tables(&conn);
+        conn
+    }
+
+    fn tool(name: &str, store_as: &str) -> RecipeStep {
+        RecipeStep::Tool { tool_name: name.into(), args: json!({}), store_as: store_as.into(), on_error: ErrorAction::Fail }
+    }
+
+    /// A built-in keeps the record of what it did across a restart (#176). `ensure_builtin` runs
+    /// at every start, and it deleted and re-inserted every built-in's step rows — so a built-in
+    /// that had run (in place, on its own id, as `run_recipe` used to run it) lost its results and
+    /// states at the next start, and the Recipes screen could only say "not recorded".
+    #[test]
+    fn a_built_in_keeps_what_it_did_across_a_restart() {
+        let conn = store();
+        let steps = [tool("get_weather", "weather"), RecipeStep::Notify { message: "{{weather}}".into() }];
+        RecipeStore::ensure_builtin(&conn, "builtin_weather", "Weather", "", &steps);
+        // A run as the old `run_recipe` made one: in place, on the built-in's own id.
+        RecipeStore::set_var(&conn, "builtin_weather", "weather", &json!("Sunny, 21°C"));
+        RecipeStore::complete_step(&conn, "builtin_weather", 0, "Sunny, 21°C");
+        RecipeStore::complete_step(&conn, "builtin_weather", 1, "Sunny, 21°C");
+        RecipeStore::update_status(&conn, "builtin_weather", &RecipeStatus::Done, 2);
+
+        // The shell starts again.
+        RecipeStore::ensure_builtin(&conn, "builtin_weather", "Weather", "", &steps);
+
+        let all = RecipeStore::list(&conn, None, 10);
+        let run = all.iter().find(|r| r.status == RecipeStatus::Done).expect("the run is still in the store, done");
+        let kept = RecipeStore::get_steps(&conn, &run.id);
+        assert_eq!(kept.iter().map(|s| s.status.as_str()).collect::<Vec<_>>(), ["done", "done"], "its steps' states survive the start");
+        assert_eq!(kept[0].result.as_deref(), Some("Sunny, 21°C"), "and their results");
+        assert_eq!(RecipeStore::get_vars(&conn, &run.id).get("weather"), Some(&json!("Sunny, 21°C")));
+        assert_ne!(run.id, "builtin_weather", "the run is kept as a recipe of its own");
+        // The built-in is a clean definition again, for its next run.
+        assert_eq!(RecipeStore::get(&conn, "builtin_weather").map(|r| r.status), Some(RecipeStatus::Pending));
+        assert!(RecipeStore::get_steps(&conn, "builtin_weather").iter().all(|s| s.status == "pending" && s.result.is_none()));
+        assert!(RecipeStore::get_vars(&conn, "builtin_weather").is_empty());
+
+        // A start that changes nothing touches nothing.
+        RecipeStore::ensure_builtin(&conn, "builtin_weather", "Weather", "", &steps);
+        assert_eq!(RecipeStore::list(&conn, None, 10).len(), 2, "no second copy of the run");
+        assert_eq!(RecipeStore::get_steps(&conn, &run.id)[0].result.as_deref(), Some("Sunny, 21°C"));
+    }
+
+    /// A wait for a time of day that has already gone by today waits for tomorrow's. It counted as
+    /// met — `h > hour || (h == hour && m >= minute)` — so "wait until 09:00" set at 10:00 went on
+    /// at once, and a daily loop around it would spin.
+    #[test]
+    fn a_time_of_day_already_gone_waits_for_tomorrow() {
+        let conn = store();
+        let of_day = (now_ts() as i64).rem_euclid(86_400);
+        if of_day < 180 {
+            // The first minutes after midnight UTC: nothing today has gone by yet.
+            return;
+        }
+        let gone = of_day - 120;
+        let (hour, minute) = ((gone / 3600) as u8, ((gone % 3600) / 60) as u8);
+        let id = RecipeStore::create(
+            &conn,
+            "Daily digest",
+            "",
+            &[
+                RecipeStep::WaitFor { condition: WaitCondition::Time { hour, minute }, timeout_secs: None },
+                RecipeStep::Notify { message: "digest".into() },
+            ],
+            None,
+        );
+        RecipeStore::complete_step(&conn, &id, 0, "waiting");
+        RecipeStore::update_status(&conn, &id, &RecipeStatus::Waiting, 1);
+        assert!(
+            RecipeStore::get_expired_waiting(&conn).is_empty(),
+            "{hour:02}:{minute:02} UTC has gone by today, so it waits for tomorrow's"
+        );
+    }
+
+    /// When a wait begun at a moment wakes, to the second.
+    #[test]
+    fn a_wait_wakes_at_its_next_time() {
+        let day = 20_719.0 * 86_400.0; // 2026-09-23 00:00 UTC
+        let at = |h: f64, m: f64, s: f64| day + h * 3600.0 + m * 60.0 + s;
+        let nine = WaitCondition::Time { hour: 9, minute: 0 };
+        assert_eq!(wakes_at(&nine, None, at(8.0, 0.0, 0.0)), Some(at(9.0, 0.0, 0.0)), "later today");
+        assert_eq!(wakes_at(&nine, None, at(10.0, 0.0, 0.0)), Some(at(33.0, 0.0, 0.0)), "gone by: tomorrow's");
+        assert_eq!(wakes_at(&nine, None, at(9.0, 0.0, 30.0)), None, "this very minute: no wait");
+        assert_eq!(wakes_at(&nine, Some(600), at(8.0, 0.0, 0.0)), Some(at(8.0, 10.0, 0.0)), "no later than its timeout");
+        let quarter = WaitCondition::Duration { seconds: 900 };
+        assert_eq!(wakes_at(&quarter, None, at(8.0, 0.0, 0.0)), Some(at(8.0, 15.0, 0.0)));
+        assert_eq!(wakes_at(&WaitCondition::Duration { seconds: 0 }, None, 5.0), None);
+        assert_eq!(clock_text(at(8.0, 15.0, 0.0)), "08:15 UTC");
+        assert_eq!(clock_text(at(33.0, 0.0, 0.0)), "09:00 UTC");
+    }
+
+    /// A new version's definition still reaches a built-in that has never run, and a copy of a
+    /// run started from a template begins with nothing run.
+    #[test]
+    fn a_built_in_takes_a_changed_definition() {
+        let conn = store();
+        RecipeStore::ensure_builtin(&conn, "builtin_x", "X", "", &[tool("a", "a")]);
+        RecipeStore::ensure_builtin(&conn, "builtin_x", "X", "", &[tool("a", "a"), tool("b", "b")]);
+        let steps = RecipeStore::get_steps(&conn, "builtin_x");
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(&steps[1].step, RecipeStep::Tool { tool_name, .. } if tool_name == "b"));
+        assert_eq!(RecipeStore::list(&conn, None, 10).len(), 1, "nothing had run: nothing to keep");
+
+        let vars = serde_json::Map::from_iter([("topic".to_string(), json!("rust"))]);
+        let (template, run) = RecipeStore::start_run(&conn, "x", Some(&vars)).expect("started by name");
+        assert_eq!(template.id, "builtin_x");
+        assert_ne!(run, "builtin_x");
+        let started = RecipeStore::get(&conn, &run).expect("the run");
+        assert_eq!((started.status, started.current_step, started.name.as_str()), (RecipeStatus::Running, 0, "X"));
+        assert_eq!(RecipeStore::get_vars(&conn, &run).get("topic"), Some(&json!("rust")));
+        assert!(RecipeStore::start_run(&conn, "no such recipe", None).is_err());
+    }
 }

@@ -49,8 +49,11 @@ impl Tool for CreateRecipeTool {
                                 PREFER on_error={\"action\":\"Replan\"} for critical steps — it auto-diagnoses failures and generates new steps. \
                                 Think steps need: prompt (use {{var}} for variable references), store_as. \
                                 JumpIf steps need: condition (object with 'op' field), target_step (index). \
-                                WaitFor steps need: condition ({\"type\":\"Duration\",\"seconds\":N} or {\"type\":\"Time\",\"hour\":H,\"minute\":M}), timeout_secs (optional). \
-                                Notify steps need: message (use {{var}} for variables).",
+                                WaitFor steps need: condition ({\"type\":\"Duration\",\"seconds\":N} or {\"type\":\"Time\",\"hour\":H,\"minute\":M} in UTC), timeout_secs (optional). \
+                                Notify steps need: message (use {{var}} for variables). \
+                                AskUser steps need: question, store_as, choices (optional list). \
+                                Branch steps need: condition (a variable name: set and not empty, false or 0 takes then_steps), then_steps, else_steps (lists of steps). \
+                                A JumpIf back to an earlier step is a loop; one that never waits is stopped after 100 steps.",
                             "items": { "type": "object" }
                         },
                         "trigger": {
@@ -228,47 +231,24 @@ impl Tool for RunRecipeTool {
             None => return "Missing required parameter: recipe_id".to_string(),
         };
 
-        // Try by ID first, then by name (case-insensitive).
-        //
-        // Two statements, not one chained `or_else`: the first `conn()` guard would still be
-        // alive when the closure ran, and locking it twice on one thread never returns.
-        let by_id = RecipeStore::get(&ctx.db.conn(), id_or_name);
-        let recipe = match by_id {
-            Some(r) => Some(r),
-            None => RecipeStore::find_by_name(&ctx.db.conn(), id_or_name),
-        };
-
-        let recipe = match recipe {
-            Some(r) => r,
-            None => return format!("Recipe not found: {}", id_or_name),
-        };
-
-        let recipe_id = &recipe.id;
-
-        // Set initial variables if provided
-        if let Some(vars) = args.get("variables").and_then(|v| v.as_object()) {
-            for (key, value) in vars {
-                RecipeStore::set_var(&ctx.db.conn(), recipe_id, key, value);
-            }
+        // By id, then by name; a template, or a recipe that has already run, starts as a new
+        // recipe with its own record (`RecipeStore::start_run`). This reset the recipe in place —
+        // steps to pending, pointer to 0 — so every run of a built-in wrote over the last one.
+        // Marked running: the worker starts every running recipe after the turn that ran this
+        // tool (`RecipeStore::get_resumable`).
+        let vars = args.get("variables").and_then(|v| v.as_object());
+        let conn = ctx.db.conn();
+        match RecipeStore::start_run(&conn, id_or_name, vars) {
+            Ok((recipe, run)) if run == recipe.id => format!(
+                "Recipe '{}' [{}] queued for execution. It will start processing immediately.",
+                recipe.name, run
+            ),
+            Ok((recipe, run)) => format!(
+                "Recipe '{}' started as a new run [{}] (from [{}]). It will start processing immediately.",
+                recipe.name, run, recipe.id
+            ),
+            Err(why) => why,
         }
-
-        // Reset to step 0 and mark as running: the worker starts every running recipe after the
-        // turn that ran this tool (`RecipeStore::get_resumable`). This said `Pending`, which
-        // `get_resumable` stopped taking so the ~50 built-in definitions would not all run at
-        // boot — and from then on nothing this tool queued ever started.
-        RecipeStore::update_status(&ctx.db.conn(), recipe_id, &crate::recipe::RecipeStatus::Running, 0);
-
-        // Reset all steps to pending
-        ctx.db.conn().execute(
-            "UPDATE recipe_steps SET status = 'pending', result = NULL WHERE recipe_id = ?1",
-            rusqlite::params![recipe_id],
-        )
-        .ok();
-
-        format!(
-            "Recipe '{}' [{}] queued for execution. It will start processing immediately.",
-            recipe.name, recipe_id
-        )
     }
 }
 
@@ -339,5 +319,66 @@ impl Tool for FindRecipeTool {
         }
         result.push_str("Use run_recipe with the recipe ID and any required variables to execute.");
         result
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recipe::RecipeStatus;
+    use serde_json::json;
+    use yantrikdb_core::YantrikDB;
+
+    fn ctx(db: &YantrikDB) -> ToolContext<'_> {
+        ToolContext {
+            db,
+            max_permission: PermissionLevel::Standard,
+            registry_metadata: None,
+            task_manager: None,
+            incognito: false,
+            agent_spawner: None,
+        }
+    }
+
+    /// A run of a template is a new recipe, and the template stays one (#176). `run_recipe` reset
+    /// the built-in in place — its steps to pending, its pointer to 0 — so each run wrote over the
+    /// last one's record, and a built-in that had run once was no longer a template.
+    #[test]
+    fn running_a_template_starts_a_new_recipe() {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        RecipeStore::ensure_tables(&db.conn());
+        let steps = [
+            RecipeStep::Tool { tool_name: "get_weather".into(), args: json!({"city": "{{city}}"}), store_as: "weather".into(), on_error: ErrorAction::Fail },
+            RecipeStep::Notify { message: "{{weather}}".into() },
+        ];
+        RecipeStore::ensure_builtin(&db.conn(), "builtin_weather", "Weather", "", &steps);
+
+        let said = RunRecipeTool.execute(&ctx(&db), &json!({"recipe_id": "builtin_weather", "variables": {"city": "Pune"}}));
+        let running = RecipeStore::list(&db.conn(), Some("running"), 10);
+        assert_eq!(running.len(), 1, "{said}");
+        let run = running[0].clone();
+        assert_ne!(run.id, "builtin_weather", "a run of a template is a recipe of its own: {said}");
+        assert!(said.contains(&run.id), "the tool names the run it started: {said}");
+        assert_eq!(run.name, "Weather");
+        assert_eq!(RecipeStore::get_steps(&db.conn(), &run.id).len(), 2);
+        assert_eq!(RecipeStore::get_vars(&db.conn(), &run.id).get("city"), Some(&json!("Pune")));
+        assert_eq!(RecipeStore::get(&db.conn(), "builtin_weather").map(|r| r.status), Some(RecipeStatus::Pending), "the template is untouched");
+        assert!(RecipeStore::get_vars(&db.conn(), "builtin_weather").is_empty(), "and holds no run's variables");
+
+        // In flight, it is not started again over itself.
+        let again = RunRecipeTool.execute(&ctx(&db), &json!({"recipe_id": run.id}));
+        assert!(again.contains("already"), "{again}");
+        assert_eq!(RecipeStore::list(&db.conn(), Some("running"), 10).len(), 1);
+
+        // Finished, running it again is another new recipe, and the first keeps its record.
+        RecipeStore::complete_step(&db.conn(), &run.id, 0, "Sunny");
+        RecipeStore::complete_step(&db.conn(), &run.id, 1, "Sunny");
+        RecipeStore::update_status(&db.conn(), &run.id, &RecipeStatus::Done, 2);
+        let rerun = RunRecipeTool.execute(&ctx(&db), &json!({"recipe_id": run.id}));
+        let second = RecipeStore::list(&db.conn(), Some("running"), 10);
+        assert_eq!(second.len(), 1, "{rerun}");
+        assert_ne!(second[0].id, run.id, "{rerun}");
+        assert_eq!(RecipeStore::get(&db.conn(), &run.id).map(|r| r.status), Some(RecipeStatus::Done));
+        assert_eq!(RecipeStore::get_steps(&db.conn(), &run.id)[0].result.as_deref(), Some("Sunny"), "the first run's record is kept");
+        assert!(RecipeStore::get_steps(&db.conn(), &second[0].id).iter().all(|s| s.status == "pending"));
     }
 }
