@@ -545,6 +545,9 @@ pub fn publish(
                 // installed, or its config file was never written, or its unit is stopped. An
                 // agent asked to fix that needs the same list the Settings page draws.
                 .with("harnesses", crate::wire::harness::catalogue_for_describe())
+                // Agents' commands running now, per agent: the job, its command, how long, and
+                // whether it seems to be waiting for input. See `control_agent_terminal`.
+                .with("agent_jobs", crate::control_agent_terminal::for_describe())
                 .with("files", files)
                 .with("installer", installer)
                 .with("editor", editor)
@@ -1298,6 +1301,10 @@ pub fn publish(
     // decision is a button in the Lens. See `control_approvals` for why that split is the
     // whole point.
     let surface = crate::control_approvals::actions(surface, ui);
+    // An agent's commands, each in a terminal of its own in its pane — agent_run, agent_job,
+    // agent_input, agent_kill. The agent comes from its token, never an argument. See
+    // `control_agent_terminal` and design/agents-workspace-2026-09-23.md, decision 3.
+    let surface = crate::control_agent_terminal::actions(surface);
     crate::control_editor::actions(surface, ui).serve();
 }
 

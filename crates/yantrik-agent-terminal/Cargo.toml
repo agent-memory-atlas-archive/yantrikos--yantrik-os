@@ -1,0 +1,21 @@
+[package]
+name = "yantrik-agent-terminal"
+version = "0.1.0"
+edition = "2021"
+description = "An agent's commands, each in a PTY of its own that the shell owns: the directory carries, shell state does not"
+
+[dependencies]
+# `AgentId` — which of the person's agents a job belongs to — is the harness wire's type, so a job
+# and the events about it name an agent the same way.
+yantrik-harness = { workspace = true }
+# `peer_identity` reads `/proc/<pid>/stat` the careful way (from the last `)`); the token check
+# walks up from the caller with it.
+yantrik-ipc-transport = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+libc = { workspace = true }
+# The same PTY and emulator the Terminal app uses, so a card and the Terminal draw a command the
+# same way.
+pty-process = "0.5"
+vt100 = "0.16"

@@ -10298,6 +10298,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "yantrik-agent-terminal"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "pty-process",
+ "serde",
+ "serde_json",
+ "tracing",
+ "vt100",
+ "yantrik-harness",
+ "yantrik-ipc-transport",
+]
+
+[[package]]
 name = "yantrik-app-runtime"
 version = "0.1.0"
 dependencies = [
@@ -10895,6 +10909,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq 2.12.1",
  "vt100",
+ "yantrik-agent-terminal",
  "yantrik-app-runtime",
  "yantrik-chat",
  "yantrik-companion",
