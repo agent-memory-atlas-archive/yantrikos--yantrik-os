@@ -87,6 +87,7 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["containers", "container_manager"], Launch::Program { id: "containers", bin: "yantrik-container-manager" }),
     (&["devices", "device_dashboard"], Launch::Screen(27)),
     (&["permissions", "permission_dashboard"], Launch::Screen(28)),
+    (&["problems", "report_problem", "report_a_problem"], Launch::Screen(33)),
     (&["documents", "document_editor"], Launch::Program { id: "documents", bin: "yantrik-document-editor" }),
     (&["presentation", "slides"], Launch::Program { id: "presentation", bin: "yantrik-presentation" }),
     // One spelling, because the app publishes `studio` and the binary is `yantrik-studio`: every
@@ -240,6 +241,7 @@ const PURPOSES: &[(&str, &str)] = &[
     ("notes", "quick markdown notes kept in the notes library, not files you name"),
     ("editor", "plain-text and code files, opened and saved by path"),
     ("image", "view pictures"),
+    ("problems", "what went wrong on this machine, and the report you can choose to send"),
     // Written against `images` on purpose: the two are one word apart and a model choosing between
     // them has only these few words. Looking and making are the difference, and where the pixels
     // come from is the second thing a caller has to know before it asks.
@@ -622,6 +624,25 @@ pub fn blender_display(display: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// A child that did not exit cleanly leaves a problem record, written by the shell on its behalf.
+///
+/// An app that panics writes its own record through the runtime's hook; this covers what a hook
+/// cannot: a segfault in a native library, an abort, a kill, an exit code the app chose. Nothing is
+/// sent anywhere — the record is a local file the "Report a problem" screen can show. A clean
+/// exit is not a problem, and neither is SIGTERM, which is what the shell itself sends to close
+/// an app; recording those would bury the real ones.
+fn record_crash(name: &str, status: &std::process::ExitStatus, lived_ms: u64) {
+    use std::os::unix::process::ExitStatusExt as _;
+    if status.success() || status.signal() == Some(15) {
+        return;
+    }
+    let message = format!("{status} after {lived_ms} ms");
+    let record = yantrik_app_runtime::problems::problem("crash", name, &message, None, None);
+    if let Some(path) = yantrik_app_runtime::problems::write(&record) {
+        tracing::info!(app = %name, path = %path.display(), "Problem record written for the crash");
+    }
+}
+
 /// Where a program is, if it is anywhere it could be run from.
 ///
 /// The shell is started from `/opt/yantrik/bin` (or a cargo target dir in development), and the
@@ -917,8 +938,10 @@ pub fn spawn_app_in(app_id: &str, bin: &str, args: &[&str], dir: Option<&std::pa
                             crate::running::mark_launch_failed(
                                 &id, &name, &status.to_string(), lived_ms,
                             );
+                            record_crash(&name, &status, lived_ms);
                         } else {
                             tracing::info!(app = %name, %status, "App exited");
+                            record_crash(&name, &status, lived_ms);
                         }
                     }
                     Err(e) => tracing::warn!(app = %name, error = %e, "Could not wait for app"),
