@@ -153,12 +153,18 @@ def _grades():
 def _apps():
     apps = [a for a in state().get("apps", []) if a.get("opens") == "app" and a.get("describe_as")]
     only = [a for a in apps if not any(s in a["name"] for s in ARGS.skip)]
-    opened, problems, counts = [], [], []
+    opened, problems, counts, absent = [], [], [], []
     for a in only:
         surface = a["describe_as"]
         try:
             act("shell", "open_app", name=a["name"])
         except Exception as e:  # noqa: BLE001
+            # An adapter for somebody else's app (Blender, LibreOffice) is listed from its .desktop
+            # file whether or not that app is installed; the image does not ship Blender. The shell
+            # says so in so many words, and that is the right answer, not a failure of this build.
+            if "is not installed on this machine" in str(e):
+                absent.append(a["name"])
+                continue
             problems.append("%s: open_app refused: %s" % (a["name"], e))
             continue
         d = wait(lambda: rpc(surface, "app.describe", timeout=10), SLOW_APPS.get(a["name"], 30), 2)
@@ -175,7 +181,10 @@ def _apps():
     close_test_windows()
     if problems:
         raise Failed("; ".join(problems))
-    return "%d apps: %s" % (len(opened), ", ".join(counts))
+    if not opened:
+        raise Failed("no app opened at all%s" % (" (not installed: %s)" % ", ".join(absent) if absent else ""))
+    return "%d apps: %s%s" % (len(opened), ", ".join(counts),
+                              "; not installed here, so not opened: %s" % ", ".join(absent) if absent else "")
 
 
 SHIPPED_APPLICATIONS = "/opt/yantrik/share/applications"
