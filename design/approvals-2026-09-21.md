@@ -126,7 +126,11 @@ them properly, which is the failure this design is most afraid of.
 Every text on the card is bounded in `approvals.rs`, so its height is arithmetic rather than a
 measurement: one line per argument (`ARG_VALUE_CHARS` = 60, each cut value naming its true
 length), at most `ARG_ROWS` = 8 arguments followed by a line saying how many more the grant still
-covers, and a purpose clipped at `PURPOSE_CHARS` = 240.
+covers. The purpose is the exception since 22 September: it was clipped at 240 characters, and
+Studio's `set_backend` publishes 585, so the card cut it mid-word at the clause that said why the
+grade is `sensitive` (#117). It now reaches the card whole (`PURPOSE_CHARS` = 2000 is a bound
+against the absurd, cut at a word), and the card bounds the block's height instead — it wraps,
+and past 160px it scrolls, with the label under it saying so.
 
 It is drawn in two places:
 
