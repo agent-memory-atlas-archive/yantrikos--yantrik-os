@@ -130,7 +130,8 @@ fn token_param() -> Param {
     )
 }
 
-/// The four actions, for the shell's surface.
+/// The four actions, for the shell's surface. Each reads the caller on the UI thread and hands
+/// everything else to the function of the same name.
 pub fn actions(surface: ControlSurface) -> ControlSurface {
     surface
         .action(
@@ -163,22 +164,7 @@ pub fn actions(surface: ControlSurface) -> ControlSurface {
                     .optional()
                     .describe("Seconds to wait for it to finish before answering `running: true`. Default 120, at most 600"),
             ),
-            move |args| {
-                let token = text(args, "agent_token");
-                let command = text(args, "command");
-                let cwd = args
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|c| !c.is_empty())
-                    .map(PathBuf::from);
-                let wait = wait_arg(args)?;
-                let pid = caller_pid();
-                later(move || {
-                    let agent = resolver().resolve(&token, pid)?;
-                    Ok(answer_json(&jobs().run(&agent, &command, cwd, wait)?))
-                })
-            },
+            |args| agent_run(args, caller_pid()),
         )
         .action(
             Action::new(
@@ -194,16 +180,7 @@ pub fn actions(surface: ControlSurface) -> ControlSurface {
                     .optional()
                     .describe("Seconds to wait for it to finish. Default 120, at most 600"),
             ),
-            move |args| {
-                let token = text(args, "agent_token");
-                let job = job_arg(args)?;
-                let wait = wait_arg(args)?;
-                let pid = caller_pid();
-                later(move || {
-                    let agent = resolver().resolve(&token, pid)?;
-                    Ok(answer_json(&jobs().job(&agent, &job, wait)?))
-                })
-            },
+            |args| agent_job(args, caller_pid()),
         )
         .action(
             // Sensitive for the Terminal `send_input`'s reason: a program at a prompt cannot tell
@@ -218,23 +195,7 @@ pub fn actions(surface: ControlSurface) -> ControlSurface {
             .arg(token_param())
             .arg(Param::text("job").describe("The `job` id `agent_run` answered with"))
             .arg(Param::text("text").describe("The exact characters to send, up to 64 KiB")),
-            move |args| {
-                let token = text(args, "agent_token");
-                let job = job_arg(args)?;
-                let typed = text(args, "text");
-                if typed.is_empty() {
-                    return Err("`text` is empty: the exact characters to send.".to_string());
-                }
-                let pid = caller_pid();
-                later(move || {
-                    let agent = resolver().resolve(&token, pid)?;
-                    jobs().input(&agent, &job, &typed)?;
-                    // A moment for the command to react, so the tail shows what it did with it.
-                    let mut out = answer_json(&jobs().job(&agent, &job, Duration::from_millis(400))?);
-                    out["sent_bytes"] = typed.len().into();
-                    Ok(out)
-                })
-            },
+            |args| agent_input(args, caller_pid()),
         )
         .action(
             Action::new(
@@ -244,23 +205,67 @@ pub fn actions(surface: ControlSurface) -> ControlSurface {
             )
             .arg(token_param())
             .arg(Param::text("job").describe("The `job` id `agent_run` answered with")),
-            move |args| {
-                let token = text(args, "agent_token");
-                let job = job_arg(args)?;
-                let pid = caller_pid();
-                later(move || {
-                    let agent = resolver().resolve(&token, pid)?;
-                    let stopped = jobs().kill(&agent, &job)?;
-                    let settle = jobs().limits().kill_grace + Duration::from_millis(500);
-                    let mut out = answer_json(&jobs().job(&agent, &job, settle)?);
-                    out["stopped"] = stopped.into();
-                    if !stopped {
-                        out["note"] = "it had already ended; nothing was signalled".into();
-                    }
-                    Ok(out)
-                })
-            },
+            |args| agent_kill(args, caller_pid()),
         )
+}
+
+fn agent_run(args: &Value, pid: Option<u32>) -> Result<Value, String> {
+    let token = text(args, "agent_token");
+    let command = text(args, "command");
+    let cwd = args
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(PathBuf::from);
+    let wait = wait_arg(args)?;
+    later(move || {
+        let agent = resolver().resolve(&token, pid)?;
+        Ok(answer_json(&jobs().run(&agent, &command, cwd, wait)?))
+    })
+}
+
+fn agent_job(args: &Value, pid: Option<u32>) -> Result<Value, String> {
+    let token = text(args, "agent_token");
+    let job = job_arg(args)?;
+    let wait = wait_arg(args)?;
+    later(move || {
+        let agent = resolver().resolve(&token, pid)?;
+        Ok(answer_json(&jobs().job(&agent, &job, wait)?))
+    })
+}
+
+fn agent_input(args: &Value, pid: Option<u32>) -> Result<Value, String> {
+    let token = text(args, "agent_token");
+    let job = job_arg(args)?;
+    let typed = text(args, "text");
+    if typed.is_empty() {
+        return Err("`text` is empty: the exact characters to send.".to_string());
+    }
+    later(move || {
+        let agent = resolver().resolve(&token, pid)?;
+        jobs().input(&agent, &job, &typed)?;
+        // A moment for the command to react, so the tail shows what it did with it.
+        let mut out = answer_json(&jobs().job(&agent, &job, Duration::from_millis(400))?);
+        out["sent_bytes"] = typed.len().into();
+        Ok(out)
+    })
+}
+
+fn agent_kill(args: &Value, pid: Option<u32>) -> Result<Value, String> {
+    let token = text(args, "agent_token");
+    let job = job_arg(args)?;
+    later(move || {
+        let agent = resolver().resolve(&token, pid)?;
+        let stopped = jobs().kill(&agent, &job)?;
+        let settle = jobs().limits().kill_grace + Duration::from_millis(500);
+        let mut out = answer_json(&jobs().job(&agent, &job, settle)?);
+        out["stopped"] = stopped.into();
+        if !stopped {
+            out["note"] = "it had already ended; nothing was signalled".into();
+        }
+        Ok(out)
+    })
 }
 
 /// How much of a command line `describe` repeats.
@@ -292,4 +297,71 @@ pub fn for_describe() -> Value {
             .map(|(agent, running)| json!({ "agent": agent, "running": running }))
             .collect(),
     )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use yantrik_agent_terminal::{AgentId, TokenTable, NO_AGENT};
+
+    /// The four actions end to end, minus only the socket: with no dispatch in progress the work
+    /// runs inline, so this drives the real token check, the real terminal and `describe`.
+    ///
+    /// One test, because the resolver is the shell's one global: "no tokens yet" has to be seen
+    /// before any are installed.
+    #[test]
+    fn the_actions_answer_for_the_agent_the_token_names_and_nobody_else() {
+        let me = Some(std::process::id());
+
+        // Before the host issues tokens, every call is inert — and says so.
+        let err = agent_run(&json!({"agent_token": "t-pi", "command": "echo hi"}), me).unwrap_err();
+        assert!(err.starts_with(NO_AGENT), "{err}");
+
+        // This test process stands in for the harness that holds both tokens.
+        let table = Arc::new(TokenTable::new());
+        table.issue("t-pi", AgentId::new("pi", "c-shell"), me);
+        table.issue("t-ds", AgentId::new("deepseek", "c-shell"), me);
+        install_resolver(table);
+
+        let done = agent_run(&json!({"agent_token": "t-pi", "command": "cd /tmp && echo hi", "wait": 10}), me).unwrap();
+        assert_eq!(done["exit_code"], 0, "{done}");
+        assert_eq!(done["cwd_after"], "/tmp", "{done}");
+        assert_eq!(done["tail"], "hi", "{done}");
+        assert_eq!(done["agent"], "pi:c-shell", "the agent is the token's, not an argument's");
+
+        let slow = agent_run(&json!({"agent_token": "t-pi", "command": "sleep 30", "wait": 0.5}), me).unwrap();
+        assert_eq!(slow["running"], true, "{slow}");
+        assert!(slow["next"].as_str().is_some_and(|n| n.contains("agent_job")), "{slow}");
+        let job = slow["job"].clone();
+
+        // `describe shell` lists it under its agent.
+        let described = for_describe();
+        let pi = described
+            .as_array()
+            .and_then(|agents| agents.iter().find(|a| a["agent"] == "pi:c-shell"))
+            .unwrap_or_else(|| panic!("pi is not listed: {described}"));
+        assert!(pi["running"].as_array().unwrap().iter().any(|j| j["job"] == job && j["command"] == "sleep 30"));
+
+        // Another agent's token cannot touch it; nor can pi's token from outside pi's harness.
+        let err = agent_kill(&json!({"agent_token": "t-ds", "job": job}), me).unwrap_err();
+        assert!(err.contains("belongs to another agent"), "{err}");
+        let err = agent_job(&json!({"agent_token": "t-pi", "job": job, "wait": 0}), Some(1)).unwrap_err();
+        assert!(err.contains("not issued to the process"), "{err}");
+
+        let looked = agent_job(&json!({"agent_token": "t-pi", "job": job, "wait": 0}), me).unwrap();
+        assert_eq!(looked["running"], true);
+
+        let killed = agent_kill(&json!({"agent_token": "t-pi", "job": job}), me).unwrap();
+        assert_eq!((killed["stopped"].clone(), killed["signal_name"].clone()), (json!(true), json!("SIGTERM")), "{killed}");
+
+        let answered = agent_run(&json!({"agent_token": "t-pi", "command": "read -r x; echo \"[$x]\"", "wait": 0.3}), me).unwrap();
+        let typed = agent_input(&json!({"agent_token": "t-pi", "job": answered["job"], "text": "yes\n"}), me).unwrap();
+        assert_eq!(typed["sent_bytes"], 4);
+        let finished = agent_job(&json!({"agent_token": "t-pi", "job": answered["job"], "wait": 10}), me).unwrap();
+        assert_eq!(finished["tail"], "yes\n[yes]", "the echo of what was typed, then the answer: {finished}");
+
+        // The bounds on `wait`, refused before anything is started.
+        let err = agent_run(&json!({"agent_token": "t-pi", "command": "true", "wait": 601}), me).unwrap_err();
+        assert!(err.contains("between 0 and 600"), "{err}");
+    }
 }
