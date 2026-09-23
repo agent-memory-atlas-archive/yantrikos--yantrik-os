@@ -29,21 +29,40 @@
 //   Readable on the dark surface first. This palette is tuned against #0c0c14, because that is
 //   what the OS is nearly all of the time; the light theme takes the same hues darkened rather
 //   than a second set, so there is one list to keep honest.
+//
+//   Loud only on a tile. The solid colour is for an app's ICON TILE — the launcher, the
+//   desktop's workspace row and the taskbar (see AppTile). Everywhere else an app's colour is
+//   a glyph or a faint tint, never a filled block (desk-and-mind, "bright and sharp").
+//
+// # One table
+//
+// `hue-for-app` is the only place an app is given a colour. It answers a hue NAME, and the
+// three colours an app can wear — the glyph tone, the faint tint and the solid tile — are all
+// read from that one name. The shell's Rust tests read this function too
+// (`every_app_the_launcher_knows_has_a_colour` in crates/yantrik-ui/src/wire/app_grid.rs):
+// an app the launcher can show and this table does not name fails the build rather than
+// quietly falling back to the house accent.
 import { Theme } from "theme.slint";
 import { ThemeMode } from "theme.slint";
 
 export global AppColor {
     // ── The palette ──
     //
-    // Deliberately a fixed set rather than free-form per app: twelve hues spaced around the
+    // Deliberately a fixed set rather than free-form per app: fourteen hues spaced around the
     // wheel, so two apps that land next to each other are always visibly different, and an app
     // added later picks one rather than inventing a shade nothing else uses.
+    //
+    // These are GLYPH tones: a stroke icon on a dark or light surface. Theme-aware.
     out property <color> blue:    ThemeMode.dark ? #4a9eff : #1f6fd0;
+    // Files. A lighter, airier blue than Mail's, the colour a folder is on every desktop.
+    out property <color> sky:     ThemeMode.dark ? #5cb0ff : #1570c8;
     out property <color> azure:   ThemeMode.dark ? #35c4e8 : #0f8ba8;
     out property <color> teal:    ThemeMode.dark ? #34d3b4 : #12907a;
     out property <color> green:   ThemeMode.dark ? #52d36a : #2a9440;
     out property <color> lime:    ThemeMode.dark ? #9ed44a : #5f8a1e;
     out property <color> yellow:  ThemeMode.dark ? #e8c44a : #9a7a10;
+    // Notes. Warmer and deeper than yellow: a legal pad, not a highlighter.
+    out property <color> amber:   ThemeMode.dark ? #f5b23c : #a0680a;
     out property <color> orange:  ThemeMode.dark ? #f0954a : #b8611a;
     out property <color> red:     ThemeMode.dark ? #f0655f : #c2352f;
     out property <color> pink:    ThemeMode.dark ? #f06aa8 : #b8306e;
@@ -51,54 +70,141 @@ export global AppColor {
     out property <color> violet:  ThemeMode.dark ? #9a7cf0 : #5f42c0;
     out property <color> slate:   ThemeMode.dark ? #8a94a8 : #5a6274;
 
+    // ── Tile fills ──
+    //
+    // The same hues as a SOLID tile with a glyph on it. Not theme-aware on purpose: an app
+    // icon is an object with its own colour, like a real one on a real desk, and does not
+    // change because the surface around it did. Each is dark enough to hold a white glyph at
+    // 3:1 or better, except the three light hues (lime, yellow, amber), which carry a dark
+    // glyph instead — see `on-tile`.
+    out property <color> tile-blue:    #2f6fe4;
+    out property <color> tile-sky:     #2f8ae8;
+    out property <color> tile-azure:   #1492c2;
+    out property <color> tile-teal:    #0fa191;
+    out property <color> tile-green:   #22a152;
+    out property <color> tile-lime:    #8cc63a;
+    out property <color> tile-yellow:  #f2c82e;
+    out property <color> tile-amber:   #f6aa2a;
+    out property <color> tile-orange:  #e8711f;
+    out property <color> tile-red:     #e5484d;
+    out property <color> tile-pink:    #e1457d;
+    out property <color> tile-magenta: #ae45cf;
+    out property <color> tile-violet:  #7a5af0;
+    out property <color> tile-slate:   #5b6577;
+    // The glyph on a light tile: a warm near-black, so it reads as ink on the colour rather
+    // than a hole cut through it.
+    out property <color> tile-ink:     #231a06;
+
     // ── Which app is which ──
     //
     // Keyed by the shell's own app ids, the same ones Icons.app is keyed by, so an app has one
-    // identity rather than a picture from one table and a colour from another.
-    public pure function for-app(id: string) -> color {
-        return id == "notes"          ? root.yellow    // writing, warm
-             : id == "editor"         ? root.violet
-             : id == "documents"      ? root.blue
-             : id == "spreadsheet"    ? root.green
-             : id == "presentation"   ? root.orange
-             : id == "snippets"       ? root.magenta
+    // identity rather than a picture from one table and a colour from another. Answers a hue
+    // name from the palette above, or "" for an app this table does not know.
+    //
+    // The named ones come from the design (desk-and-mind, "Colour per app"): Files blue,
+    // Calendar red, Notes amber, Terminal green, Mail blue, Browser teal, Studio violet. The
+    // test beside the launcher holds those seven to it.
+    public pure function hue-for-app(id: string) -> string {
+        return id == "notes"          ? "amber"     // writing, warm
+             : id == "editor"         ? "violet"
+             : id == "documents"      ? "blue"
+             : id == "spreadsheet"    ? "green"
+             : id == "presentation"   ? "orange"
+             : id == "snippets"       ? "magenta"
 
-             : id == "email"          ? root.blue      // communication
-             : id == "calendar"       ? root.red
-             : id == "notifications"  ? root.orange
+             : id == "email"          ? "blue"      // communication
+             : id == "calendar"       ? "red"
+             : id == "notifications"  ? "orange"
 
-             : id == "music"          ? root.pink      // media
-             : id == "media"          ? root.pink
-             : id == "image"          ? root.magenta
+             : id == "music"          ? "pink"      // media
+             : id == "media"          ? "pink"
+             : id == "image"          ? "magenta"
              // Beside `image` on purpose but not the same colour: making and looking are one word
              // apart in the launcher and in a model's choice of app. Violet, because its
              // alphabetical neighbours there are spreadsheet (green) and system-monitor (lime).
-             : id == "studio"         ? root.violet
+             : id == "studio"         ? "violet"
+             // Blender's own orange: the one app here whose colour people already know.
+             : id == "blender"        ? "orange"
+             : id == "arcade"         ? "orange"
 
-             : id == "terminal"       ? root.green     // the machine, cool
-             : id == "system"         ? root.azure
-             : id == "sysmonitor"     ? root.lime
-             : id == "network"        ? root.azure
-             : id == "containers"     ? root.teal
-             : id == "packages"       ? root.teal
-             : id == "devices"        ? root.slate
-             : id == "downloads"      ? root.teal
-             : id == "files"          ? root.yellow
-             : id == "browser"        ? root.azure
+             // The files, and the machine. Files is the folder blue; the rest are cool.
+             : id == "files"          ? "sky"
+             : id == "terminal"       ? "green"
+             : id == "system"         ? "azure"
+             : id == "sysmonitor"     ? "lime"
+             : id == "network"        ? "azure"
+             : id == "containers"     ? "teal"
+             : id == "packages"       ? "teal"
+             : id == "devices"        ? "slate"
+             : id == "downloads"      ? "teal"
+             : id == "browser"        ? "teal"
+             : id == "weather"        ? "azure"
 
-             : id == "memory"         ? root.violet    // the companion
-             : id == "bond"           ? root.pink
-             : id == "personality"    ? root.magenta
-             : id == "skills"         ? root.lime
-             : id == "permissions"    ? root.red
-             : id == "settings"       ? root.slate
-             : id == "about"          ? root.slate
-             : id == "launchpad"      ? root.blue
+             : id == "memory"         ? "violet"    // the companion
+             : id == "agents"         ? "violet"
+             : id == "bond"           ? "pink"
+             : id == "personality"    ? "magenta"
+             : id == "skills"         ? "lime"
+             : id == "permissions"    ? "red"
+             : id == "settings"       ? "slate"
+             : id == "about"          ? "slate"
+             : id == "launchpad"      ? "blue"
+             : "";
+    }
 
+    /// A hue name's glyph tone.
+    public pure function hue(name: string) -> color {
+        return name == "blue"    ? root.blue
+             : name == "sky"     ? root.sky
+             : name == "azure"   ? root.azure
+             : name == "teal"    ? root.teal
+             : name == "green"   ? root.green
+             : name == "lime"    ? root.lime
+             : name == "yellow"  ? root.yellow
+             : name == "amber"   ? root.amber
+             : name == "orange"  ? root.orange
+             : name == "red"     ? root.red
+             : name == "pink"    ? root.pink
+             : name == "magenta" ? root.magenta
+             : name == "violet"  ? root.violet
+             : name == "slate"   ? root.slate
              // Anything else — a third-party app, or one added without an entry here — takes
              // the shell's accent. It is the honest answer: we do not know what this is, so it
              // gets the house colour rather than a hue that would imply a category.
              : Theme.accent;
+    }
+
+    /// A hue name's solid tile fill.
+    public pure function tile-hue(name: string) -> color {
+        return name == "blue"    ? root.tile-blue
+             : name == "sky"     ? root.tile-sky
+             : name == "azure"   ? root.tile-azure
+             : name == "teal"    ? root.tile-teal
+             : name == "green"   ? root.tile-green
+             : name == "lime"    ? root.tile-lime
+             : name == "yellow"  ? root.tile-yellow
+             : name == "amber"   ? root.tile-amber
+             : name == "orange"  ? root.tile-orange
+             : name == "red"     ? root.tile-red
+             : name == "pink"    ? root.tile-pink
+             : name == "magenta" ? root.tile-magenta
+             : name == "violet"  ? root.tile-violet
+             : name == "slate"   ? root.tile-slate
+             // An app we have no colour for gets a quiet tile, not the accent: a solid accent
+             // block would make every unknown app the loudest thing in the launcher.
+             : Theme.bg-elevated;
+    }
+
+    /// The glyph colour that reads on a hue's tile.
+    public pure function on-tile(name: string) -> color {
+        return name == "lime" || name == "yellow" || name == "amber" ? root.tile-ink
+             : name == "" ? Theme.text-secondary
+             : #ffffff;
+    }
+
+    /// An app's glyph tone, on a surface. The call every existing site uses.
+    public pure function for-app(id: string) -> color {
+        return root.hue(root.hue-for-app(id));
     }
 
     /// The same colour as a surface behind it: the badge a glyph sits in.
@@ -107,6 +213,16 @@ export global AppColor {
     /// never disagree.
     public pure function tint-for-app(id: string) -> color {
         return root.for-app(id).transparentize(ThemeMode.dark ? 0.86 : 0.90);
+    }
+
+    /// An app's solid icon tile. For AppTile; nowhere else should be this loud.
+    public pure function tile-for-app(id: string) -> color {
+        return root.tile-hue(root.hue-for-app(id));
+    }
+
+    /// The glyph colour on an app's solid tile.
+    public pure function on-tile-for-app(id: string) -> color {
+        return root.on-tile(root.hue-for-app(id));
     }
 }
 

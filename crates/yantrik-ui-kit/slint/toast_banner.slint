@@ -77,8 +77,11 @@ export component ToastBanner inherits Rectangle {
                 // inside `card` — one unconditional VerticalLayout — and the card's height is
                 // that layout's.
                 height: card.preferred-height;
-                border-radius: 14px;
-                background: @linear-gradient(135deg, Theme.bg-card.transparentize(15%) 0%, Theme.bg-deep.transparentize(15%) 100%);
+                border-radius: Theme.r-lg;
+                // Solid: the software renderer draws a gradient fill without its corner
+                // radius, so the old diagonal gradient made every toast a square card with a
+                // rounded outline around it.
+                background: Theme.bg-card.transparentize(8%);
                 border-width: 1px;
                 border-color: toast.urgency == 2 ? Theme.color-emotional.transparentize(60%) : Theme.cyan.transparentize(80%);
                 drop-shadow-blur: 24px;

@@ -319,15 +319,50 @@ pub fn publish(
                 let listing: Vec<serde_json::Value> = (0..total.min(FILE_LISTING_CAP))
                     .filter_map(|i| entries.row_data(i))
                     .map(|e| {
-                        serde_json::json!({
+                        let mut entry = serde_json::json!({
                             "name": e.name.to_string(),
                             "dir": e.is_dir,
                             "size": e.size_text.to_string(),
                             "modified": e.modified_text.to_string(),
+                            "changed": e.changed_text.to_string(),
                             "selected": e.selected,
-                        })
+                        });
+                        // What the folder tile says it holds. `null` with a reason when the
+                        // folder could not be counted — never a 0 that was not read.
+                        if e.is_dir {
+                            entry["items"] = if e.count_known {
+                                e.item_count.into()
+                            } else {
+                                serde_json::Value::Null
+                            };
+                            if !e.count_known {
+                                entry["items_reason"] = e.count_reason.to_string().into();
+                            }
+                        }
+                        entry
                     })
                     .collect();
+                // The row under the grid: this folder's most recently changed files.
+                let recent: Vec<serde_json::Value> = {
+                    let recent = ui.get_file_recent();
+                    (0..recent.row_count())
+                        .filter_map(|i| recent.row_data(i))
+                        .map(|r| {
+                            serde_json::json!({
+                                "name": r.name.to_string(),
+                                "size": r.size_text.to_string(),
+                                "changed": r.changed_text.to_string(),
+                            })
+                        })
+                        .collect()
+                };
+                let places: Vec<serde_json::Value> = {
+                    let places = ui.get_file_places();
+                    (0..places.row_count())
+                        .filter_map(|i| places.row_data(i))
+                        .map(|p| serde_json::json!({ "label": p.label.to_string(), "path": p.path.to_string() }))
+                        .collect()
+                };
                 let sel = ui.get_file_selected_index();
                 let selected = if sel >= 0 {
                     entries
@@ -356,6 +391,9 @@ pub fn publish(
                     "preview_name": ui.get_file_quick_look_name().to_string(),
                     "tabs": ui.get_file_tabs().row_count(),
                     "free_space": ui.get_file_free_space_text().to_string(),
+                    "view": if ui.get_file_grid_view() { "grid" } else { "list" },
+                    "recent": recent,
+                    "places": places,
                 })
             } else {
                 serde_json::Value::Null

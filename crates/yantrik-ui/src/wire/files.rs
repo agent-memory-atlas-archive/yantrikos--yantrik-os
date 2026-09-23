@@ -1,7 +1,8 @@
 //! Files workbench. Workers perform I/O; the UI owns navigation and selection.
 use crate::app_context::AppContext;
 use crate::{
-    filebrowser as fsview, fileops, App, BreadcrumbSegment, FileDetailData, FileEntry, FileTabData,
+    filebrowser as fsview, fileops, App, BreadcrumbSegment, FileDetailData, FileEntry,
+    FilePlaceData, FileRecentData, FileTabData,
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
@@ -151,19 +152,33 @@ impl Browser {
                 order.reverse()
             }
         });
+        let hidden = self.hidden;
         self.model.set_vec(
             self.visible
                 .iter()
-                .map(|i| FileEntry {
-                    name: i.entry.name.clone().into(),
-                    is_dir: i.entry.is_dir,
-                    size_text: i.entry.size_text.clone().into(),
-                    modified_text: i.entry.modified_text.clone().into(),
-                    icon_char: i.entry.icon_char.clone().into(),
-                    selected: false,
-                })
+                .map(|i| file_entry(&i.entry, hidden))
                 .collect::<Vec<_>>(),
         );
+        // The row under the grid: what changed last in this folder. From the whole folder, not
+        // the filtered view — a search narrows the listing, it does not change what is recent
+        // (the row is hidden while one is typed). Trash has no recent row: what was thrown away
+        // last is not work to pick up.
+        let recent = if self.trash {
+            Vec::new()
+        } else {
+            fsview::most_recent(self.all.iter().map(|i| &i.entry), hidden, RECENT_ROW)
+        };
+        ui.set_file_recent(ModelRc::new(VecModel::from(
+            recent
+                .into_iter()
+                .map(|e| FileRecentData {
+                    name: e.name.clone().into(),
+                    size_text: e.size_text.clone().into(),
+                    changed_text: fsview::changed_text(e.modified).into(),
+                    icon_char: e.icon_char.clone().into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
         self.selected.clear();
         ui.set_file_selected_index(-1);
         ui.set_file_selection_count(0);
@@ -276,11 +291,22 @@ impl Browser {
             let result = (|| {
                 let root = fileops::trash_root();
                 let (items, space, badge) = if trash {
+                    let mut counted = 0usize;
                     let items = fileops::trash_items(&root)?
                         .into_iter()
                         .map(|t| {
                             let meta =
                                 std::fs::symlink_metadata(&t.stored).map_err(|e| e.to_string())?;
+                            // A folder in Trash is counted like any other, within the same
+                            // budget: "3 items" is what tells you which "Project" this was.
+                            let items = meta.is_dir().then(|| {
+                                counted += 1;
+                                if counted <= fsview::FOLDER_COUNT_BUDGET {
+                                    fsview::count_items(&t.stored)
+                                } else {
+                                    fsview::ItemCount::Unknown("not counted: Trash holds too many folders".into())
+                                }
+                            });
                             Ok(Item {
                                 entry: fsview::DirEntry {
                                     name: t.name.clone(),
@@ -299,6 +325,7 @@ impl Browser {
                                         "file".into()
                                     },
                                     selected: false,
+                                    items,
                                 },
                                 path: t.stored.clone(),
                                 trash: Some(t),
@@ -313,13 +340,16 @@ impl Browser {
                     if cancel.load(Ordering::Acquire) {
                         return Err("Canceled".into());
                     }
-                    let items = fsview::list_dir_checked(
+                    let mut entries = fsview::list_dir_checked(
                         dir.to_str().ok_or("Folder path is not UTF-8")?,
                         true,
                         "",
                         "name",
                         true,
-                    )?
+                    )?;
+                    // Each folder's item count, on this worker thread: the tiles' "12 items".
+                    fsview::count_folders(&dir, &mut entries, &|| cancel.load(Ordering::Acquire));
+                    let items = entries
                     .into_iter()
                     .map(|entry| Item {
                         path: dir.join(&entry.name),
@@ -422,6 +452,47 @@ impl Browser {
         std::thread::spawn(move || run_job(job, cancel, sink));
     }
 }
+/// How many files the recent row under the grid shows.
+const RECENT_ROW: usize = 6;
+
+/// One row of the listing, as the screen and `describe` read it.
+///
+/// A folder carries its item count only when the count was read: `count_known` false with a
+/// reason is "we could not look", and the tile says so instead of drawing a zero.
+fn file_entry(entry: &fsview::DirEntry, show_hidden: bool) -> FileEntry {
+    let (item_count, count_known, count_reason) = match &entry.items {
+        Some(count @ fsview::ItemCount::Known { .. }) => {
+            (count.shown(show_hidden).unwrap_or(0) as i32, true, String::new())
+        }
+        Some(fsview::ItemCount::Unknown(reason)) => (0, false, reason.clone()),
+        None if entry.is_dir => (0, false, "not counted".to_string()),
+        None => (0, false, String::new()),
+    };
+    FileEntry {
+        name: entry.name.clone().into(),
+        is_dir: entry.is_dir,
+        size_text: entry.size_text.clone().into(),
+        modified_text: entry.modified_text.clone().into(),
+        icon_char: entry.icon_char.clone().into(),
+        selected: false,
+        item_count,
+        count_known,
+        count_reason: count_reason.into(),
+        changed_text: fsview::changed_text(entry.modified).into(),
+    }
+}
+
+/// The sidebar's places for this home, as the screen reads them.
+fn set_places(ui: &App) {
+    let home = fsview::expand_home("~");
+    ui.set_file_places(ModelRc::new(VecModel::from(
+        fsview::places(&home)
+            .into_iter()
+            .map(|p| FilePlaceData { id: p.id.into(), label: p.label.into(), path: p.path.into() })
+            .collect::<Vec<_>>(),
+    )));
+}
+
 fn free_space(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -683,6 +754,9 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                             })));
                             u.set_file_free_space_text(space.into());
                             u.set_file_dir_type_badge(badge.into());
+                            // Places are re-read with each listing: a ~/Projects made a minute
+                            // ago appears the next time any folder is opened. Eight `stat`s.
+                            set_places(&u);
                             if trash {
                                 u.set_file_trash_count(items.len() as i32);
                             }
@@ -1029,5 +1103,6 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             }
         }
     });
+    set_places(ui);
     state.borrow().tabs_ui(ui);
 }

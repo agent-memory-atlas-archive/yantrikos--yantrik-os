@@ -27,6 +27,7 @@ import { StatusBar } from "components/status_bar.slint";
 import { DockItem } from "components/app_dock.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { AppColor } from "components/app_color.slint";
+import { AppTile } from "app_tile.slint";
 import { IntentLens, LensResult, ApprovalRequest } from "components/intent_lens.slint";
 import { MessageData } from "components/message_bubble.slint";
 import { UrgeCardData, GlanceCard } from "components/glance_card.slint";
@@ -762,29 +763,17 @@ export component DesktopScreen inherits Rectangle {
                                             spacing: 6px;
                                             alignment: start;
 
+                                            // desk-look: the app's own tile, as in the launcher,
+                                            // the workspace row and the taskbar.
                                             HorizontalLayout {
                                                 alignment: center;
-                                                Rectangle {
-                                                    width: 28px;
-                                                    height: 28px;
-                                                    if item.has-icon : Image {
-                                                        source: item.icon;
-                                                        width: 26px;
-                                                        height: 26px;
-                                                        x: (parent.width - self.width) / 2;
-                                                        y: (parent.height - self.height) / 2;
-                                                        image-fit: contain;
-                                                    }
-                                                    if !item.has-icon : Icon {
-                                                        commands: Icons.app-or-window(item.icon-id);
-                                                        size: 26px;
-                                                        thickness: 1.6px;
-                                                        tint: tile.has-hover
-                                                            ? AppColor.for-app(item.icon-id).brighter(30%)
-                                                            : AppColor.for-app(item.icon-id);
-                                                        x: (parent.width - self.width) / 2;
-                                                        y: (parent.height - self.height) / 2;
-                                                    }
+                                                AppTile {
+                                                    size: 30px;
+                                                    app-id: item.icon-id;
+                                                    glyph: Icons.app-or-window(item.icon-id);
+                                                    has-icon: item.has-icon;
+                                                    icon: item.icon;
+                                                    hovered: tile.has-hover;
                                                 }
                                             }
                                             Text {

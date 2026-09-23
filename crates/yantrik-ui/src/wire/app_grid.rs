@@ -266,6 +266,131 @@ mod icon_id_tests {
     }
 }
 
+#[cfg(test)]
+mod app_colour_tests {
+    use super::icon_id_for;
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    /// The one table that gives an app its colour, in the UI kit.
+    fn app_color_slint() -> String {
+        let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../yantrik-ui-kit/slint/app_color.slint");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    }
+
+    /// The body of one `public pure function <name>` in that file.
+    fn function_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("public pure function {name}("))
+            .unwrap_or_else(|| panic!("app_color.slint has no function {name}"));
+        let rest = &src[start..];
+        let end = rest.find("\n    }").expect("a function body ends at its closing brace");
+        &rest[..end]
+    }
+
+    /// `(key, value)` for every `<var> == "key" ? "value"` or `<var> == "key" ? root.x` arm.
+    fn arms(body: &str, var: &str) -> Vec<(String, String)> {
+        let needle = format!("{var} == \"");
+        body.lines()
+            .filter_map(|line| {
+                let after = &line[line.find(&needle)? + needle.len()..];
+                let (key, rest) = after.split_once('"')?;
+                let value = rest.split_once('?')?.1.trim();
+                let value = value.split("//").next()?.trim().trim_matches('"').to_string();
+                Some((key.to_string(), value))
+            })
+            .collect()
+    }
+
+    /// Every app id the launcher, the desktop's workspace row and the taskbar can draw a tile
+    /// for: the shell's built-in apps, every app we ship a .desktop entry for (under the id the
+    /// icon set and the tiles are keyed by), and every app the taskbar can name a window after.
+    fn ids_the_launcher_knows() -> BTreeSet<String> {
+        let mut ids: BTreeSet<String> = yantrik_shell_core::apps::builtin_apps()
+            .into_iter()
+            .map(|entry| icon_id_for(&entry.app_id))
+            .collect();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop-files");
+        for entry in std::fs::read_dir(&dir).expect("apps/desktop-files is in the tree") {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(".desktop") {
+                ids.insert(icon_id_for(stem));
+            }
+        }
+        ids.extend(crate::windows::APP_NAMES.iter().map(|(id, _)| id.to_string()));
+        ids
+    }
+
+    /// Every app a tile can be drawn for has a colour of its own.
+    ///
+    /// An app missing from `AppColor.hue-for-app` does not fail to draw: it falls back to a
+    /// quiet grey tile, which is right for a third-party app and wrong for one of ours — it
+    /// is how Agents, Arcade and Weather came to wear the house accent in the launcher while
+    /// every app beside them had a colour. So the table is held to the launcher's own list.
+    #[test]
+    fn every_app_the_launcher_knows_has_a_colour() {
+        let src = app_color_slint();
+        let table: BTreeSet<String> = arms(function_body(&src, "hue-for-app"), "id")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let missing: Vec<String> = ids_the_launcher_knows()
+            .into_iter()
+            .filter(|id| !table.contains(id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these apps have no colour in AppColor.hue-for-app \
+             (crates/yantrik-ui-kit/slint/app_color.slint), so their tile falls back to grey:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    /// A hue the table names is one the palette has, as a glyph tone AND as a tile.
+    ///
+    /// A misspelt hue ("amer") would not fail to compile — `hue()` falls through to the accent
+    /// and `tile-hue()` to a grey tile — so this is the only thing that catches it.
+    #[test]
+    fn every_hue_in_the_table_is_in_the_palette() {
+        let src = app_color_slint();
+        let glyph: BTreeSet<String> =
+            arms(function_body(&src, "hue"), "name").into_iter().map(|(h, _)| h).collect();
+        let tile: BTreeSet<String> =
+            arms(function_body(&src, "tile-hue"), "name").into_iter().map(|(h, _)| h).collect();
+        for (id, hue) in arms(function_body(&src, "hue-for-app"), "id") {
+            assert!(glyph.contains(&hue), "{id} is {hue:?}, which hue() does not know");
+            assert!(tile.contains(&hue), "{id} is {hue:?}, which tile-hue() does not know");
+        }
+        assert_eq!(glyph, tile, "the glyph tones and the tile fills name the same hues");
+    }
+
+    /// The colours the design names are the ones the table gives (desk-and-mind, "Colour per
+    /// app"): Files blue, Calendar red, Notes amber, Terminal green, Mail blue, Browser teal,
+    /// Studio violet. Files is the folder blue ("sky") so it and Mail, alphabetical
+    /// neighbours in the launcher as Email and Files, are two blues and not one.
+    #[test]
+    fn the_design_colours_hold() {
+        let src = app_color_slint();
+        let table = arms(function_body(&src, "hue-for-app"), "id");
+        let hue = |id: &str| {
+            table
+                .iter()
+                .find(|(k, _)| k == id)
+                .map(|(_, h)| h.as_str())
+                .unwrap_or_else(|| panic!("{id} has no colour"))
+        };
+        assert_eq!(hue("files"), "sky");
+        assert_eq!(hue("email"), "blue");
+        assert_eq!(hue("calendar"), "red");
+        assert_eq!(hue("notes"), "amber");
+        assert_eq!(hue("terminal"), "green");
+        assert_eq!(hue("browser"), "teal");
+        assert_eq!(hue("studio"), "violet");
+    }
+}
+
 fn populate_grid(ui: &App, installed: &Arc<Vec<DesktopEntry>>, query: &str, category: &str) {
     let query_lower = query.to_lowercase();
     let apps: Vec<AppGridItem> = installed

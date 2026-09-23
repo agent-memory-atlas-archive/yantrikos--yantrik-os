@@ -1,7 +1,7 @@
 // The everyday desktop: a quiet place to start, with real pins and recent items.
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
-import { AppColor } from "app_color.slint";
+import { AppTile } from "app_tile.slint";
 import { DockItem } from "app_dock.slint";
 import { LensResult } from "intent_lens.slint";
 import { YButton } from "y_button.slint";
@@ -131,15 +131,17 @@ export component DesktopHome inherits Rectangle {
                             VerticalLayout {
                                 padding-top: 8px; padding-bottom: 4px;
                                 spacing: 6px; alignment: start;
+                                // The app's own tile — the same object the launcher and the
+                                // taskbar draw, so Files is the same blue square on all three.
                                 HorizontalLayout {
                                     alignment: center;
-                                    Rectangle {
-                                        width: 46px; height: 46px;
-                                        border-radius: 13px;
-                                        background: AppColor.tint-for-app(item.icon-id);
-                                        border-width: 1px; border-color: Theme.glass-border;
-                                        if item.has-icon : Image { source: item.icon; width: 30px; height: 30px; x: 8px; y: 8px; image-fit: contain; }
-                                        if !item.has-icon : Icon { commands: Icons.app-or-window(item.icon-id); size: 26px; x: 10px; y: 10px; tint: AppColor.for-app(item.icon-id); }
+                                    AppTile {
+                                        size: 46px;
+                                        app-id: item.icon-id;
+                                        glyph: Icons.app-or-window(item.icon-id);
+                                        has-icon: item.has-icon;
+                                        icon: item.icon;
+                                        hovered: pin-touch.has-hover;
                                     }
                                 }
                                 Text { text: item.label; color: Theme.text-primary; font-size: Theme.fs-caption; horizontal-alignment: center; overflow: elide; }

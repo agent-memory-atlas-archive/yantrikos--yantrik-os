@@ -45,14 +45,50 @@ export component AppsScene inherits Rectangle {
         multi-select-clicked(index, control, shift) => { self.selected-index = index; root.action("file:" + self.entries[index].name); }
         entries: root.scene == "files-empty" ? [] : self.sample-entries;
         property <[FileEntry]> sample-entries: [
-            { name: "Projects", is-dir: true, modified-text: "Today, 09:42" },
-            { name: "Personal", is-dir: true, modified-text: "Yesterday" },
-            { name: "Reference", is-dir: true, modified-text: "Sep 17, 2026" },
-            { name: "Getting started.md", size-text: "2.4 KB", modified-text: "Today, 10:24", icon-char: "≡" },
-            { name: "Project brief.pdf", size-text: "184 KB", modified-text: "Yesterday", icon-char: "▤" },
-            { name: "Autumn landscape.png", size-text: "3.2 MB", modified-text: "Sep 17, 2026", icon-char: "▣" },
-            { name: "Ideas for next week.txt", size-text: "1.1 KB", modified-text: "Sep 16, 2026", icon-char: "≡" },
-            { name: "Budget.csv", size-text: "8.7 KB", modified-text: "Sep 15, 2026", icon-char: "◇" }
+            { name: "Projects", is-dir: true, modified-text: "Today, 09:42", item-count: 6, count-known: true, changed-text: "1 h ago" },
+            { name: "Personal", is-dir: true, modified-text: "Yesterday", item-count: 14, count-known: true, changed-text: "1 d ago" },
+            { name: "Reference", is-dir: true, modified-text: "Sep 17, 2026", count-known: false, count-reason: "permission denied", changed-text: "6 d ago" },
+            { name: "Getting started.md", size-text: "2.4 KB", modified-text: "Today, 10:24", icon-char: "≡", changed-text: "12 min ago" },
+            { name: "Project brief.pdf", size-text: "184 KB", modified-text: "Yesterday", icon-char: "▧", changed-text: "1 d ago" },
+            { name: "Autumn landscape.png", size-text: "3.2 MB", modified-text: "Sep 17, 2026", icon-char: "▣", changed-text: "6 d ago" },
+            { name: "Ideas for next week.txt", size-text: "1.1 KB", modified-text: "Sep 16, 2026", icon-char: "≡", changed-text: "7 d ago" },
+            { name: "Budget.csv", size-text: "8.7 KB", modified-text: "Sep 15, 2026", icon-char: "◇", changed-text: "8 d ago" }
+        ];
+        free-space-text: "42.8 GB available";
+    }
+    // Files at home, as the redesign draws it: the places this home has, folder tiles with
+    // their counts and times (one that could not be read), and the recent row under the grid.
+    if root.scene == "files-home" || root.scene == "files-home-list" : FileBrowser {
+        width: 100%; height: 100%;
+        current-path: "~";
+        breadcrumbs: [{ label: "Home", full-path: "~" }];
+        grid-view: root.scene == "files-home";
+        can-go-back: true;
+        places: [
+            { id: "home", label: "Home", path: "~" },
+            { id: "documents", label: "Documents", path: "~/Documents" },
+            { id: "downloads", label: "Downloads", path: "~/Downloads" },
+            { id: "pictures", label: "Pictures", path: "~/Pictures" },
+            { id: "music", label: "Music", path: "~/Music" },
+            { id: "videos", label: "Videos", path: "~/Videos" },
+            { id: "projects", label: "Projects", path: "~/Projects" }
+        ];
+        entries: [
+            { name: "Documents", is-dir: true, item-count: 12, count-known: true, changed-text: "2 h ago" },
+            { name: "Downloads", is-dir: true, item-count: 31, count-known: true, changed-text: "25 min ago" },
+            { name: "Music", is-dir: true, item-count: 0, count-known: true, changed-text: "2 mo ago" },
+            { name: "Pictures", is-dir: true, item-count: 148, count-known: true, changed-text: "3 d ago" },
+            { name: "Projects", is-dir: true, item-count: 6, count-known: true, changed-text: "just now" },
+            { name: "Shared", is-dir: true, count-known: false, count-reason: "permission denied", changed-text: "5 d ago" },
+            { name: "Videos", is-dir: true, item-count: 1, count-known: true, changed-text: "1 y ago" },
+            { name: "notes.md", size-text: "4.1 KB", icon-char: "≡", changed-text: "8 min ago" },
+            { name: "budget.csv", size-text: "8.7 KB", icon-char: "◇", changed-text: "1 d ago" },
+            { name: "landscape.png", size-text: "2.4 MB", icon-char: "▣", changed-text: "3 h ago" }
+        ];
+        recent: [
+            { name: "notes.md", size-text: "4.1 KB", changed-text: "8 min ago", icon-char: "≡" },
+            { name: "landscape.png", size-text: "2.4 MB", changed-text: "3 h ago", icon-char: "▣" },
+            { name: "budget.csv", size-text: "8.7 KB", changed-text: "1 d ago", icon-char: "◇" }
         ];
         free-space-text: "42.8 GB available";
     }

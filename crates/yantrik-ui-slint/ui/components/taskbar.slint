@@ -21,7 +21,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "icon.slint";
-import { AppColor } from "app_color.slint";
+import { AppTile } from "app_tile.slint";
 import { WindowItem } from "window_switcher.slint";
 
 export component Taskbar inherits Rectangle {
@@ -117,10 +117,11 @@ export component Taskbar inherits Rectangle {
                             padding-left: 10px;
                             padding-right: 10px;
                             spacing: 8px;
-                            Icon {
-                                commands: Icons.app-or-window(root.minimized-app-id);
-                                size: 14px;
-                                tint: AppColor.for-app(root.minimized-app-id).transparentize(40%);
+                            AppTile {
+                                size: 22px;
+                                app-id: root.minimized-app-id;
+                                glyph: Icons.app-or-window(root.minimized-app-id);
+                                dimmed: true;
                                 y: (parent.height - self.height) / 2;
                             }
                             Text {
@@ -162,14 +163,15 @@ export component Taskbar inherits Rectangle {
                             padding-left: 10px;
                             padding-right: 10px;
                             spacing: 8px;
-                            Icon {
-                                commands: Icons.app-or-window(w.app-id);
-                                size: 14px;
-                                // Colour says which app; brightness still says which one has focus,
-                                // so the active state survives them no longer all being grey.
-                                tint: win.is-active
-                                    ? AppColor.for-app(w.app-id)
-                                    : AppColor.for-app(w.app-id).transparentize(40%);
+                            // The app's own tile, small: colour says which app, and the
+                            // tile dims when its window does not have focus, so the active
+                            // state survives them no longer all being grey.
+                            AppTile {
+                                size: 22px;
+                                app-id: w.app-id;
+                                glyph: Icons.app-or-window(w.app-id);
+                                dimmed: !win.is-active;
+                                hovered: win.has-hover;
                                 y: (parent.height - self.height) / 2;
                             }
                             Text {
