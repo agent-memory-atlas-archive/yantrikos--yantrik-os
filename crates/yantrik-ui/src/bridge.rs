@@ -145,6 +145,15 @@ pub enum CompanionCommand {
     ProcessNextTask,
     /// Execute the next step of a recipe. Self-signals for continuous execution.
     ProcessRecipeStep { recipe_id: String },
+    /// Read the recipes again and publish them to `crate::recipes`, which the Recipes screen,
+    /// `describe shell` and the mind panel read without waiting on this thread.
+    RefreshRecipes,
+    /// A person's answer, pause, resume or cancel for one recipe. The outcome is published to
+    /// `crate::recipes` with the recipes themselves.
+    Recipe {
+        recipe_id: String,
+        op: yantrik_companion::recipe_view::RecipeOp,
+    },
     /// Rename the user (persists to config).
     RenameUser { name: String },
     /// Rename the companion (persists to config).
@@ -396,6 +405,22 @@ impl CompanionHandle {
             })
             .map_err(|_| "companion worker is not running".to_string())?;
         Ok(receipt)
+    }
+
+    /// Ask the worker to publish the recipes again. Returns at once; see `crate::recipes`.
+    pub fn refresh_recipes(&self) -> Result<(), String> {
+        self.cmd_tx
+            .send(CompanionCommand::RefreshRecipes)
+            .map_err(|_| "companion worker is not running".to_string())
+    }
+
+    /// Answer, pause, resume or cancel one recipe. Returns once it is queued: the worker may be
+    /// in the middle of a generation, and nothing on the UI thread waits for it. The outcome
+    /// lands in `crate::recipes`.
+    pub fn recipe(&self, recipe_id: String, op: yantrik_companion::recipe_view::RecipeOp) -> Result<(), String> {
+        self.cmd_tx
+            .send(CompanionCommand::Recipe { recipe_id, op })
+            .map_err(|_| "companion worker is not running".to_string())
     }
 
     /// The board, for status and cancellation.
@@ -752,13 +777,41 @@ fn worker_loop(
 
     tracing::info!("Companion worker ready for commands");
 
+    // Set by every command that can change a recipe; the recipes are published once it is done,
+    // before the next command is taken. See `crate::recipes`.
+    let mut recipes_dirty = true;
+
     loop {
-        // The mind panel's recipes in flight, read here because this thread owns the store's
-        // connection (a second one from this process is what the engine refuses to write beside).
-        // Before the wait, so what the panel shows is the state the last command left.
-        crate::mind_panel::publish_from_worker(&companion.db.conn());
+        // The recipes, read here because this thread owns the store's connection (a second one
+        // from this process is what the engine refuses to write beside), and before the wait, so
+        // what is shown is the state the last command left. The Recipes screen, `describe shell`
+        // and the mind panel's recipes in flight all read this one copy (`crate::recipes`).
+        if std::mem::take(&mut recipes_dirty) {
+            crate::recipes::publish(yantrik_companion::recipe_view::list(&companion.db.conn()));
+        }
+        // The mind panel: the worker has reached its loop, so the memory count it pushes is a count.
+        crate::mind_panel::worker_up();
         match cmd_rx.recv() {
+            Ok(CompanionCommand::RefreshRecipes) => recipes_dirty = true,
+            Ok(CompanionCommand::Recipe { recipe_id, op }) => {
+                let outcome = yantrik_companion::recipe_view::apply(&companion.db.conn(), &recipe_id, &op);
+                match &outcome {
+                    Ok(applied) => {
+                        tracing::info!(recipe_id = %recipe_id, op = op.verb(), "Recipe: {}", applied.message);
+                        // Running again — after an answer, or resumed: the executor takes it now,
+                        // the way a chat turn's sweep would.
+                        if applied.run_now {
+                            let _ = cmd_tx.send(CompanionCommand::ProcessRecipeStep { recipe_id: recipe_id.clone() });
+                        }
+                    }
+                    Err(why) => tracing::info!(recipe_id = %recipe_id, op = op.verb(), why = %why, "Recipe: refused"),
+                }
+                crate::recipes::record(&recipe_id, outcome.map(|a| a.message));
+                recipes_dirty = true;
+            }
             Ok(CompanionCommand::SendMessage { text, token_tx, job }) => {
+                // A turn can create, run or change a recipe through its tools.
+                recipes_dirty = true;
                 // Work that arrived without a ticket gets one here, and that is not bookkeeping:
                 // the startup brief and every message typed into the chat box come through this
                 // arm, and without an entry the board reported "0 active" while the worker was
@@ -1058,6 +1111,13 @@ fn worker_loop(
                     board.finish(id, Ok(output.clone()));
                 }
                 let _ = reply_tx.send(output);
+                // `run_recipe` from an outside caller: start it as a chat turn's sweep would.
+                if name == "run_recipe" {
+                    for rid in yantrik_companion::recipe::RecipeStore::get_resumable(&companion.db.conn()) {
+                        let _ = cmd_tx.send(CompanionCommand::ProcessRecipeStep { recipe_id: rid });
+                    }
+                }
+                recipes_dirty = true;
             }
             Ok(CompanionCommand::ListTools { reply_tx }) => {
                 let _ = reply_tx.send(companion.tool_catalog());
@@ -2043,6 +2103,7 @@ fn worker_loop(
                 push_state(&companion, &ui_weak, online.load(Ordering::Relaxed));
             }
             Ok(CompanionCommand::ProcessNextTask) => {
+                recipes_dirty = true;
                 // Event-driven task processing: process one step, then self-signal
                 // to continue. User messages have priority — they arrive via the same
                 // channel and will be processed before queued ProcessNextTask signals.
@@ -2172,6 +2233,7 @@ fn worker_loop(
             }
             Ok(CompanionCommand::ProcessRecipeStep { recipe_id }) => {
                 use yantrik_companion::recipe::*;
+                recipes_dirty = true;
 
                 let recipe = match RecipeStore::get(&companion.db.conn(), &recipe_id) {
                     Some(r) => r,
@@ -2181,13 +2243,23 @@ fn worker_loop(
                     }
                 };
 
-                // Skip if recipe is done/failed
-                if recipe.status == RecipeStatus::Done || recipe.status == RecipeStatus::Failed {
+                // Skip if recipe is done/failed, or a person has paused it
+                if recipe.status == RecipeStatus::Done || recipe.status == RecipeStatus::Failed || recipe.status == RecipeStatus::Paused {
                     continue;
                 }
 
                 let steps = RecipeStore::get_steps(&companion.db.conn(), &recipe_id);
                 let step_count = steps.len();
+
+                // Waiting on a person's answer: only the answer moves it on (it sets the recipe
+                // running). A signal still queued from an earlier chain — the chat's sweep starts
+                // one per turn — would otherwise walk it past its question with the answer unbound.
+                if recipe.status == RecipeStatus::Waiting
+                    && recipe.current_step > 0
+                    && matches!(steps.get(recipe.current_step - 1).map(|s| &s.step), Some(RecipeStep::AskUser { .. }))
+                {
+                    continue;
+                }
 
                 // Check if we've finished all steps
                 if recipe.current_step >= step_count {

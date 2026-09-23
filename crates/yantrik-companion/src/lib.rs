@@ -56,6 +56,9 @@ pub mod interjection;
 pub mod recipe;
 pub mod recipe_executor;
 pub mod recipe_templates;
+/// Recipes as the desk shows them: the read side the Recipes screen, `describe shell` and the
+/// mind panel draw from, and the one door for a person's answer, pause, resume and cancel.
+pub mod recipe_view;
 pub mod task_queue;
 pub mod trust_model;
 pub mod tool_cache;

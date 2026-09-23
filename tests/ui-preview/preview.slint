@@ -299,3 +299,22 @@ export component AgentsProbe inherits Window {
 export { App } from "app.slint";
 export { MindPanelState, MindPanelNow, MindPanelAgent, MindPanelRecipe, MindPanelAct } from "components/mind_panel.slint";
 export { ThemeMode }
+
+// The Recipes screen (screen 35), filled with fixture data by src/recipes_tests.rs. Callbacks are
+// recorded there, never acted on.
+import { RecipesScreen } from "recipes.slint";
+export { RecipesState, RecipeTabData, RecipeRowData, RecipeStageData, RecipeStepData } from "recipes.slint";
+export component RecipesProbe inherits Window {
+    in property <length> canvas-width: 1280px;
+    in property <length> canvas-height: 800px;
+    width: root.canvas-width;
+    height: root.canvas-height;
+    default-font-family: Theme.font-ui;
+    background: Theme.bg-deep;
+    in-out property <bool> light: false;
+    changed light => { ThemeMode.dark = !root.light; }
+    RecipesScreen {
+        width: 100%;
+        height: 100%;
+    }
+}

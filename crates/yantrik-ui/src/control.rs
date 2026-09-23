@@ -132,6 +132,7 @@ const SCREENS: &[(&str, i32)] = &[
     ("permissions", 28),
     ("problems", 33),
     ("agents", 34),
+    ("recipes", 35),
 ];
 
 /// What `describe` calls the screen the shell is on.
@@ -523,6 +524,9 @@ pub fn publish(
                 // Every agent, one conversation with one mind: its state, what it has run and
                 // what it is waiting on, with the counts the Agents screen's tabs show.
                 .with("agents", crate::agents::for_describe())
+                // Every recipe the companion holds that is not a never-run built-in: its status,
+                // the step it is on and what it waits for. `answer_recipe` and its siblings act.
+                .with("recipes", crate::recipes::for_describe())
                 // The owner's standing policy for callers on the socket, so a bridge can read
                 // it instead of provoking a `CEILING:` refusal to find out. An approval cannot
                 // exceed this, and a question the machine will refuse to answer should never
@@ -1087,7 +1091,7 @@ pub fn publish(
             Action::new("show_screen", "Switch the shell to one of its screens")
                 .arg(
                     Param::text("screen")
-                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media, problems, agents — or launchpad, the launcher, which opens over the desktop"),
+                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media, problems, agents, recipes — or launchpad, the launcher, which opens over the desktop"),
                 )
                 .arg(
                     Param::text("section")
@@ -1380,6 +1384,9 @@ pub fn publish(
     // agent_input, agent_kill. The agent comes from its token, never an argument. See
     // `control_agent_terminal` and design/agents-workspace-2026-09-23.md, decision 3.
     let surface = crate::control_agent_terminal::actions(surface);
+    // A recipe's question answered, and a recipe paused, resumed or cancelled — answer_recipe,
+    // pause_recipe, resume_recipe, cancel_recipe. See `control_recipes`.
+    let surface = crate::control_recipes::actions(surface, ctx.bridge.handle());
     crate::control_editor::actions(surface, ui).serve();
 }
 

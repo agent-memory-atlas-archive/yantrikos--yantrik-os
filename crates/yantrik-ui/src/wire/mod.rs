@@ -9,6 +9,8 @@
 mod about;
 // The Agents screen and every agent popped out into its own window.
 pub mod agents;
+// The Recipes screen: every recipe as its stages, live.
+pub mod recipes;
 mod app_grid;
 pub mod dep_check;
 mod callbacks;
@@ -91,6 +93,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     agents::wire(ui, ctx);
     // After `harness` and `agents`: the panel reads the host and the Agents store they set up.
     crate::mind_panel::wire(ui);
+    recipes::wire(ui, ctx);
     about::wire(ui, ctx);
     version::wire(ui, ctx);
     morning_brief::wire(ui, ctx);

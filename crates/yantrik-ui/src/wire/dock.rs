@@ -89,6 +89,7 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["permissions", "permission_dashboard"], Launch::Screen(28)),
     (&["problems", "report_problem", "report_a_problem"], Launch::Screen(33)),
     (&["agents", "agent"], Launch::Screen(34)),
+    (&["recipes", "recipe"], Launch::Screen(35)),
     (&["documents", "document_editor"], Launch::Program { id: "documents", bin: "yantrik-document-editor" }),
     (&["presentation", "slides"], Launch::Program { id: "presentation", bin: "yantrik-presentation" }),
     // One spelling, because the app publishes `studio` and the binary is `yantrik-studio`: every
@@ -244,6 +245,7 @@ const PURPOSES: &[(&str, &str)] = &[
     ("image", "view pictures"),
     ("problems", "what went wrong on this machine, and the report you can choose to send"),
     ("agents", "every agent at work — each mind's conversation, its tool calls and their output, in one list"),
+    ("recipes", "every recipe the companion holds, as its stages while it runs — answer the one waiting on you, pause, resume or cancel"),
     // Written against `images` on purpose: the two are one word apart and a model choosing between
     // them has only these few words. Looking and making are the difference, and where the pixels
     // come from is the second thing a caller has to know before it asks.
