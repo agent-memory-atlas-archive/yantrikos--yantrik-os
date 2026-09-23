@@ -359,14 +359,17 @@ fn spawn_screenshot(ui: &ArcadeApp, core: &Core, game: &str) -> Result<u64, Stri
 }
 
 fn spawn_play(ui: &ArcadeApp, core: &Core, game: &str) -> Result<u64, String> {
-    let (_lib, slug, html) = prepared_built_game(ui, game)?;
+    let (lib, slug, html) = prepared_built_game(ui, game)?;
     let id = core.start_job("play", &slug);
     let core2 = core.clone();
     let weak = ui.as_weak();
     std::thread::Builder::new()
         .name(format!("arcade-play-{id}"))
         .spawn(move || {
-            let result = play::play(&html);
+            // The same file `screenshot` writes: if the Browser cannot draw the game,
+            // play renders it headless there and says so.
+            let shot = lib.screenshot_path(&slug);
+            let result = play::play(&html, &shot);
             core2.finish_job(id, result.clone());
             post_result(weak, core2, result);
         })
@@ -600,7 +603,7 @@ fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
             handler(ui, &core, "build"),
         ),
         (
-            Action::new("play", "Open a built game in the desktop Browser")
+            Action::new("play", "Open a built game in the desktop Browser and confirm it draws; if the Browser has no WebGL, say so and take a headless screenshot instead")
                 .defers()
                 .arg(Param::text("game").describe("Title or slug of a built game")),
             handler(ui, &core, "play"),

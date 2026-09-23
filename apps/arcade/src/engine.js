@@ -590,6 +590,13 @@
     overlay.style.display = "flex";
   }
   refreshHud();
+  // A browser with no WebGL context leaves the canvas a white rectangle under a
+  // working HUD, which looks like a game that is about to start and never does. Say
+  // what happened where the person is looking, not only in the state hook.
+  if (status === "nogl") {
+    showOverlay("NO WEBGL", "This browser has no WebGL context, so the arena cannot draw here. " +
+      "The game is built and fine: Arcade's screenshot and verify render it in a headless browser.");
+  }
 
   // ── Juice: particles ─────────────────────────────────────────────
   var particles = [];
@@ -786,6 +793,9 @@
 
   // ── Reset ────────────────────────────────────────────────────────
   function reset() {
+    // Without a renderer there is nothing to restart: R or Enter must not hide the
+    // "no WebGL" overlay and report "playing" over a canvas that cannot draw.
+    if (!renderer) return;
     collected = 0;
     lives = GAME.lives;
     invuln = 0; shakeT = 0; elapsed = 0;
@@ -1041,6 +1051,7 @@
         z: Math.round(playerPos.z * 100) / 100,
         frameMs: Math.round(avgFrameMs() * 10) / 10,
         frames: frames,
+        webgl: !!renderer,
         bot: botMode,
         errors: errors.slice(0, 10)
       };
