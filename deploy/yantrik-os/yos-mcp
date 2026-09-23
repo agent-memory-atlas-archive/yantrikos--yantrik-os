@@ -19,7 +19,8 @@ Config for the mind (YM_MCP_CONFIG, default /etc/yantrik-mind/mcp.json):
 
 Started with YANTRIK_AGENT_TOKEN — by a harness, for one of the person's agents — every act
 carries that agent's token, a command runs in the agent's own terminal rather than the person's,
-and `run_command` / `command_status` / `command_input` / `command_kill` are offered as well. See
+and `run_command` / `command_status` / `command_input` / `command_kill` are offered as well, with
+`new_agent` / `send_to_agent` / `stop_agent` / `read_agent` for handing work to another agent. See
 "Which agent this bridge acts for" below.
 """
 
@@ -527,6 +528,88 @@ AGENT_TOOLS = [
     },
 ]
 
+# ── Other agents: how a mind hands work to another ──────────────────────────────────────
+#
+# design/agents-workspace-2026-09-23.md, decision 1: "A mind can spin up agents too". The shell's
+# `new_agent`, `send_to_agent`, `stop_agent` and `read_agent`, made with `os_act` underneath like
+# the command tools — so `new_agent` is `sensitive` (a card in `ask` mode, in THIS agent's pane),
+# `send_to_agent` and `stop_agent` are `standard`, `read_agent` is `safe`. Which agent is asking is
+# never an argument: it rides beside them as this bridge's token, and the shell holds the caller to
+# it — a child cannot start agents of its own, an agent holds at most three, and an agent directs
+# and reads only the agents it started. `pass` names the arguments that go through as they are.
+_AGENT = {"type": "string",
+          "description": "The agent, as new_agent answered: `<mind>:<conversation>`, e.g. pi:c-7f3a91."}
+
+AGENT_TOOLS += [
+    {
+        "name": "new_agent",
+        "agent_action": "new_agent",
+        "pass": ["mind", "task"],
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+        "description": "Hand a task to another agent: start a new conversation with a mind on this "
+                       "desktop and give it its first prompt. It works on its own, in its own pane "
+                       "on the Agents screen, and its row says you started it. Answers at once "
+                       "with its id; read_agent shows how it is going, send_to_agent says more, "
+                       "stop_agent stops it. It starts with none of your grants: anything it needs "
+                       "allowed is asked for again, in its own pane. An agent you started cannot "
+                       "start agents of its own, you may have at most three running at once, and "
+                       "the desktop caps how many run in all. Graded sensitive: in `ask` mode the "
+                       "person allows it first.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mind": {"type": "string",
+                         "description": "Which mind: an attached one's id, as os_describe shell "
+                                        "lists under `minds` (pi, deepseek)."},
+                "task": {"type": "string", "description": "What it is to do, in full."},
+            },
+            "required": ["mind", "task"],
+        },
+    },
+    {
+        "name": "send_to_agent",
+        "agent_action": "send_to_agent",
+        "pass": ["agent", "text"],
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        "description": "Say more to an agent you started: its next prompt. One turn at a time — an "
+                       "agent still on its last turn is not sent another; read_agent shows when "
+                       "it is done.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"agent": _AGENT,
+                           "text": {"type": "string", "description": "What to say to it."}},
+            "required": ["agent", "text"],
+        },
+    },
+    {
+        "name": "stop_agent",
+        "agent_action": "stop_agent",
+        "pass": ["agent"],
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
+        "description": "Stop an agent you started: its turn ends, every command it is running is "
+                       "killed, anything it was waiting on the person for is withdrawn, and the "
+                       "agents it started stop with it. Its pane stays readable.",
+        "inputSchema": {"type": "object", "properties": {"agent": _AGENT}, "required": ["agent"]},
+    },
+    {
+        "name": "read_agent",
+        "agent_action": "read_agent",
+        "pass": ["agent", "last"],
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "description": "Read an agent's recent turns as text: what it was asked, what it said, each "
+                       "call it made with how it went and the end of its output, and what the "
+                       "person was asked for it. You may read yourself and the agents you started.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"agent": _AGENT,
+                           "last": {"type": "number",
+                                    "description": "How many of its latest turns. Default 3, at "
+                                                   "most 20."}},
+            "required": ["agent"],
+        },
+    },
+]
+
 AGENT_BY_NAME = {t["name"]: t for t in AGENT_TOOLS}
 
 # What `os_act` says in addition when this bridge has a token, so a mind that reaches for the
@@ -589,6 +672,11 @@ def agent_route(args):
 
 def agent_args(name, args):
     """A command tool's arguments, as the shell's action names them."""
+    passed = AGENT_BY_NAME.get(name, {}).get("pass")
+    if passed is not None:
+        # The other-agent tools take the shell's own names, and nothing else — an `agent_token`
+        # among them included, which never leaves this process as an argument.
+        return {k: args[k] for k in passed if args.get(k) not in (None, "")}
     out = {}
     if name == "run_command":
         out["command"] = args.get("command")
@@ -692,7 +780,20 @@ def run_agent_tool(tool, args):
         seen["result"] = result
         return command_text(result, COMMAND_TOOL_NAMES)
 
+    def present_agent(out):
+        # The shell's own sentence, or — for read_agent — the session as text. Never the JSON.
+        result = result_object(out)
+        if not isinstance(result, dict):
+            return out
+        return str(result.get("text") or result.get("said") or out)
+
     act = {"app": "shell", "action": tool["agent_action"], "args": agent_args(tool["name"], args)}
+    if "pass" in tool:
+        text, is_error = run_tool(BY_NAME["os_act"], act, present=present_agent)
+        if tool["name"] in PRIVATE_READS and not is_error and not text.startswith("REFUSED"):
+            # Another agent's session holds whatever it read: this session has now seen it too.
+            _SAW_PRIVATE.append(tool["name"])
+        return text, is_error, None
     text, is_error = run_tool(BY_NAME["os_act"], act, present=present)
     return text, is_error, seen.get("result")
 
@@ -895,7 +996,9 @@ def ambiguous(pair):
 # is session lifetime. There is deliberately NO tool to clear the taint — a caller that can
 # untaint itself is not constrained, and the only way back is a new session, which is a
 # person's decision rather than an agent's.
-PRIVATE_READS = {"os_describe", "os_perception", "web_listen"}
+PRIVATE_READS = {"os_describe", "os_perception", "web_listen",
+                 # Another agent's session: what it read, its commands' output.
+                 "read_agent"}
 OUTBOUND = {"web_type", "web_go"}
 
 _SAW_PRIVATE = []          # what tainted this session, in order, for the refusal message

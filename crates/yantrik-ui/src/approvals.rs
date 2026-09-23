@@ -189,11 +189,18 @@ pub struct Verified {
     /// stop and read rather than to click — and both are one line, so the card's height stays
     /// arithmetic however many there turn out to be later.
     pub discrepancies: Vec<String>,
+    /// The agent this request is for (`pi:c-7f3a91`), or empty for a caller that runs as no agent.
+    ///
+    /// Taken from the agent token that rode beside the request's arguments, and believed only when
+    /// the kernel's caller descends from the harness the token was issued to — never from anything
+    /// the request says. It decides which agent's pane draws the card (design decision 4), and the
+    /// card names it. The token itself is never kept here, or anywhere a card or a log can show it.
+    pub agent: String,
 }
 
 impl Verified {
-    /// What `describe shell` publishes beside `requester`. Three facts and no prose: a caller
-    /// reading this has to be able to compare it with `ps`, not to be reassured by it.
+    /// What `describe shell` publishes beside `requester`. Facts and no prose: a caller reading
+    /// this has to be able to compare it with `ps`, not to be reassured by it.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "line": self.line,
@@ -201,6 +208,7 @@ impl Verified {
             "pid": self.pid,
             "attached_mind": self.attached_mind,
             "discrepancies": self.discrepancies,
+            "agent": self.agent,
         })
     }
 }
@@ -263,6 +271,9 @@ struct Record {
     /// left in the transcript, so a person scrolling back can see which of the two they chose.
     /// The standing part of that decision lives in `mind_mode`, not here.
     session: bool,
+    /// The shell took it back before anybody answered: the agent that asked was stopped, or its
+    /// harness went. Reported as `expired` — nobody answered — and never grantable.
+    withdrawn: bool,
     /// The stored state. Expiry is not stored: it is a fact about the clock, derived on every
     /// read, so a request cannot be alive merely because nothing looked at it.
     state: Status,
@@ -488,11 +499,16 @@ impl Store {
         // Asked and still waiting: the same question, so the same card. A caller that retries
         // (a poll that timed out, a model that repeated itself) must not put a second identical
         // card in front of the person — that is how a stack of cards becomes noise.
+        //
+        // The same question from ANOTHER agent is not the same question: who is asking is half of
+        // what the person reads, the card is drawn in the asker's pane, and one agent's Allow must
+        // not answer another's request.
         if let Some(existing) = self.records.iter().find(|r| {
             r.status(now) == Status::Pending
                 && r.app == app
                 && r.action == action
                 && r.canonical == canonical
+                && r.verified.agent == verified.agent
         }) {
             return Ok(Requested {
                 id: existing.id.clone(),
@@ -546,9 +562,34 @@ impl Store {
             decided: None,
             decided_at: String::new(),
             session: false,
+            withdrawn: false,
             state: Status::Pending,
         });
         Ok(Requested { id, status: Status::Pending, fresh: true })
+    }
+
+    /// Take back every request still waiting for `agent`: it was stopped, or its harness went, and
+    /// a card for work that is no longer happening must not become a grant (design, "When a
+    /// harness dies"). The ids withdrawn.
+    ///
+    /// This only ever makes the desktop less permissive — a withdrawn request is refused, never
+    /// granted — so it is not a decision a person has to make, and it is not reachable from any
+    /// action on the socket: the shell calls it when it stops an agent or sees its harness go.
+    pub(crate) fn withdraw_for_agent(&mut self, agent: &str, now: Instant, at: &str) -> Vec<String> {
+        if agent.is_empty() {
+            return Vec::new();
+        }
+        let mut withdrawn = Vec::new();
+        for record in self.records.iter_mut() {
+            if record.verified.agent == agent && record.status(now) == Status::Pending {
+                record.state = Status::Expired;
+                record.withdrawn = true;
+                record.decided = Some(now);
+                record.decided_at = at.to_string();
+                withdrawn.push(record.id.clone());
+            }
+        }
+        withdrawn
     }
 
     /// Where a request stands. `None` means no request by that id — which is not the same as
@@ -765,6 +806,9 @@ fn record_line(record: &Record, status: Status) -> String {
         Status::Expired if record.state == Status::Granted => {
             format!("{allowed}: {what} — {} (grant expired unused)", record.decided_at)
         }
+        Status::Expired if record.withdrawn => {
+            format!("Withdrawn: {what} — {} (the agent that asked was stopped or is gone)", record.decided_at)
+        }
         Status::Expired => format!("Not answered: {what} — asked {}", record.created_at),
     }
 }
@@ -834,6 +878,53 @@ pub fn card(id: &str) -> Option<Card> {
     cards().into_iter().find(|c| c.id == id)
 }
 
+/// Which agent a request was asked for — empty for none — while the store still holds it.
+pub fn agent_of(id: &str) -> Option<String> {
+    locked().records.iter().find(|r| r.id == id).map(|r| r.verified.agent.clone())
+}
+
+/// How a request came out, as the pane of the agent that asked says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Allowed,
+    Denied,
+    /// Nobody answered in time — or the store no longer holds it, which is the same thing to
+    /// whoever is still waiting.
+    Unanswered,
+    Withdrawn,
+}
+
+impl Store {
+    /// `None` while the request is still waiting; else how it came out and the line it leaves. An
+    /// allowed request stays allowed after its grant is spent or runs out: that is what the person
+    /// said.
+    pub fn outcome(&self, id: &str, now: Instant) -> Option<(Outcome, String)> {
+        let Some(record) = self.records.iter().find(|r| r.id == id) else {
+            return Some((Outcome::Unanswered, String::new()));
+        };
+        let status = record.status(now);
+        let outcome = match (status, record.state) {
+            (Status::Pending, _) => return None,
+            (_, Status::Granted | Status::Consumed) => Outcome::Allowed,
+            (_, Status::Denied) => Outcome::Denied,
+            _ if record.withdrawn => Outcome::Withdrawn,
+            _ => Outcome::Unanswered,
+        };
+        Some((outcome, record_line(record, status)))
+    }
+}
+
+/// See [`Store::outcome`].
+pub fn outcome(id: &str) -> Option<(Outcome, String)> {
+    locked().outcome(id, Instant::now())
+}
+
+/// Take back what `agent` is still waiting on. See [`Store::withdraw_for_agent`]: the shell's own
+/// call when it stops an agent or sees its harness go, never an action on the socket.
+pub(crate) fn withdraw_for_agent(agent: &str) -> Vec<String> {
+    locked().withdraw_for_agent(agent, Instant::now(), &hhmm())
+}
+
 pub fn consume(
     id: &str,
     app: &str,
@@ -871,6 +962,7 @@ mod approvals_tests {
             pid: 696,
             attached_mind: "Hermes Agent".into(),
             discrepancies: Vec::new(),
+            agent: String::new(),
         }
     }
 
@@ -1445,5 +1537,71 @@ mod approvals_tests {
         store.deny(&id, now, "12:05").unwrap();
         let record = store.cards(now).into_iter().find(|c| c.id == id).unwrap().record;
         assert_eq!(record, "Denied: calendar.delete_event — 12:05");
+    }
+
+    fn for_agent(agent: &str) -> Verified {
+        Verified { agent: agent.into(), ..verified() }
+    }
+
+    fn ask_as(store: &mut Store, agent: &str, now: Instant) -> Requested {
+        store
+            .request(
+                "pi 0.87",
+                for_agent(agent),
+                "shell",
+                "agent_run",
+                args(serde_json::json!({"command": "rm -rf build"})),
+                "sensitive",
+                "",
+                now,
+                "12:03",
+            )
+            .unwrap()
+    }
+
+    /// Design decision 4: an approval carries its agent, and the same question from another agent
+    /// is another question — its own card, in its own pane, answered on its own.
+    #[test]
+    fn approvals_the_same_question_from_two_agents_is_two_cards() {
+        let mut store = Store::new();
+        let now = Instant::now();
+        let pi = ask_as(&mut store, "pi:c-7f3a91", now);
+        let again = ask_as(&mut store, "pi:c-7f3a91", now);
+        assert_eq!((again.id.as_str(), again.fresh), (pi.id.as_str(), false), "the same agent asking twice is one card");
+        let ds = ask_as(&mut store, "deepseek:c-02be44", now);
+        assert!(ds.fresh && ds.id != pi.id, "another agent asking the same thing is a card of its own");
+        store.grant(&pi.id, now, "12:04").unwrap();
+        assert_eq!(store.status(&ds.id, now), Some(Status::Pending), "one agent's Allow answers only its own request");
+        // What each agent's pane is told: allowed, with the line the Lens shows; the other still waiting.
+        assert_eq!(store.outcome(&pi.id, now), Some((Outcome::Allowed, "Allowed once: shell.agent_run — 12:04".into())));
+        assert_eq!(store.outcome(&ds.id, now), None);
+        store.consume(&pi.id, "shell", "agent_run", &serde_json::json!({"command": "rm -rf build"}), now).unwrap();
+        assert_eq!(store.outcome(&pi.id, now).map(|o| o.0), Some(Outcome::Allowed), "spent, it is still what the person said");
+        assert_eq!(store.outcome("appr-999", now).map(|o| o.0), Some(Outcome::Unanswered), "a request the store no longer holds");
+        let card = store.cards(now).into_iter().find(|c| c.id == ds.id).unwrap();
+        assert_eq!(card.verified.agent, "deepseek:c-02be44");
+        assert_eq!(card.verified.to_json()["agent"], "deepseek:c-02be44", "describe says which agent asked");
+    }
+
+    /// "When a harness dies": a card for work that is no longer happening is refused, never
+    /// granted — and only that agent's cards are taken back.
+    #[test]
+    fn approvals_a_withdrawn_request_cannot_be_granted_and_says_why() {
+        let mut store = Store::new();
+        let now = Instant::now();
+        let pi = ask_as(&mut store, "pi:c-7f3a91", now).id;
+        let ds = ask_as(&mut store, "deepseek:c-02be44", now).id;
+        assert_eq!(store.withdraw_for_agent("", now, "12:04"), Vec::<String>::new(), "no agent, nothing taken back");
+        assert_eq!(store.withdraw_for_agent("pi:c-7f3a91", now, "12:04"), vec![pi.clone()]);
+        assert_eq!(store.status(&pi, now), Some(Status::Expired), "a poller hears that nobody answered");
+        assert!(store.grant(&pi, now, "12:05").is_err(), "and a late click grants nothing");
+        let err = store
+            .consume(&pi, "shell", "agent_run", &serde_json::json!({"command": "rm -rf build"}), now)
+            .unwrap_err();
+        assert!(err.contains("expired"), "{err}");
+        let record = store.cards(now).into_iter().find(|c| c.id == pi).unwrap().record;
+        assert!(record.starts_with("Withdrawn: shell.agent_run — 12:04"), "{record}");
+        assert_eq!(store.outcome(&pi, now), Some((Outcome::Withdrawn, record)));
+        assert_eq!(store.status(&ds, now), Some(Status::Pending), "another agent's card stays up");
     }
 }

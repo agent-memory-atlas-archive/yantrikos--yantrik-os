@@ -7,21 +7,28 @@
 //!
 //! A timer redraws a quarter of a second at a time: the list and the counts while the screen is up
 //! (the "running · 2m" moves on its own), and each open agent window. A session is rebuilt only when
-//! the store has changed or the person opened or folded something.
+//! the store has changed or the person opened or folded something — or, while an approval card is
+//! up in it, every tick, so its countdown moves.
+//!
+//! The same tick watches for what the person should hear about an agent they are not looking at —
+//! "pi finished: …", "deepseek needs you" — and says it through the notification service, as the
+//! desktop (see [`Watch`]).
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
-use crate::agents::model::{bytes, now, Agent, CallState, Card, Details, Item, Mark, OutputKind, Provenance, State, Tab};
-use crate::agents::{self, launch, AgentId, Store};
+use crate::agents::model::{
+    bytes, now, Agent, Approval, ApprovalOutcome, CallState, Card, Details, Item, Mark, OutputKind, Provenance, State, Tab,
+};
+use crate::agents::{self, feed, launch, AgentId, Store};
 use crate::app_context::AppContext;
 use crate::{
     AccentPreset, AgentDetailsData, AgentHeaderData, AgentItemData, AgentMindData, AgentRowData, AgentRunData,
-    AgentTabData, AgentWindow, AgentsState, App, ThemeMode, ThemeOverrides, ToolCallData,
+    AgentTabData, AgentWindow, AgentsState, App, ApprovalRequest, ThemeMode, ThemeOverrides, ToolCallData,
 };
 
 /// The screen id `app.slint` draws the Agents screen at.
@@ -202,17 +209,50 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         }
     });
 
+    // ── Agents glue ──
+    //
+    // Allow and Deny on a card in a pane. The pane's card is the Lens's own component bound to the
+    // one request id, and a press here goes to the very callbacks the Lens's card calls — the only
+    // place a grant is made (`control_approvals::wire`). Answering here answers it there, and the
+    // other way round, because there is one request and one store.
+    forward_approvals(&g, &weak);
+    g.on_show_agent(on(|ui, state, id| show_agent(ui, state, AgentId(id))));
+    // The Lens's "open in Agents": the active mind's own conversation, `<id>:main`.
+    ui.on_lens_open_in_agents({
+        let (weak, state) = (weak.clone(), state.clone());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(host) = crate::wire::harness::host() else { return };
+            let agent = feed::main_agent(&host.active_id());
+            // Known, so it can be selected, even before the first question: it is a live
+            // conversation while its mind is attached.
+            agents::store().upsert_agent(feed::meta_for(&agent));
+            ui.set_lens_open(false);
+            show_agent(&ui, &state, agent);
+        }
+    });
+
+    let watch = RefCell::new(Watch::default());
     let timer = Timer::default();
     {
         let (weak, state) = (weak.clone(), state.clone());
         timer.start(TimerMode::Repeated, TICK, move || {
             agents::store().save_if_due();
-            sync_with_host(&Seen::now());
+            let seen = Seen::now();
+            sync_with_host(&seen);
             let Some(ui) = weak.upgrade() else { return };
+            // The Lens offers "open in Agents" while its conversation is an attached mind's.
+            let lens_agent = crate::wire::harness::host()
+                .map(|h| h.active_id())
+                .is_some_and(|active| seen.minds.iter().any(|(id, _, _)| *id == active));
+            if ui.get_lens_can_open_in_agents() != lens_agent {
+                ui.set_lens_can_open_in_agents(lens_agent);
+            }
             if ui.get_current_screen() == SCREEN {
                 refresh(&ui, &state, false);
             }
             refresh_windows(&ui, &state);
+            tell_the_person(&ui, &state, &mut watch.borrow_mut());
         });
     }
     // The timer lives as long as the shell, the idiom every wire module uses.
@@ -233,12 +273,17 @@ struct Seen {
     /// Lens: (id, name, what it says it runs on).
     minds: Vec<(String, String, String)>,
     agents: Vec<yantrik_harness::AgentEntry>,
+    /// The approval requests waiting on the person, from the shell's own store: what a pane's
+    /// approval card is drawn from. Read here, before the agents store is locked — nothing holds
+    /// both locks at once.
+    approvals: Vec<crate::approvals::Card>,
 }
 
 impl Seen {
     fn now() -> Seen {
+        let approvals = crate::approvals::pending();
         let Some(host) = crate::wire::harness::host() else {
-            return Seen { minds: Vec::new(), agents: Vec::new() };
+            return Seen { minds: Vec::new(), agents: Vec::new(), approvals };
         };
         Seen {
             minds: host
@@ -248,6 +293,7 @@ impl Seen {
                 .map(|e| (e.id, e.name, e.detail.unwrap_or_default()))
                 .collect(),
             agents: host.agents(),
+            approvals,
         }
     }
 
@@ -294,6 +340,9 @@ fn sync_with_host(seen: &Seen) {
     }
     for agent in gone {
         agents::store().set_state(&agent, State::HarnessGone);
+        // "When a harness dies": its pending approvals are withdrawn — a card for a mind that is
+        // gone is refused, never granted. The approval store's tick redraws the Lens and the pane.
+        crate::approvals::withdraw_for_agent(&agent.0);
     }
 }
 
@@ -422,11 +471,13 @@ fn draw(g: &AgentsState, surface: &mut Surface, s: &Store, agent: Option<&AgentI
         surface.drawn = None;
     }
     let stamp = (s.revision(), surface.local);
-    if !force && !fresh && surface.drawn == Some(stamp) {
+    // An approval card waiting in the pane counts down, which the store does not change for.
+    let counting = !a.pending_approvals.is_empty();
+    if !force && !fresh && !counting && surface.drawn == Some(stamp) {
         return;
     }
     surface.drawn = Some(stamp);
-    publish_items(g, surface, items_of(a, &surface.expanded), fresh);
+    publish_items(g, surface, items_of(a, &surface.expanded, &seen.approvals), fresh);
 }
 
 /// Put a session's items in the model: in place when only the end changed, so the view keeps its
@@ -605,8 +656,9 @@ fn one_line(text: &str, max: usize) -> String {
     format!("{}…", flat.chars().take(max - 1).collect::<String>())
 }
 
-/// A session as the screen draws it, newest last.
-fn items_of(a: &Agent, expanded: &HashSet<String>) -> Vec<AgentItemData> {
+/// A session as the screen draws it, newest last. `pending` is the shell's approval store's
+/// waiting requests: an approval item is drawn from there, never from the session.
+fn items_of(a: &Agent, expanded: &HashSet<String>, pending: &[crate::approvals::Card]) -> Vec<AgentItemData> {
     let mut out = Vec::new();
     let from = a.turns.len().saturating_sub(SHOWN_TURNS);
     if from > 0 {
@@ -653,10 +705,59 @@ fn items_of(a: &Agent, expanded: &HashSet<String>) -> Vec<AgentItemData> {
                     out.push(AgentItemData { kind: "note".into(), key: key.into(), text: note.as_str().into(), ..Default::default() })
                 }
                 Item::Card(card) => out.push(card_of(card, key, open)),
+                Item::Approval(approval) => out.push(approval_of(a, approval, key, pending)),
             }
         }
     }
     out
+}
+
+/// An approval, as the pane draws it: the shell's own card — the Lens's component, filled from the
+/// shell's approval store under the one request id — while the request waits; the line it left
+/// once it is over.
+///
+/// The buttons are drawn only when all three hold: the session item is one the shell made
+/// (`approval_asked`, never an event or the agent's text), the shell's store says the request is
+/// still waiting, and that request was asked for THIS agent — its token's, not its words'. Anything
+/// else draws a line with no buttons.
+fn approval_of(a: &Agent, approval: &Approval, key: String, pending: &[crate::approvals::Card]) -> AgentItemData {
+    let live = (approval.outcome == ApprovalOutcome::Pending)
+        .then(|| {
+            pending.iter().find(|c| {
+                c.id == approval.request
+                    && c.status == crate::approvals::Status::Pending
+                    && c.verified.agent == a.meta.id.0
+            })
+        })
+        .flatten();
+    let card = match live {
+        Some(card) => crate::control_approvals::row_for(card.clone()),
+        None => {
+            let (app, action) = approval.what.split_once('.').unwrap_or((approval.what.as_str(), ""));
+            let (decision, record) = match approval.outcome {
+                // Answered or taken back a moment ago, and not yet settled here: the approval
+                // store redraws on its own tick and this follows.
+                ApprovalOutcome::Pending => ("asked", format!("Asked you: {}", approval.what)),
+                outcome => (outcome.key(), approval.record.clone()),
+            };
+            ApprovalRequest {
+                id: approval.request.as_str().into(),
+                agent: a.meta.id.0.as_str().into(),
+                app: app.into(),
+                action: action.into(),
+                decision: decision.into(),
+                record: record.into(),
+                ..Default::default()
+            }
+        }
+    };
+    AgentItemData {
+        kind: "approval".into(),
+        key: key.into(),
+        text: approval.what.as_str().into(),
+        approval: card,
+        ..Default::default()
+    }
 }
 
 /// One call, as the card draws it.
@@ -764,6 +865,7 @@ fn card_of(c: &Card, key: String, open: bool) -> AgentItemData {
         can_open_all: has_output && (c.output.kind == OutputKind::Terminal || total > OPEN_BYTES as u64),
         runs,
         rows,
+        approval: Default::default(),
     }
 }
 
@@ -842,7 +944,7 @@ fn pop_out(ui: &App, state: &Shared, agent: AgentId) {
         g.set_popped(true);
         g.set_items(ModelRc::from(surface.items.clone()));
     }
-    wire_window(&window, state, &agent);
+    wire_window(&window, state, &agent, &ui.as_weak());
     let closed = Rc::new(Cell::new(false));
     {
         let closed = closed.clone();
@@ -862,9 +964,11 @@ fn pop_out(ui: &App, state: &Shared, agent: AgentId) {
     }
 }
 
-/// The acts a popped-out window has: fold and open, Stop, say more, open all output.
-fn wire_window(window: &AgentWindow, state: &Shared, agent: &AgentId) {
+/// The acts a popped-out window has: fold and open, Stop, say more, open all output, and Allow and
+/// Deny on an approval card — which go to the shell's own, like the screen's.
+fn wire_window(window: &AgentWindow, state: &Shared, agent: &AgentId, shell: &slint::Weak<App>) {
     let g = window.global::<AgentsState>();
+    forward_approvals(&g, shell);
     let weak = window.as_weak();
     g.on_toggle({
         let (state, agent) = (state.clone(), agent.clone());
@@ -908,6 +1012,201 @@ fn wire_window(window: &AgentWindow, state: &Shared, agent: &AgentId) {
             }
         }
     });
+}
+
+/// Allow, Allow for this session and Deny on a pane's approval card, handed to the shell's own
+/// callbacks — the ones the Lens's card and the overlay call, and the only place a grant is made
+/// (`control_approvals::wire`). Nothing here grants or denies: it presses the same button.
+fn forward_approvals(g: &AgentsState, shell: &slint::Weak<App>) {
+    g.on_approval_allow({
+        let shell = shell.clone();
+        move |id| {
+            if let Some(ui) = shell.upgrade() {
+                ui.invoke_approval_allow(id);
+            }
+        }
+    });
+    g.on_approval_allow_session({
+        let shell = shell.clone();
+        move |id| {
+            if let Some(ui) = shell.upgrade() {
+                ui.invoke_approval_allow_session(id);
+            }
+        }
+    });
+    g.on_approval_deny({
+        let shell = shell.clone();
+        move |id| {
+            if let Some(ui) = shell.upgrade() {
+                ui.invoke_approval_deny(id);
+            }
+        }
+    });
+}
+
+/// Put one agent on the Agents screen: selected, under a tab that lists it, the screen shown.
+/// The Lens's "open in Agents", a notification's Open, and `show_agent` all come here.
+fn show_agent(ui: &App, state: &Shared, agent: AgentId) {
+    let known = agents::store().read(|s| s.agent(&agent).map(|a| a.state));
+    let g = ui.global::<AgentsState>();
+    let Some(agent_state) = known else {
+        notice(&g, Err(format!("`{agent}` is no longer in the list.")));
+        return;
+    };
+    {
+        let mut st = state.borrow_mut();
+        if !st.tab.holds(agent_state) {
+            st.tab = Tab::All;
+            g.set_tab(Tab::All.key().into());
+        }
+        st.order.clear();
+        st.selected = Some(agent);
+    }
+    ui.set_current_screen(SCREEN);
+    ui.invoke_navigate(SCREEN);
+    refresh(ui, state, true);
+}
+
+// ── Telling the person ────────────────────────────────────────────
+
+/// Something the person should hear about an agent they are not looking at.
+#[derive(Clone, Debug, PartialEq)]
+enum Notice {
+    /// Its turn ended — finished, or not.
+    Finished { agent: AgentId, mind: String, title: String, ok: bool },
+    /// A card of its waits on the person: an approval, or a command at a prompt.
+    NeedsYou { agent: AgentId, mind: String, what: String },
+}
+
+impl Notice {
+    fn agent(&self) -> &AgentId {
+        match self {
+            Notice::Finished { agent, .. } | Notice::NeedsYou { agent, .. } => agent,
+        }
+    }
+
+    /// Said as the desktop, in the desktop's words. The title quotes the task, and nothing the
+    /// agent wrote goes in: a notification from `Yantrik` must not carry a mind's sentences as
+    /// though the desktop had said them (#139).
+    fn notification(&self) -> yantrik_app_runtime::notify::Notification {
+        use yantrik_app_runtime::notify::{Level, Notification};
+        let (title, body) = match self {
+            Notice::Finished { mind, title, ok: true, .. } => (
+                format!("{mind} finished: \u{201c}{}\u{201d}", one_line(title, 60)),
+                "Its turn is done. Open it to read what it said and what it ran.".to_string(),
+            ),
+            Notice::Finished { mind, title, ok: false, .. } => (
+                format!("{mind} could not finish: \u{201c}{}\u{201d}", one_line(title, 60)),
+                "Its turn ended without finishing. Open it to see where it stopped.".to_string(),
+            ),
+            Notice::NeedsYou { mind, what, .. } => (format!("{mind} needs you"), what.clone()),
+        };
+        Notification::new("Yantrik", title)
+            .body(body)
+            // News, not a question with a deadline: Do Not Disturb holds it, like any other.
+            .urgency(Level::Normal)
+            // The shell presses `show_agent` on its own surface for this, as Download Manager's
+            // "Open folder" is pressed on its.
+            .action_with("show_agent", "Open", serde_json::json!({ "agent": self.agent().0 }))
+    }
+}
+
+/// Watches the store, tick by tick, for turns that ended and cards that began waiting.
+///
+/// The first look only learns what is already there — a session loaded from disk is history, not
+/// news. After that an agent's newest turn ending, or a new request or waiting command of its,
+/// is a [`Notice`] once.
+#[derive(Default)]
+struct Watch {
+    primed: bool,
+    /// Each agent's newest ended turn, as `(turn, ended at)`.
+    ended: HashMap<AgentId, (u64, u64)>,
+    /// What each agent was already known to be waiting on: request ids and job ids.
+    waiting: HashMap<AgentId, BTreeSet<String>>,
+}
+
+impl Watch {
+    /// `waiting_jobs` is the agent terminal's commands sitting at a prompt: `(agent, job)`.
+    fn changes(&mut self, s: &Store, waiting_jobs: &[(AgentId, String)]) -> Vec<Notice> {
+        let mut out = Vec::new();
+        for a in s.agents() {
+            let id = &a.meta.id;
+            if let Some(turn) = a.turns.last() {
+                if let Some(at) = turn.ended {
+                    let before = self.ended.insert(id.clone(), (turn.n, at));
+                    // A turn with no prompt is the shell's own account of something outside any
+                    // turn, and a turn the person stopped needs no telling.
+                    if self.primed && before != Some((turn.n, at)) && !turn.prompt.is_empty() && !stopped(turn) {
+                        out.push(Notice::Finished {
+                            agent: id.clone(),
+                            mind: a.meta.mind.clone(),
+                            title: a.meta.title.clone(),
+                            ok: turn.ok != Some(false),
+                        });
+                    }
+                }
+            }
+            let now: BTreeSet<String> = a
+                .pending_approvals
+                .iter()
+                .cloned()
+                .chain(waiting_jobs.iter().filter(|(agent, _)| agent == id).map(|(_, job)| job.clone()))
+                .collect();
+            let before = self.waiting.insert(id.clone(), now.clone()).unwrap_or_default();
+            let fresh: Vec<&String> = now.difference(&before).collect();
+            if self.primed && !fresh.is_empty() {
+                let asked = fresh.iter().find_map(|request| {
+                    a.turns.iter().rev().flat_map(|t| t.items.iter()).find_map(|item| match item {
+                        Item::Approval(ap) if &&ap.request == request => Some(ap.what.clone()),
+                        _ => None,
+                    })
+                });
+                let what = match asked {
+                    Some(what) => format!("It is asking to be allowed {what}. Allow or Deny on its card."),
+                    None => "One of its commands is waiting for input; answer in its card.".to_string(),
+                };
+                out.push(Notice::NeedsYou { agent: id.clone(), mind: a.meta.mind.clone(), what });
+            }
+        }
+        self.primed = true;
+        out
+    }
+}
+
+/// Whether a turn ended because the person stopped it.
+fn stopped(turn: &crate::agents::model::Turn) -> bool {
+    turn.items.iter().any(|item| {
+        matches!(item, Item::Note(note) if note.starts_with("Stop asked") || note.contains(yantrik_harness::host::STOPPED))
+    })
+}
+
+/// Send what the person should hear, except about what they are already looking at: the agent
+/// selected on the Agents screen, one in a window of its own, or — with the Lens open — the
+/// Lens's own mind, whose answer and cards are in front of them there. A "needs you" is also held
+/// while the Lens is open at all: its approval card is in the Lens, and a toast would land on it.
+fn tell_the_person(ui: &App, state: &Shared, watch: &mut Watch) {
+    let waiting_jobs: Vec<(AgentId, String)> = crate::control_agent_terminal::running_jobs()
+        .into_iter()
+        .filter(|(_, job)| job["waiting_for_input"] == true)
+        .map(|(agent, job)| (agent, job["job"].as_str().unwrap_or_default().to_string()))
+        .collect();
+    let notices = agents::store().read(|s| watch.changes(s, &waiting_jobs));
+    if notices.is_empty() {
+        return;
+    }
+    let lens_open = ui.get_lens_open();
+    let lens_agent = crate::wire::harness::host().map(|h| feed::main_agent(&h.active_id()));
+    let st = state.borrow();
+    for notice in notices {
+        let agent = notice.agent();
+        let on_screen = ui.get_current_screen() == SCREEN && st.selected.as_ref() == Some(agent);
+        let in_window = st.windows.get(agent).is_some_and(|p| !p.closed.get());
+        let in_lens = lens_open && (lens_agent.as_ref() == Some(agent) || matches!(notice, Notice::NeedsYou { .. }));
+        if on_screen || in_window || in_lens {
+            continue;
+        }
+        yantrik_app_runtime::notify::send(notice.notification());
+    }
 }
 
 /// A window has its own copy of every global, so it takes the shell's theme — dark or light, the
@@ -1052,6 +1351,168 @@ mod tests {
         let open = card_of(&card, "t1.0".into(), true);
         assert!(open.call.output.contains("line 0\n") && open.call.output.contains("line 19"));
         assert!(open.call.arguments.contains("fdupes"), "the arguments in full");
+    }
+
+    fn pending_card(id: &str, agent: &str) -> crate::approvals::Card {
+        crate::approvals::Card {
+            id: id.into(),
+            requester: "pi 0.87".into(),
+            verified: crate::approvals::Verified {
+                line: "pi --mode rpc (pid 4242)".into(),
+                agent: agent.into(),
+                ..Default::default()
+            },
+            app: "shell".into(),
+            action: "agent_run".into(),
+            grade: "sensitive".into(),
+            purpose: "Run one command line in a fresh terminal of your own.".into(),
+            args: vec!["command: rm -rf build".into()],
+            warning: String::new(),
+            can_session: true,
+            status: crate::approvals::Status::Pending,
+            record: String::new(),
+            age_secs: 4,
+        }
+    }
+
+    fn approvals_drawn(store: &Store, agent: &AgentId, pending: &[crate::approvals::Card]) -> Vec<AgentItemData> {
+        items_of(store.agent(agent).unwrap(), &HashSet::new(), pending).into_iter().filter(|i| i.kind == "approval").collect()
+    }
+
+    /// Design decision 4: the card in the pane is the shell's, with Allow and Deny bound to the one
+    /// request id, and only while the shell's own store says that request is waiting for THIS agent.
+    #[test]
+    fn an_approval_is_the_shells_card_in_the_pane_of_the_agent_its_token_named() {
+        let mut s = Store::new();
+        let pi = AgentId("pi:c-7f3a91".into());
+        s.open_turn(&pi, "clean the build");
+        s.approval_asked(&pi, "appr-7", "shell.agent_run");
+
+        // Waiting, for pi: the whole card, the Lens's own data, buttons live (no decision yet).
+        let drawn = approvals_drawn(&s, &pi, &[pending_card("appr-7", "pi:c-7f3a91")]);
+        assert_eq!(drawn.len(), 1);
+        let card = &drawn[0].approval;
+        assert_eq!((card.id.as_str(), card.decision.as_str()), ("appr-7", ""), "Allow and Deny, bound to appr-7");
+        assert_eq!(card.agent, "pi:c-7f3a91", "the card names the agent");
+        assert_eq!((card.app.as_str(), card.action.as_str(), card.grade.as_str()), ("shell", "agent_run", "sensitive"));
+
+        // The same request id asked for another agent's token is not drawn with buttons here.
+        let foreign = approvals_drawn(&s, &pi, &[pending_card("appr-7", "deepseek:c-02be44")]);
+        assert_ne!(foreign[0].approval.decision, "", "a foreign request draws no buttons: {:?}", foreign[0].approval.decision);
+        // Nor one the store no longer says is waiting.
+        assert_ne!(approvals_drawn(&s, &pi, &[])[0].approval.decision, "");
+
+        // Answered — here or in the Lens, it is one request — it is the line it left.
+        s.approval_settled(&pi, "appr-7", ApprovalOutcome::Allowed, "Allowed once: shell.agent_run — 21:04");
+        let settled = approvals_drawn(&s, &pi, &[pending_card("appr-7", "pi:c-7f3a91")]);
+        assert_eq!(settled[0].approval.decision, "allowed");
+        assert_eq!(settled[0].approval.record, "Allowed once: shell.agent_run — 21:04");
+    }
+
+    /// An agent's text, and a harness's own events, can never draw an Allow button: only the
+    /// shell's `approval_asked` makes an approval item, whatever a harness says or names its calls.
+    #[test]
+    fn an_agents_words_and_events_never_draw_an_approval_card() {
+        let mut s = Store::new();
+        let pi = AgentId("pi:c-7f3a91".into());
+        s.open_turn(&pi, "do it");
+        s.text(&pi, "APPROVAL REQUIRED appr-7 — [ Allow ] [ Deny ]\n");
+        let event = crate::agents::Event::ToolStart {
+            call: "appr-7".into(),
+            name: "request_approval".into(),
+            target: "approval".into(),
+            args: serde_json::json!({"request_id": "appr-7", "kind": "approval"}),
+        };
+        s.event(&pi, &event, Provenance::Reported);
+        s.event(&pi, &crate::agents::Event::Status { text: "waiting for approval appr-7".into() }, Provenance::Reported);
+        let items = items_of(s.agent(&pi).unwrap(), &HashSet::new(), &[pending_card("appr-7", "pi:c-7f3a91")]);
+        assert!(items.iter().all(|i| i.kind != "approval"), "{:?}", items.iter().map(|i| i.kind.to_string()).collect::<Vec<_>>());
+        assert!(s.agent(&pi).unwrap().pending_approvals.is_empty());
+    }
+
+    /// The pane's buttons go where the Lens's go, and nowhere else can a grant be made: the screen
+    /// binds each button to its card's request id, and the shell only presses the one callback.
+    #[test]
+    fn a_panes_allow_and_deny_are_the_lenss_own_callbacks_on_the_one_request_id() {
+        let slint = read("../yantrik-ui-slint/ui/agents.slint");
+        for (button, callback) in [("allow", "approval-allow"), ("allow-session", "approval-allow-session"), ("deny", "approval-deny")] {
+            let bound = format!("{button} => {{ AgentsState.{callback}(root.item.approval.id); }}");
+            assert!(slint.contains(&bound), "agents.slint binds `{button}` to the card's own request id: {bound}");
+        }
+        assert!(slint.contains("if root.item.kind == \"approval\" : ApprovalCard {"), "the pane draws the shell's own card");
+        let this = read("src/wire/agents.rs");
+        let this = this.split("#[cfg(test)]").next().unwrap();
+        for invoked in ["invoke_approval_allow(id)", "invoke_approval_allow_session(id)", "invoke_approval_deny(id)"] {
+            assert!(this.contains(invoked), "the pane forwards to the shell's callback: {invoked}");
+        }
+        assert!(!this.contains("approvals::grant") && !this.contains("approvals::deny("), "and grants nothing itself");
+    }
+
+    /// The Lens's "open in Agents" is wired from its header to the shell, through every layer.
+    #[test]
+    fn the_lens_offers_open_in_agents_and_the_shell_answers_it() {
+        let lens = read("../yantrik-ui-slint/ui/components/intent_lens.slint");
+        assert!(lens.contains("if root.can-open-in-agents : agents-hit := TouchArea") && lens.contains("clicked => { root.open-in-agents(); }"));
+        let desktop = read("../yantrik-ui-slint/ui/desktop.slint");
+        assert!(desktop.contains("open-in-agents => { root.lens-open-in-agents(); }"));
+        assert!(desktop.contains("can-open-in-agents: root.lens-can-open-in-agents;"));
+        let app = read("../yantrik-ui-slint/ui/app.slint");
+        assert!(app.contains("lens-open-in-agents => { root.lens-open-in-agents(); }"));
+        let this = read("src/wire/agents.rs");
+        assert!(this.contains("ui.on_lens_open_in_agents(") && this.contains("feed::main_agent(&host.active_id())"));
+    }
+
+    #[test]
+    fn a_turn_ending_or_a_card_waiting_is_said_once_and_history_is_not_news() {
+        let mut s = Store::new();
+        let pi = AgentId("pi:c-7f3a91".into());
+        let ds = AgentId("deepseek:main".into());
+        // History, there before the first look.
+        s.open_turn(&ds, "release notes");
+        s.close_turn(&ds, true);
+        let mut watch = Watch::default();
+        assert!(watch.changes(&s, &[]).is_empty(), "a session loaded from disk is not news");
+
+        s.open_turn(&pi, "tidy the photos folder");
+        assert!(watch.changes(&s, &[]).is_empty());
+        s.approval_asked(&pi, "appr-3", "files.move");
+        let told = watch.changes(&s, &[]);
+        assert!(matches!(&told[..], [Notice::NeedsYou { what, .. }] if what.contains("files.move")), "{told:?}");
+        assert!(watch.changes(&s, &[]).is_empty(), "said once");
+        let waiting = [(pi.clone(), "job-9".to_string())];
+        let told = watch.changes(&s, &waiting);
+        assert!(matches!(&told[..], [Notice::NeedsYou { what, .. }] if what.contains("waiting for input")), "{told:?}");
+
+        s.approval_answered(&pi, "appr-3", true);
+        s.close_turn(&pi, true);
+        let told = watch.changes(&s, &waiting);
+        assert_eq!(told, vec![Notice::Finished { agent: pi.clone(), mind: "pi".into(), title: "tidy the photos folder".into(), ok: true }]);
+
+        // A turn the person stopped needs no telling.
+        s.open_turn(&pi, "and the videos");
+        s.note(&pi, "Stop asked.");
+        s.close_turn(&pi, false);
+        assert!(watch.changes(&s, &waiting).is_empty());
+    }
+
+    /// Said as the desktop, with nothing the agent wrote in it, and a button that opens the agent.
+    #[test]
+    fn a_notice_is_the_desktops_and_opens_its_agent() {
+        let finished = Notice::Finished {
+            agent: AgentId("pi:c-7f3a91".into()),
+            mind: "pi".into(),
+            title: "tidy the photos folder".into(),
+            ok: true,
+        };
+        let sent = format!("{:?}", finished.notification());
+        for said in ["\"Yantrik\"", "pi finished: \u{201c}tidy the photos folder\u{201d}", "Normal", "show_agent", "Open", "pi:c-7f3a91"] {
+            assert!(sent.contains(said), "{said:?} missing: {sent}");
+        }
+        let needs = Notice::NeedsYou { agent: AgentId("deepseek:main".into()), mind: "deepseek".into(), what: "x".into() };
+        assert!(format!("{:?}", needs.notification()).contains("deepseek needs you"));
+        // The screen's own route for the button: the shell publishes `show_agent`.
+        let actions = read("src/control_agents.rs");
+        assert!(actions.contains("\"show_agent\""));
     }
 
     #[test]

@@ -294,7 +294,8 @@ pub(crate) struct Shared {
     pub limits: Limits,
     /// Each agent's directory, and the start order of the command that reported it.
     pub dirs: Mutex<HashMap<AgentId, (PathBuf, u64)>>,
-    pub on_output: RwLock<Option<OutputSink>>,
+    /// Every listener for a job's bytes, in the order they were added.
+    pub on_output: RwLock<Vec<OutputSink>>,
     /// Every listener for a job's end, in the order they were added.
     pub on_finish: RwLock<Vec<FinishSink>>,
 }
@@ -333,7 +334,7 @@ impl Jobs {
                 shared: Arc::new(Shared {
                     limits,
                     dirs: Mutex::new(HashMap::new()),
-                    on_output: RwLock::new(None),
+                    on_output: RwLock::new(Vec::new()),
                     on_finish: RwLock::new(Vec::new()),
                 }),
                 env,
@@ -347,9 +348,14 @@ impl Jobs {
         &self.inner.shared.limits
     }
 
-    /// Hand every job's raw terminal bytes to `sink` as they arrive. Replaces any earlier sink.
+    /// Hand every job's raw terminal bytes to `sink` as they arrive, as well as to every sink added
+    /// before it.
+    ///
+    /// Added to, not replaced, for [`Jobs::on_finish`]'s reason: the Agents store draws a command's
+    /// card from these bytes, and anything else that listens — a popped-out view, a test — must not
+    /// silently take them away from it depending on which was wired last.
     pub fn on_output(&self, sink: impl Fn(&AgentId, &JobId, &[u8]) + Send + Sync + 'static) {
-        *self.inner.shared.on_output.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(sink));
+        self.inner.shared.on_output.write().unwrap_or_else(|e| e.into_inner()).push(Arc::new(sink));
     }
 
     /// Tell `sink` whenever a job ends, as well as every sink added before it.

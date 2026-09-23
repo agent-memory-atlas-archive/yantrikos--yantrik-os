@@ -190,10 +190,17 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 if !grade_note.is_empty() {
                     verified.discrepancies.push(grade_note);
                 }
+                let agent = verified.agent.clone();
 
                 let asked = approvals::request(
                     &requester, verified, &app, &action, parsed, &grade, &purpose,
                 )?;
+
+                // And in the pane of the agent that asked: the same card, under the same request
+                // id, so answering it there answers it here (design decision 4). Only for the
+                // agent its token named and the kernel vouched for — `agent` is empty otherwise,
+                // and nothing the request says can fill it.
+                draw_in_pane(&agent, &asked.id, &app, &action);
 
                 // Straight onto the screen. The handler is already on the UI thread — this is
                 // the same turn of the event loop that accepted the request — so the card is up
@@ -297,6 +304,13 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 let app = required(args, "app")?;
                 let action = required(args, "action")?;
                 let parsed = args_value(args.get("args_json"))?;
+                // A grant is for the agent it was asked for: one agent cannot spend another's —
+                // a child handed its parent's request id starts with no grants all the same.
+                grant_belongs(
+                    &id,
+                    approvals::agent_of(&id).as_deref().unwrap_or_default(),
+                    &crate::control_agent_terminal::calling_agent(),
+                )?;
                 approvals::consume(&id, &app, &action, &parsed)?;
                 if let Some(ui) = consume_ui.upgrade() {
                     sync(&ui);
@@ -636,6 +650,85 @@ fn grade_note(claimed: &str, published: &str) -> String {
 /// `claimed` is only used to decide whether the two disagree. It never becomes part of the
 /// verified answer; that is the entire point of the split.
 fn who_is_asking(claimed: &str) -> approvals::Verified {
+    let mut verified = who_is_calling(claimed);
+    // Which of the person's agents it is for: from the token beside the arguments, checked against
+    // the same kernel-verified caller, never from anything the request says (design decision 4).
+    let (agent, doubt) = agent_fact(crate::control_agent_terminal::calling_agent());
+    verified.agent = agent;
+    verified.discrepancies.extend(doubt);
+    verified
+}
+
+/// The agent a call is for, as a card and a log may show it, and the sentence the card owes the
+/// person when a token came and was not believed. Never the token: only the agent it names.
+fn agent_fact(calling: Option<Result<crate::agents::AgentId, String>>) -> (String, Option<String>) {
+    match calling {
+        None => (String::new(), None),
+        Some(Ok(agent)) => (agent.to_string(), None),
+        Some(Err(why)) => {
+            tracing::info!(reason = %why, "an agent token came with a request and was not believed");
+            (String::new(), Some(UNBELIEVED_TOKEN.to_string()))
+        }
+    }
+}
+
+/// What the card says about a request whose agent token did not check out. One line, like every
+/// discrepancy, and no detail of the token.
+const UNBELIEVED_TOKEN: &str = "Its agent token was not issued to it; no agent's pane shows this.";
+
+/// Draw a request in the pane of the agent it is for, when it is for one. `agent` is the verified
+/// agent — [`who_is_asking`]'s, from the token — and empty means no pane: a caller that runs as no
+/// agent, or one whose token was not believed, is asked in the Lens alone. Returns whether a pane
+/// got it.
+fn draw_in_pane(agent: &str, request: &str, app: &str, action: &str) -> bool {
+    if agent.is_empty() {
+        return false;
+    }
+    crate::agents::store().approval_asked(&crate::agents::AgentId(agent.to_string()), request, &format!("{app}.{action}"));
+    true
+}
+
+/// May the caller spend request `id`, which was asked for `asked_for` (empty: for no agent)?
+///
+/// A caller that runs as no agent — the person's own `yos act`, or an app's dispatch spending the
+/// grant it was handed (#116) — is not told apart here and is let through, as before. A caller
+/// that presented a token is held to it: a token that was not believed spends nothing, and an
+/// agent spends only what was asked for it. A child agent handed its parent's request id is
+/// refused, because a child starts with no grants.
+fn grant_belongs(
+    id: &str,
+    asked_for: &str,
+    calling: &Option<Result<crate::agents::AgentId, String>>,
+) -> Result<(), String> {
+    match calling {
+        None => Ok(()),
+        Some(Err(_)) => Err(format!(
+            "the agent token that came with this call was not believed, so `{id}` was not spent. \
+             Nothing was authorised."
+        )),
+        Some(Ok(agent)) if agent.0 == asked_for => Ok(()),
+        Some(Ok(_)) => Err(format!(
+            "`{id}` was asked for {}, not for the agent making this call. A grant is not handed \
+             from one agent to another — ask for your own. Nothing was authorised.",
+            if asked_for.is_empty() { "by a caller that runs as no agent".to_string() } else { format!("agent `{asked_for}`") }
+        )),
+    }
+}
+
+/// How request `id` came out, for the pane of the agent that asked: `None` while it is waiting.
+fn settled_as(id: &str) -> Option<(crate::agents::ApprovalOutcome, String)> {
+    use crate::agents::ApprovalOutcome as Pane;
+    let (outcome, record) = approvals::outcome(id)?;
+    let outcome = match outcome {
+        approvals::Outcome::Allowed => Pane::Allowed,
+        approvals::Outcome::Denied => Pane::Denied,
+        approvals::Outcome::Unanswered => Pane::Expired,
+        approvals::Outcome::Withdrawn => Pane::Withdrawn,
+    };
+    Some((outcome, record))
+}
+
+fn who_is_calling(claimed: &str) -> approvals::Verified {
     let Some(caller) = yantrik_app_runtime::control::caller() else {
         // No credentials at all: a TCP connection on the Windows dev build, or a peer that was
         // gone before `SO_PEERCRED` could be read. The card says "could not be identified"
@@ -672,6 +765,7 @@ fn who_is_asking(claimed: &str) -> approvals::Verified {
             let said = crate::caller_identity::mismatch(claimed, &identity, &minds);
             if said.is_empty() { Vec::new() } else { vec![said] }
         },
+        agent: String::new(),
     }
 }
 
@@ -1039,9 +1133,12 @@ fn sync(ui: &App) {
     publish(ui, cards);
 }
 
-fn row_for(card: Card) -> crate::ApprovalRequest {
+pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
     crate::ApprovalRequest {
         id: card.id.into(),
+        // Which of the person's agents asked — from its token, never its words — so the card
+        // names it wherever it is drawn (design decision 4). Empty for a caller that is no agent.
+        agent: card.verified.agent.clone().into(),
         requester: card.requester.into(),
         // Never blank. An empty line where the verified fact should be reads as "nothing to
         // report", which is the opposite of what an unidentifiable caller means — and the card
@@ -1097,6 +1194,11 @@ fn row_for(card: Card) -> crate::ApprovalRequest {
 
 fn publish(ui: &App, cards: Vec<Card>) {
     let waiting = cards.iter().filter(|c| c.status == Status::Pending).count();
+
+    // The same answers, in the pane of the agent each request was for: one request id, so
+    // answering in either place settles both, and an expiry or a withdrawal reaches the pane on
+    // the same turn it reaches the Lens.
+    crate::agents::settle_approvals(settled_as);
 
     // One card at a time, even though up to three requests can be waiting.
     //
@@ -1257,7 +1359,23 @@ fn text(value: Option<&serde_json::Value>) -> String {
 /// builds of it parsed every value as JSON and sent an object. The two must produce the same
 /// canonical form or a grant requested one way and consumed the other would never match — so
 /// both land here, and the canonicalisation is done once, in Rust, on the parsed value.
+///
+/// An `agent_token` among them is taken out and not used. A token is not an argument: these are
+/// what the card draws, what `record_unasked_action` writes to the audit log and what the grant is
+/// bound to — and the dispatch that spends the grant takes the same key out of the action's
+/// arguments first (`gate::agent_token_of`), so a grant bound without it is the grant that
+/// matches. Which agent is asking rides beside the arguments and is read by `who_is_asking`.
 fn args_value(raw: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+    let mut value = args_object(raw)?;
+    if let Some(map) = value.as_object_mut() {
+        if map.remove(yantrik_ipc_transport::gate::AGENT_TOKEN).is_some() {
+            tracing::warn!("an agent token arrived inside `args_json`; it was removed and not used");
+        }
+    }
+    Ok(value)
+}
+
+fn args_object(raw: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
     match raw {
         None | Some(serde_json::Value::Null) => Ok(serde_json::json!({})),
         Some(serde_json::Value::Object(map)) => Ok(serde_json::Value::Object(map.clone())),
@@ -1801,6 +1919,7 @@ mod control_approvals_tests {
                 "\u{201c}Hermes Agent\u{201d} is attached here \u{2014} this is not it.".into(),
                 "The caller called this `standard`; the app publishes `dangerous`.".into(),
             ],
+            agent: String::new(),
         }));
         assert!(known.verified.contains("pid 696"), "{}", known.verified);
         // Both disagreements survive. Concatenating them into one elided row would have shown
@@ -1899,5 +2018,54 @@ mod control_approvals_tests {
         let err = args_value(Some(&serde_json::Value::String("id=evt-3".into())))
             .expect_err("key=value is not JSON");
         assert!(err.contains("not JSON"), "{err}");
+    }
+
+    /// A token is not an argument: one put inside `args_json` is taken out before the card draws
+    /// the arguments, the audit writes them or the grant is bound to them — and the grant then
+    /// matches the dispatch, which takes the same key out of the action's arguments.
+    #[test]
+    fn approvals_a_token_inside_the_arguments_never_reaches_the_card_the_log_or_the_grant() {
+        use super::args_value;
+        let token = "0123456789abcdef0123456789abcdef";
+        for raw in [
+            serde_json::json!({"command": "ls", "agent_token": token}),
+            serde_json::Value::String(format!(r#"{{"command":"ls","agent_token":"{token}"}}"#)),
+        ] {
+            let bound = args_value(Some(&raw)).unwrap();
+            assert_eq!(bound, serde_json::json!({"command": "ls"}));
+            let rows = crate::approvals::args_rows(&bound);
+            assert!(!rows.join(" ").contains(token), "{rows:?}");
+        }
+    }
+
+    /// The agent on a card comes from the token, and only a believed one: a token that did not
+    /// check out puts the card in no pane and says so, in a line that carries nothing of it.
+    #[test]
+    fn approvals_the_agent_on_a_card_is_the_one_its_token_names_or_none() {
+        use super::{agent_fact, UNBELIEVED_TOKEN};
+        use crate::agents::AgentId;
+        assert_eq!(agent_fact(None), (String::new(), None), "no token: the Lens alone, as always");
+        assert_eq!(agent_fact(Some(Ok(AgentId("pi:c-7f3a91".into())))), ("pi:c-7f3a91".to_string(), None));
+        let (agent, doubt) = agent_fact(Some(Err("token 0123abcd was not issued to the process 4242".into())));
+        assert_eq!(agent, "", "a token that was not believed names no agent");
+        assert_eq!(doubt.as_deref(), Some(UNBELIEVED_TOKEN));
+        assert!(!UNBELIEVED_TOKEN.contains("0123") && UNBELIEVED_TOKEN.chars().count() < 70, "one line, nothing of the token");
+        // Drawn in a pane only for a named agent.
+        assert!(!super::draw_in_pane("", "appr-1", "shell", "agent_run"));
+    }
+
+    /// A child starts with no grants: a request id asked for one agent spends for nobody else.
+    #[test]
+    fn approvals_one_agent_cannot_spend_anothers_grant() {
+        use super::grant_belongs;
+        use crate::agents::AgentId;
+        let parent = Some(Ok(AgentId("pi:c-parent".into())));
+        let child = Some(Ok(AgentId("pi:c-child1".into())));
+        assert!(grant_belongs("appr-1", "pi:c-parent", &parent).is_ok(), "the agent that asked spends it");
+        let err = grant_belongs("appr-1", "pi:c-parent", &child).unwrap_err();
+        assert!(err.contains("not handed from one agent to another") && err.contains("pi:c-parent"), "{err}");
+        assert!(grant_belongs("appr-2", "", &child).is_err(), "nor one the person asked for");
+        assert!(grant_belongs("appr-1", "pi:c-parent", &Some(Err("no".into()))).is_err(), "a token not believed spends nothing");
+        assert!(grant_belongs("appr-1", "pi:c-parent", &None).is_ok(), "an app's own dispatch, as before");
     }
 }

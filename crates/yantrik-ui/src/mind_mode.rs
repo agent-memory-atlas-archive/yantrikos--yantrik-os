@@ -1624,6 +1624,7 @@ mod mind_mode_tests {
                 pid: 696,
                 attached_mind: "Hermes Agent".into(),
                 discrepancies: Vec::new(),
+                agent: String::new(),
             },
             app: "files".into(),
             action: "move".into(),

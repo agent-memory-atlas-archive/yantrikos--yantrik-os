@@ -146,6 +146,10 @@ export component App inherits Window {
     callback approval-allow-session(string);
     callback approval-deny(string);
 
+    // ── Agents glue: the Lens's "open in Agents" (crates/yantrik-ui/src/wire/agents.rs) ──
+    in property <bool> lens-can-open-in-agents: false;
+    callback lens-open-in-agents();
+
     // ── The vault, and the one way a passphrase gets into this machine ──
     //
     // Filled by `wire::vault`. `reason` empty means nothing is being asked; anything else puts the
@@ -1459,6 +1463,8 @@ export component App inherits Window {
             approval-allow(id) => { root.approval-allow(id); }
             approval-allow-session(id) => { root.approval-allow-session(id); }
             approval-deny(id) => { root.approval-deny(id); }
+            lens-can-open-in-agents: root.lens-can-open-in-agents;
+            lens-open-in-agents => { root.lens-open-in-agents(); }
             // Urges
             urges: root.urges;
             // Whisper Cards

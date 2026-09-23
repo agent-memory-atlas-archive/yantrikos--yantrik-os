@@ -14,6 +14,7 @@ import { Icon, Icons } from "components/icon.slint";
 import { YButton } from "components/y_button.slint";
 import { YInput } from "components/y_input.slint";
 import { ToolCallData, ToolCallCard } from "components/tool_call.slint";
+import { ApprovalRequest, ApprovalCard } from "components/intent_lens.slint";
 
 export struct AgentTabData {
     id: string,        // active | needs_you | complete | all
@@ -42,9 +43,10 @@ export struct AgentRunData {
     bold: bool,
 }
 
-// One thing in a session: a prompt, the mind's text, its thinking, a note from the shell, or a card.
+// One thing in a session: a prompt, the mind's text, its thinking, a note from the shell, a card,
+// or an approval the shell asked the person for on this agent's behalf.
 export struct AgentItemData {
-    kind: string,          // prompt | text | thinking | note | card
+    kind: string,          // prompt | text | thinking | note | card | approval
     key: string,           // stable across redraws; what `toggle` names
     text: string,
     call: ToolCallData,    // a card's call, as ToolCallCard draws it
@@ -58,6 +60,9 @@ export struct AgentItemData {
     can-open-all: bool,
     runs: [AgentRunData],
     rows: int,
+    // For an approval: the shell's own card, from the shell's approval store under one request id
+    // — the same data the Lens draws. Never anything the agent said.
+    approval: ApprovalRequest,
 }
 
 export struct AgentHeaderData {
@@ -135,6 +140,14 @@ export global AgentsState {
     callback start(string, string);
     callback send(string, string);
     callback dismiss-notice();
+    // An approval card in a pane. Each names the one request id; the shell answers it through the
+    // same Allow and Deny the Lens's card calls, so answering here answers it there.
+    callback approval-allow(string);
+    callback approval-allow-session(string);
+    callback approval-deny(string);
+    // Show one agent on the Agents screen — the Lens's "open in Agents", a notification's Open,
+    // `show_agent`.
+    callback show-agent(string);
 }
 
 component StateDot inherits Rectangle {
@@ -348,6 +361,17 @@ component ItemView inherits Rectangle {
             font-size: Theme.fs-caption;
             font-italic: true;
             wrap: word-wrap;
+        }
+
+        // An approval: the shell's own card (the Lens's component), with Allow and Deny bound to
+        // the one request id. Waiting, it is the whole card; answered, the line it leaves. Only the
+        // shell makes this item — never a harness event or a line of the agent's text — so nothing
+        // an agent says can draw these buttons.
+        if root.item.kind == "approval" : ApprovalCard {
+            data: root.item.approval;
+            allow => { AgentsState.approval-allow(root.item.approval.id); }
+            allow-session => { AgentsState.approval-allow-session(root.item.approval.id); }
+            deny => { AgentsState.approval-deny(root.item.approval.id); }
         }
 
         // A call: the one card every view of a mind's calls shares (#125), with the call's own

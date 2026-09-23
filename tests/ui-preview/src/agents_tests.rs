@@ -231,6 +231,91 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     // Past the buttons' colour animation, so the picture is the light theme and not a blend.
     std::thread::sleep(std::time::Duration::from_millis(300));
     save(&draw(), &output.replace(".png", "-light.png"), width, height)?;
+
+    // An approval in the pane: the shell's own card (the Lens's component), naming the agent, with
+    // Deny and Allow each answering the one request id it carries.
+    ui.set_light(false);
+    {
+        let l = log.clone();
+        g.on_approval_allow(move |id| l.borrow_mut().push(format!("allow:{id}")));
+        let l = log.clone();
+        g.on_approval_deny(move |id| l.borrow_mut().push(format!("deny:{id}")));
+        let l = log.clone();
+        g.on_approval_allow_session(move |id| l.borrow_mut().push(format!("allow-session:{id}")));
+    }
+    let item = |kind: &str, key: &str, text: &str| AgentItemData {
+        kind: kind.into(),
+        key: key.into(),
+        text: text.into(),
+        ..Default::default()
+    };
+    let lines = |rows: &[&str]| ModelRc::new(VecModel::from(rows.iter().map(|r| slint::SharedString::from(*r)).collect::<Vec<_>>()));
+    let approval = ApprovalRequest {
+        id: "appr-7".into(),
+        agent: "pi:main".into(),
+        requester: "pi 0.87".into(),
+        verified: "pi --mode rpc (pid 4242) · the attached mind".into(),
+        discrepancies: lines(&[]),
+        app: "files".into(),
+        action: "move".into(),
+        purpose: "Move files or folders to another place, or into the recoverable Trash.".into(),
+        grade: "sensitive".into(),
+        args: lines(&["from: ~/Pictures/copy of a.jpg", "to: ~/.local/share/Trash"]),
+        warning: "".into(),
+        can_session: false,
+        decision: "".into(),
+        record: "".into(),
+        age_text: "94s left".into(),
+    };
+    g.set_items(ModelRc::new(VecModel::from(vec![
+        item("prompt", "t2", "move the duplicates into Trash"),
+        item("text", "t2.0", "38 duplicates in 17 groups. Asking before anything moves."),
+        AgentItemData { approval, ..item("approval", "t2.1", "files.move") },
+    ])));
+    draw();
+    draw();
+    save(&draw(), &output.replace(".png", "-approval.png"), width, height)?;
+    // Allow is the right-hand button of the pair; scan the session's right half from the bottom up
+    // until one of the two answers, and it must be Allow, for appr-7.
+    let answered = |log: &Rc<RefCell<Vec<String>>>| log.borrow().iter().any(|e| e.starts_with("allow") || e.starts_with("deny"));
+    for y in (90..(height as i32 - 70)).rev().step_by(4) {
+        if answered(&log) {
+            break;
+        }
+        click(w, 840., y as f32);
+    }
+    let answers: Vec<String> = log.borrow().iter().filter(|e| e.starts_with("allow") || e.starts_with("deny")).cloned().collect();
+    assert_eq!(answers, vec!["allow:appr-7".to_string()], "the pane's Allow answers the one request id");
+    for y in (90..(height as i32 - 70)).rev().step_by(4) {
+        if log.borrow().iter().any(|e| e.starts_with("deny")) {
+            break;
+        }
+        click(w, 460., y as f32);
+    }
+    assert!(log.borrow().iter().any(|e| e == "deny:appr-7"), "and its Deny the same id: {:?}", log.borrow());
+    // Answered, it is the line it left, with no buttons: nothing to press any more.
+    let answered_card = ApprovalRequest {
+        id: "appr-7".into(),
+        agent: "pi:main".into(),
+        app: "files".into(),
+        action: "move".into(),
+        decision: "allowed".into(),
+        record: "Allowed once: files.move — 21:05".into(),
+        ..Default::default()
+    };
+    g.set_items(ModelRc::new(VecModel::from(vec![
+        item("prompt", "t2", "move the duplicates into Trash"),
+        AgentItemData { approval: answered_card, ..item("approval", "t2.1", "files.move") },
+    ])));
+    let before = log.borrow().len();
+    draw();
+    for y in (90..(height as i32 - 70)).step_by(6) {
+        click(w, 840., y as f32);
+        click(w, 460., y as f32);
+    }
+    let pressed: Vec<String> = log.borrow()[before..].iter().filter(|e| e.starts_with("allow") || e.starts_with("deny")).cloned().collect();
+    assert!(pressed.is_empty(), "an answered card has no buttons: {pressed:?}");
+    save(&draw(), &output.replace(".png", "-approval-answered.png"), width, height)?;
     ui.hide()?;
 
     // One agent in its own window: the same components, its own global.
@@ -245,6 +330,49 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     w.request_redraw();
     w.draw_if_needed(|r| { r.render(pixels.make_mut_slice(), ww as usize); });
     save(&pixels, &output.replace(".png", "-window.png"), ww, wh)?;
-    println!("PASS: Agents list hover reported and cleared, row select, tab filter, Stop, a card opened from its line; screen and window rendered");
+    println!("PASS: Agents list hover reported and cleared, row select, tab filter, Stop, a card opened from its line; an approval card in the pane answered Allow and Deny for its one request id, and drew no buttons once answered; screen and window rendered");
+    Ok(())
+}
+
+/// The Lens in a conversation with an attached mind: its header offers "open in Agents", a press
+/// reaches the shell, and a Lens talking to no agent (the built-in) offers nothing.
+pub fn run_lens(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (width, height) = (1280u32, 800u32);
+    let ui = LensAgentsProbe::new()?;
+    ui.show()?;
+    w.set_size(slint::PhysicalSize::new(width, height));
+    let draw = || {
+        slint::platform::update_timers_and_animations();
+        let mut pixels = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(width, height);
+        w.request_redraw();
+        w.draw_if_needed(|r| { r.render(pixels.make_mut_slice(), width as usize); });
+        pixels
+    };
+    draw();
+    // Past the panel's slide-in.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    save(&draw(), output, width, height)?;
+    // The header runs along the top of the panel, right of the mind's name and left of ×.
+    for x in (900..1240).step_by(6) {
+        for y in (34..76).step_by(6) {
+            if ui.get_opened() == 0 {
+                click(w, x as f32, y as f32);
+            }
+        }
+    }
+    assert_eq!(ui.get_opened(), 1, "the header's \"open in Agents\" reaches the shell");
+    let closed_before = ui.get_closed();
+    // With nothing to open, there is no button: the same sweep opens nothing (× may still close).
+    ui.set_can_open(false);
+    draw();
+    for x in (900..1200).step_by(6) {
+        for y in (34..76).step_by(6) {
+            click(w, x as f32, y as f32);
+        }
+    }
+    assert_eq!(ui.get_opened(), 1, "no button when the conversation is no agent's");
+    let _ = closed_before;
+    save(&draw(), &output.replace(".png", "-builtin.png"), width, height)?;
+    println!("PASS: the Lens header offers open in Agents for an agent's conversation, the press reaches the shell, and it is not offered otherwise");
     Ok(())
 }

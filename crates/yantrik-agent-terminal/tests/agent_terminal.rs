@@ -329,10 +329,17 @@ fn the_view_gets_the_raw_bytes_the_screen_and_the_end() {
         let also = also.clone();
         move |answer| also.lock().unwrap().push(answer.job.clone())
     });
+    // The same for the bytes: the Agents store's card and any other view each hear all of them.
+    let also_bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
+    jobs.on_output({
+        let also_bytes = also_bytes.clone();
+        move |_agent, _job, chunk| also_bytes.lock().unwrap().extend_from_slice(chunk)
+    });
 
     let done = jobs.run(&pi(), "printf '\\033[31mred\\033[0m\\n'", None, LONG).unwrap();
     let raw = bytes.lock().unwrap().clone();
     assert!(raw.windows(5).any(|w| w == b"\x1b[31m"), "the raw bytes keep their escapes");
+    assert_eq!(*also_bytes.lock().unwrap(), raw, "a second output listener hears every byte the first does");
     assert!(owners.lock().unwrap().iter().all(|a| a == &pi()), "every chunk names its agent");
     assert_eq!(done.tail, "red", "the answer's tail is what the screen shows, escapes gone");
     let red = jobs
