@@ -221,6 +221,8 @@ fn parse_content_blocks(content: &SharedString) -> ModelRc<ContentBlock> {
         .map(|b| ContentBlock {
             block_type: SharedString::from(b.block_type),
             text: SharedString::from(b.text.as_str()),
+            // The card the bubble draws for a tool call; empty for every other block.
+            call: b.call.as_ref().map(crate::trail::ToolCall::to_card).unwrap_or_default(),
         })
         .collect();
 
@@ -230,6 +232,24 @@ fn parse_content_blocks(content: &SharedString) -> ModelRc<ContentBlock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the bubble is handed when an answer finishes: a tool call arrives as a `tool` block
+    /// whose card holds the one line and the whole arguments — the exact thing the person clicks
+    /// open. On the version #125 fixed, the same text reached the bubble as a prose block reading
+    /// `⚙️ os_act studio.generate …` with nowhere to put the arguments.
+    #[test]
+    fn a_finished_answer_hands_the_bubble_each_call_with_its_arguments() {
+        let blocks = parse_content_blocks(&SharedString::from(
+            "On it.\n⚙️ os_act studio.generate {\"args\":{\"prompt\":\"a red kite over the sea\"}}\n\nDone.",
+        ));
+        let tool = blocks.row_data(1).expect("the call is the second block");
+        assert_eq!(tool.block_type, "tool");
+        assert_eq!(tool.call.summary, "os_act studio.generate prompt=\"a red kite over the sea\"");
+        assert!(tool.call.arguments.contains("\"prompt\": \"a red kite over the sea\""));
+        let prose = blocks.row_data(2).expect("the answer goes on after the call");
+        assert_eq!(prose.text, "Done.");
+        assert_eq!(prose.call.summary, "", "a paragraph carries no call");
+    }
 
     /// Starting an answer must not end one that is still arriving.
     ///

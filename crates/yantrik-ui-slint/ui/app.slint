@@ -35,6 +35,7 @@ import { ToastBanner, ToastData, ToastActionData } from "components/toast_banner
 import { ProblemReportScreen, ProblemRow } from "problem_report.slint";
 import { CommandItem } from "components/command_palette.slint";
 import { ContentBlock, MessageData } from "components/message_bubble.slint";
+import { ToolCallData } from "components/tool_call.slint";
 import { UrgeCardData } from "components/glance_card.slint";
 import { LensResult, ApprovalRequest, ApprovalCard, VaultUnlockRequest, VaultUnlockCard } from "components/intent_lens.slint";
 import { MindModeMenu, MindRule, MindAuditEntry } from "components/mind_mode_menu.slint";
@@ -53,7 +54,7 @@ import { YMenuAction } from "components/y_context_menu.slint";
 import { Icons } from "components/icon.slint";
 import { Tr } from "translations.slint";
 
-export { HarnessData, HarnessRowData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, MindRule, MindAuditEntry, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, NotifActionData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, ToastActionData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction, ProblemRow }
+export { HarnessData, HarnessRowData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, ToolCallData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, MindRule, MindAuditEntry, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, NotifActionData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, ToastActionData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction, ProblemRow }
 
 export component App inherits Window {
     default-font-family: Theme.font-ui;

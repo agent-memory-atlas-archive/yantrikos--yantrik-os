@@ -81,6 +81,7 @@ mod streaming;
 mod system_context;
 mod telegram;
 mod terminal;
+mod trail;
 // What protects the credential vault on this machine, and the honest answer when nothing does.
 mod vault_unlock;
 mod voice;

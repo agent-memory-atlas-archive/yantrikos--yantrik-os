@@ -3,11 +3,15 @@
 // Yantrik messages: left-aligned with glowing cyan dot + rich block rendering.
 
 import { Theme } from "theme.slint";
+import { ToolCallData, ToolCallCard } from "tool_call.slint";
 
 // A single rendered block in a message (parsed from markdown).
 export struct ContentBlock {
-    block-type: string,  // "text", "code", "heading", "bullet"
+    block-type: string,  // "text", "code", "heading", "bullet", "tool"
     text: string,
+    // A "tool" block's call — name, arguments, status, output — drawn by ToolCallCard. Empty
+    // for every other kind of block.
+    call: ToolCallData,
 }
 
 export struct MessageData {
@@ -63,13 +67,22 @@ export component MessageBubble inherits Rectangle {
 
                 // Rich block rendering (after stream completes)
                 for block in data.blocks : Rectangle {
-                    height: self.preferred-height;
-                    background: block.block-type == "code" ? Theme.bg-card : transparent;
-                    border-radius: block.block-type == "code" ? 6px : 0;
-                    border-width: block.block-type == "code" ? 1px : 0;
-                    border-color: block.block-type == "code" ? Theme.border-subtle : transparent;
+                    property <bool> is-tool: block.block-type == "tool";
+                    property <bool> is-code: block.block-type == "code";
 
-                    HorizontalLayout {
+                    height: self.preferred-height;
+                    background: is-code ? Theme.bg-card : transparent;
+                    border-radius: is-code ? 6px : 0;
+                    border-width: is-code ? 1px : 0;
+                    border-color: is-code ? Theme.border-subtle : transparent;
+
+                    // A tool call: the card every view of a mind's calls shares — one line with
+                    // the arguments on it, the whole of them on a click.
+                    if is-tool : ToolCallCard {
+                        call: block.call;
+                    }
+
+                    if !is-tool : HorizontalLayout {
                         padding: block.block-type == "code" ? 8px : 0;
                         padding-left: block.block-type == "code" ? 10px
                             : block.block-type == "bullet" ? 8px : 0;

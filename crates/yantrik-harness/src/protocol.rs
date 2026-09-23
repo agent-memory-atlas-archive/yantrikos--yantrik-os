@@ -53,6 +53,20 @@ pub const DETACH: &str = "harness.detach";
 /// Every method this service answers, for the error when something else is called.
 pub const METHODS: &[&str] = &[ATTACH, POLL, CHUNK, COMPLETE, FAIL, DETACH];
 
+/// How a tool call is written into an answer.
+///
+/// [`CHUNK`] carries text and nothing else, on purpose: which tools a harness has and how it
+/// calls them are its own affair. But a person watching a mind work deserves to see the calls go
+/// by, so a call is a line of the answer beginning with this mark —
+/// `⚙️ os_act studio.generate {"args":{"prompt":"a red kite"}}`: the tool's name, what it
+/// touched, and the rest of its arguments as one JSON object on the same line. That is what
+/// `harnesses/lib/yantrik_harness.py` (`tool_trail`) writes, and the shell reads it back into a
+/// tool block with the arguments a click away. The shell also understands the lines Hermes'
+/// gateway writes on its own — `⚙️ name...`, `⚙️ name: "preview"`, and its verbose
+/// `⚙️ name([...])` with the arguments on the line after — so a harness that already has a way
+/// of writing a call down does not need this one.
+pub const TRAIL_MARK: &str = "⚙️";
+
 /// How long a harness may go without polling before it is considered gone.
 ///
 /// Any session call counts, so a harness still working on a long turn keeps its place by sending

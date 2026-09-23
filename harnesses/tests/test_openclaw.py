@@ -147,8 +147,9 @@ class GatewayRouteTests(HarnessCase):
         text = self.desktop.text(turn)
         self.assertIn("⚙️ os_act calendar.add_event", text)
         self.assertIn("Added it.", text)
-        # The trail names what was touched; what was said stays out of it.
-        self.assertNotIn("dentist", text.split("Added it.")[0])
+        # The trail names what was touched and, since #125, with what: the panel shows the
+        # arguments under the call, the way the approval card for the same call does.
+        self.assertIn('{"args":{"title":"dentist"}}', text.split("Added it.")[0])
 
     def test_stop_closes_the_stream_and_the_turn_once(self):
         gw = self.gateway("abort")
