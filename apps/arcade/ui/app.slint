@@ -135,8 +135,8 @@ export component ArcadeApp inherits Window {
                     }
                     HorizontalLayout {
                         spacing: 8px;
-                        YButton { label: "New character"; icon: Icons.plus; disabled: root.busy; clicked => { root.action("new-character"); } }
-                        YButton { label: "New game"; icon: Icons.plus; variant: 1; disabled: root.busy; clicked => { root.action("new-game"); } }
+                        YButton { label: "New character"; icon-path: Icons.plus; disabled: root.busy; clicked => { root.action("new-character"); } }
+                        YButton { label: "New game"; icon-path: Icons.plus; variant: 1; disabled: root.busy; clicked => { root.action("new-game"); } }
                         Rectangle { horizontal-stretch: 1; }
                     }
                     HorizontalLayout {
