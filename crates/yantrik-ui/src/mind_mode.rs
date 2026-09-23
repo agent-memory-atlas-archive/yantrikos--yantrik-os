@@ -1027,7 +1027,9 @@ fn audit() -> &'static Mutex<Vec<AuditEntry>> {
     AUDIT.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn audit_path() -> String {
+/// The audit file. `pub(crate)` for the mind panel, which reads it back after a restart has
+/// emptied the in-memory list (see `mind_panel::recent_acts`).
+pub(crate) fn audit_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     format!("{home}/.local/share/yantrik/mind-audit.jsonl")
 }

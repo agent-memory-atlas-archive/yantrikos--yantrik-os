@@ -753,6 +753,10 @@ fn worker_loop(
     tracing::info!("Companion worker ready for commands");
 
     loop {
+        // The mind panel's recipes in flight, read here because this thread owns the store's
+        // connection (a second one from this process is what the engine refuses to write beside).
+        // Before the wait, so what the panel shows is the state the last command left.
+        crate::mind_panel::publish_from_worker(&companion.db.conn());
         match cmd_rx.recv() {
             Ok(CompanionCommand::SendMessage { text, token_tx, job }) => {
                 // Work that arrived without a ticket gets one here, and that is not bookkeeping:

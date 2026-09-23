@@ -76,6 +76,8 @@ mod lock;
 mod markdown;
 /// What the mind may do without being asked: plan / ask / auto / bypass. See its module doc.
 mod mind_mode;
+/// The right edge of every screen: the answering mind, what is at work, what it did.
+mod mind_panel;
 mod notifications;
 mod onboarding;
 mod icons;

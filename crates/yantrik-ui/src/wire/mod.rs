@@ -89,6 +89,8 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     permission_dashboard::wire(ui, ctx);
     problem_report::wire(ui, ctx);
     agents::wire(ui, ctx);
+    // After `harness` and `agents`: the panel reads the host and the Agents store they set up.
+    crate::mind_panel::wire(ui);
     about::wire(ui, ctx);
     version::wire(ui, ctx);
     morning_brief::wire(ui, ctx);
