@@ -5,8 +5,16 @@ of this desktop rather than a window a mind can only photograph is this addon: i
 `app-blender.sock` in the session's socket directory and answers `app.describe` and
 `app.act` in the same JSON-RPC every other app speaks, so `yos describe blender` reads a
 scene the way `yos describe notes` reads a note — and the same ceiling, the same revision
-guard and the same refusal vocabulary bind it, because `surface.py` is a port of
-`yantrik-app-runtime::control`'s dispatch rather than an opinion of its own.
+guard and the same refusal vocabulary bind it, because it is built on the surface SDK
+(`yantrik_surface`), the port of `yantrik-app-runtime::control`'s dispatch that any author
+uses, rather than an opinion of its own.
+
+Where the SDK comes from. It travels with the addon: a release copies it beside this package
+(`share/blender/yantrik_surface`, next to `share/blender/yantrik_blender`), and in the source
+tree it is `sdk/python`. Both are found relative to this file, so it works in whatever Python
+this Blender runs — Debian's Blender uses the system Python and would see an installed copy,
+but a blender.org build brings its own Python that sees no system packages at all — and the
+addon always runs with the SDK it was released with.
 
 Threading. The socket is served on a thread of its own; `bpy` is not thread-safe and every
 read or change of the scene is marshalled onto Blender's main thread and waited for — the
@@ -34,7 +42,23 @@ _here = os.path.dirname(os.path.abspath(__file__))
 if _here not in sys.path:
     sys.path.insert(0, _here)
 
-from . import wire  # noqa: E402
+
+def _find_sdk():
+    """Put the SDK this addon travels with first on the path: beside it in a release, at
+    `sdk/python` in the source tree. A copy found some other way is used only when neither
+    is there."""
+    parent = os.path.dirname(_here)
+    for candidate in (parent, os.path.join(parent, "..", "..", "..", "sdk", "python")):
+        candidate = os.path.normpath(candidate)
+        if os.path.isfile(os.path.join(candidate, "yantrik_surface", "__init__.py")):
+            if candidate not in sys.path:
+                sys.path.insert(0, candidate)
+            return candidate
+    return None
+
+
+_find_sdk()
+
 from .bridge import QueuedBridge  # noqa: E402
 from .scene import Scene  # noqa: E402
 from .surface import Surface  # noqa: E402
@@ -101,7 +125,7 @@ class _Session:
         self.background = background
         self.bridge = QueuedBridge()
         self.surface = Surface(Scene(bpy_mod), self.bridge, app_id=APP_ID)
-        self.server = wire.Server(wire.default_socket_path(APP_ID), self.surface)
+        self.server = None  # the wire.Server, once start() has bound app-blender.sock
         self.stopped = False
         self.splash_quieted = False
 
@@ -109,7 +133,7 @@ class _Session:
         # Before the socket, so a bind failure (which keeps the window) still leaves it a
         # window without a splash over it; before the pump, so no action can land behind one.
         self.splash_quieted = quiet_first_window(self.bpy, self.background)
-        self.server.start()
+        self.server = self.surface.serve_in_thread()
         if self.background:
             return
         # Windowed: pump between Blender's own turns. The interval is a floor on how long a
@@ -131,7 +155,7 @@ class _Session:
 
     def stop(self):
         self.stopped = True
-        self.server.stop()
+        self.surface.stop()
         self.bridge.wake()
 
 
@@ -155,7 +179,9 @@ def start():
             try:
                 session.start()
             except OSError as e:
-                # Said where a person will see it, and not raised: see the docstring.
+                # Said where a person will see it, and not raised: see the docstring. A second
+                # Blender lands here too — the first one's live socket is its name, and the
+                # SDK does not bind over it (`SocketBusy`).
                 print("[yantrik] control surface not serving: %s" % e, file=sys.stderr)
                 return None
             _running = session

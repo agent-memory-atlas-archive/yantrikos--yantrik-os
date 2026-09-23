@@ -17,10 +17,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                  "..", "..", "apps", "blender", "addon")))
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "..", "..", "sdk", "python")))
 
 import fake_bpy  # noqa: E402
-import yantrik_surface  # noqa: E402
-from yantrik_surface import quiet_first_window  # noqa: E402
+import yantrik_blender  # noqa: E402
+from yantrik_blender import quiet_first_window  # noqa: E402
 
 
 class TestQuietFirstWindow(unittest.TestCase):
@@ -75,7 +78,7 @@ class TestSessionStart(unittest.TestCase):
 
     def test_windowed_start_quiets_the_splash_and_registers_the_pump(self):
         fake = fake_bpy.make_bpy(background=False, windows=1)
-        session = yantrik_surface._Session(fake, background=False)
+        session = yantrik_blender._Session(fake, background=False)
         try:
             session.start()
             self.assertTrue(session.splash_quieted)
@@ -86,7 +89,7 @@ class TestSessionStart(unittest.TestCase):
 
     def test_background_start_registers_no_pump_and_leaves_the_splash_preference(self):
         fake = fake_bpy.make_bpy(background=True)
-        session = yantrik_surface._Session(fake, background=True)
+        session = yantrik_blender._Session(fake, background=True)
         try:
             session.start()
             self.assertFalse(session.splash_quieted)

@@ -17,9 +17,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                  "..", "..", "apps", "blender", "addon")))
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "..", "..", "sdk", "python")))
 
 import fake_bpy  # noqa: E402
-from yantrik_surface.scene import (  # noqa: E402
+from yantrik_blender.scene import (  # noqa: E402
     Refusal,
     Scene,
     light_note,

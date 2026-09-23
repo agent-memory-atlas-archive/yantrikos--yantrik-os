@@ -18,13 +18,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                  "..", "..", "apps", "blender", "addon")))
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "..", "..", "sdk", "python")))
 
 import fake_bpy  # noqa: E402
+from yantrik_blender.bridge import BridgeTimeout, DirectBridge  # noqa: E402
+from yantrik_blender.scene import Scene  # noqa: E402
+from yantrik_blender.surface import ACTIONS, Surface  # noqa: E402
 from yantrik_surface import wire  # noqa: E402
-from yantrik_surface.bridge import BridgeTimeout, DirectBridge  # noqa: E402
-from yantrik_surface.scene import Scene  # noqa: E402
-from yantrik_surface.surface import (  # noqa: E402
-    ACTIONS, LADDER, GrantRefused, Surface, grant_refusal, mode_from)
+from yantrik_surface.gate import LADDER, GrantRefused, grant_refusal, mode_from  # noqa: E402
 
 ALL_ACTION_NAMES = [a.name for a in ACTIONS]
 
@@ -188,6 +191,20 @@ class TestDispatchOrder(unittest.TestCase):
         message = refusal(self, lambda: self.act("new_scene", please=True))
         self.assertEqual(message,
                          "`new_scene` takes no arguments, but `please` was given")
+
+    def test_an_argument_of_the_wrong_type_is_refused_before_the_scene_sees_it(self):
+        # The SDK checks each argument against its published type, in the Rust
+        # `yantrik-surface` crate's words: `samples` is published `integer`, so the text "4" is
+        # refused naming the argument (and not echoing the value), and the integer 4 — which is
+        # what `yos act blender set_render samples=4` sends — is taken.
+        self.assertEqual(
+            refusal(self, lambda: self.act("set_render", samples="4")),
+            "`set_render` argument `samples` must be an integer, and a string arrived")
+        self.assertEqual(
+            refusal(self, lambda: self.act("set_material", name="Cube", metallic="0.2")),
+            "`set_material` argument `metallic` must be a number, and a string arrived")
+        self.act("set_render", engine="cycles")
+        self.assertEqual(self.act("set_render", samples=4)["state"]["render"]["samples"], 4)
 
     def test_the_ceiling_is_checked_before_the_arguments(self):
         # Order pinned by the runtime: a dangerous action with a missing argument is refused
@@ -499,7 +516,7 @@ class TestQueuedBridge(unittest.TestCase):
         import threading
         import time
 
-        from yantrik_surface.bridge import QueuedBridge
+        from yantrik_blender.bridge import QueuedBridge
 
         bridge = QueuedBridge()
         results = []
@@ -522,8 +539,8 @@ class TestQueuedBridge(unittest.TestCase):
         import threading
         import time
 
-        from yantrik_surface.bridge import QueuedBridge
-        from yantrik_surface.scene import Refusal
+        from yantrik_blender.bridge import QueuedBridge
+        from yantrik_blender.scene import Refusal
 
         bridge = QueuedBridge()
         outcome = {}
@@ -552,7 +569,7 @@ class TestQueuedBridge(unittest.TestCase):
     def test_wake_releases_a_waiter_with_the_truth(self):
         import threading
 
-        from yantrik_surface.bridge import QueuedBridge
+        from yantrik_blender.bridge import QueuedBridge
 
         bridge = QueuedBridge()
         outcome = {}

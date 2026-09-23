@@ -101,6 +101,8 @@ test_*.py
 # local-only scripts, and the same one-directory miss applies: CI runs a discover over
 # tests/blender-core that would pass with the files it runs never committed.
 !tests/blender-core/test_*.py
+# ...nor the Python surface SDK's conformance suite, which CI discovers the same way.
+!sdk/python/tests/test_*.py
 
 # Brainstorm outputs
 brainstorm_*.py

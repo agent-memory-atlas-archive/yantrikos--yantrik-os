@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yantrik-surface"
+version = "0.1.0"
+description = "Put an app on the Yantrik OS desktop where a mind can find it, read it and act in it, under the person's grades."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0" }
+authors = [{ name = "Yantrik OS" }]
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Source = "https://github.com/yantrikos/yantrik-os/tree/main/sdk/python"
+
+[tool.setuptools]
+packages = ["yantrik_surface"]

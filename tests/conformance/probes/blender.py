@@ -205,8 +205,10 @@ def check_mutating_surface(probe, headless):
     baseline = lib.state(APP)
     before_total = baseline.get("objects_total")
 
-    # Small, CPU-renderable, and quick: the point is the witness, not the picture.
-    settings = lib.act(APP, "set_render", engine="cycles", resolution="320x240", samples="4")
+    # Small, CPU-renderable, and quick: the point is the witness, not the picture. Numbers go
+    # as numbers — the dispatch (the surface SDK) checks each argument against the type it
+    # publishes, so `samples` is the integer 4, as `yos act ... samples=4` sends it.
+    settings = lib.act(APP, "set_render", engine="cycles", resolution="320x240", samples=4)
     render_state = (lib.state(APP).get("render") or {})
     probe.check(
         "set_render changes the engine, the resolution and the samples, and describe agrees",
@@ -243,7 +245,7 @@ def check_mutating_surface(probe, headless):
         contract=3)
 
     material = lib.act(APP, "set_material", name=monkey, color="#ff8800",
-                       metallic="0.2", roughness="0.4")
+                       metallic=0.2, roughness=0.4)
     probe.check(
         "set_material reports the material it made or reused, with the colour asked for",
         material.get("accepted") is True
@@ -262,7 +264,7 @@ def check_mutating_surface(probe, headless):
                   "refused": camera.get("refused")},
         contract=3)
 
-    light = lib.act(APP, "set_light", kind="sun", energy="3", location="2,2,4")
+    light = lib.act(APP, "set_light", kind="sun", energy=3, location="2,2,4")
     light_types = [o.get("type") for o in (lib.state(APP).get("objects") or [])]
     probe.check(
         "set_light puts a light of that kind in the scene",

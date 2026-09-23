@@ -1,0 +1,3 @@
+# What `pip install ./sdk/python` leaves behind when it builds in the tree.
+build/
+*.egg-info/

@@ -176,3 +176,12 @@ jobs:
       # design/blender-surface-2026-09-22.md.
       - name: The Blender addon speaks the runtime's own wire and vocabulary
         run: python3 -m unittest discover -s tests/blender-core
+
+      # The Python surface SDK (sdk/python/yantrik_surface), which the Blender addon above is
+      # built on and any outside author imports. Stdlib-only like the rest. It holds itself to
+      # the Rust runtime it ports: every refusal it asserts is read out of the Rust source it
+      # comes from, its revision vectors were produced by serde_json, the example is driven by
+      # the real `yos` over real sockets (a grant spent end to end through a stand-in shell),
+      # and it replays the policy vectors generated from gate::decide once they are in the tree.
+      - name: The Python surface SDK answers like the Rust dispatch
+        run: python3 -m unittest discover -s sdk/python/tests -v
