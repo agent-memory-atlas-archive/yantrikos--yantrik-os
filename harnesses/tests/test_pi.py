@@ -154,6 +154,134 @@ class PiHarnessTests(unittest.TestCase):
         self.assertIn("no provider configured", closed[2])
 
 
+@unittest.skipUnless(support.HAS_UNIX_SOCKETS, "the harness socket is a unix socket")
+class PiEventTests(unittest.TestCase):
+    """What pi does inside a turn, as the desktop's cards."""
+
+    def setUp(self):
+        self.desktop = FakeDesktop()
+        self.addCleanup(self.desktop.stop)
+        self.work = tempfile.mkdtemp(prefix="fake-pi-")
+
+    def config(self, scenario, **extra):
+        config = {"silence_timeout": 10.0, "settled_grace": 0.3, "extension": "",
+                  "command": [sys.executable, FAKE_PI, scenario],
+                  "env": {"FAKE_PI_ENV_DUMP": os.path.join(self.work, "env"),
+                          "FAKE_PI_PROMPTS_DUMP": os.path.join(self.work, "prompts")}}
+        config.update(extra)
+        return PiConfig(config)
+
+    def start(self, handler):
+        self.addCleanup(handler.close)
+        harness = Harness("pi", "Pi", handler, address=self.desktop.path, tools=True,
+                          poll_interval=0.02, retry_seconds=0.2, heartbeat_seconds=30.0,
+                          log=lambda message: None)
+        thread = threading.Thread(target=harness.run, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(harness.stop)
+        self.assertTrue(wait_for(lambda: bool(self.desktop.attachments)), "never attached")
+
+    def dump(self, name):
+        path = os.path.join(self.work, name)
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    def test_a_tool_execution_is_a_card_with_its_output_streamed_into_it(self):
+        self.start(PiMind(self.config("tool"), log=lambda message: None))
+        turn = self.desktop.ask("add dentist")
+        self.assertEqual(self.desktop.wait_closed(turn)[1], "complete")
+        events = self.desktop.events_for(turn)
+        calls = [e for e in events if e.get("call") == "t1"]
+        self.assertEqual([e["kind"] for e in calls],
+                         ["tool_start", "tool_output", "tool_output", "tool_output", "tool_end"])
+        start = calls[0]
+        self.assertEqual((start["name"], start["target"]), ("os_act", "calendar.add_event"))
+        self.assertEqual(start["args"]["args"], {"title": "dentist"}, "the card has the arguments whole")
+        # Pi reports the output accumulated; the card is sent only what is new, once.
+        self.assertEqual("".join(e["delta"] for e in calls if e["kind"] == "tool_output"),
+                         "checking the calendar\nadding dentist\ndone")
+        end = calls[-1]
+        self.assertEqual((end["ok"], end["summary"], end.get("exit_code")),
+                         (True, "checking the calendar", 0))
+        # The trail line is still in the text for every reader that draws no cards.
+        self.assertIn("⚙️ os_act calendar.add_event", self.desktop.text(turn))
+
+    def test_thinking_is_sent_beside_the_answer_and_usage_after_it(self):
+        self.start(PiMind(self.config("tool"), log=lambda message: None))
+        turn = self.desktop.ask("add dentist")
+        self.desktop.wait_closed(turn)
+        events = self.desktop.events_for(turn)
+        self.assertIn({"kind": "thinking", "delta": "hmm, notes"}, events)
+        usage = [e for e in events if e["kind"] == "usage"]
+        self.assertEqual(usage, [{"kind": "usage", "model": "fake-model", "input_tokens": 105,
+                                  "output_tokens": 20, "cost_usd": 0.003}])
+        self.assertNotIn("hmm, notes", self.desktop.text(turn))
+
+    def test_a_refused_act_settles_its_card_as_not_done(self):
+        self.start(PiMind(self.config("refused"), log=lambda message: None))
+        turn = self.desktop.ask("delete my files")
+        self.desktop.wait_closed(turn)
+        end = [e for e in self.desktop.events_for(turn) if e["kind"] == "tool_end"][0]
+        self.assertFalse(end["ok"])
+        self.assertIn("REFUSED", end["summary"])
+
+    def test_each_conversation_is_its_own_pi_process_with_its_agents_token(self):
+        gate = os.path.join(self.work, "gate")
+        config = self.config("slow")
+        config.env["FAKE_PI_GATE"] = gate
+        self.start(yantrik_pi.handler(config, log=lambda message: None))
+        a = self.desktop.ask("one", conversation="c-aaaaaa", agent_token="a" * 32)
+        b = self.desktop.ask("two", conversation="c-bbbbbb", agent_token="b" * 32)
+        # They run at once: both prompts reach a pi while neither has answered. One after the
+        # other, the second would never arrive until the gate opened.
+        self.assertTrue(wait_for(lambda: len(self.dump("prompts")) == 2, timeout=15),
+                        "the second conversation waited for the first")
+        prompts = {p["message"]: p for p in self.dump("prompts")}
+        self.assertNotEqual(prompts["one"]["pid"], prompts["two"]["pid"])
+        self.assertEqual(self.desktop.closes_for(a) + self.desktop.closes_for(b), [])
+        open(gate, "w").close()
+        for turn in (a, b):
+            self.assertEqual(self.desktop.wait_closed(turn, timeout=10)[1], "complete")
+
+        started = self.dump("env")
+        self.assertEqual(len(started), 2, started)
+        self.assertEqual(sorted(p["token"] for p in started), ["a" * 32, "b" * 32])
+        pid_of = {p["token"]: p["pid"] for p in started}
+        self.assertIn("answered by %d" % pid_of["a" * 32], self.desktop.text(a))
+        self.assertIn("answered by %d" % pid_of["b" * 32], self.desktop.text(b))
+
+        # The same conversation again is the same process, and its history.
+        again = self.desktop.ask("three", conversation="c-aaaaaa", agent_token="a" * 32)
+        self.desktop.wait_closed(again, timeout=8)
+        self.assertIn("answered by %d" % pid_of["a" * 32], self.desktop.text(again))
+        self.assertEqual(len(self.dump("env")), 2)
+
+    def test_ending_a_conversation_ends_its_pi_process_and_only_that_one(self):
+        handler = yantrik_pi.handler(self.config("text"), log=lambda message: None)
+        self.start(handler)
+        for conversation in ("c-aaaaaa", "c-bbbbbb"):
+            turn = self.desktop.ask("hi", conversation=conversation, agent_token=conversation * 4)
+            self.desktop.wait_closed(turn, timeout=8)
+        a = handler.mind("c-aaaaaa").proc.proc
+        b = handler.mind("c-bbbbbb").proc.proc
+        self.assertIsNone(a.poll())
+
+        self.desktop.stop_agent(conversation="c-aaaaaa")
+        self.assertTrue(wait_for(lambda: a.poll() is not None, timeout=8), "pi was left running")
+        self.assertIsNone(b.poll(), "the other conversation's pi was stopped too")
+        self.assertEqual(handler.held(), ["c-bbbbbb"])
+
+    def test_the_token_is_never_inherited_from_the_harness_itself(self):
+        os.environ["YANTRIK_AGENT_TOKEN"] = "f" * 32
+        self.addCleanup(os.environ.pop, "YANTRIK_AGENT_TOKEN", None)
+        self.start(PiMind(self.config("text"), log=lambda message: None))
+        self.desktop.wait_closed(self.desktop.ask("hi"), timeout=8)
+        self.assertEqual([p["token"] for p in self.dump("env")], [None])
+
+
 class PiConfigTests(unittest.TestCase):
     def test_the_silence_budget_exceeds_the_longest_an_approval_card_can_wait(self):
         # An os_act above the ceiling waits ~270s for the person inside a single tool call, with

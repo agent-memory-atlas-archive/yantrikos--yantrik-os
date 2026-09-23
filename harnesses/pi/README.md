@@ -117,9 +117,14 @@ reached at all, a small fallback table keeps the tools existing so Pi still star
 
 - `/stop` sends Pi's own `abort`, so the tool it is in the middle of stops too.
 - `/new` sends `new_session`: Pi keeps the conversation, so Pi is the one that has to forget it.
-- A tool execution shows as one line — `⚙️ os_act calendar.add_event` — naming what was touched,
-  never the arguments.
-- Pi's thinking is not forwarded. You asked a question, not for a transcript of the deliberation.
+- Each conversation the desktop starts with Pi (each agent in the Agents view, and the Lens's
+  own `main`) is its own `pi --mode rpc` process, started when its first message arrives and
+  stopped when the agent is stopped. Its environment carries that agent's
+  `YANTRIK_AGENT_TOKEN`, so the `yos-mcp` the extension starts can say which agent is asking.
+- A tool execution is a card in the agent's pane — its arguments, its output streamed into it,
+  ✓ or ✗ when it ends — and still the trail line `⚙️ os_act calendar.add_event` in the text.
+- Pi's thinking goes beside the answer as a folded "thinking" line in the pane, never into the
+  answer itself; what each model call cost goes to the agent's details.
 - If Pi opens a dialog of its own (`confirm`, `select`, `input`), it is **declined** and the
   question is repeated in the conversation. This desktop asks for permission with its own card,
   which you see and answer and which the machine records; a harness that clicked "yes" for you

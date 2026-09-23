@@ -119,10 +119,27 @@ pub enum Event {
 }
 
 impl Event {
+    /// Every `kind` this build reads. Anything else is a newer harness talking to an older
+    /// desktop, and is ignored; one of these that does not parse is malformed, and is counted.
+    pub const KINDS: &'static [&'static str] =
+        &["tool_start", "tool_output", "tool_end", "thinking", "status", "usage"];
+
     /// Read one event from the wire. `None` for a kind this build does not know, or one that is
     /// malformed: the caller logs it and carries on, and the turn is not failed over it.
     pub fn parse(value: &serde_json::Value) -> Option<Event> {
         serde_json::from_value(value.clone()).ok()
+    }
+
+    /// The `kind` this event travels as.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Event::ToolStart { .. } => "tool_start",
+            Event::ToolOutput { .. } => "tool_output",
+            Event::ToolEnd { .. } => "tool_end",
+            Event::Thinking { .. } => "thinking",
+            Event::Status { .. } => "status",
+            Event::Usage { .. } => "usage",
+        }
     }
 
     /// The call this event belongs to, for the three tool events.
@@ -180,6 +197,24 @@ mod tests {
         let wire = serde_json::to_value(&event).unwrap();
         assert_eq!(wire["kind"], "tool_end");
         assert_eq!(Event::parse(&wire), Some(event));
+    }
+
+    #[test]
+    fn every_kind_this_build_writes_is_one_it_reads() {
+        let every = [
+            Event::ToolStart { call: "c".into(), name: "n".into(), target: String::new(), args: json!({}) },
+            Event::ToolOutput { call: "c".into(), stream: Stream::Stdout, delta: "d".into() },
+            Event::ToolEnd { call: "c".into(), ok: true, summary: String::new(), exit_code: None },
+            Event::Thinking { delta: "d".into() },
+            Event::Status { text: "t".into() },
+            Event::Usage { model: String::new(), input_tokens: None, output_tokens: None, cost_usd: None },
+        ];
+        assert_eq!(every.len(), Event::KINDS.len());
+        for event in every {
+            let wire = serde_json::to_value(&event).unwrap();
+            assert_eq!(wire["kind"], event.kind());
+            assert!(Event::KINDS.contains(&event.kind()), "{} is written but not read", event.kind());
+        }
     }
 
     #[test]

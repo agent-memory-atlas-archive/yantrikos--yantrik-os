@@ -416,7 +416,21 @@ impl yantrik_ipc_transport::server::ServiceHandler for HarnessService {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, yantrik_ipc_contracts::email::ServiceError> {
-        self.host.handle(method, &params).map_err(|message| {
+        self.handle_from(method, params, None)
+    }
+
+    /// Told who is on the other end, so the host can record which process attached. An agent's
+    /// token is only believed from that process or one it started — the pid is the kernel's
+    /// word (`SO_PEERCRED`, read at accept), never the harness's own.
+    fn handle_from(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        peer: Option<yantrik_ipc_transport::PeerCred>,
+    ) -> Result<serde_json::Value, yantrik_ipc_contracts::email::ServiceError> {
+        // 0 is what the transport writes when the kernel gave no pid.
+        let pid = peer.and_then(|p| u32::try_from(p.pid).ok()).filter(|pid| *pid > 0);
+        self.host.handle_from(method, &params, pid).map_err(|message| {
             yantrik_ipc_contracts::email::ServiceError { code: -32000, message }
         })
     }

@@ -47,7 +47,9 @@ _LIB = Path(__file__).resolve().parent.parent / "lib"
 if _LIB.is_dir() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from yantrik_harness import Handler, Harness, McpTools, Turn  # noqa: E402
+from yantrik_harness import (  # noqa: E402
+    AGENT_TOKEN_ENV, Handler, Harness, McpTools, PerConversation, Turn, summary_line, tool_target,
+)
 
 VERSION = "1.0"
 
@@ -199,7 +201,7 @@ class Config:
     def __init__(self, base_url: str, model: str, api_key: str = "", max_steps: int = DEFAULT_MAX_STEPS,
                  temperature: Optional[float] = None,
                  request_timeout: float = DEFAULT_REQUEST_TIMEOUT, source: str = CONFIG_PATH,
-                 decider: Optional[DeciderConfig] = None) -> None:
+                 decider: Optional[DeciderConfig] = None, include_usage: bool = True) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
@@ -208,6 +210,10 @@ class Config:
         self.request_timeout = request_timeout
         self.source = source
         self.decider = decider
+        # Ask for the token counts at the end of the stream (`stream_options.include_usage`),
+        # for the agent's details. OpenAI, DeepSeek and Ollama take it; a server that rejects
+        # the field is one line in the config to turn it off.
+        self.include_usage = include_usage
 
     @property
     def host(self) -> str:
@@ -299,6 +305,7 @@ def load_config(path: Optional[str] = None) -> Config:
         request_timeout=timeout,
         source=str(where),
         decider=load_decider(data.get("decider"), where),
+        include_usage=bool(data.get("include_usage", True)),
     )
 
 
@@ -1134,6 +1141,12 @@ class DeepSeekMind(Handler):
     def reset(self) -> None:
         self.messages = []
 
+    def close(self) -> None:
+        """The conversation is over: its bridge to the desktop's tools goes with it."""
+        close = getattr(self.tools, "close", None)
+        if close is not None:
+            close()
+
     # ── the loop ────────────────────────────────────────────────────────
 
     def answer(self, turn: Turn) -> None:
@@ -1205,8 +1218,9 @@ class DeepSeekMind(Handler):
         if world_from_messages(self.messages).apps:
             return
         call_id = "catalogue_%d" % len(self.messages)
-        turn.tool("os_apps", {})
+        turn.tool_start(call_id, "os_apps", "", {})
         text, is_error = self.tools.call("os_apps", {})
+        self._settle(turn, call_id, text, is_error)
         # Written into the conversation as a call and its answer, because that is the one shape
         # both readers of this history already understand. The mind did not ask for this one;
         # the trail line and the README are where that is said.
@@ -1335,18 +1349,34 @@ class DeepSeekMind(Handler):
                     "content": "the arguments were not valid JSON (%s); send them again as a "
                                "JSON object" % exc,
                 })
+                # A card, so the pane shows a call that was asked for and never ran; no trail
+                # line, because nothing touched the desktop.
+                turn.tool_start(call["id"], call["name"], "",
+                                {"arguments": redact(call["arguments"][:4000], self.config.secrets)},
+                                trail=False)
+                turn.tool_end(call["id"], False, "not run: the arguments were not valid JSON")
                 continue
-            # The trail line, not the arguments: what a tool call touched is worth showing, what
-            # it said is the person's business (see tool_trail).
-            turn.tool(call["name"], args)
+            # The trail line and the card. The line names what was touched; the card holds the
+            # arguments whole, a click away in the agent's own pane.
+            turn.tool_start(call["id"], call["name"], tool_target(call["name"], args), args)
             if turn.cancelled.is_set():
                 self.messages.append({
                     "role": "tool", "tool_call_id": call["id"], "name": call["name"],
                     "content": "not run: the person said /stop",
                 })
+                turn.tool_end(call["id"], False, "not run: stopped")
                 continue
             text, is_error = self.tools.call(call["name"], args)
             self.messages.append(self._result(call["id"], call["name"], text, is_error))
+            self._settle(turn, call["id"], text, is_error)
+
+    def _settle(self, turn: Turn, call_id: str, text: str, is_error: bool) -> None:
+        """A call's result into its card, and the card settled. Redacted like everything else."""
+        text = redact(text, self.config.secrets)
+        turn.tool_output(call_id, text)
+        # A refusal is an answer, and still not the thing done: the card says ✗ and why.
+        refused = text.lstrip().startswith("REFUSED")
+        turn.tool_end(call_id, not (is_error or refused), summary_line(text))
 
     def _result(self, call_id: str, name: str, text: str, is_error: bool) -> Dict[str, Any]:
         """One tool result as the conversation stores it: redacted, capped, marked if it failed."""
@@ -1378,6 +1408,8 @@ class DeepSeekMind(Handler):
             body["tools"] = schemas
         if schemas and tool_choice:
             body["tool_choice"] = tool_choice
+        if self.config.include_usage:
+            body["stream_options"] = {"include_usage": True}
         if self.config.temperature is not None:
             body["temperature"] = self.config.temperature
         return body
@@ -1409,6 +1441,8 @@ class DeepSeekMind(Handler):
         content = ""
         pending: Dict[Any, Dict[str, str]] = {}
         order: List[Any] = []
+        usage: Optional[Dict[str, Any]] = None
+        model = self.config.model
         try:
             for raw in response:
                 if turn.cancelled.is_set():
@@ -1425,16 +1459,28 @@ class DeepSeekMind(Handler):
                     event = json.loads(payload)
                 except ValueError:
                     continue
-                if isinstance(event, dict) and event.get("error"):
+                if not isinstance(event, dict):
+                    continue
+                if event.get("error"):
                     err = event["error"]
                     message = err.get("message") if isinstance(err, dict) else str(err)
                     raise ProviderError(redact("%s reported: %s" % (self.config.host, message),
                                                self.config.secrets))
+                if isinstance(event.get("usage"), dict):
+                    # The last chunk of a stream asked for it with include_usage; some servers
+                    # send it anyway.
+                    usage = event["usage"]
+                if event.get("model"):
+                    model = str(event["model"])
                 for choice in (event.get("choices") or []):
                     delta = choice.get("delta") or {}
-                    # Reasoning is the model talking to itself. It is not the answer, the person
-                    # did not ask for it, and on a desktop panel it reads as the mind rambling.
-                    # Dropped on purpose — `reasoning_content` is DeepSeek's field name for it.
+                    # Reasoning is the model talking to itself. It is not the answer, and in the
+                    # text it reads as the mind rambling — so it goes beside the answer as a
+                    # `thinking` event, which the pane folds away. `reasoning_content` is
+                    # DeepSeek's field name for it.
+                    thought = delta.get("reasoning_content")
+                    if thought:
+                        turn.thinking(redact(thought, self.config.secrets))
                     piece = delta.get("content")
                     if piece:
                         # Redacted before it is shown AND before it is stored: a model that
@@ -1458,6 +1504,10 @@ class DeepSeekMind(Handler):
                 response.close()
             except Exception:
                 pass
+
+        if usage is not None:
+            turn.usage(model=model, input_tokens=_tokens(usage.get("prompt_tokens")),
+                       output_tokens=_tokens(usage.get("completion_tokens")))
 
         calls = []
         for position, index in enumerate(order):
@@ -1520,6 +1570,33 @@ class DeepSeekMind(Handler):
                 self.messages.pop(0)
 
 
+def _tokens(value: Any) -> Optional[int]:
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+# The most conversations this harness holds at once, each with its own history and its own bridge
+# to the desktop. The desktop caps live agents at six; this is the harness's own backstop.
+MAX_CONVERSATIONS = 8
+
+
+def handler(config: Config, make_tools: Optional[Any] = None, log: Optional[Any] = None,
+            limit: int = MAX_CONVERSATIONS) -> PerConversation:
+    """DeepSeek as the desktop runs it: a history per conversation, and a bridge per conversation.
+
+    One bridge each, not one shared, because the bridge is where the agent's token goes
+    (`YANTRIK_AGENT_TOKEN` in its environment): every act it makes is then the act of that agent.
+    `make_tools(token)` builds it; the default is `yos-mcp`.
+    """
+    def tools_for(token: str) -> Any:
+        if make_tools is not None:
+            return make_tools(token)
+        return McpTools("DeepSeek", VERSION, env={AGENT_TOKEN_ENV: token} if token else None)
+
+    return PerConversation(
+        lambda conversation, token: DeepSeekMind(config, tools_for(token), log=log),
+        limit=limit, log=log)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -1528,8 +1605,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    tools = McpTools("DeepSeek", VERSION)
-    mind = DeepSeekMind(config, tools)
+    mind = handler(config)
     harness = Harness(
         id="deepseek", name="DeepSeek", handler=mind, detail=config.detail,
         tools=True, memory=False,
@@ -1544,7 +1620,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         harness.stop()
     finally:
-        tools.close()
+        mind.close()
     return 0
 
 

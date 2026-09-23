@@ -10,12 +10,14 @@ one of the candidates.
 
 ## The whole thing
 
-Six methods on the `harness` socket, all spoken by the harness:
+Seven methods on the `harness` socket, all spoken by the harness:
 
 ```text
-harness.attach   {id, name, detail?, tools?, memory?}  → {session}
-harness.poll     {session}                             → {turn_id, text, context} | {}
+harness.attach   {id, name, detail?, tools?, memory?, conversations?}  → {session}
+harness.poll     {session}              → {turn_id, text, context, conversation, agent_token} | {}
+                                          … either may also carry cancelled: [turn_id], ended: [conversation]
 harness.chunk    {session, turn_id, delta}             → {}
+harness.event    {session, turn_id, event}             → {}      (optional — see below)
 harness.complete {session, turn_id}                    → {}
 harness.fail     {session, turn_id, error}             → {}
 harness.detach   {session}                             → {}
@@ -23,7 +25,9 @@ harness.detach   {session}                             → {}
 
 Attach, then loop: ask for a turn, stream the answer back in pieces, say you are done.
 `crates/yantrik-harness/examples/echo_harness.rs` is a working one end to end, and the only part
-a real harness replaces is the function that produces the answer.
+a real harness replaces is the function that produces the answer. `harness.event`,
+`conversations`, `conversation`, `agent_token`, `cancelled` and `ended` are all optional to use:
+a harness that knows none of them works exactly as it always did.
 
 ## Why the harness dials in
 
@@ -108,6 +112,96 @@ Attaching is about the conversation. Driving is about the desktop. Keeping them 
 harness can do either without the other: a mind that only talks never needs permissions, and a
 script that only acts never needs to attach.
 
+## Agents: conversations, tokens and events
+
+The desktop's **Agents** view (`design/agents-workspace-2026-09-23.md`) shows one pane per
+agent, and an agent is **one conversation with one mind**: `<harness>:<conversation>`, like
+`pi:c-7f3a91`.
+
+**Conversations.** A harness that can hold more than one conversation at a time — a process per
+conversation, a history per conversation — says `conversations: true` when it attaches. The
+desktop then issues conversation ids itself (`c-` and six random hex digits, never issued twice,
+so an id from an earlier session cannot name a live agent), and every turn names its
+`conversation`. A harness that does not say so has the one agent `<id>:main` and gets every turn
+in `main`; the Agents view says "holds one conversation at a time" rather than pretending
+otherwise. The Lens always talks to the answering mind's `main`. The desktop runs at most six
+live agents at once, across every mind, and says so when asked for a seventh.
+
+**One turn at a time per conversation, first in first out.** The desktop hands a conversation its
+next turn only once the one in flight is completed or failed; different conversations run at
+once. `/stop` alone does not wait, because it is how a person interrupts the turn that is
+running. (Turns used to be handed out newest first; they are not any more.)
+
+**Agent tokens.** Every turn carries `agent_token`: 128 random bits as hex, minted when the agent
+was created and the same for every turn of that conversation. Pass it to the tools you start for
+that conversation as `YANTRIK_AGENT_TOKEN` — the `yos-mcp` bridge a conversation uses — and to
+nothing else: not the model, not a log. The shell resolves a token back to its agent, and checks
+the caller descends from the process that attached (the kernel's `SO_PEERCRED` at `attach`), so an
+act can be recorded against the agent that asked. The limit is stated in the design: processes of
+the same user can read each other's environment, so this stops confusion and casual
+impersonation, not a hostile program running as the person.
+
+**Stopping.** When the person stops an agent, the turns waiting for it are failed, the one in
+flight is settled for the reader at once, and the harness's next poll carries `cancelled: [turn_id]`
+(stop working on it) and, for a harness with conversations, `ended: [conversation]` (let go of its
+process and history). Both are advisory. Whatever the harness still sends for a cancelled turn is
+answered `{"dropped": true}`, and closing it is accepted. A harness that attaches again — it
+restarted, or the desktop did — gets new agents; the old conversations and their tokens are gone.
+
+**Events.** Text still travels as `harness.chunk`. Beside it, `harness.event` says what the agent
+is *doing*, and the Agents view draws each tool call as a card:
+
+| `kind` | carries | shown as |
+|---|---|---|
+| `tool_start` | `call`, `name`, `target`, `args` | a card opens, running |
+| `tool_output` | `call`, `stream` (`stdout`/`stderr`/`terminal`), `delta` | text inside that card |
+| `tool_end` | `call`, `ok`, `summary`, `exit_code?` | the card settles ✓ / ✗ |
+| `thinking` | `delta` | a folded "thinking" line |
+| `status` | `text` | the agent's state line |
+| `usage` | `model`, `input_tokens?`, `output_tokens?`, `cost_usd?` | the details panel; they add up |
+
+`call` is your own id for the call (pi's `toolCallId`, an OpenAI `tool_call.id`), unique within
+the turn. The types are `crates/yantrik-harness/src/event.rs`. The desktop enforces a lifecycle,
+and a refusal is an answer (`{"refused": why}`), never an error — an event that could not be shown
+is not a reason to lose the turn:
+
+- an event is accepted only for a turn in flight, from the session that holds it;
+- a call's events come in order: `tool_start`, its output, one `tool_end`;
+- `complete` and `fail` are the end: events after them are dropped and counted, and a call still
+  open is settled for the reader as *interrupted* — as it is when a harness detaches, restarts,
+  goes quiet or is stopped;
+- one event is at most 64 KiB as JSON; send a long output as several `tool_output` events;
+- an event of a kind the desktop does not know is ignored (`{"ignored": …}`) — a newer harness
+  must not break an older desktop — and a malformed one of a kind it knows is logged and counted.
+
+**Events are the harness's claims.** The pane marks cards from events as *reported*, apart from
+what the shell verified itself. Keep writing the trail line (`⚙️ …`, below) into the text as
+well: every panel that draws no cards, and every reader of the transcript, still sees the call.
+
+**In Python** (`harnesses/lib/yantrik_harness.py`), a `Turn` has all of it:
+
+```python
+turn.conversation, turn.agent_token            # which agent this turn is for
+turn.tool_start(call, name, target="", args={}) # also writes the trail line (trail=False not to)
+turn.tool_output(call, delta, stream="stdout")  # cut into pieces under 64 KiB for you
+turn.tool_end(call, ok, summary="", exit_code=None)
+turn.thinking(delta); turn.status(text)
+turn.usage(model="", input_tokens=None, output_tokens=None, cost_usd=None)
+```
+
+and a mind that holds one conversation holds many by being made once per conversation:
+
+```python
+Harness("pi", "Pi", PerConversation(lambda conversation, token: PiMind(config, token=token)))
+```
+
+`PerConversation` announces `conversations`, makes a handler when a conversation's first turn
+arrives, closes it (`close()`) when the desktop ends that conversation or a turn arrives under a
+new token, and keeps `concurrent = False` per conversation: a second message to the same
+conversation still gets "still working on the previous request", while different conversations
+run at once. `/stop` and `/new` act on their own conversation only. Against a desktop too old for
+`harness.event`, the events are skipped after one log line and the trail lines carry on.
+
 ## Rules worth knowing
 
 - **`id` is what a person types to select you**, so it cannot be empty or contain spaces.
@@ -129,7 +223,9 @@ script that only acts never needs to attach.
   (`⚙️ name...`, `⚙️ name: "preview"`, and the verbose `⚙️ name([...])` with the arguments on the
   line after), so a harness that already writes its calls down does not need this form. Anything
   a line carries is what the panel can show: Hermes in its default mode sends the name alone
-  for an MCP tool, and the panel shows the name alone.
+  for an MCP tool, and the panel shows the name alone. A harness that also sends
+  `harness.event` (above) keeps writing this line: the event is the call's card in the Agents
+  view, the line is the call in the text, and `turn.tool_start` writes both.
 
 ## Five harnesses exist
 
@@ -178,7 +274,9 @@ Two things a gateway-shaped harness has to get right, both learned by running on
   and a heartbeat keeps it waiting convincingly.
 - **A message that arrives while you are working is a turn too.** Queueing it behind the current
   one is fine for a chat app, where nothing is owed; here the turn it came from is owed an
-  answer. Answer it — even if the answer is "still working on the last one".
+  answer. Answer it — even if the answer is "still working on the last one". (The desktop now
+  does the queueing itself — a conversation is handed one turn at a time, and only `/stop`
+  arrives mid-turn — so this is the rule for an older desktop, and a backstop for this one.)
 
 **Pi** (`harnesses/pi`) is the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 driven over its RPC mode: `pi --mode rpc` on a pipe, one JSON line per message, each desktop turn
@@ -347,9 +445,21 @@ fakes answer the way the real things answered when each harness was run against 
 the only reason the offline suite is worth anything: a fake that agrees with a guess proves the
 guess is self-consistent and nothing else.
 
+Pi and DeepSeek both hold conversations and send events. **Pi** runs one `pi --mode rpc`
+process per conversation, started with that agent's `YANTRIK_AGENT_TOKEN` when its first message
+arrives and stopped when the desktop ends it; `tool_execution_start / _update / _end` become a
+card each (Pi reports a running call's output accumulated, so only what is new is sent), its
+`thinking_delta` a folded thinking line, and each assistant `message_end`'s usage a `usage`
+event. **DeepSeek** keeps a history and a `yos-mcp` bridge per conversation (the bridge is where
+the token goes), sends each tool call it runs as a card with its result, `reasoning_content` as
+thinking, and the token counts the API reports at the end of the stream
+(`stream_options.include_usage`; `"include_usage": false` in its config for a server that
+rejects the field).
+
 ## What is not here yet
 
-Tasks, events with sequence numbers, approvals as a first-class message and automations are
-designed (`design/hermes-on-yantrik.html`) but not in the protocol: today a long task is one turn with
-its progress streamed as text, and an approval is a line of that text the person answers by
-typing `/approve`.
+Tasks, approvals as a first-class message and automations are designed
+(`design/hermes-on-yantrik.html`, `design/agents-workspace-2026-09-23.md`) but not in the
+protocol: an approval is drawn by the shell from the act that needs it, and a long task is one
+turn with its progress streamed as text and events. Hermes and OpenClaw hold one conversation and
+send no events yet; their calls reach the pane through their trail lines.

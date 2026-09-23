@@ -54,6 +54,7 @@ endpoint or a key and never asks for one.
 | `temperature` | provider's own | Sent only if you set it. |
 | `request_timeout` | `180` | Seconds to wait for the model. Nothing to do with the 300s a tool call may take. |
 | `decider` | — | Optional. A decision model that picks the tool — see below. Left out, nothing about the loop changes. |
+| `include_usage` | `true` | Ask for token counts at the end of each streamed answer (`stream_options.include_usage`), for the agent's details. Set `false` for a server that rejects the field. |
 
 `api_key_env` reads the variable **in this process**. A user service does not inherit your
 shell, so put it in an `EnvironmentFile` the unit names (mode 600) or in
@@ -252,12 +253,18 @@ anywhere.
 
 ## In the conversation
 
-- `/stop` ends what the mind is doing, between steps.
-- `/new` forgets the conversation and starts again.
-- A tool call shows as one line — `⚙️ os_act calendar.add_event` — naming what was touched. The
-  arguments are not shown: they routinely hold the body of the note or the text of the message.
-- A message typed while the mind is working gets an answer straight away saying so. It is not
-  queued: the desktop is owed an answer for it.
+- Each conversation the desktop starts — each agent in the Agents view, and the Lens's own
+  `main` — has its own history and its own `yos-mcp` bridge, started with that agent's
+  `YANTRIK_AGENT_TOKEN` so every act it makes is that agent's. Different conversations answer at
+  once.
+- `/stop` ends what the mind is doing, between steps, in its own conversation.
+- `/new` forgets that conversation and starts it again.
+- A tool call is a card in the agent's pane — its arguments, its result, ✓ or ✗ (a `REFUSED`
+  answer is ✗) — and still the trail line `⚙️ os_act calendar.add_event` in the text. The
+  model's `reasoning_content` goes beside the answer as a folded "thinking" line, never into it.
+- The desktop hands a conversation one message at a time. On an older desktop, a message typed
+  while the mind is working gets an answer straight away saying so, because the desktop is owed
+  an answer for it.
 
 ## What the model is told
 

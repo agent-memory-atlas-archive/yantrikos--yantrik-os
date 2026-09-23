@@ -144,6 +144,10 @@ fn dispatch(
                     answered = false;
                     tx.send("__REPLACE__".to_string()).and_then(|_| tx.send(why))
                 }
+                // What the agent is doing — a tool call's card, its output, its thinking. The
+                // chat panel draws text; the calls still show here as the trail line the harness
+                // writes beside each event, and the Agents view is where the cards are drawn.
+                yantrik_harness::Chunk::Event(_) => Ok(()),
             };
             if sent.is_err() {
                 return;

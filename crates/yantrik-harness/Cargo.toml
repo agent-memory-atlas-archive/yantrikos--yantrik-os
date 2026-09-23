@@ -8,6 +8,9 @@ description = "How an agent harness attaches to Yantrik OS — the OS holds whic
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# Conversation ids and agent tokens come from the OS's own random source. Already in the tree
+# (0.2.x, through half the workspace), so this adds an edge to the lock and nothing to download.
+getrandom = "0.2"
 
 [dev-dependencies]
 # Only the examples need a socket; the host itself is deliberately transport-free so it can be
