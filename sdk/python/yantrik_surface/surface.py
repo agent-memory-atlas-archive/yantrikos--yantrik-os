@@ -24,8 +24,10 @@ Blender's main thread) overrides `run_on_app_thread` to hop there and back.
 
 import inspect
 import json
+import math
 import itertools
 import os
+import re
 import signal
 import sys
 import threading
@@ -171,6 +173,49 @@ def arrived(wanted, value):
     return "a %s" % type(value).__name__
 
 
+# A string that is exactly an integer, or a decimal: the only strings a number is read from.
+# ASCII digits only — `str.isdigit` and `int()` accept other scripts' digits, `_` and spaces, and
+# serde_json does not.
+_INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)", re.ASCII)
+_DECIMAL = re.compile(r"-?(?:0|[1-9][0-9]*)\.[0-9]+", re.ASCII)
+
+
+def coerced(param, value):
+    """What `value` becomes for `param` when it is not already of its type and converts to it
+    without loss: `(True, converted)`, or `(False, None)` — `coerced` in the `yantrik-surface`
+    crate, rule for rule (`args.rs`, "What is converted, and what never is"):
+
+    * text (and an enum): an integer is its decimal digits; a number with a fraction is not text;
+    * integer: a string that is exactly an integer (`-?(0|[1-9][0-9]*)`) within what serde_json
+      holds as one;
+    * number: that, or a string that is exactly a decimal (that, a `.` and one digit or more), as
+      the nearest float;
+    * boolean: `"true"` and `"false"`;
+    * nothing into or inside an array or an object.
+    """
+    kind = param.type
+    if kind == "string":
+        if isinstance(value, int) and not isinstance(value, bool) and \
+                wire._I64_MIN <= value <= wire._U64_MAX:
+            return True, str(value)
+        return False, None
+    if kind in ("integer", "number") and isinstance(value, str):
+        if _INTEGER.fullmatch(value):
+            number = int(value)
+            if (value.startswith("-") and number >= wire._I64_MIN) or \
+                    (not value.startswith("-") and number <= wire._U64_MAX):
+                return True, number
+            return False, None
+        if kind == "number" and _DECIMAL.fullmatch(value):
+            number = float(value)
+            if math.isfinite(number):
+                return True, number
+        return False, None
+    if kind == "boolean" and isinstance(value, str) and value in ("true", "false"):
+        return True, value == "true"
+    return False, None
+
+
 class Param:
     """One argument of an action: `control_surface::Param` in Python, with the richer types the
     `yantrik-surface` crate adds, published the way it publishes them.
@@ -246,9 +291,21 @@ class Param:
             return "an array of %s" % _PLURAL[self.items]
         return _SINGULAR[self.type]
 
+    def accepts(self, action, value):
+        """None if a caller's `value` is of this parameter's type or converts to it without loss
+        (`coerced`); otherwise the refusal — `check_argument` in the crate. When it converts, the
+        converted value is what is checked (an integer for an enum, against the list as its
+        digits); when it does not, the refusal is the one for the value as it came."""
+        refusal = self.mismatch(action, value)
+        if refusal is None:
+            return None
+        converts, converted = coerced(self, value)
+        return self.mismatch(action, converted) if converts else refusal
+
     def mismatch(self, action, value):
-        """None if `value` is of this parameter's type; otherwise the refusal, in the crate's
-        sentences (`check_value` in `yantrik-surface`). `action` None words it for a default."""
+        """None if `value` is of this parameter's type, exactly; otherwise the refusal, in the
+        crate's sentences (`check_value` in `yantrik-surface`). `action` None words it for a
+        default, which is held to the exact type: a default is the author's, not a caller's."""
         whose = "argument `%s`" % self.name if action is None else "`%s` argument `%s`" % (
             action, self.name)
         if not is_type(value, self.type):
@@ -656,7 +713,7 @@ class Surface:
         if not name:
             raise wire.RpcError(wire.RPC_INVALID_PARAMS, "act needs a non-empty `action`")
         # `args` left out is none given. Anything but an object is refused with the other
-        # argument checks, after the gate, as the crate refuses it.
+        # argument checks, before the gate, as the crate refuses it.
         args = params.get("args")
         if args is None:
             args = {}
@@ -673,10 +730,15 @@ class Surface:
 
         spec = self._find(name)
         if grant:
-            # Spent only once the ceiling has passed on the action's grade (#154), and never on
-            # an action this app does not have.
+            # Spent only once everything that could still refuse the call without asking anybody
+            # has passed — the action exists, its arguments are right, and the ceiling allows its
+            # grade (#154) — or a person's Allow is used up on an act that never runs. Spent
+            # against the arguments as sent: what the card showed, not what the handler will read.
             if spec is None:
                 raise wire.RpcError(wire.RPC_INVALID_PARAMS, self._unknown(name))
+            refusal = check_arguments(spec, args)
+            if refusal is not None:
+                raise wire.RpcError(wire.RPC_INVALID_PARAMS, refusal)
             refusal = authority.spend(grant, self.app_id, name, self._grade(spec), args,
                                       self._spend_grant)
             if refusal is not None:
@@ -718,11 +780,13 @@ class Surface:
         if spec is None:
             raise Refusal(self._unknown(name))
 
-        refusal = gate.decide(authority, self.app_id, name, self._grade(spec), spec.description)
+        # The arguments first: a malformed call is refused for what is wrong with it, before
+        # anything about who may make it — as a grant is never spent on one.
+        refusal = check_arguments(spec, args)
         if refusal is not None:
             raise Refusal(refusal)
 
-        refusal = check_arguments(spec, args)
+        refusal = gate.decide(authority, self.app_id, name, self._grade(spec), spec.description)
         if refusal is not None:
             raise Refusal(refusal)
 
@@ -733,7 +797,8 @@ class Surface:
                               "reports: %s. Read it again before deciding."
                               % (current, expect, summary))
 
-        result = self._handlers[name](with_defaults(spec, args))
+        # The handler reads what it declared: converted where the call converts, defaults in.
+        result = self._handlers[name](as_declared(spec, args))
         later = result if isinstance(result, Later) else None
         if later is None:
             result = wire.jsonable(result, "the answer of %s" % name)
@@ -801,8 +866,9 @@ def check_arguments(spec, args):
     the `yantrik-surface` crate, in its order and its sentences: an object of named values
     (`null` is nothing given), every required argument present (the first missing, in
     declaration order), nothing the action does not take (the first in sorted order, as
-    serde_json's map iterates), and each argument of its declared type (in declaration order;
-    `null` for an optional one is the same as leaving it out). The refusal, or None."""
+    serde_json's map iterates), and each argument of its declared type or converting to it
+    without loss (`coerced`; in declaration order; `null` for an optional one is the same as
+    leaving it out). The refusal, or None. Checked before the gate and before any grant is spent."""
     name = spec.name
     if args is None:
         args = {}
@@ -826,10 +892,26 @@ def check_arguments(spec, args):
         value = args[p.name]
         if value is None and not p.required:
             continue
-        refusal = p.mismatch(name, value)
+        refusal = p.accepts(name, value)
         if refusal is not None:
             return refusal
     return None
+
+
+def as_declared(spec, args):
+    """The arguments as the handler receives them — `as_declared` in the crate: every argument
+    converted to its declared type where it arrived as something that converts without loss, and
+    every declared default filled in for one left out or sent as `null`. The call as sent is not
+    changed: it is what a grant is bound to."""
+    converted = dict(args or {})
+    for p in spec.params:
+        value = converted.get(p.name)
+        if value is None or p.mismatch(None, value) is None:
+            continue
+        converts, value = coerced(p, value)
+        if converts:
+            converted[p.name] = value
+    return with_defaults(spec, converted)
 
 
 def with_defaults(spec, args):

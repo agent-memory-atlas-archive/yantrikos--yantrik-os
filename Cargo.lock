@@ -5199,6 +5199,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
@@ -10323,6 +10324,7 @@ dependencies = [
  "tracing-subscriber",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-surface",
  "yantrik-version",
 ]
 
@@ -10758,6 +10760,7 @@ dependencies = [
  "tracing-subscriber",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
+ "yantrik-surface",
 ]
 
 [[package]]
@@ -10823,6 +10826,17 @@ dependencies = [
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ui-kit",
+]
+
+[[package]]
+name = "yantrik-surface"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "tracing",
+ "yantrik-ipc-contracts",
+ "yantrik-ipc-transport",
 ]
 
 [[package]]

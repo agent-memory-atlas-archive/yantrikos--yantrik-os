@@ -49,7 +49,10 @@ pub(crate) fn run_recipe_spec() -> Action {
     .risk("sensitive")
     .defers()
     .arg(Param::text("recipe").describe("The recipe's id from `describe shell` → `recipes`, or its name (Council, Build …)"))
-    .arg(Param::text("inputs").optional().describe(
+    // An object, as it is described and as a caller sends it: declared as text, the dispatch's
+    // type check would refuse the very object the description asks for (as it would have
+    // `args_json`'s). `inputs_arg` still reads JSON text, for a caller that reaches it another way.
+    .arg(Param::object("inputs").optional().describe(
         "Its inputs as a JSON object: {\"question\": \"…\"} for the Council, and a seat to change, e.g. \
          \"seat_2\": \"reviewer\". `describe shell` → `recipes` → `formations` lists what each takes",
     ))
@@ -268,6 +271,8 @@ mod tests {
         assert_eq!((spec.name.as_str(), spec.permission, spec.deferred), ("run_recipe", "sensitive", true));
         let params: Vec<(&str, bool)> = spec.params.iter().map(|p| (p.name.as_str(), p.required)).collect();
         assert_eq!(params, [("recipe", true), ("inputs", false)]);
+        // Published as the object it is described as, so the dispatch's type check takes one.
+        assert_eq!(spec.params[1].kind, "object");
         let at = |mode: &str, granted: bool, ceiling: &str| Authority { ceiling: ceiling.into(), mode: Mode::named(mode), granted };
         let err = decide(&at("ask", false, "sensitive"), "shell", "run_recipe", spec.permission, &spec.description).unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("graded `sensitive`"), "{err}");

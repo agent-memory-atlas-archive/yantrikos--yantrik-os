@@ -24,7 +24,10 @@ if PACKAGE_ROOT not in sys.path:
 import yantrik_surface  # noqa: E402,F401
 from yantrik_surface import wire  # noqa: E402
 
-RUST_CONTROL = "crates/yantrik-app-runtime/src/control.rs"
+# The dispatch this port keeps: the `yantrik-surface` crate (piece B of the SDK design), and the
+# window's hop over it in `yantrik-app-runtime::control`. Read as one text, because a sentence the
+# port quotes may live in either.
+RUST_CONTROL = ("crates/yantrik-surface/src", "crates/yantrik-app-runtime/src/control.rs")
 RUST_GATE = "crates/yantrik-ipc-transport/src/gate.rs"
 RUST_SERVER = "crates/yantrik-ipc-transport/src/server.rs"
 RUST_CONTRACTS = "crates/yantrik-ipc-contracts/src/control_surface.rs"
@@ -46,16 +49,31 @@ EXAMPLE = os.path.join(PACKAGE_ROOT, "examples", "hello_surface.py")
 _sources = {}
 
 
+def _files(path):
+    """The `.rs` files `path` names: one file, every file under a directory, or each of a tuple."""
+    if isinstance(path, tuple):
+        return [f for p in path for f in _files(p)]
+    full = os.path.join(REPO, path)
+    if os.path.isdir(full):
+        return sorted(os.path.join(root, name) for root, _, names in os.walk(full)
+                      for name in names if name.endswith(".rs"))
+    return [full] if os.path.isfile(full) else []
+
+
 def rust(path):
-    """A Rust source file with its string continuations joined (`\\` at a line end drops the
-    newline and the next line's leading whitespace, as rustc does), or None outside the repo."""
+    """Rust source with its string continuations joined (`\\` at a line end drops the newline
+    and the next line's leading whitespace, as rustc does), or None outside the repo. `path` is a
+    file, a directory of them, or a tuple of either, read as one text."""
     if path not in _sources:
-        full = os.path.join(REPO, path)
-        if not os.path.isfile(full):
+        files = _files(path)
+        if not files:
             _sources[path] = None
         else:
-            with open(full, encoding="utf-8") as f:
-                _sources[path] = re.sub(r"\\\n\s*", "", f.read())
+            text = []
+            for full in files:
+                with open(full, encoding="utf-8") as f:
+                    text.append(re.sub(r"\\\n\s*", "", f.read()))
+            _sources[path] = "\n".join(text)
     return _sources[path]
 
 

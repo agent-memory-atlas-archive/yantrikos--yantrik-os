@@ -293,6 +293,17 @@ class ProtocolSurface:
                 return refuse(("`%s` has no argument `%s`; it takes: %s"
                                % (name, key, ", ".join(declared))) if declared else
                               "`%s` takes no arguments, but `%s` was given" % (name, key))
+        kinds = {"string": (str, "a string"), "boolean": (bool, "a boolean")}
+        arrived = lambda v: ("a boolean" if isinstance(v, bool) else "a number"
+                             if isinstance(v, (int, float)) else "a string"
+                             if isinstance(v, str) else "an object")
+        for p, pspec in spec["parameters"]["properties"].items():
+            kind, wanted = kinds[pspec["type"]]
+            value = args.get(p)
+            if value is not None and not (isinstance(value, kind)
+                                          and (kind is bool or not isinstance(value, bool))):
+                return refuse("`%s` argument `%s` must be %s, and %s arrived"
+                              % (name, p, wanted, arrived(value)))
         current = fnv(self.summary, self.state)
         if params.get("expect_revision") not in (None, current):
             return refuse("STALE: this app is at revision %s and you acted on %s. It now reports: "
@@ -731,7 +742,7 @@ def main():
               and all(("  pass  %s" % c) in out for c in (
                   "ping", "describe", "protocol", "schema", "grades", "params", "secrets",
                   "revision", "steady", "method", "empty", "unknown", "missing", "undeclared",
-                  "stale")), out + err)
+                  "types", "stale")), out + err)
         check("no handler ran: every act it sent was one the dispatch refuses first",
               hello.ran == [], hello.ran)
         acts = [c["params"] for c in hello_svc.calls if c["method"] == "app.act"]
@@ -748,7 +759,7 @@ def main():
             answer = {}
         rows = (answer.get("surfaces") or [{}])[0].get("checks") or []
         check("--json says the same, as JSON",
-              answer.get("ok") is True and len(rows) == 15
+              answer.get("ok") is True and len(rows) == 16
               and {r["status"] for r in rows} == {"pass"}, out)
         out, err, code = run(lambda: yos.cmd_check([str(sockets / "app-hello.sock")]))
         check("a socket can be named by its path, for a surface under development",

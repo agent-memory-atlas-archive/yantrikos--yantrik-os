@@ -28,16 +28,53 @@ use std::sync::Arc;
 pub use serde_json;
 pub use yantrik_ipc_contracts::email::ServiceError;
 pub use yantrik_ipc_transport::server::{RpcServer, ServiceHandler};
-/// The ceiling, mode and grant rule every `app.act` meets. A service that answers `app.act` in
-/// its own handler calls [`gate::permit`] before it dispatches, with the grade and the description
-/// from the table it publishes in `describe` — the rule an app window's dispatch enforces, in the
-/// same words (docs/surface-protocol.md, section 7).
+/// The ceiling, mode and grant rule every `app.act` meets (docs/surface-protocol.md, section 7).
+/// A [`Surface`] calls it for you, with the grade and the description it publishes, in the same
+/// order and the same words as an app window's dispatch; it is here for a service that needs to
+/// read the same files or spend a grant the same way.
 pub use yantrik_ipc_transport::gate;
-/// An agent's reach: a service calls [`reach::permits`] with the token `gate::agent_token_of`
-/// lifted, before [`gate::permit`], so an agent started from a catalog role is held to its role.
+/// An agent's reach: what a role from the agent catalog may touch. A [`Surface`] holds every
+/// call that carries an agent token to it, before any grant is spent and before the handler, as
+/// an app window's dispatch does; it is here for a service that needs to read it itself.
 pub use yantrik_ipc_transport::reach;
 
+/// A service's control surface: `app.describe` and `app.act`, dispatched exactly as an app
+/// window's are — the gate, the argument checks (present, known, typed), the revision guard,
+/// stable per-call `action_id`s — with no UI dependency. Build a [`Surface`] from the service's
+/// actions and hand it the two methods from `handle_from` with [`Surface::answer`]; the rest of
+/// the service's methods stay its own.
+///
+/// ```rust,ignore
+/// use yantrik_service_sdk::prelude::*;
+/// use yantrik_service_sdk::{PeerCred, Surface};
+///
+/// struct Weather { surface: Surface }
+///
+/// impl ServiceHandler for Weather {
+///     fn service_id(&self) -> &str { "weather" }
+///     fn handle(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, ServiceError> {
+///         self.handle_from(method, params, None)
+///     }
+///     fn handle_from(&self, method: &str, params: serde_json::Value, peer: Option<PeerCred>)
+///         -> Result<serde_json::Value, ServiceError> {
+///         if let Some(answer) = self.surface.answer(method, &params, peer) {
+///             return answer;
+///         }
+///         match method { /* the service's own methods */ _ => todo!() }
+///     }
+/// }
+/// ```
+pub use yantrik_surface as surface;
+pub use yantrik_surface::{
+    agent_token, answer_later, caller, Action, Caller, Param, Surface, View,
+};
+pub use yantrik_ipc_transport::server::PeerCred;
+
 /// Commonly-needed imports for service authors.
+///
+/// The surface types are deliberately not in it: a dozen services glob-import this beside their
+/// own contracts, and a second `View` or `Action` arriving by glob is an ambiguity waiting for
+/// the first service that names one. Import them by name: `use yantrik_service_sdk::{Surface, …}`.
 pub mod prelude {
     pub use crate::{run_service, ServiceBuilder, ServiceError};
     pub use crate::{RpcServer, ServiceHandler};

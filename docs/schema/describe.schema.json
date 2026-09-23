@@ -51,7 +51,11 @@
           "description": "Whether the work is finished when the act answers (on return) or only started (later).",
           "enum": ["on return", "later"]
         },
-        "parameters": { "$ref": "#/$defs/parameters" }
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "expected_seconds": {
+          "description": "How long a call usually takes to answer, when the app knows it is more than a moment; a client sizes its timeout by it.",
+          "type": "integer"
+        }
       }
     },
     "parameters": {
@@ -75,10 +79,26 @@
       "required": ["type", "description"],
       "properties": {
         "type": {
-          "description": "A JSON Schema primitive. Version 1 checks presence, not type: the dispatch refuses a missing required argument and an undeclared one, and hands the value to the handler as it came.",
-          "enum": ["string", "number", "integer", "boolean"]
+          "description": "A JSON Schema type. The dispatch refuses a missing required argument, an undeclared one, and one of another type, before the handler runs.",
+          "enum": ["string", "number", "integer", "boolean", "array", "object"]
         },
-        "description": { "type": "string" }
+        "description": { "type": "string" },
+        "enum": {
+          "description": "For a string: the only values it may take.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "items": {
+          "description": "For an array: the type of every item.",
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "enum": ["string", "number", "integer", "boolean", "array", "object"] }
+          }
+        },
+        "default": {
+          "description": "What the handler is given when the argument is left out. A parameter with one is not required."
+        }
       }
     }
   }

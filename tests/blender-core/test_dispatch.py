@@ -194,22 +194,27 @@ class TestDispatchOrder(unittest.TestCase):
 
     def test_an_argument_of_the_wrong_type_is_refused_before_the_scene_sees_it(self):
         # The SDK checks each argument against its published type, in the Rust
-        # `yantrik-surface` crate's words: `samples` is published `integer`, so the text "4" is
-        # refused naming the argument (and not echoing the value), and the integer 4 — which is
-        # what `yos act blender set_render samples=4` sends — is taken.
+        # `yantrik-surface` crate's words: `samples` is published `integer`, so text that is not
+        # exactly an integer is refused naming the argument (and not echoing the value), and the
+        # integer 4 — which is what `yos act blender set_render samples=4` sends — is taken.
         self.assertEqual(
-            refusal(self, lambda: self.act("set_render", samples="4")),
+            refusal(self, lambda: self.act("set_render", samples="four")),
             "`set_render` argument `samples` must be an integer, and a string arrived")
         self.assertEqual(
-            refusal(self, lambda: self.act("set_material", name="Cube", metallic="0.2")),
+            refusal(self, lambda: self.act("set_material", name="Cube", metallic="0.2.0")),
             "`set_material` argument `metallic` must be a number, and a string arrived")
         self.act("set_render", engine="cycles")
         self.assertEqual(self.act("set_render", samples=4)["state"]["render"]["samples"], 4)
+        # Text that is exactly the number converts without loss: the scene reads the integer.
+        self.assertEqual(self.act("set_render", samples="8")["state"]["render"]["samples"], 8)
 
-    def test_the_ceiling_is_checked_before_the_arguments(self):
-        # Order pinned by the runtime: a dangerous action with a missing argument is refused
-        # on the grade, because the grade is the more important fact about the call.
-        message = refusal(self, lambda: self.act("run_python"))
+    def test_the_arguments_are_checked_before_the_ceiling(self):
+        # Order pinned by the runtime (docs/surface-protocol.md §5): a malformed call is refused
+        # for its arguments first, so a person's grant is never spent on one; a well-formed
+        # dangerous call is then refused on the grade.
+        self.assertEqual(refusal(self, lambda: self.act("run_python")),
+                         "`run_python` needs argument `code`")
+        message = refusal(self, lambda: self.act("run_python", code="print(1)"))
         self.assertTrue(message.startswith("CEILING: blender.run_python is graded "
                                            "`dangerous`, above this machine's `sensitive` "
                                            "ceiling"), message)
@@ -388,10 +393,11 @@ class TestModeAndGrant(unittest.TestCase):
         surface, _ = self.surface(None)
         self.assertEqual(refusal(self, lambda: self.save(surface)), self.ASK_SENTENCE)
 
-    def test_the_mode_refuses_before_the_arguments_are_looked_at(self):
+    def test_the_arguments_are_looked_at_before_the_mode(self):
         surface, _ = self.surface("ask")
         message = refusal(self, lambda: surface.act({"action": "save", "args": {}}))
-        self.assertTrue(message.startswith("GRANT:"), message)
+        self.assertEqual(message, "`save` needs argument `path`")
+        self.assertTrue(refusal(self, lambda: self.save(surface)).startswith("GRANT:"))
 
     def test_a_sensitive_act_runs_in_auto_and_bypass(self):
         for mode in ("auto", "bypass"):
