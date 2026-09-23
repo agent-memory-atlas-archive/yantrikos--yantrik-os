@@ -18,6 +18,7 @@ What it does with the bytes on stdin:
   2. hashes what it wrote and compares it with the sha256 it was told — a mismatch deletes
      the file and changes nothing else;
   3. renames it into place, writes `<name>.sha256`, repoints the channel's `latest` symlink
+     (a changelog, published under its image's stem, is also named in that image's latest.json)
      (and, for a release, rewrites that channel's entry in manifest.json, atomically);
   4. prunes the channel to the newest KEEP builds. The one `latest` points at is never
      deleted, whatever its age.
@@ -36,18 +37,24 @@ KEEP = 3
 ROOTS = {
     "iso": "/var/www/iso.yantrikos.com",
     "release": "/var/www/releases.yantrikos.com",
+    # The changelog lives beside the image it describes, under the image's own name with
+    # `.changelog.md` in place of `.iso`, so a page that links the ISO can link the list of
+    # what changed in it by string substitution and nothing else.
+    "changelog": "/var/www/iso.yantrikos.com",
 }
 CHANNELS = ("nightly", "beta", "stable")
-MAX_BYTES = {"iso": 6 * 1024**3, "release": 1 * 1024**3}
+MAX_BYTES = {"iso": 6 * 1024**3, "release": 1 * 1024**3, "changelog": 1 * 1024**2}
 # Names this script will create. Anchored, no slashes, no leading dot: the filename is the
 # one piece of client text that reaches the filesystem.
 NAME = {
     "iso": re.compile(r"^yantrik-os-[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.iso$"),
     "release": re.compile(r"^yantrik-os-[A-Za-z0-9][A-Za-z0-9._-]{0,120}-linux-amd64\.tar\.(zst|gz)$"),
+    "changelog": re.compile(r"^yantrik-os-[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.changelog\.md$"),
 }
 LATEST = {
     "iso": lambda name: "yantrik-os-latest.iso",
     "release": lambda name: "yantrik-os-latest-linux-amd64.tar." + name.rsplit(".", 1)[1],
+    "changelog": lambda name: "yantrik-os-latest.changelog.md",
 }
 SHA = re.compile(r"^[0-9a-f]{64}$")
 WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,80}$")
@@ -101,8 +108,8 @@ def main():
         die("this key publishes builds and does nothing else; no command was given")
     kind = argv[0]
     if kind not in ROOTS:
-        die("unknown kind %r (iso | release)" % kind)
-    want = 4 if kind == "iso" else 7
+        die("unknown kind %r (iso | release | changelog)" % kind)
+    want = 7 if kind == "release" else 4
     if len(argv) != want:
         die("%s takes %d arguments, got %d" % (kind, want - 1, len(argv) - 1))
     channel, name, sha = argv[1], argv[2], argv[3].lower()
@@ -168,6 +175,20 @@ def main():
             "version": found.group(1) if found else "",
             "date": time.strftime("%Y-%m-%d", time.gmtime()),
         }, indent=2) + "\n")
+
+    if kind == "changelog":
+        # Tell latest.json which changelog goes with the image it names, when the two agree.
+        # The pipeline publishes the image first and its changelog second, under the same stem;
+        # a changelog for some other image (a re-run, a hand publish) is stored but not claimed.
+        latest_json = os.path.join(directory, "latest.json")
+        try:
+            with open(latest_json) as f:
+                current = json.load(f)
+        except (OSError, ValueError):
+            current = None
+        if current and current.get("file", "").rsplit(".", 1)[0] == name[: -len(".changelog.md")]:
+            current["changelog"] = name
+            atomic_write(latest_json, json.dumps(current, indent=2) + "\n")
 
     if kind == "release":
         version, git, binaries = extra

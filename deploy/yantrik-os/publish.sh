@@ -3,8 +3,9 @@
 # publish.sh — hand one build to the public server, which decides what happens to it
 # ═══════════════════════════════════════════════════════════════════════════════════════
 #
-#   publish.sh iso      <channel> <file.iso>
-#   publish.sh release  <channel> <bundle.tar.zst> <version> <git> <binaries>
+#   publish.sh iso       <channel> <file.iso>
+#   publish.sh release   <channel> <bundle.tar.zst> <version> <git> <binaries>
+#   publish.sh changelog <channel> <yantrik-os-<version>.changelog.md>
 #
 # The other end is deploy/yantrik-os/server/yantrik-publish, installed as the forced command
 # of the key this uses. This script streams the file and says what it is; the server hashes
@@ -20,7 +21,7 @@
 # accepts whatever key answers will upload the release to whoever answers.
 set -euo pipefail
 
-KIND="${1:?iso or release}"; CHANNEL="${2:?channel}"; FILE="${3:?file}"
+KIND="${1:?iso, release or changelog}"; CHANNEL="${2:?channel}"; FILE="${3:?file}"
 shift 3
 HOST="${YANTRIK_PUBLISH_HOST:-15.204.233.63}"
 USER_="${YANTRIK_PUBLISH_USER:-ubuntu}"
@@ -47,8 +48,9 @@ ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
 # What was published is what gets downloaded: fetch the checksum the server wrote, over the
 # public name, and compare it with the file in hand.
 case "$KIND" in
-  iso)     URL="https://iso.yantrikos.com/$CHANNEL/$NAME.sha256" ;;
-  release) URL="https://releases.yantrikos.com/$CHANNEL/$NAME.sha256" ;;
+  iso)       URL="https://iso.yantrikos.com/$CHANNEL/$NAME.sha256" ;;
+  changelog) URL="https://iso.yantrikos.com/$CHANNEL/$NAME.sha256" ;;
+  release)   URL="https://releases.yantrikos.com/$CHANNEL/$NAME.sha256" ;;
 esac
 SERVED="$(curl -fsS --max-time 30 "$URL" | cut -d' ' -f1)"
 if [ "$SERVED" = "$SHA" ]; then

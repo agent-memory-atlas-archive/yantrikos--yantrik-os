@@ -121,7 +121,33 @@ with tempfile.TemporaryDirectory() as d:
     check("the updater's latest name points at it",
           os.readlink(rel_root / "nightly" / "yantrik-os-latest-linux-amd64.tar.zst") == name)
 
-    # 6. an empty upload is a failure, not an empty file on a download page
+    # 6. a changelog sits beside its image, under the image's stem, and latest.json names it
+    text = b"# What changed in v0.1.0-4\n\n- one thing\n- another\n"
+    stem = names[-1][: -len(".iso")]
+    r = run(script, "changelog nightly %s.changelog.md %s" % (stem, sha(text)), text)
+    check("a changelog is accepted", r.returncode == 0, r.stderr.decode())
+    check("it lands beside the image", (nightly / (stem + ".changelog.md")).read_bytes() == text)
+    check("latest.changelog.md follows it",
+          os.readlink(nightly / "yantrik-os-latest.changelog.md") == stem + ".changelog.md")
+    lj = json.loads((nightly / "latest.json").read_text())
+    check("latest.json names the changelog of the image it names",
+          lj.get("changelog") == stem + ".changelog.md" and lj.get("file") == names[-1], lj)
+    check("the images were not pruned by the changelog",
+          sorted(p.name for p in nightly.iterdir() if p.name.endswith(".iso") and not p.is_symlink())
+          == sorted(names[-3:]))
+    other = b"# not this image\n"
+    r = run(script, "changelog nightly yantrik-os-v9.9.9-gffffff0.changelog.md %s" % sha(other), other)
+    check("a changelog for another image is stored", r.returncode == 0, r.stderr.decode())
+    lj = json.loads((nightly / "latest.json").read_text())
+    check("but latest.json still names the one that matches its image",
+          lj.get("changelog") == stem + ".changelog.md", lj)
+    big = b"x" * (1024 * 1024 + 1)
+    r = run(script, "changelog nightly yantrik-os-big.changelog.md %s" % sha(big), big)
+    check("a changelog over a megabyte is refused", r.returncode != 0)
+    r = run(script, "changelog nightly yantrik-os-not-a-changelog.iso %s" % sha(text), text)
+    check("an .iso cannot be published as a changelog", r.returncode != 0)
+
+    # 7. an empty upload is a failure, not an empty file on a download page
     r = run(script, "iso beta yantrik-os-empty.iso %s" % sha(b""), b"")
     check("an empty upload is refused", r.returncode != 0)
     check("and leaves no file", not (iso_root / "beta" / "yantrik-os-empty.iso").exists())

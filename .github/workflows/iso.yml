@@ -249,6 +249,16 @@ jobs:
           deploy/yantrik-os/publish.sh release "$ch" "${{ steps.bundle.outputs.path }}" \
             "${{ steps.bundle.outputs.version }}" "${{ steps.bundle.outputs.git }}" "${{ steps.bundle.outputs.binaries }}"
           deploy/yantrik-os/publish.sh iso "$ch" "${{ steps.iso.outputs.path }}"
+          # The image's changelog, beside it under the image's own stem, so a page that links
+          # the ISO can link what changed in it. It is the same file the image carries at
+          # /opt/yantrik/share/CHANGELOG.md; the bundle is where it is easiest to reach.
+          iso="${{ steps.iso.outputs.path }}"
+          changelog="$(dirname "$iso")/$(basename "$iso" .iso).changelog.md"
+          if tar --use-compress-program='zstd -d' -xOf "${{ steps.bundle.outputs.path }}" --wildcards '*/share/CHANGELOG.md' > "$changelog" 2>/dev/null && [ -s "$changelog" ]; then
+            deploy/yantrik-os/publish.sh changelog "$ch" "$changelog"
+          else
+            echo "::warning::the bundle carries no share/CHANGELOG.md; nothing published beside the image"
+          fi
           echo "- Published to https://iso.yantrikos.com/$ch/ and https://releases.yantrikos.com/$ch/" >> "$GITHUB_STEP_SUMMARY"
 
       # The community server's #nightly channel. Never fails the build: a nightly that published
