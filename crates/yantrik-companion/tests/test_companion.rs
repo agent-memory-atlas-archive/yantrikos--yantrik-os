@@ -116,13 +116,14 @@ fn test_instinct_evaluation() {
     let companion = build_companion();
     let state = companion.build_state();
 
-    // With fresh state, no instincts should fire (recently interacted)
+    // A fresh store holds no interaction events, so the companion has never heard the
+    // person: the clock stays unset (#156 — it used to be stamped with the boot time,
+    // which told check-in the person had just walked away). Check-in therefore fires;
+    // the instincts that need memories, triggers or patterns have nothing to work on.
     let urges = companion.evaluate_instincts(&state);
-    // Check-in won't fire because we just created (last_interaction_ts is now)
-    // Others won't fire because no triggers/patterns/conflicts
     assert!(
-        urges.is_empty(),
-        "no instincts should fire on fresh state, got {:?}",
+        urges.iter().any(|u| u.instinct_name == "check_in"),
+        "check-in should fire when the companion has never heard the person, got {:?}",
         urges.iter().map(|u| &u.instinct_name).collect::<Vec<_>>()
     );
 }
