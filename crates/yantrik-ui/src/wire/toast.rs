@@ -123,7 +123,7 @@ pub fn local(ui_weak: &slint::Weak<App>, app: &str, summary: &str, body: &str, u
             id: id.into(),
             app_name: app.into(),
             summary: summary.into(),
-            body: body.chars().take(120).collect::<String>().into(),
+            body: brief(body).into(),
             urgency,
             icon_char: app
                 .chars()
@@ -184,4 +184,41 @@ fn ensure_sweeper(ui_weak: slint::Weak<App>) {
         });
         *slot.borrow_mut() = Some(timer);
     });
+}
+
+/// A toast body short enough for its two lines, cut at a word and marked as cut.
+///
+/// It used to be the first 120 characters, which at fs-caption in a 360px toast is three lines
+/// — and the toast shows two, so the third was clipped through its descenders mid-word, with
+/// nothing to say there was more. A person reading "A card will a" is not being told anything.
+pub(crate) fn brief(body: &str) -> String {
+    const MAX: usize = 96;
+    let body = body.trim();
+    if body.chars().count() <= MAX {
+        return body.to_string();
+    }
+    let head: String = body.chars().take(MAX).collect();
+    let cut = head.rfind(char::is_whitespace).filter(|&i| i > MAX / 2).unwrap_or(head.len());
+    let mut out = head[..cut].trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';').to_string();
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod brief_tests {
+    use super::brief;
+
+    #[test]
+    fn a_short_body_is_left_alone_and_a_long_one_ends_at_a_word_with_an_ellipsis() {
+        assert_eq!(brief("Studio finished."), "Studio finished.");
+        let long = "Alex here. I'm about to point Studio at a hosted service and straight back to fake, to see the grade move. A card will appear twice.";
+        let out = brief(long);
+        assert!(out.ends_with('…'), "{out}");
+        assert!(out.chars().count() <= 97, "{out}");
+        assert!(!out.contains("A card will a"), "the cut must not fall mid-word: {out}");
+        assert!(long.starts_with(out.trim_end_matches('…')), "{out}");
+        // A single unbroken run still gets cut, at the limit.
+        let run = "x".repeat(300);
+        assert_eq!(brief(&run).chars().count(), 97);
+    }
 }

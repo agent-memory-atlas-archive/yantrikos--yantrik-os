@@ -447,7 +447,7 @@ fn maybe_toast(ui: &App, n: &Notification) {
             id: n.id.clone().into(),
             app_name: n.app.clone().into(),
             summary: n.title.clone().into(),
-            body: n.body.chars().take(120).collect::<String>().into(),
+            body: super::toast::brief(&n.body).into(),
             urgency: notifications::urgency_int(n.urgency),
             icon_char: n
                 .app
