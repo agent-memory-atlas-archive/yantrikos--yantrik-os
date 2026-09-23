@@ -329,6 +329,58 @@ pub fn builtin_app_ids() -> impl Iterator<Item = &'static str> {
     ROUTES.iter().flat_map(|(names, _)| names.iter().copied())
 }
 
+/// What `open_app` will do for a name. Decided here, once, and read by the dispatch — so a
+/// test can ask the question without a window, a catalogue thread or a spawn.
+pub enum Resolved {
+    /// In the tree, not in this build; carries why.
+    Shelved(&'static Shelved),
+    /// One of the shell's own: a screen, a program it knows how to start, Blender with its addon.
+    Route(Launch),
+    /// A program the shell has no account of, from its .desktop entry: the binary and its args.
+    Catalogue { id: String, bin: String, args: Vec<String> },
+    /// Nothing answers to that name.
+    Unknown,
+}
+
+/// The shell's own route is asked before the .desktop catalogue, and the order is the point.
+///
+/// It used to be the other way round, on the reasoning that a pin or the Lens can name an app
+/// ("notes") that also has a .desktop entry, and that entry should launch like the route does.
+/// It does — for our own apps the two agree by construction. Where they disagree is a program
+/// the distribution also ships an entry for: Debian's `blender.desktop` says `Exec=blender %f`,
+/// ours says `blender --python …/bootstrap.py`, and both are called "Blender". The catalogue
+/// matched first, so `open_app name=blender` opened a Blender without the addon — the window
+/// came up, the control surface never did, `describe blender` said "no socket", and the launch
+/// had been reported as done. A window a mind can only photograph: the exact thing the launch
+/// arm's own comment promises not to open (#96).
+///
+/// The route is the shell's account of how to open a thing it knows. The catalogue is for
+/// things it does not know. `availability()` already asked in this order; now the launch does.
+pub fn resolve(app: &str, installed: &[DesktopEntry]) -> Resolved {
+    if let Some(shelf) = shelved(app) {
+        return Resolved::Shelved(shelf);
+    }
+    if let Some(launch) = route(app) {
+        return Resolved::Route(launch);
+    }
+    if let Some(entry) = catalogue_entry(app, installed) {
+        if let Some(shelf) = shelved_exec(&entry.exec) {
+            return Resolved::Shelved(shelf);
+        }
+        if entry.exec != "__builtin__" {
+            let mut parts = entry.exec.split_whitespace().map(str::to_string);
+            if let Some(bin) = parts.next() {
+                return Resolved::Catalogue {
+                    id: super::app_grid::icon_id_for(&entry.app_id),
+                    bin,
+                    args: parts.collect(),
+                };
+            }
+        }
+    }
+    Resolved::Unknown
+}
+
 /// The .desktop entry a name refers to, matched the way the dispatch matches it.
 fn catalogue_entry<'a>(app: &str, installed: &'a [DesktopEntry]) -> Option<&'a DesktopEntry> {
     let lower = app.trim().to_lowercase();
@@ -390,10 +442,13 @@ pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
         Some(Launch::Blender) => match find_program("blender") {
             None => Availability::Missing("blender".to_string()),
             Some(_) => match blender_bootstrap() {
-                Some(_) => Availability::Ready,
                 None => Availability::Missing(
                     "the Yantrik addon for Blender (share/blender/bootstrap.py)".to_string(),
                 ),
+                Some(_) => match blender_display(std::env::var("DISPLAY").ok().as_deref()) {
+                    Ok(()) => Availability::Ready,
+                    Err(why) => Availability::Missing(why),
+                },
             },
         },
         Some(Launch::Screen(_) | Launch::SettingsSection(_) | Launch::Editor | Launch::Launchpad) => {
@@ -523,6 +578,35 @@ pub fn blender_bootstrap() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
+/// Whether Blender has a display it can open a window on, given the session's `DISPLAY`.
+///
+/// Debian's `blender` package is built with the X11 GHOST back-end only. On this desktop the
+/// session is Wayland, so the window Blender opens is an X11 window served by Xwayland, and the
+/// only thing that tells a client where that server is, is `DISPLAY`. labwc sets it for every
+/// child it starts — when Xwayland is installed. When it is not, `DISPLAY` is absent, and
+/// Blender's whole contribution is:
+///
+///     GHOST: failed to initialize display for back-end(s): ['X11']
+///     GHOST: unable to initialize, exiting!
+///
+/// after `open_app` has already answered "launching" (#96). The addon still works headless —
+/// the control surface comes up and renders — but the person sees nothing, which defeats the
+/// point of an app whose value is that the mind and the person look at the same screen.
+///
+/// The check reads only the variable, on purpose. Whether the server behind it is alive is
+/// Xwayland's business (labwc starts it on the first connection); whether this Blender was built
+/// with a Wayland back-end instead is not knowable without running it. An absent `DISPLAY` is
+/// the one case that is certain, and it is the case the ISO produces when the package is missing.
+pub fn blender_display(display: Option<&str>) -> Result<(), String> {
+    match display {
+        Some(d) if !d.trim().is_empty() => Ok(()),
+        _ => Err(
+            "an X display for Blender's window: this Blender speaks X11 only, and no DISPLAY is              set, so Xwayland is not running in this session (is the xwayland package installed?)"
+                .to_string(),
+        ),
+    }
+}
+
 /// Where a program is, if it is anywhere it could be run from.
 ///
 /// The shell is started from `/opt/yantrik/bin` (or a cargo target dir in development), and the
@@ -574,46 +658,28 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         // `invoke_launch_app` from anywhere in the shell, and the binary is still on the disk of
         // every machine that installed an earlier release — so the last gate before spawn says no
         // as well, and says why.
-        if let Some(shelf) = shelved(&app) {
-            tracing::warn!(
-                app = %app,
-                "{} is not part of this build: {}. It comes back when {}.",
-                shelf.name, shelf.reason, shelf.returns_when
-            );
-            return;
-        }
-
-        // Installed .desktop apps first; a built-in entry falls through to its route.
-        //
-        // A pin or the Lens can name an app ("notes") that ALSO has a .desktop entry (Name=Notes);
-        // that entry matches first, so it must launch exactly like the routes below do — same
-        // resolution, same environment scrubbing.
+        // One decision, made in `resolve` where the tests can reach it. The shell's own route
+        // is asked before the .desktop catalogue — see `resolve` for the Blender that taught us.
         let installed = catalogue.get();
-        if let Some(entry) = catalogue_entry(&app, &installed) {
-            if let Some(shelf) = shelved_exec(&entry.exec) {
+        let launch = match resolve(&app, &installed) {
+            Resolved::Shelved(shelf) => {
                 tracing::warn!(
-                    app = %app, exec = %entry.exec,
-                    "{} is not part of this build: {}", shelf.name, shelf.reason
+                    app = %app,
+                    "{} is not part of this build: {}. It comes back when {}.",
+                    shelf.name, shelf.reason, shelf.returns_when
                 );
                 return;
             }
-            if entry.exec != "__builtin__" {
-                let parts: Vec<&str> = entry.exec.split_whitespace().collect();
-                if let Some((bin, args)) = parts.split_first() {
-                    let id = super::app_grid::icon_id_for(&entry.app_id);
-                    spawn_app_with_args(&id, bin, args);
-                }
+            Resolved::Catalogue { id, bin, args } => {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                spawn_app_with_args(&id, &bin, &args);
                 return;
             }
-        }
-
-        // Matched on the canonical spelling, so an id taken from an app's control surface reaches
-        // the same route as the dock's own. The .desktop lookup above deliberately still uses the
-        // raw string: those entries carry real ids and names, and folding their punctuation would
-        // be guessing at somebody else's vocabulary rather than settling our own.
-        let Some(launch) = route(&app) else {
-            tracing::warn!(app = %app, "Unknown app");
-            return;
+            Resolved::Unknown => {
+                tracing::warn!(app = %app, "Unknown app");
+                return;
+            }
+            Resolved::Route(launch) => launch,
         };
         let show = |screen: i32| {
             if let Some(ui) = ui_weak.upgrade() {
@@ -654,6 +720,14 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             // the refusal below says so rather than quietly opening the lesser thing.
             Launch::Blender => match (find_program("blender"), blender_bootstrap()) {
                 (Some(bin), Some(bootstrap)) => {
+                    // Third check, same reason as the other two: a launch that dies in under a
+                    // second is a launch the shell reported and nobody saw. Debian's Blender
+                    // speaks X11 only, so without an X display it prints one GHOST line and
+                    // exits, and `open_app` had already answered "launching".
+                    if let Err(why) = blender_display(std::env::var("DISPLAY").ok().as_deref()) {
+                        tracing::error!("Cannot open Blender: {why}");
+                        return;
+                    }
                     let bin = bin.to_string_lossy().into_owned();
                     let bootstrap = bootstrap.to_string_lossy().into_owned();
                     spawn_app_with_args("blender", &bin, &["--python", &bootstrap]);
@@ -1126,6 +1200,23 @@ mod tests {
     }
 
     /// A shell app whose program is not on the disk is known, and not launchable.
+    /// Blender needs three things, and the third is a display. The first two were checked;
+    /// the third was discovered by watching `open_app name=blender` answer "launching" and
+    /// then nothing, on a session without Xwayland (#96).
+    #[test]
+    fn blender_without_an_x_display_is_refused_before_it_is_started() {
+        assert!(blender_display(Some(":0")).is_ok());
+        assert!(blender_display(Some(":1")).is_ok());
+        let why = blender_display(None).unwrap_err();
+        assert!(why.contains("DISPLAY"), "{why}");
+        assert!(why.contains("X11"), "the refusal should say why this Blender needs X: {why}");
+        assert!(why.contains("xwayland"), "and what would fix it: {why}");
+        // An empty DISPLAY is what a script that copied a compositor's own environment exports.
+        // It is not a display.
+        assert!(blender_display(Some("")).is_err());
+        assert!(blender_display(Some("   ")).is_err());
+    }
+
     #[test]
     fn a_missing_program_is_known_but_does_not_open() {
         let there = PathBuf::from("/definitely/not/here/yantrik-notes");
@@ -1228,6 +1319,39 @@ mod tests {
             app_id: app_id.into(),
             icon_char: String::new(),
         }
+    }
+
+    /// A .desktop entry the distribution ships must not shadow the shell's own route.
+    ///
+    /// The one that did: Debian's `blender.desktop`, `Exec=blender %f`, matched "blender" before
+    /// `Launch::Blender` and opened a Blender with no addon and no surface (#96). The same shape
+    /// waits for any distro app whose Name collides with one of ours — a file manager called
+    /// "Files" would have opened instead of the shell's Files screen.
+    #[test]
+    fn a_distro_desktop_entry_does_not_shadow_the_shells_own_route() {
+        let debian_blender = stale_entry("blender", "Blender", "blender %f");
+        assert!(
+            matches!(resolve("blender", &[debian_blender]), Resolved::Route(Launch::Blender)),
+            "Debian's blender.desktop shadowed the route that carries the addon"
+        );
+        let a_file_manager = stale_entry("org.gnome.Nautilus", "Files", "nautilus --new-window");
+        assert!(
+            matches!(resolve("files", &[a_file_manager]), Resolved::Route(Launch::Screen(8))),
+            "a distro file manager shadowed the shell's own Files screen"
+        );
+        // A program the shell has no route for still opens from its entry, args and all.
+        let foreign = stale_entry("foo", "Foo", "foo --bar baz");
+        match resolve("foo", &[foreign]) {
+            Resolved::Catalogue { bin, args, .. } => {
+                assert_eq!(bin, "foo");
+                assert_eq!(args, vec!["--bar".to_string(), "baz".to_string()]);
+            }
+            _ => panic!("a catalogue-only program must resolve to its .desktop entry"),
+        }
+        // And the shelf still comes first, whatever else is installed.
+        let shelved_by_name = stale_entry("music-player", "Music Player", "yantrik-music-player");
+        assert!(matches!(resolve("music", &[shelved_by_name]), Resolved::Shelved(_)));
+        assert!(matches!(resolve("nothing-called-this", &[]), Resolved::Unknown));
     }
 
     /// Every spelling a caller could arrive with is refused, and refused for the same reason.
