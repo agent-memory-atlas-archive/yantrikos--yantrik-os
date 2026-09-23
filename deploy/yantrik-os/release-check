@@ -287,22 +287,6 @@ def _screens():
     return "%d screens: %s" % (len(screens), ", ".join(screens))
 
 
-@check("no launch failed, and no window is listed twice")
-def _windows():
-    st = state()
-    failed = st.get("failed_launches", [])
-    titles = [w.get("title") for w in st.get("windows", [])]
-    dupes = sorted({t for t in titles if titles.count(t) > 1})
-    msgs = []
-    if failed:
-        msgs.append("failed launches: %s" % json.dumps(failed)[:300])
-    if dupes:
-        msgs.append("listed twice: %s (%s)" % (dupes, [(w.get("app"), w.get("title")[:30]) for w in st.get("windows", []) if w.get("title") in dupes]))
-    if msgs:
-        raise Failed("; ".join(msgs))
-    return "%d windows, none twice, no failed launch" % len(titles)
-
-
 @check("a sensitive act without a grant is refused on every door")
 def _gate():
     mode = BASELINE.get("mode", "ask")
@@ -455,13 +439,81 @@ def _minds():
     return ", ".join(report)
 
 
+def cdp(path, method="GET", timeout=5):
+    """One request to the browser's DevTools endpoint: its JSON, its text, or None when no
+    drivable browser answers."""
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(urllib.request.Request(yos.CDP + path, method=method),
+                                    timeout=timeout) as reply:
+            body = reply.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError):
+        return None
+    try:
+        return json.loads(body)
+    except ValueError:
+        return body  # /json/close answers in words
+
+
+def pages():
+    return [t for t in (cdp("/json/list") or []) if isinstance(t, dict) and t.get("type") == "page"]
+
+
+def close_own_tabs(own, started_here):
+    """Close the tabs this run made, and let the browser go if it came up for this run.
+
+    Returns what is left, in words, and whether the browser this run started is still running
+    with nothing of anyone's in it — which is a failure: the run left something open."""
+    for tab in own:
+        cdp("/json/close/%s" % tab)
+    if not started_here:
+        return "closed its own tab; the browser that was already open is as it was", True
+    # The browser came up for this run. With its last tab gone it closes its window and exits —
+    # unless somebody opened a tab in it meanwhile, and then that tab is theirs and it stays.
+    if wait(lambda: cdp("/json/version") is None, 15, 1):
+        return "closed its tabs, and the browser it opened has exited", True
+    others = [t for t in pages() if t.get("id") not in own]
+    if others:
+        return ("closed its own tabs; the browser it opened stays for %d tab(s) opened in it "
+                "meanwhile" % len(others)), True
+    # Nobody's tab is left and it has not gone: ask it to.
+    try:
+        from websocket import create_connection
+        ws = create_connection(cdp("/json/version")["webSocketDebuggerUrl"], origin=yos.CDP, timeout=10)
+        ws.send(json.dumps({"id": 1, "method": "Browser.close"}))
+        ws.close()
+    except Exception:  # noqa: BLE001 — what is left is said below
+        pass
+    if wait(lambda: cdp("/json/version") is None, 15, 1):
+        return "closed its tabs, and asked the browser it opened to close, which it did", True
+    return "closed its tabs, but the browser it opened is still running with no tab in it", False
+
+
 @check("the browser can be driven: go to a page and read it back", tier="rc")
 def _browser():
+    """Drive the desktop's browser through `yos web`, in a tab of the run's own, and close what the
+    run opened — and nothing a person had open.
+
+    Tabs are told apart by their DevTools target id. The tab driven is one this check asks the
+    browser for (`/json/new`), so its id is known; `YOS_WEB_TAB` points `yos web` at that tab and
+    no other, and it is the tab closed after (`/json/close/<id>`). The browser is this run's when
+    nothing answered on the DevTools port before the check opened one: then the tabs it came up
+    with are the run's too, and once they are closed it exits. A browser that was already open is
+    left as it was. The window list is no use for this — a browser window is titled after its
+    front tab, so a person's window with the run's tab in front reads like one the run opened —
+    which is why `close_test_windows` is not called here; the last check looks for anything titled
+    after the run's page (`release-check page …`) that is still open."""
+    if "YOS_WEB_TAB" not in (yos.__doc__ or ""):
+        raise Failed("the installed yos cannot drive one tab (YOS_WEB_TAB); it would drive the "
+                     "browser's front page, which may be somebody's, so nothing was driven")
     phrase = "release-check page %d" % os.getpid()
 
     class Page(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            body = ("<html><body><h1>%s</h1><button>Harmless</button></body></html>" % phrase).encode()
+            # Titled with the phrase, so the window it is in is recognisably the run's.
+            body = ("<html><head><title>%s</title></head><body><h1>%s</h1><button>Harmless</button>"
+                    "</body></html>" % (phrase, phrase)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -471,18 +523,37 @@ def _browser():
             pass
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    own, started_here, closed = [], False, None
     try:
-        act("shell", "open_app", name="browser")
-        wait(lambda: sh("curl -s -m 2 http://127.0.0.1:9222/json/version")[0] == 0, 30, 2)
-        code, out = sh("yos web go http://127.0.0.1:%d/" % srv.server_address[1])
-        text = wait(lambda: (lambda t: t if phrase in t else None)(sh("yos web text")[1]), 20, 2)
+        if cdp("/json/version") is None:
+            started_here = True
+            act("shell", "open_app", name="browser")
+            if not wait(lambda: cdp("/json/version"), 30, 1):
+                raise Failed("the browser did not come up drivable on %s within 30 s" % yos.CDP)
+            # What it opened with — a new-tab page — is the run's, like the browser.
+            wait(lambda: pages(), 10, 0.5)
+            own.extend(t["id"] for t in pages())
+        # PUT since Chromium 111; a GET on an older one.
+        tab = cdp("/json/new?about:blank", method="PUT")
+        if not isinstance(tab, dict):
+            tab = cdp("/json/new?about:blank")
+        if not isinstance(tab, dict) or not tab.get("id"):
+            raise Failed("the browser would not open a tab for the check: %r" % (tab,))
+        own.append(tab["id"])
+        mine = "YOS_WEB_TAB=%s " % tab["id"]
+        code, out = sh(mine + "yos web go http://127.0.0.1:%d/" % srv.server_address[1])
+        text = wait(lambda: (lambda t: t if phrase in t else None)(sh(mine + "yos web text")[1]), 20, 2)
         if not text:
             raise Failed("the page did not read back within 20 s: go=%r last text=%r"
-                         % (out[:100], sh("yos web text")[1][:160]))
-        return "went to a local page and read %r back" % phrase
+                         % (out[:100], sh(mine + "yos web text")[1][:160]))
+        closed, ok = close_own_tabs(own, started_here)
+        if not ok:
+            raise Failed("went to a local page and read %r back, but %s" % (phrase, closed))
+        return "went to a local page in a tab of its own and read %r back; %s" % (phrase, closed)
     finally:
         srv.shutdown()
-        close_test_windows()
+        if closed is None:
+            close_own_tabs(own, started_here)
 
 
 @check("a sensitive act through `yos` asks, and runs once a person allows it", tier="rc", interactive=True)
@@ -523,6 +594,36 @@ def _agent_command():
                      "(describe shell agents: %s)" % json.dumps(state().get("agents", []))[:300])
     agent, job = found
     return "%s ran it: %s" % (agent.get("id"), json.dumps(job)[:160])
+
+
+# ── last: what the run leaves behind ────────────────────────────────────────────────────────
+
+# Last of all, in every tier, so it sees what every check before it left. It ran in the middle of
+# ci, and the rc browser check that came later left its own page open in Chromium where nothing
+# looked (#190).
+@check("no launch failed, no window is listed twice, and no window of the run's is left open")
+def _windows():
+    def left_open():
+        return [t for t in (w.get("title") or "" for w in state().get("windows", []))
+                if "release-check page" in t]
+    # The window list is up to nine seconds old (COMPOSITOR_TTL): a window closed a moment ago
+    # may still be in it, so its going is waited for before it is called left open.
+    wait(lambda: not left_open(), 30, 3)
+    st = state()
+    failed = st.get("failed_launches", [])
+    titles = [w.get("title") for w in st.get("windows", [])]
+    dupes = sorted({t for t in titles if titles.count(t) > 1})
+    msgs = []
+    if failed:
+        msgs.append("failed launches: %s" % json.dumps(failed)[:300])
+    if dupes:
+        msgs.append("listed twice: %s (%s)" % (dupes, [(w.get("app"), w.get("title")[:30]) for w in st.get("windows", []) if w.get("title") in dupes]))
+    left = left_open()
+    if left:
+        msgs.append("left open by this run: %s" % left)
+    if msgs:
+        raise Failed("; ".join(msgs))
+    return "%d windows, none twice, none of the run's left open, no failed launch" % len(titles)
 
 
 MANUAL = [

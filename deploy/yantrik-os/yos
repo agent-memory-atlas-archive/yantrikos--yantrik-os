@@ -39,6 +39,7 @@ protocol and prints what came back.
     yos web click <n>                   click element n from `yos web`
     yos web type <n> <text>             type into element n
     yos web tabs                        what is open
+    YOS_WEB_TAB=<id> yos web ...        drive that tab (a DevTools target id), not the first
     yos web listen [secs]               what the page SAYS OUT LOUD — records the audio
                                         the machine is playing and transcribes it
 
@@ -1267,6 +1268,15 @@ def _page():
             "name=browser — then `yos web go <url>`. If a browser window is already open, it "
             "was not started by the desktop; close it and open it that way.")
     pages = [t for t in tabs if t.get("type") == "page"]
+    # A caller that opened a tab of its own names it, and every `yos web` drives that tab and no
+    # other — release-check does, so a check of the browser never navigates a person's page.
+    # Otherwise the first page the browser lists, which is the one most recently active.
+    wanted = os.environ.get("YOS_WEB_TAB", "").strip()
+    if wanted:
+        mine = [t for t in pages if t.get("id") == wanted]
+        if not mine:
+            die("the tab YOS_WEB_TAB names (%s) is not open in this browser" % wanted)
+        return mine[0]
     if not pages:
         die("the browser is running but has no page open")
     return pages[0]
