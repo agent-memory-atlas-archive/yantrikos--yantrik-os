@@ -15,6 +15,9 @@ protocol and prints what came back.
     yos ls                              which surfaces are up
     yos describe shell                  what the desktop is showing
     yos describe notes                  what an app is showing
+    yos check notes                     does a surface keep the protocol (docs/surface-protocol.md)
+    yos check ./my-app.sock --json      the same, for a socket you are writing, as JSON
+    yos check --all                     every surface that answers on this machine
     yos act shell open_app name=notes   ask something to do something
     yos act notes append text='...'     with arguments
     yos act shell open_app name=notes --full     the reply with the app state
@@ -81,20 +84,85 @@ import json
 import os
 import re
 import socket
+import statistics
+import struct
 import sys
 import time
 
-# Everything the session starts lives in the user's runtime dir. perception-service is the
-# one that can be either: started by the desktop it lands there like the rest, and started
-# privileged — it wants CAP_SYS_ADMIN and CAP_NET_ADMIN for its descriptors — it has no
-# XDG_RUNTIME_DIR and lands in /run/yantrik. A caller should not have to know which uid
-# started what, so both are looked in, session first.
-SOCKET_DIRS = [
-    os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "yantrik"),
-    "/run/yantrik",
-]
+
+def socket_dirs():
+    """The socket-directory chain, in the order docs/surface-protocol.md says a client searches it.
+
+    It is the transport's own chain (`server::socket_dir()`): `$XDG_RUNTIME_DIR/yantrik`, then
+    `/run/yantrik`, then `/tmp/yantrik-<uid>`. A server binds in the first it can use; a client
+    looks in all three, in order, and creates none of them.
+
+    perception-service is the reason the second one matters: started by the desktop it lands in
+    the session's directory like the rest, but started privileged — it wants CAP_SYS_ADMIN and
+    CAP_NET_ADMIN for its descriptors — it has no XDG_RUNTIME_DIR and lands in /run/yantrik. The
+    third is where everything lands on a machine with neither, and `yos` did not look there.
+
+    A `yos` started without XDG_RUNTIME_DIR (sudo, cron, a bare ssh command) cannot know the
+    session's value, so it looks where logind puts it, `/run/user/<uid>`, in the first place —
+    which the protocol allows a client and never a server.
+    """
+    xdg = os.environ.get("XDG_RUNTIME_DIR", "").strip() or "/run/user/%d" % os.getuid()
+    return [os.path.join(xdg, "yantrik"), "/run/yantrik", "/tmp/yantrik-%d" % os.getuid()]
+
+
+SOCKET_DIRS = socket_dirs()
 
 ALIASES = {"shell": "app-shell"}
+
+# ── Who is answering as the shell ──
+#
+# The shell's socket is where a person's Allow is asked for and spent, and where `describe shell`
+# reads the mode and the ceiling every other decision starts from. Anything that bound
+# `app-shell.sock` before the shell did, or after it died, would be believed. So before anything is
+# written to it the process listening on it has to be the desktop's own shell: the kernel says which
+# pid is listening (`SO_PEERCRED`), `/proc/<pid>/exe` says which program that is, and it has to be
+# a `yantrik-ui` binary — the installed one or a developer's build. The same rule the apps' own
+# dispatch applies before it spends a grant (`yantrik_ipc_transport::owner::must_be_the_shell`).
+# yos-mcp reaches the shell only through this script, so it inherits the check. Same-uid limits
+# stand: this stops a stray server or a second shell, not hostile code running as the person.
+SHELL_SOCKET = "app-shell.sock"
+SHELL_BINARIES = ("yantrik-ui",)
+
+
+def shell_peer_problem(sock, path):
+    """None when `path` is not the shell's socket or the shell is what listens on it; otherwise
+    the sentence saying what is listening instead."""
+    if os.path.basename(os.path.realpath(path)) != SHELL_SOCKET:
+        return None
+    try:
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        pid = struct.unpack("3i", creds)[0]
+        exe = os.readlink("/proc/%d/exe" % pid)
+    except (OSError, AttributeError, struct.error) as e:
+        return ("could not tell which process is answering as the shell at %s (%s), so nothing "
+                "was sent to it" % (path, e))
+    name = os.path.basename(exe[:-len(" (deleted)")] if exe.endswith(" (deleted)") else exe)
+    if name in SHELL_BINARIES:
+        return None
+    return ("the process answering as the shell at %s is %s (pid %d), not the desktop's own "
+            "yantrik-ui, so nothing was sent to it. Something else has the shell's name; the "
+            "shell will refuse to start beside it" % (path, exe, pid))
+
+
+def open_socket(path, timeout):
+    """Connect to `path`, and when it is the shell's, make sure the shell is who answers."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(path)
+    except BaseException:
+        s.close()
+        raise
+    problem = shell_peer_problem(s, path)
+    if problem:
+        s.close()
+        raise Unreachable(problem)
+    return s
 
 
 def socket_candidates(name):
@@ -174,19 +242,15 @@ def request(name, method, params=None, timeout=40):
 
     last_error = None
     for path in candidates:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
         try:
-            s.connect(path)
+            s = open_socket(path, timeout)
         except (ConnectionRefusedError, FileNotFoundError) as e:
             # A stale socket: the file is there, the process is not. Try the next candidate.
-            s.close()
             last_error = e
             continue
         except PermissionError:
             # Connecting to a unix socket needs *write* permission, which is why a
             # world-readable socket is still unreachable. Say that rather than "denied".
-            s.close()
             raise Unreachable(
                 "%s is not readable by this user — perception runs as root; try sudo" % path)
         s.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}) + "\n").encode())
@@ -395,10 +459,11 @@ def ensure_service(name):
 
 def _one_line(path):
     """An app's own one-line summary, or nothing. Never raises: this is a listing."""
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(2)
     try:
-        s.connect(path)
+        s = open_socket(path, 2)
+    except (OSError, Unreachable):
+        return ""
+    try:
         s.sendall(b'{"jsonrpc":"2.0","id":1,"method":"app.describe","params":{}}\n')
         buf = b""
         while not buf.endswith(b"\n"):
@@ -1248,9 +1313,631 @@ def cmd_listen(argv):
         print("(%s)" % (out.stderr.strip().splitlines() or ["no detail"])[-1])
 
 
+# ── yos check: does a surface keep the protocol ──
+#
+# The checker an author runs against their own surface, and `release-check` can run against
+# every surface on a machine: docs/surface-protocol.md, read by a program. It prints what it saw
+# for each check, exits non-zero when any check fails, and says it as JSON with `--json`.
+#
+# It never runs an action. Every `app.act` it sends is one the protocol's dispatch refuses before
+# a handler is reached — an empty or unknown action, a missing or undeclared argument, a stale
+# `expect_revision` — and even those are sent only to a surface that has shown it runs the
+# protocol's dispatch: it publishes `protocol: 1` AND refused the unknown action exactly as that
+# dispatch does. The action a probe names is graded `safe` or `standard` and does not say it
+# cannot be undone, and every probe also carries a stale `expect_revision`, so a surface that
+# skipped an argument check is still stopped by its revision guard before its handler runs. A
+# surface that implements neither could run a `safe` or `standard` handler with placeholder
+# arguments — which is why the gate on sending those probes is a dispatch that has already
+# answered like the protocol's.
+
+PROTOCOL = 1
+LADDER = ("safe", "standard", "sensitive", "dangerous")
+PARAM_TYPES = ("string", "number", "integer", "boolean")
+# How long a describe may take before the checker says so. A describe reads a few properties on a
+# UI thread; half a second is already a surface a mind waits on.
+DESCRIBE_BUDGET = 0.5
+DESCRIBE_READS = 3
+# The shell's secret-name rule (`no_published_action_can_carry_a_passphrase` in
+# crates/yantrik-ui/src/control_approvals.rs): the words a secret would arrive under, and the
+# parameter that contains one of them and is not one. `args` is what an approval card draws and
+# the audit log keeps, so a secret among them is shown to whoever reads either.
+SECRET_WORDS = ("passphrase", "password", "passwd", "pin", "secret", "credential", "unlock")
+SECRET_PERMITTED = ("pinned",)
+# `gate::UNRECOVERABLE_PHRASES`. An action whose description says one of these is asked about in
+# every mode but bypass, so the checker never names one in a probe.
+UNRECOVERABLE_PHRASES = ("not recoverable", "cannot be undone", "can't be undone", "irreversible",
+                         "permanently", "permanent", "no undo")
+NO_SUCH_ACTION = "yos-check-no-such-action"
+NO_SUCH_METHOD = "app.yos_check_no_such_method"
+UNDECLARED = "yos_check_undeclared"
+PLACEHOLDER = {"string": "yos-check", "number": 0, "integer": 0, "boolean": False}
+
+# docs/schema/describe.schema.json, carried here because `yos` ships alone and stdlib-only.
+# yos-selftest.py fails when the two differ.
+DESCRIBE_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://yantrikos.com/schema/surface/1/describe.schema.json",
+    "title": "app.describe result, surface protocol 1",
+    "description": "What a control surface answers to app.describe. Normative text: "
+                   "docs/surface-protocol.md. Unknown keys are allowed so a later protocol can add "
+                   "them; a version-1 client ignores what it does not know.",
+    "type": "object",
+    "required": ["protocol", "app", "summary", "state", "revision", "actions"],
+    "properties": {
+        "protocol": {"description": "The surface protocol version this describe speaks.",
+                     "const": 1},
+        "app": {"description": "The id the surface publishes under: the <id> of app-<id>.sock.",
+                "type": "string", "minLength": 1},
+        "summary": {"description": "One line a person could read.", "type": "string"},
+        "state": {"description": "The view-model, in the app's own vocabulary.", "type": "object"},
+        "revision": {"description": "FNV-1a 64 over summary, a zero byte, and state rendered "
+                                    "compact with sorted keys; 16 lowercase hex digits.",
+                     "type": "string", "pattern": "^[0-9a-f]{16}$"},
+        "actions": {"type": "array", "items": {"$ref": "#/$defs/action"}},
+    },
+    "$defs": {
+        "action": {
+            "type": "object",
+            "required": ["name", "description", "permission", "settles", "parameters"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "description": {"description": "What the action does, in the app's own words. "
+                                               "The dispatch reads it for wording that says it "
+                                               "cannot be undone.",
+                                "type": "string"},
+                "permission": {"description": "The grade, on the ladder safe < standard < "
+                                              "sensitive < dangerous.",
+                               "enum": ["safe", "standard", "sensitive", "dangerous"]},
+                "settles": {"description": "Whether the work is finished when the act answers "
+                                           "(on return) or only started (later).",
+                            "enum": ["on return", "later"]},
+                "parameters": {"$ref": "#/$defs/parameters"},
+            },
+        },
+        "parameters": {
+            "type": "object",
+            "required": ["type", "properties", "required"],
+            "properties": {
+                "type": {"const": "object"},
+                "properties": {"type": "object",
+                               "additionalProperties": {"$ref": "#/$defs/parameter"}},
+                "required": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+            },
+        },
+        "parameter": {
+            "type": "object",
+            "required": ["type", "description"],
+            "properties": {
+                "type": {"description": "A JSON Schema primitive. Version 1 checks presence, not "
+                                        "type: the dispatch refuses a missing required argument "
+                                        "and an undeclared one, and hands the value to the "
+                                        "handler as it came.",
+                         "enum": ["string", "number", "integer", "boolean"]},
+                "description": {"type": "string"},
+            },
+        },
+    },
+}
+
+
+def _json_equal(a, b):
+    """Equality the way JSON means it: `true` is not `1`."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    return a == b
+
+
+def _is_type(value, kind):
+    if kind == "object":
+        return isinstance(value, dict)
+    if kind == "array":
+        return isinstance(value, list)
+    if kind == "string":
+        return isinstance(value, str)
+    if kind == "boolean":
+        return isinstance(value, bool)
+    if kind == "null":
+        return value is None
+    if isinstance(value, bool):
+        return False
+    if kind == "integer":
+        return isinstance(value, int) or (isinstance(value, float) and value.is_integer())
+    if kind == "number":
+        return isinstance(value, (int, float))
+    return False
+
+
+def schema_errors(value, schema, root=None, at="$"):
+    """What is wrong with `value` against a JSON Schema, as `path: problem` lines.
+
+    The subset the protocol's schemas use — type, const, enum, required, properties,
+    additionalProperties, items, pattern, minLength, uniqueItems and local `$ref` — because `yos`
+    carries no dependencies. Annotation keywords are ignored, as the standard says they are.
+    """
+    root = schema if root is None else root
+    if "$ref" in schema:
+        node = root
+        for part in schema["$ref"][2:].split("/"):
+            node = node[part]
+        return schema_errors(value, node, root, at)
+    errors = []
+    kinds = schema.get("type")
+    if kinds is not None:
+        kinds = kinds if isinstance(kinds, list) else [kinds]
+        if not any(_is_type(value, k) for k in kinds):
+            return ["%s: is %s, not %s" % (at, type(value).__name__, " or ".join(kinds))]
+    if "const" in schema and not _json_equal(value, schema["const"]):
+        errors.append("%s: is %s, must be %s" % (at, json.dumps(value), json.dumps(schema["const"])))
+    if "enum" in schema and not any(_json_equal(value, e) for e in schema["enum"]):
+        errors.append("%s: %s is not one of %s" % (at, json.dumps(value), json.dumps(schema["enum"])))
+    if isinstance(value, str):
+        if len(value) < schema.get("minLength", 0):
+            errors.append("%s: is empty" % at)
+        if "pattern" in schema and not re.search(schema["pattern"], value):
+            errors.append("%s: %s does not match %s" % (at, json.dumps(value), schema["pattern"]))
+    if isinstance(value, dict):
+        for key in schema.get("required", []):
+            if key not in value:
+                errors.append("%s: `%s` is missing" % (at, key))
+        properties = schema.get("properties", {})
+        extra = schema.get("additionalProperties", True)
+        for key, item in value.items():
+            if key in properties:
+                errors.extend(schema_errors(item, properties[key], root, "%s.%s" % (at, key)))
+            elif extra is False:
+                errors.append("%s: `%s` is not allowed" % (at, key))
+            elif isinstance(extra, dict):
+                errors.extend(schema_errors(item, extra, root, "%s.%s" % (at, key)))
+    if isinstance(value, list):
+        if "items" in schema:
+            for i, item in enumerate(value):
+                errors.extend(schema_errors(item, schema["items"], root, "%s[%d]" % (at, i)))
+        if schema.get("uniqueItems"):
+            seen = [json.dumps(v, sort_keys=True) for v in value]
+            if len(set(seen)) != len(seen):
+                errors.append("%s: has repeated items" % at)
+    return errors
+
+
+def revision_of(summary, state):
+    """`View::revision()`: FNV-1a 64 over the summary, a zero byte, and the state rendered compact
+    with sorted keys and UTF-8 kept raw. docs/surface-protocol.md has the vectors."""
+    h = 0xCBF29CE484222325
+    rendered = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    for byte in summary.encode("utf-8") + b"\x00" + rendered.encode("utf-8"):
+        h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return "%016x" % h
+
+
+def _has_float(value):
+    if isinstance(value, float):
+        return True
+    if isinstance(value, dict):
+        return any(_has_float(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_float(v) for v in value)
+    return False
+
+
+def rpc(path, method, params=None, timeout=10, request_id=1):
+    """One JSON-RPC line to `path` and the whole reply object back, error or not, with how long
+    it took. Unlike `request`, a refusal is an answer here: the checker reads its code and words."""
+    started = time.monotonic()
+    s = open_socket(path, timeout)
+    try:
+        line = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            line["params"] = params
+        s.sendall((json.dumps(line) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(1 << 20)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        s.close()
+    if not buf:
+        raise Unreachable("%s closed the connection without answering %s" % (path, method))
+    return json.loads(buf), time.monotonic() - started
+
+
+def unrecoverable(purpose):
+    lower = (purpose or "").lower()
+    return any(phrase in lower for phrase in UNRECOVERABLE_PHRASES)
+
+
+def _stale(revision):
+    """A revision guaranteed not to be the current one: every hex digit flipped."""
+    if isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{16}", revision):
+        return "".join("%x" % (15 - int(c, 16)) for c in revision)
+    return "0123456789abcdef"
+
+
+class Report:
+    """The rows one surface's check produced, and how they print."""
+
+    def __init__(self, surface, path):
+        self.surface, self.path, self.rows = surface, path, []
+
+    def add(self, check, status, saw):
+        self.rows.append({"check": check, "status": status, "saw": saw})
+
+    def failed(self):
+        return any(r["status"] == "fail" for r in self.rows)
+
+    def as_json(self):
+        return {"surface": self.surface, "socket": self.path, "ok": not self.failed(),
+                "checks": self.rows}
+
+    def print(self):
+        print("yos check %s  (%s)" % (self.surface, self.path))
+        for r in self.rows:
+            lines = str(r["saw"]).splitlines() or [""]
+            print("  %-5s %-11s %s" % (r["status"], r["check"], lines[0]))
+            for more in lines[1:]:
+                print("  %-5s %-11s %s" % ("", "", more))
+        counts = {s: sum(1 for r in self.rows if r["status"] == s)
+                  for s in ("fail", "warn", "pass", "skip")}
+        print("  %d failed, %d warned, %d passed, %d skipped"
+              % (counts["fail"], counts["warn"], counts["pass"], counts["skip"]))
+
+
+def _refusal(reply):
+    """`(code, message)` of a JSON-RPC error, or None when the reply is not one."""
+    error = reply.get("error") if isinstance(reply, dict) else None
+    if not isinstance(error, dict):
+        return None
+    return error.get("code"), error.get("message")
+
+
+def _expect_refusal(report, check, reply, code, sentence, what):
+    """One refusal probe: the code and the exact words, or a failure saying which differed."""
+    got = _refusal(reply)
+    if got is None:
+        report.add(check, "fail", "%s was not refused: it answered %s"
+                   % (what, json.dumps(reply.get("result"))[:200]))
+        return False
+    got_code, got_message = got
+    if got_code == code and got_message == sentence:
+        report.add(check, "pass", "%s → %s %s" % (what, got_code, got_message))
+        return True
+    report.add(check, "fail", "%s → %s %s\nthe protocol says: %s %s"
+               % (what, got_code, got_message, code, sentence))
+    return False
+
+
+def _probe(report, path, action, args, stale):
+    """`app.act` a probe that a protocol dispatch refuses before any handler, carrying a stale
+    `expect_revision` besides. Returns the reply, or records the failure and returns None."""
+    try:
+        reply, _ = rpc(path, "app.act", {"action": action, "args": args, "expect_revision": stale})
+    except (OSError, ValueError, Unreachable) as e:
+        report.add("refusals", "fail", "app.act %s did not answer: %s" % (action, e))
+        return None
+    return reply
+
+
+def _gated(reply):
+    """The gate's refusal, if that is what came back instead of the one a probe was after."""
+    got = _refusal(reply)
+    if got and isinstance(got[1], str) and got[1].split(":", 1)[0] in ("CEILING", "GRANT"):
+        return got[1]
+    return None
+
+
+def check_surface(path, label, services_too=False):
+    """Every check, against one socket. Returns the Report.
+
+    `services_too`: a socket that answers but has no `app.describe` (-32601) is a service rather
+    than a surface, and is skipped instead of failed — for `--all`, which meets both."""
+    report = Report(label, path)
+
+    # rpc.ping: the transport answers it before any handler, and echoes the id it was sent.
+    try:
+        reply, took = rpc(path, "rpc.ping", request_id=7)
+    except (OSError, ValueError, Unreachable) as e:
+        report.add("reachable", "fail", str(e))
+        return report
+    if reply.get("result") == "pong" and reply.get("id") == 7 and reply.get("jsonrpc") == "2.0":
+        report.add("ping", "pass", 'rpc.ping answered "pong" with the id it was sent (%.1f ms)'
+                   % (took * 1000))
+    else:
+        report.add("ping", "fail", "rpc.ping answered %s" % json.dumps(reply)[:300])
+
+    # describe, a few times: the envelope, how long it takes, and whether the revision is steady.
+    views, times = [], []
+    for _ in range(DESCRIBE_READS):
+        try:
+            reply, took = rpc(path, "app.describe", {})
+        except (OSError, ValueError, Unreachable) as e:
+            report.add("describe", "fail", "app.describe did not answer: %s" % e)
+            return report
+        refused = _refusal(reply)
+        if services_too and refused and (refused[0] == -32601
+                                         or "unknown method" in str(refused[1]).lower()):
+            # Not every service says so with -32601 (the companion's socket answers -32602, the
+            # harness host -32000); what they all say is that the method is unknown.
+            report.add("describe", "skip", "answers, but has no app.describe — a service, not a "
+                       "surface")
+            return report
+        if _refusal(reply) or not isinstance(reply.get("result"), dict):
+            report.add("describe", "fail", "app.describe answered %s — not a surface"
+                       % json.dumps(reply)[:300])
+            return report
+        views.append(reply["result"])
+        times.append(took)
+    view = views[-1]
+    median = statistics.median(times)
+    shown = ", ".join("%.1f" % (t * 1000) for t in times)
+    report.add("describe", "pass" if median <= DESCRIBE_BUDGET else "warn",
+               "answered in %.1f ms, the median of %d reads (%s ms)%s" % (
+                   median * 1000, len(times), shown,
+                   "" if median <= DESCRIBE_BUDGET else
+                   " — over the %d ms a caller should wait for a read" % (DESCRIBE_BUDGET * 1000)))
+
+    protocol = view.get("protocol")
+    if protocol == PROTOCOL and not isinstance(protocol, bool):
+        report.add("protocol", "pass", "protocol %d" % PROTOCOL)
+    elif protocol is None:
+        report.add("protocol", "fail", "no `protocol` in describe: a surface from before the "
+                   "protocol was written down (docs/surface-protocol.md adds `protocol: 1`)")
+    else:
+        report.add("protocol", "warn", "protocol %s; this yos knows %d" % (json.dumps(protocol),
+                                                                          PROTOCOL))
+
+    errors = schema_errors(view, DESCRIBE_SCHEMA)
+    report.add("schema", "fail" if errors else "pass",
+               "\n".join(errors[:12] + (["… and %d more" % (len(errors) - 12)]
+                                        if len(errors) > 12 else []))
+               if errors else "describe matches docs/schema/describe.schema.json")
+
+    actions = [a for a in (view.get("actions") or []) if isinstance(a, dict)]
+    grades = [(a.get("name"), a.get("permission")) for a in actions]
+    off = ["%s is graded %s" % (n, json.dumps(g)) for n, g in grades if g not in LADDER]
+    tally = ", ".join("%d %s" % (sum(1 for _, g in grades if g == level), level)
+                      for level in LADDER if any(g == level for _, g in grades))
+    report.add("grades", "fail" if off else "pass",
+               "\n".join(off) if off else "%d action%s: %s" % (
+                   len(actions), "" if len(actions) == 1 else "s", tally or "none"))
+
+    bad_params, secrets, counted = [], [], 0
+    for a in actions:
+        params = a.get("parameters") if isinstance(a.get("parameters"), dict) else {}
+        props = params.get("properties") if isinstance(params.get("properties"), dict) else {}
+        for name, spec in props.items():
+            counted += 1
+            kind = (spec or {}).get("type") if isinstance(spec, dict) else None
+            if kind not in PARAM_TYPES:
+                bad_params.append("%s(%s) is typed %s" % (a.get("name"), name, json.dumps(kind)))
+            lower = name.lower()
+            if any(w in lower for w in SECRET_WORDS) and name not in SECRET_PERMITTED:
+                secrets.append("%s(%s)" % (a.get("name"), name))
+        for name in params.get("required") or []:
+            if name not in props:
+                bad_params.append("%s requires `%s`, which it does not declare"
+                                  % (a.get("name"), name))
+    report.add("params", "fail" if bad_params else "pass",
+               "\n".join(bad_params) if bad_params else
+               "%d parameter%s, each typed %s" % (counted, "" if counted == 1 else "s",
+                                                  " | ".join(PARAM_TYPES)))
+    report.add("secrets", "fail" if secrets else "pass",
+               ("named like a secret: %s — args are what an approval card draws and the audit log "
+                "keeps, so a secret among them is shown to whoever reads either"
+                % ", ".join(secrets)) if secrets else
+               "no parameter named like a secret (%s)" % ", ".join(SECRET_WORDS))
+
+    # The revision: computed as the protocol says, and steady while the view is.
+    summary, state = view.get("summary"), view.get("state")
+    if isinstance(summary, str) and isinstance(view.get("revision"), str):
+        mine = revision_of(summary, state)
+        if mine == view["revision"]:
+            report.add("revision", "pass", "%s is FNV-1a over the summary and the state"
+                       % view["revision"])
+        elif _has_float(state):
+            report.add("revision", "warn", "published %s, computed %s — the state carries a float, "
+                       "and a float's rendering is where ports differ (the vectors' "
+                       "`revision_float_edges`)" % (view["revision"], mine))
+        else:
+            report.add("revision", "fail", "published %s, but FNV-1a over the summary and the "
+                       "state is %s" % (view["revision"], mine))
+    same = [(a, b) for a, b in zip(views, views[1:])
+            if a.get("summary") == b.get("summary") and a.get("state") == b.get("state")]
+    if not same:
+        report.add("steady", "skip", "the view changed between every read (live data), so "
+                   "whether an unchanged view keeps its revision could not be seen")
+    elif all(a.get("revision") == b.get("revision") for a, b in same):
+        report.add("steady", "pass", "%d reads of an unchanged view, one revision"
+                   % (len(same) + 1))
+    else:
+        report.add("steady", "fail", "the same summary and state came back under different "
+                   "revisions: %s" % ", ".join(v.get("revision", "?") for v in views))
+
+    # Refusals. None of these names anything a handler runs for.
+    stale = _stale(view.get("revision"))
+    try:
+        reply, _ = rpc(path, NO_SUCH_METHOD, {})
+        got = _refusal(reply)
+        if got and got[0] == -32601:
+            report.add("method", "pass", "%s → -32601 %s" % (NO_SUCH_METHOD, got[1]))
+        else:
+            report.add("method", "fail", "%s → %s; the protocol says -32601"
+                       % (NO_SUCH_METHOD, json.dumps(reply)[:200]))
+        reply, _ = rpc(path, "app.act", {"args": {}})
+        _expect_refusal(report, "empty", reply, -32602, "act needs a non-empty `action`",
+                        "app.act with no action")
+    except (OSError, ValueError, Unreachable) as e:
+        report.add("refusals", "fail", "did not answer: %s" % e)
+        return report
+
+    names = [a.get("name") for a in actions]
+    reply = _probe(report, path, NO_SUCH_ACTION, {}, stale)
+    if reply is None:
+        return report
+    protocol_dispatch = _expect_refusal(
+        report, "unknown", reply, -32602,
+        "unknown action `%s`; this app offers: %s" % (NO_SUCH_ACTION, ", ".join(names)),
+        "unknown action")
+
+    if not (protocol == PROTOCOL and protocol_dispatch):
+        why = ("it does not publish protocol 1" if protocol != PROTOCOL else
+               "its unknown-action refusal is not the protocol dispatch's")
+        for check in ("missing", "undeclared", "stale"):
+            report.add(check, "skip", "not probed: %s, so nothing promises it refuses before a "
+                       "handler runs" % why)
+        return report
+
+    ceiling = _machine_ceiling()
+    eligible = [a for a in actions
+                if a.get("permission") in ("safe", "standard")
+                and LADDER.index(a["permission"]) <= LADDER.index(ceiling)
+                and not unrecoverable(a.get("description"))]
+    eligible.sort(key=lambda a: LADDER.index(a["permission"]))  # safe first
+    if not eligible:
+        for check in ("missing", "undeclared", "stale"):
+            report.add(check, "skip", "no action graded safe or standard (within this machine's "
+                       "%s ceiling) that can be undone; yos check names nothing else" % ceiling)
+        return report
+
+    def declared(a):
+        params = a.get("parameters") or {}
+        return list((params.get("properties") or {}).keys()), list(params.get("required") or [])
+
+    def placeholders(a):
+        props = (a.get("parameters") or {}).get("properties") or {}
+        return {n: PLACEHOLDER.get((props.get(n) or {}).get("type"), "yos-check")
+                for n in declared(a)[1]}
+
+    def gated(check, reply):
+        why = _gated(reply)
+        if why:
+            report.add(check, "skip", "the gate answered first, as it should: %s" % why[:160])
+        return bool(why)
+
+    needing = [a for a in eligible if declared(a)[1]]
+    if needing:
+        a = needing[0]
+        reply = _probe(report, path, a["name"], {}, stale)
+        if reply is not None and not gated("missing", reply):
+            _expect_refusal(report, "missing", reply, -32602,
+                            "`%s` needs argument `%s`" % (a["name"], declared(a)[1][0]),
+                            "%s with no arguments" % a["name"])
+    else:
+        report.add("missing", "skip", "no eligible action requires an argument")
+
+    a = eligible[0]
+    args = dict(placeholders(a), **{UNDECLARED: "yos-check"})
+    reply = _probe(report, path, a["name"], args, stale)
+    if reply is not None and not gated("undeclared", reply):
+        props = declared(a)[0]
+        got = _refusal(reply)
+        if props:
+            prefix = "`%s` has no argument `%s`; it takes: " % (a["name"], UNDECLARED)
+            ok = (got and got[0] == -32602 and isinstance(got[1], str) and got[1].startswith(prefix)
+                  and sorted(got[1][len(prefix):].split(", ")) == sorted(props))
+            want = prefix + ", ".join(props)
+        else:
+            want = "`%s` takes no arguments, but `%s` was given" % (a["name"], UNDECLARED)
+            ok = got == (-32602, want)
+        if ok:
+            report.add("undeclared", "pass", "%s with `%s` → -32602 %s"
+                       % (a["name"], UNDECLARED, got[1]))
+        else:
+            report.add("undeclared", "fail", "%s with `%s` → %s\nthe protocol says: -32602 %s"
+                       % (a["name"], UNDECLARED, json.dumps(got or reply.get("result"))[:300], want))
+
+    reply = _probe(report, path, a["name"], placeholders(a), stale)
+    if reply is not None and not gated("stale", reply):
+        got = _refusal(reply)
+        pattern = (r"STALE: this app is at revision ([0-9a-f]{16}) and you acted on %s\. "
+                   r"It now reports: (.*)\. Read it again before deciding\." % stale)
+        matched = got and got[0] == -32602 and isinstance(got[1], str) and \
+            re.fullmatch(pattern, got[1], re.DOTALL)
+        if matched:
+            report.add("stale", "pass", "%s acting on %s → -32602 %s"
+                       % (a["name"], stale, got[1][:200]))
+        else:
+            report.add("stale", "fail", "%s acting on %s → %s\nthe protocol says: -32602 STALE: "
+                       "this app is at revision <current> and you acted on %s. It now reports: "
+                       "<summary>. Read it again before deciding."
+                       % (a["name"], stale, json.dumps(got or reply.get("result"))[:300], stale))
+    return report
+
+
+def _machine_ceiling():
+    """`tool_permission` as every dispatch reads it (`gate::ceiling_from`), for choosing probes
+    the ceiling will not refuse first."""
+    path = os.path.join(os.path.expanduser("~"), ".config", "yantrik", "settings.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                if key.strip() == "tool_permission":
+                    value = value.strip().strip("\"'")
+                    return value if value in LADDER else "sensitive"
+    except OSError:
+        pass
+    return "sensitive"
+
+
+def _every_surface():
+    """Every socket in the chain that answers, once each (another name's symlink is skipped)."""
+    found = []
+    for directory in SOCKET_DIRS:
+        try:
+            entries = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            path = os.path.join(directory, entry)
+            if entry.endswith(".sock") and not os.path.islink(path) and _answers(path):
+                found.append((entry[:-5], path))
+    return found
+
+
+def cmd_check(argv):
+    as_json = "--json" in argv
+    every = "--all" in argv
+    names = [a for a in argv if a not in ("--json", "--all")]
+    if not names and not every:
+        die("usage: yos check <surface|path.sock> [...] [--json]   or   yos check --all [--json]")
+
+    targets = []
+    for name in names:
+        if os.sep in name or name.endswith(".sock"):
+            targets.append((name, name))
+            continue
+        live = [p for p in socket_candidates(name) if _answers(p)]
+        targets.append((name, live[0] if live else None))
+    if every:
+        targets.extend((n, p) for n, p in _every_surface()
+                       if not any(p == q for _, q in targets))
+
+    reports = []
+    for label, path in targets:
+        if path is None:
+            report = Report(label, None)
+            report.add("reachable", "fail", "nothing answers as %r (try: yos ls)" % label)
+        else:
+            report = check_surface(path, label, services_too=every and label not in names)
+        reports.append(report)
+
+    if as_json:
+        print(json.dumps({"ok": not any(r.failed() for r in reports),
+                          "surfaces": [r.as_json() for r in reports]}, indent=2))
+    else:
+        for i, report in enumerate(reports):
+            if i:
+                print()
+            report.print()
+    if any(r.failed() for r in reports):
+        raise SystemExit(1)
+
+
 COMMANDS = {
     "ls": cmd_ls,
     "describe": cmd_describe,
+    "check": cmd_check,
     "act": cmd_act,
     "perception": cmd_perception,
     "journal": cmd_journal,

@@ -94,11 +94,16 @@ fn breaker_reset(address: &str) {
     }
 }
 
+/// Who a caller insists is on the other end before it says anything: handed the kernel's account
+/// of the peer, `Err` with the reason when it is not. See [`SyncRpcClient::expecting_peer`].
+pub type PeerRule = fn(Option<crate::server::PeerCred>) -> Result<(), String>;
+
 /// Blocking RPC client for calling services from synchronous code.
 pub struct SyncRpcClient {
     address: String,
     next_id: std::sync::atomic::AtomicU64,
     timeout: Duration,
+    peer_rule: Option<PeerRule>,
 }
 
 impl SyncRpcClient {
@@ -119,7 +124,21 @@ impl SyncRpcClient {
             address: address.to_string(),
             next_id: std::sync::atomic::AtomicU64::new(1),
             timeout: DEFAULT_TIMEOUT,
+            peer_rule: None,
         }
+    }
+
+    /// Check who is listening before sending anything, and refuse to talk to anyone else.
+    ///
+    /// For the one call where the answer is worth something to whoever gives it: spending a
+    /// person's grant through `app-shell` (see `gate::spend_grant` and
+    /// [`crate::owner::must_be_the_shell`]). The peer is read from the kernel after `connect` and
+    /// before the request is written, so a process that is not the shell never sees the grant. A
+    /// refusal comes back as an `RpcError` carrying the rule's own sentence. Unix only; the TCP dev
+    /// path has no peer process, and a rule handed `None` there refuses.
+    pub fn expecting_peer(mut self, rule: PeerRule) -> Self {
+        self.peer_rule = Some(rule);
+        self
     }
 
     /// Connect to the default address for a service.
@@ -249,6 +268,14 @@ impl SyncRpcClient {
             data: None,
         })?;
 
+        if let Some(rule) = self.peer_rule {
+            rule(crate::owner::peer_of(&stream)).map_err(|message| RpcError {
+                code: -32000,
+                message,
+                data: None,
+            })?;
+        }
+
         self.exchange(stream, req_json)
     }
 
@@ -278,6 +305,10 @@ impl SyncRpcClient {
             message: format!("Connection failed ({}): {e}", self.address),
             data: None,
         })?;
+
+        if let Some(rule) = self.peer_rule {
+            rule(None).map_err(|message| RpcError { code: -32000, message, data: None })?;
+        }
 
         self.exchange(stream, req_json)
     }
@@ -403,6 +434,64 @@ mod tests {
 
         breaker_reset(&addr);
         assert!(!breaker_is_open(&addr));
+    }
+
+    /// A caller that insists on who is listening never writes its request to anyone else. The
+    /// listener here is this test binary, which is not the shell: the rule refuses it, the
+    /// request never arrives, and a rule that accepts this process lets the same call through.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_peer_rule_is_checked_before_the_request_is_sent() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!("yantrik-peer-rule-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app-shell.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let heard = Arc::new(AtomicUsize::new(0));
+        let counted = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let mut writer = stream.try_clone().unwrap();
+                let mut line = String::new();
+                if BufReader::new(stream).read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+                let asked: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let reply = serde_json::json!({"jsonrpc": "2.0", "id": asked["id"], "result": "spent"});
+                let _ = writer.write_all(format!("{reply}\n").as_bytes());
+            }
+        });
+
+        let address = path.to_string_lossy().to_string();
+        let err = SyncRpcClient::new(&address)
+            .expecting_peer(crate::owner::must_be_the_shell)
+            .call("app.act", serde_json::json!({"action": "consume_approval"}))
+            .expect_err("a test binary is not the shell");
+        assert!(err.message.contains("not the desktop's own yantrik-ui"), "{}", err.message);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(heard.load(Ordering::SeqCst), 0, "nothing was written to a peer that failed the rule");
+
+        breaker_reset(&address);
+        fn this_process(peer: Option<crate::server::PeerCred>) -> Result<(), String> {
+            match peer {
+                Some(p) if p.pid as u32 == std::process::id() => Ok(()),
+                other => Err(format!("unexpected peer {other:?}")),
+            }
+        }
+        let answer = SyncRpcClient::new(&address)
+            .expecting_peer(this_process)
+            .call("app.act", serde_json::json!({}))
+            .expect("the kernel names this process as the listener");
+        assert_eq!(answer, "spent");
+        assert_eq!(heard.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

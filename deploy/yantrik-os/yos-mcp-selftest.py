@@ -887,15 +887,27 @@ with tempfile.TemporaryDirectory() as d:
     # refuses a session rule from `approvals::unrecoverable`; this decides whether there is a
     # card at all. Two readings of the same sentence that disagreed would be a desktop warning
     # about something it had already run.
+    #
+    # The list lives in the gate now (`gate::UNRECOVERABLE_PHRASES`), which the shell's
+    # `approvals::unrecoverable` and every app's dispatch ask; the gate's tests publish it in
+    # surface-vectors.json, so the two lists are compared as lists, in order.
     module, _ = case(tmp, "phrases", ceiling=None)
-    rust = (HERE.parent.parent / "crates" / "yantrik-ui" / "src" / "approvals.rs")
+    rust = (HERE.parent.parent / "crates" / "yantrik-ipc-transport" / "src" / "gate.rs")
     body = rust.read_text(encoding="utf-8")
-    start = body.index("pub fn unrecoverable(")
+    start = body.index("pub const UNRECOVERABLE_PHRASES")
     in_rust = [p for p in module.UNRECOVERABLE_PHRASES
-               if '"%s"' % p in body[start:body.index("\n}", start)]]
-    check("every phrase this bridge matches on is one the shell matches on",
+               if '"%s"' % p in body[start:body.index("];", start)]]
+    check("every phrase this bridge matches on is one the gate matches on",
           len(in_rust) == len(module.UNRECOVERABLE_PHRASES),
           sorted(set(module.UNRECOVERABLE_PHRASES) - set(in_rust)))
+    published = json.loads((HERE / "surface-vectors.json").read_text(encoding="utf-8"))
+    check("and the list is the gate's, phrase for phrase and in order",
+          list(module.UNRECOVERABLE_PHRASES) == published.get("phrases"),
+          (module.UNRECOVERABLE_PHRASES, published.get("phrases")))
+    misread = [v["purpose"] for v in published.get("purposes") or []
+               if module.unrecoverable(v["purpose"]) != v["unrecoverable"]]
+    check("and every sentence in the vectors is read the way the gate reads it",
+          bool(published.get("purposes")) and not misread, misread)
     check("and the sentence Calendar actually publishes is one of them",
           module.unrecoverable("Take an event off the calendar. It is not recoverable")
           and not module.unrecoverable("Move a file or folder to recoverable Trash"), None)
@@ -1115,6 +1127,43 @@ with tempfile.TemporaryDirectory() as d:
     by_undo = {bool(v.get("unrecoverable")): v.get("expect") for v in auto_sensitive}
     check("auto runs a recoverable sensitive action and asks about one that cannot be undone",
           by_undo == {False: "run_logged", True: "ask"}, by_undo)
+
+    # And the bridge agrees with every app's dispatch. `surface-vectors.json` is
+    # `yantrik_ipc_transport::gate::decide` written out by the gate's own tests; each vector says
+    # what a door that raises cards must do with the same inputs (`door`): ask exactly where the
+    # dispatch would refuse for want of a grant, refuse where it refuses on the ceiling or the
+    # machine is in plan. The bridge is such a door. If this and the mind-mode check above both
+    # pass, the shell, the bridge and every app's dispatch tell a mind the same thing.
+    module, _ = case(tmp, "surface-vectors")
+    try:
+        surface = json.loads((HERE / "surface-vectors.json").read_text(encoding="utf-8"))
+        doors = surface.get("decide") or []
+    except (OSError, ValueError) as e:
+        doors = []
+        check("the dispatch's vectors are checked in", False, e)
+    check("the dispatch's vectors are checked in", len(doors) >= 640, len(doors))
+    as_door = {"run": "run", "ask": "ask", "refuse_grade": "refuse", "refuse_ceiling": "refuse",
+               "refuse_mode": "refuse"}
+    drifted = []
+    for v in doors:
+        rules = [(v["app"], v["action"])] if v.get("session_rule") else []
+        verdict, _ = module.decide(v["grade"], v["app"], v["action"],
+                                   module.unrecoverable(v["purpose"]), v["mode"], rules,
+                                   v["ceiling"])
+        if as_door.get(verdict) != v.get("door"):
+            drifted.append("%s: the dispatch says a door should %s, this bridge says %s"
+                           % (v.get("id"), v.get("door"), verdict))
+    check("this bridge does what every app's dispatch says a door should, on all %d" % len(doors),
+          not drifted, "\n     " + "\n     ".join(drifted[:12]))
+    # The bridge reaches the desktop only by running `yos`, which checks that the process behind
+    # `app-shell.sock` is the shell before it writes anything there. That is only this bridge's
+    # check too while it opens no socket of its own.
+    source = SOURCE.read_text(encoding="utf-8")
+    check("the bridge opens no socket itself, so yos's check of the shell's peer is its check",
+          "socket.socket(" not in source and "AF_UNIX" not in source, None)
+    check("and the one place the two differ is named in the file, not excused here",
+          all(v.get("door") == "refuse" and v.get("outcome") == "allow" and v.get("mode") == "plan"
+              for v in doors if v.get("note")) and any(v.get("note") for v in doors), None)
 
     # ── 19. A card on the screen does not make the bridge deaf ──────────────────────────
     #

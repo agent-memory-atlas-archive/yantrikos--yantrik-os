@@ -39,7 +39,15 @@ What it is checking, in one line each:
   * an agent's token — `--agent-token`, `YANTRIK_AGENT_TOKEN`, or an `agent_token=` argument —
     rides beside the arguments on `app.act` and never among them, so the approval card it may
     raise is asked for with the arguments alone; and an act told to `wait` is given longer than
-    its wait.
+    its wait;
+  * `yos check` passes a fake surface that keeps docs/surface-protocol.md, runs none of its
+    handlers doing it, and names only its safe, recoverable action in a probe; it fails a surface
+    that keeps nothing on each thing it breaks, and sends it nothing that names a real action;
+  * the describe schema `yos check` carries is docs/schema/describe.schema.json, the envelopes the
+    Rust builders make (surface-vectors.json) match both schemas, and the revision, the phrase
+    list and every revision the spec quotes are the gate's;
+  * `yos` writes nothing to `app-shell.sock` unless a `yantrik-ui` binary is what listens there;
+  * and the socket-directory chain is the transport's, in its order.
 """
 
 import contextlib
@@ -48,6 +56,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
 import sys
@@ -202,7 +211,106 @@ def load_yos(runtime_dir):
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     module.SOCKET_DIRS = [str(pathlib.Path(runtime_dir) / "yantrik")]
+    # The fake shell below is served by this very process, so the kernel names this Python as the
+    # process behind `app-shell.sock`. `yos` refuses to talk to anything but a `yantrik-ui` binary
+    # there; this test's own interpreter is added to what it accepts, and the refusal itself is
+    # checked on its own, with the real list, further down.
+    module.SHELL_BINARIES = ("yantrik-ui", os.path.basename(os.readlink("/proc/self/exe")))
     return module
+
+
+def fnv(summary, state):
+    """`View::revision()` written out a second time, so a fake surface can publish a revision that
+    was not computed by the function under test."""
+    h = 0xCBF29CE484222325
+    text = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    for byte in summary.encode("utf-8") + b"\x00" + text.encode("utf-8"):
+        h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return "%016x" % h
+
+
+class ProtocolSurface:
+    """A surface that keeps docs/surface-protocol.md: the dispatch's checks in the dispatch's
+    order and words, and a record of every handler that ran — which `yos check` must leave empty.
+    """
+
+    ACTIONS = [
+        {"name": "greet", "description": "Say hello to someone", "permission": "safe",
+         "settles": "on return",
+         "parameters": {"type": "object", "required": ["name"], "properties": {
+             "loud": {"type": "boolean", "description": "Shout it"},
+             "name": {"type": "string", "description": "Who to greet"}}}},
+        {"name": "wipe", "description": "Delete every greeting. It is not recoverable.",
+         "permission": "standard", "settles": "on return",
+         "parameters": {"type": "object", "required": [], "properties": {}}},
+        {"name": "render", "description": "Render the greetings to a file",
+         "permission": "sensitive", "settles": "later",
+         "parameters": {"type": "object", "required": ["out"], "properties": {
+             "out": {"type": "string", "description": "Where to write"}}}},
+    ]
+
+    def __init__(self):
+        self.ran = []
+        self.summary, self.state = "Hello — 2 greetings", {"greetings": 2, "last": "Ada"}
+
+    def describe(self):
+        return {"protocol": 1, "app": "hello", "summary": self.summary, "state": self.state,
+                "revision": fnv(self.summary, self.state), "actions": self.ACTIONS}
+
+    def reply(self, _svc, asked):
+        refuse = lambda message, code=-32602: {"__error__": {"code": code, "message": message}}
+        if asked["method"] == "rpc.ping":
+            return "pong"
+        if asked["method"] == "app.describe":
+            return self.describe()
+        if asked["method"] != "app.act":
+            return refuse("unknown method `%s`; this app serves app.describe, app.act"
+                          % asked["method"], -32601)
+        params = asked.get("params") or {}
+        name = (params.get("action") or "").strip()
+        args = params.get("args") or {}
+        if not name:
+            return refuse("act needs a non-empty `action`")
+        spec = next((a for a in self.ACTIONS if a["name"] == name), None)
+        if spec is None:
+            return refuse("unknown action `%s`; this app offers: %s"
+                          % (name, ", ".join(a["name"] for a in self.ACTIONS)))
+        declared = list(spec["parameters"]["properties"])
+        for p in spec["parameters"]["required"]:
+            if p not in args:
+                return refuse("`%s` needs argument `%s`" % (name, p))
+        for key in sorted(args):
+            if key not in declared:
+                return refuse(("`%s` has no argument `%s`; it takes: %s"
+                               % (name, key, ", ".join(declared))) if declared else
+                              "`%s` takes no arguments, but `%s` was given" % (name, key))
+        current = fnv(self.summary, self.state)
+        if params.get("expect_revision") not in (None, current):
+            return refuse("STALE: this app is at revision %s and you acted on %s. It now reports: "
+                          "%s. Read it again before deciding."
+                          % (current, params["expect_revision"], self.summary))
+        self.ran.append((name, args))
+        return {"app": "hello", "action_id": "app-hello#1", "accepted": True, "settled": True,
+                "result": {}, "revision": current, "summary": self.summary, "state": self.state}
+
+
+# A surface that keeps nothing: no `protocol`, a grade off the ladder, a parameter typed as
+# nothing JSON Schema has, a password among the arguments, a revision that is not the hash, and an
+# unknown-action refusal in a service's own words — as the three services that answer `app.act`
+# themselves still do (their dispatch moves onto the shared one in the SDK's piece B).
+BROKEN = {
+    "app": "broken", "summary": "Broken", "state": {"x": 1}, "revision": "0000000000000000",
+    "actions": [
+        {"name": "connect", "description": "Join a network", "permission": "standard",
+         "settles": "later",
+         "parameters": {"type": "object", "required": ["ssid"], "properties": {
+             "ssid": {"type": "string", "description": ""},
+             "password": {"type": "string", "description": ""}}}},
+        {"name": "nuke", "description": "Everything", "permission": "catastrophic",
+         "settles": "on return", "parameters": {"type": "object", "required": [], "properties": {
+             "how": {"type": "list", "description": ""}}}},
+    ],
+}
 
 
 def run(fn):
@@ -602,6 +710,126 @@ def main():
         out, err, code = run(lambda: yos.cmd_act(["system-monitor", "kill_process", "pid=4242"]))
         check("a denial ends nothing", [k.get("grant") for k in kills()] == [None]
               and code == 1 and "said no" in err, (kills(), err))
+
+        print("yos check, against a surface that keeps the protocol")
+        hello = ProtocolSurface()
+        hello_svc = FakeService(sockets / "app-hello.sock", hello.reply)
+        hello_svc.start()
+        services.append(hello_svc)
+        out, err, code = run(lambda: yos.cmd_check(["hello"]))
+        check("it passes, and says what it saw for every check",
+              code is None and "0 failed" in out
+              and all(("  pass  %s" % c) in out for c in (
+                  "ping", "describe", "protocol", "schema", "grades", "params", "secrets",
+                  "revision", "steady", "method", "empty", "unknown", "missing", "undeclared",
+                  "stale")), out + err)
+        check("no handler ran: every act it sent was one the dispatch refuses first",
+              hello.ran == [], hello.ran)
+        acts = [c["params"] for c in hello_svc.calls if c["method"] == "app.act"]
+        named = sorted({a.get("action") for a in acts if a.get("action")})
+        check("the only real action it named is the safe, recoverable one",
+              named == ["greet", "yos-check-no-such-action"], named)
+        check("and every act that named one carried a revision the app had moved past",
+              all(a.get("expect_revision") and a["expect_revision"] != hello.describe()["revision"]
+                  for a in acts if a.get("action")), acts)
+        out, err, code = run(lambda: yos.cmd_check(["hello", "--json"]))
+        try:
+            answer = json.loads(out)
+        except ValueError:
+            answer = {}
+        rows = (answer.get("surfaces") or [{}])[0].get("checks") or []
+        check("--json says the same, as JSON",
+              answer.get("ok") is True and len(rows) == 15
+              and {r["status"] for r in rows} == {"pass"}, out)
+        out, err, code = run(lambda: yos.cmd_check([str(sockets / "app-hello.sock")]))
+        check("a socket can be named by its path, for a surface under development",
+              code is None and "0 failed" in out, out + err)
+
+        print("yos check, against a surface that keeps nothing")
+        broken_svc = FakeService(sockets / "app-broken.sock", lambda _s, asked: (
+            "pong" if asked["method"] == "rpc.ping" else
+            BROKEN if asked["method"] == "app.describe" else
+            {"__error__": {"code": -32601, "message": "unknown action `%s`; this service offers: "
+                           "connect, nuke" % (asked.get("params") or {}).get("action")}}))
+        broken_svc.start()
+        services.append(broken_svc)
+        out, err, code = run(lambda: yos.cmd_check(["broken"]))
+        failed = {line.split()[1] for line in out.splitlines() if line.startswith("  fail")}
+        check("it fails, exit 1", code == 1, (code, out))
+        check("on the missing protocol, the schema, the grade, the parameter type, the password, "
+              "the revision and the unknown-action refusal",
+              {"protocol", "schema", "grades", "params", "secrets", "revision", "unknown"} <= failed,
+              sorted(failed))
+        check("naming what it saw",
+              "nuke is graded \"catastrophic\"" in out and "connect(password)" in out
+              and "nuke(how) is typed \"list\"" in out and "this service offers" in out, out)
+        acts = [c["params"] for c in broken_svc.calls if c["method"] == "app.act"]
+        check("and a dispatch that is not the protocol's is sent nothing that names a real action",
+              all(a.get("action") in (None, "yos-check-no-such-action") for a in acts)
+              and "  skip  missing" in out, acts)
+
+        print("yos check's schema is the one beside the spec, and the envelopes the Rust builders "
+              "make match both schemas")
+        repo = HERE.parent.parent
+        on_disk = json.loads((repo / "docs" / "schema" / "describe.schema.json").read_text("utf-8"))
+        check("the describe schema yos carries is docs/schema/describe.schema.json",
+              yos.DESCRIBE_SCHEMA == on_disk, "regenerate one from the other")
+        vectors = json.loads((HERE / "surface-vectors.json").read_text("utf-8"))
+        act_schema = json.loads((repo / "docs" / "schema" / "act.schema.json").read_text("utf-8"))
+        envelopes = vectors.get("envelopes") or {}
+        check("describe_json's envelope matches the describe schema",
+              envelopes.get("describe") and not yos.schema_errors(envelopes["describe"], on_disk),
+              yos.schema_errors(envelopes.get("describe") or {}, on_disk))
+        check("act_json's envelope matches the act schema",
+              envelopes.get("act") and not yos.schema_errors(envelopes["act"], act_schema),
+              yos.schema_errors(envelopes.get("act") or {}, act_schema))
+        refusal = {"code": -32602, "message": "STALE: …"}
+        check("and a refusal matches the act schema's",
+              not yos.schema_errors(refusal, {"$ref": "#/$defs/refusal"}, act_schema)
+              and yos.schema_errors({"code": "x"}, {"$ref": "#/$defs/refusal"}, act_schema), None)
+        wrong = [v["summary"] for v in vectors.get("revision") or []
+                 if yos.revision_of(v["summary"], v["state"]) != v["revision"]]
+        check("the revision yos computes is the gate's, on every vector",
+              vectors.get("revision") and not wrong, wrong)
+        check("and its phrase list is the gate's",
+              list(yos.UNRECOVERABLE_PHRASES) == vectors.get("phrases"), yos.UNRECOVERABLE_PHRASES)
+        spec = (repo / "docs" / "surface-protocol.md").read_text("utf-8")
+        generated = {v["revision"] for v in vectors.get("revision") or []}
+        generated.add((envelopes.get("describe") or {}).get("revision"))
+        quoted = set(re.findall(r"`([0-9a-f]{16})`", spec)) | set(
+            re.findall(r'"revision": "([0-9a-f]{16})"', spec))
+        check("every revision the spec quotes is one the code generated",
+              quoted and quoted <= generated, sorted(quoted - generated))
+
+        print("the shell's name is the shell's: yos talks to app-shell only when yantrik-ui is "
+              "what answers")
+        accepted = yos.SHELL_BINARIES
+        yos.SHELL_BINARIES = ("yantrik-ui",)
+        shell.calls.clear()
+        try:
+            out, err, code = run(lambda: yos.cmd_describe(["shell"]))
+        finally:
+            yos.SHELL_BINARIES = accepted
+        check("a process that is not yantrik-ui is refused, named, and sent nothing",
+              code == 1 and "not the desktop's own yantrik-ui" in err
+              and ("pid %d" % os.getpid()) in err and shell.calls == [], (err, shell.calls))
+        check("while any other socket is talked to as before",
+              yos.shell_peer_problem(None, str(sockets / "app-hello.sock")) is None, None)
+
+        print("the socket chain is the transport's, in its order")
+        saved = os.environ.get("XDG_RUNTIME_DIR")
+        try:
+            os.environ["XDG_RUNTIME_DIR"] = "/run/user/4242"
+            chain = yos.socket_dirs()
+            del os.environ["XDG_RUNTIME_DIR"]
+            unset = yos.socket_dirs()
+        finally:
+            os.environ["XDG_RUNTIME_DIR"] = saved or tmp
+        check("$XDG_RUNTIME_DIR/yantrik, then /run/yantrik, then /tmp/yantrik-<uid>",
+              chain == ["/run/user/4242/yantrik", "/run/yantrik", "/tmp/yantrik-%d" % os.getuid()],
+              chain)
+        check("and with no XDG_RUNTIME_DIR, where logind puts it, in the first place",
+              unset[0] == "/run/user/%d/yantrik" % os.getuid() and unset[1:] == chain[1:], unset)
 
         print("yos perception, with no desktop to ask")
         for svc in services:

@@ -25,7 +25,15 @@
 //!    being above the ceiling, and never ran (#154).
 //! 3. **The mode** (`mind-mode.json`, beside the settings): above what it runs unasked, with no
 //!    grant spent and no session rule for the action, the call is refused with `GRANT:` and told
-//!    how to get one.
+//!    how to get one. So is an action whose own published description says it cannot be undone
+//!    ([`unrecoverable`]), in every mode but bypass and whatever its grade above `safe`: the
+//!    shell's table and the MCP bridge already asked about those, and until this rule moved here
+//!    `yos act` or a raw socket ran `calendar.delete_event` in auto with nobody asked (map gap 4
+//!    of the surface SDK). A session rule never covers one, and in plan mode no session rule
+//!    covers anything — plan raises no card, so there is no standing answer to one.
+//!
+//! The whole table is generated into `deploy/yantrik-os/surface-vectors.json` by this module's
+//! tests, and every other implementation of it replays that file.
 //!
 //! [`permit`] is all three, for a caller that holds the grade where it holds the call — a
 //! service. A window cannot: its grades live on the UI thread and file and socket IO does not
@@ -50,6 +58,49 @@ pub const LADDER: [&str; 4] = ["safe", "standard", "sensitive", "dangerous"];
 /// Where a grade sits on [`LADDER`], or `None` if it is not a level this OS defines.
 pub fn grade(permission: &str) -> Option<usize> {
     LADDER.iter().position(|g| *g == permission)
+}
+
+/// Whether a caller capped at `cap` may use an action graded `graded` — the ceiling's comparison
+/// alone, for a caller that holds a cap of its own rather than the machine's. The companion's
+/// `app_action` asks this against `tools.max_permission` before it sends anything, so the ladder
+/// it reads is this one and not a copy.
+///
+/// `None` when `graded` is not a level this OS defines: that is refused, never waved through. A
+/// cap off the ladder reads as [`DEFAULT_CEILING`], as the machine's does.
+pub fn permits(cap: &str, graded: &str) -> Option<bool> {
+    let level = grade(graded)?;
+    let cap = grade(cap).unwrap_or_else(|| grade(DEFAULT_CEILING).unwrap());
+    Some(level <= cap)
+}
+
+// ── What cannot be undone ───────────────────────────────────────────
+
+/// The wording that makes an action's own description a promise that it cannot be taken back.
+///
+/// Lowercased, matched as substrings. The same seven, in the same order, the shell's
+/// `approvals::unrecoverable` used (it now asks this function) and the MCP bridge's
+/// `UNRECOVERABLE_PHRASES` carries; `surface-vectors.json` publishes the list so a port can check
+/// its own copy phrase for phrase.
+pub const UNRECOVERABLE_PHRASES: [&str; 7] = [
+    "not recoverable",
+    "cannot be undone",
+    "can't be undone",
+    "irreversible",
+    "permanently",
+    "permanent",
+    "no undo",
+];
+
+/// Does the app's own sentence about an action say it cannot be taken back?
+///
+/// The grade ladder has no rung for "recoverable", and `calendar.delete_event` — graded
+/// `sensitive`, published as "It is not recoverable" — is the action that showed it matters: the
+/// mode menu promises auto still asks about the destructive ones. So the sentence decides too, in
+/// [`decide`], on every door. One reading of the sentence for the whole machine: the shell's card
+/// draws its red warning line from this, and refuses to mint a session rule on the strength of it.
+pub fn unrecoverable(purpose: &str) -> bool {
+    let lower = purpose.to_lowercase();
+    UNRECOVERABLE_PHRASES.iter().any(|phrase| lower.contains(phrase))
 }
 
 /// The ceiling used when `settings.yaml` is missing, unreadable, or says nothing usable —
@@ -273,12 +324,18 @@ pub fn spend_grants_with(
 /// itself before running the action. The check is the shell's — granted, unspent, unexpired,
 /// bound to this app, this action and these arguments — and the refusal is the shell's own
 /// sentence, which already names the part that differed.
+///
+/// And only to the shell. Whatever answers `consume_approval` decides whether a person's Allow
+/// stands behind this call, so before the grant is written to the socket the process listening on
+/// it must be a `yantrik-ui` binary (`owner::must_be_the_shell`, from `SO_PEERCRED` and
+/// `/proc/<pid>/exe`). Anything else that bound `app-shell.sock` is refused and never sees it.
 fn spend_grant(id: &str, app: &str, action: &str, args: &serde_json::Value) -> Result<(), String> {
     if let Some(spend) = SPENDER.get() {
         return spend(id, app, action, args);
     }
     SyncRpcClient::for_service(SHELL)
         .with_timeout(GRANT_ROUNDTRIP)
+        .expecting_peer(crate::owner::must_be_the_shell)
         .call(
             "app.act",
             serde_json::json!({
@@ -384,51 +441,79 @@ impl Authority {
     }
 }
 
-/// May `app_id.action`, graded `graded` by the surface that offers it, run under `authority`?
+/// May `app_id.action`, graded `graded` and described as `purpose` by the surface that offers
+/// it, run under `authority`?
 ///
-/// The ceiling, then the mode — on the grade alone, before the arguments, the revision guard or
-/// the handler, because "may this caller use this action at all" is a question about the action,
-/// and answering a narrower question first would mean doing work for a call that was never
-/// allowed. Pure: no file is read and nothing is spent here, so a window's UI thread can call it
-/// inside the same turn of the event loop as the handler.
+/// The ceiling, then the mode — on the grade and the action's own description alone, before the
+/// arguments, the revision guard or the handler, because "may this caller use this action at
+/// all" is a question about the action, and answering a narrower question first would mean doing
+/// work for a call that was never allowed. Pure: no file is read and nothing is spent here, so a
+/// window's UI thread can call it inside the same turn of the event loop as the handler.
+///
+/// `purpose` is the description the surface publishes for the action — the sentence a person
+/// reads on the approval card — not anything the caller sent. [`unrecoverable`] reads it.
 pub fn decide(
     authority: &Authority,
     app_id: &str,
     action: &str,
     graded: &str,
+    purpose: &str,
 ) -> Result<(), String> {
     let level = within_ceiling(&authority.ceiling, app_id, action, graded)?;
 
     // The mode, and the grant that stands in for it. After the ceiling — no mode and no grant
-    // reaches past that. A session rule is the person's standing answer for this one action and
-    // covers it the way a grant would. Nothing here asks anybody: raising the card is the
-    // shell's, and the caller's job is to have done it (`yos act` does it for a caller that has
-    // not).
-    let unasked = authority.mode.allows().max(grade(SOCKET_FLOOR).unwrap());
-    if level > unasked && !authority.granted && !authority.mode.covers(app_id, action) {
-        return Err(grant_refusal(app_id, action, graded, &authority.mode));
+    // reaches past that. A grant is a person's Allow for exactly this call, and it answers every
+    // question below. Nothing here asks anybody: raising the card is the shell's, and the
+    // caller's job is to have done it (`yos act` does it for a caller that has not).
+    if authority.granted {
+        return Ok(());
     }
-    Ok(())
+    let mode = &authority.mode;
+    let everything = LADDER.len() - 1;
+
+    // The app's own sentence, and the one input here that is not a grade. `safe` is excluded:
+    // a read destroys nothing, so wording that happens to match cannot turn a look into a
+    // question. The shell's `Modes::decide` and the bridge's `decide` draw the same line.
+    let irreversible = level > 0 && unrecoverable(purpose);
+
+    // Bypass runs everything under the ceiling — "Stop asking me anything" is an answer already.
+    // Every other mode runs what its column says, never less than the socket floor, and asks
+    // about anything the app says cannot be undone.
+    let asks = mode.allows() < everything
+        && (irreversible || level > mode.allows().max(grade(SOCKET_FLOOR).unwrap()));
+    if !asks {
+        return Ok(());
+    }
+
+    // A session rule is the person's standing answer for this one action and covers it the way a
+    // grant would — except for an action that cannot be undone, which the card never offers a
+    // rule for, and except in plan mode, which raises no card and so has no standing answers.
+    let plan = mode.allows() == 0;
+    if !plan && !irreversible && mode.covers(app_id, action) {
+        return Ok(());
+    }
+    Err(grant_refusal(app_id, action, graded, mode, irreversible))
 }
 
 /// The whole rule for one call, for a caller that holds the grade where it holds the call.
 ///
 /// A service answering `app.act` in its own handler calls this before it dispatches, with the
-/// grade from the same table it hands `describe_json` — so the grade a caller is shown is the
-/// grade that is enforced. The ceiling, then the grant (spent only past the ceiling), then the
-/// mode: the steps a window's dispatch takes, in its order, with its sentences.
+/// grade and description from the same table it hands `describe_json` — so what a caller is shown
+/// is what is enforced. The ceiling, then the grant (spent only past the ceiling), then the mode:
+/// the steps a window's dispatch takes, in its order, with its sentences.
 pub fn permit(
     authority: &mut Authority,
     app_id: &str,
     action: &str,
     graded: &str,
+    purpose: &str,
     args: &serde_json::Value,
     grant: Option<&str>,
 ) -> Result<(), String> {
     if let Some(id) = grant {
         authority.spend(id, app_id, action, graded, args)?;
     }
-    decide(authority, app_id, action, graded)
+    decide(authority, app_id, action, graded, purpose)
 }
 
 /// Where `graded` sits on the ladder, or the ceiling's refusal. An unrecognised ceiling falls
@@ -436,7 +521,7 @@ pub fn permit(
 /// makes — and an unrecognised grade is refused rather than waved through: a typo in a
 /// `.risk(...)` must fail closed, or the typo silently becomes an exemption.
 fn within_ceiling(ceiling: &str, app_id: &str, action: &str, graded: &str) -> Result<usize, String> {
-    let Some(level) = grade(graded) else {
+    let Some(within) = permits(ceiling, graded) else {
         return Err(format!(
             "CEILING: {}.{} is graded `{}`, which is not a level this OS defines ({}), \
              so it was not run.",
@@ -446,8 +531,8 @@ fn within_ceiling(ceiling: &str, app_id: &str, action: &str, graded: &str) -> Re
             LADDER.join(" < ")
         ));
     };
-    let cap = grade(ceiling).unwrap_or_else(|| grade(DEFAULT_CEILING).unwrap());
-    if level > cap {
+    let level = grade(graded).unwrap_or_default();
+    if !within {
         return Err(format!(
             "CEILING: {app_id}.{action} is graded `{graded}`, above this machine's `{ceiling}` \
              ceiling (`tool_permission` in ~/.config/yantrik/settings.yaml), so it was not \
@@ -463,26 +548,43 @@ fn within_ceiling(ceiling: &str, app_id: &str, action: &str, graded: &str) -> Re
 /// It says how to get one, because the caller reading it is usually a program — `yos`, or a
 /// mind with a terminal — and "no" without a way forward is what teaches a program to look for
 /// another door. `GRANT:` in front so a caller can branch on it the way it branches on
-/// `CEILING:` and `STALE:`; `yos act` does, and asks on the caller's behalf.
-fn grant_refusal(app: &str, action: &str, graded: &str, mode: &Mode) -> String {
-    if mode.name == "plan" {
-        return format!(
+/// `CEILING:` and `STALE:`; `yos act` does, and asks on the caller's behalf. Every variant says
+/// "graded `<grade>`", which is where `yos act` reads the grade to ask with.
+///
+/// Four sentences: plan or not, and whether the reason is the grade or the app's own word that
+/// the action cannot be undone. The second reason is named when it applies, because it is the
+/// one a session rule does not answer — a caller holding a rule for the action needs to know why
+/// the rule did not cover it.
+fn grant_refusal(app: &str, action: &str, graded: &str, mode: &Mode, irreversible: bool) -> String {
+    const HOW: &str = "Ask the shell for approval first (`request_approval` with this app, action \
+         and these exact arguments, poll `approval_status`, then send the granted request_id as \
+         `grant` on app.act — `yos act` does all of that for you), or have the person at the \
+         machine press Allow when the card appears.";
+    const PLAN: &str = "Say what you would do and let the person decide; they switch the mode \
+         from the chip in the status bar.";
+    let final_word = "its own description says it cannot be undone";
+    match (mode.name == "plan", irreversible) {
+        (true, false) => format!(
             "GRANT: {app}.{action} is graded `{graded}` and this machine is in plan mode, which \
-             raises no card for anything above `{SOCKET_FLOOR}` — so it was not run. Say what \
-             you would do and let the person decide; they switch the mode from the chip in the \
-             status bar."
-        );
+             raises no card for anything above `{SOCKET_FLOOR}` — so it was not run. {PLAN}"
+        ),
+        (true, true) => format!(
+            "GRANT: {app}.{action} is graded `{graded}` and {final_word}, and this machine is in \
+             plan mode, which raises no card for that — so it was not run. {PLAN}"
+        ),
+        (false, false) => format!(
+            "GRANT: {app}.{action} is graded `{graded}` and this machine is in {mode} mode, which \
+             runs nothing above `{allowed}` without asking — so it was not run. {HOW}",
+            mode = mode.name,
+            allowed = LADDER[mode.allows().max(grade(SOCKET_FLOOR).unwrap())],
+        ),
+        (false, true) => format!(
+            "GRANT: {app}.{action} is graded `{graded}` and {final_word}, and this machine is in \
+             {mode} mode, which asks before anything that cannot be undone — so it was not run. \
+             {HOW}",
+            mode = mode.name,
+        ),
     }
-    format!(
-        "GRANT: {app}.{action} is graded `{graded}` and this machine is in {mode} mode, which \
-         runs nothing above `{allowed}` without asking — so it was not run. Ask the shell for \
-         approval first (`request_approval` with this app, action and these exact arguments, \
-         poll `approval_status`, then send the granted request_id as `grant` on app.act — \
-         `yos act` does all of that for you), or have the person at the machine press Allow \
-         when the card appears.",
-        mode = mode.name,
-        allowed = LADDER[mode.allows().max(grade(SOCKET_FLOOR).unwrap())],
-    )
 }
 
 #[cfg(test)]
@@ -492,6 +594,10 @@ mod tests {
     fn at(ceiling: &str, mode: &str) -> Authority {
         Authority { ceiling: ceiling.into(), mode: Mode::named(mode), granted: false }
     }
+
+    /// What System Monitor publishes for `kill_process`. Recoverable wording, so these tests are
+    /// about the grade; the description's own rule has tests of its own below.
+    const KILL: &str = "End a running process by pid";
 
     /// A stand-in for the shell's store: `ok-*` ids hold once, for exactly
     /// `system-monitor.kill_process {"pid": 42}`; anything else is refused in the shell's words.
@@ -518,31 +624,100 @@ mod tests {
 
     #[test]
     fn the_order_is_ceiling_then_mode_and_each_says_which_it_was() {
-        let err = decide(&at("sensitive", "bypass"), "system-monitor", "kill_process", "dangerous").unwrap_err();
+        let err = decide(&at("sensitive", "bypass"), "system-monitor", "kill_process", "dangerous", KILL).unwrap_err();
         assert!(err.starts_with("CEILING:") && err.contains("above this machine's `sensitive`"), "{err}");
 
-        let err = decide(&at("dangerous", "ask"), "system-monitor", "kill_process", "dangerous").unwrap_err();
+        let err = decide(&at("dangerous", "ask"), "system-monitor", "kill_process", "dangerous", KILL).unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("ask mode"), "{err}");
 
-        assert!(decide(&at("dangerous", "bypass"), "system-monitor", "kill_process", "dangerous").is_ok());
+        assert!(decide(&at("dangerous", "bypass"), "system-monitor", "kill_process", "dangerous", KILL).is_ok());
         let mut granted = at("dangerous", "ask");
         granted.granted = true;
-        assert!(decide(&granted, "system-monitor", "kill_process", "dangerous").is_ok());
+        assert!(decide(&granted, "system-monitor", "kill_process", "dangerous", KILL).is_ok());
     }
 
     #[test]
     fn standard_is_the_floor_in_every_mode_and_the_ceiling_still_binds_it() {
         for mode in ["plan", "ask", "auto", "bypass"] {
-            assert!(decide(&at("sensitive", mode), "notifications", "notify", "standard").is_ok(), "{mode}");
+            assert!(decide(&at("sensitive", mode), "notifications", "notify", "standard", "Post a notification").is_ok(), "{mode}");
         }
-        let err = decide(&at("safe", "bypass"), "notifications", "notify", "standard").unwrap_err();
+        let err = decide(&at("safe", "bypass"), "notifications", "notify", "standard", "Post a notification").unwrap_err();
         assert!(err.starts_with("CEILING:"), "{err}");
     }
 
     #[test]
     fn a_grade_off_the_ladder_is_refused_whatever_the_ceiling() {
-        let err = decide(&at("dangerous", "bypass"), "weather", "set_location", "catastrophic").unwrap_err();
+        let err = decide(&at("dangerous", "bypass"), "weather", "set_location", "catastrophic", "").unwrap_err();
         assert!(err.starts_with("CEILING:") && err.contains("not a level this OS defines"), "{err}");
+    }
+
+    /// Map gap 4 of the surface SDK, and the defect of 21 September one door further in:
+    /// `calendar.delete_event` is `sensitive` and says "It is not recoverable". The shell and the
+    /// bridge asked about it in auto; the dispatch ran it, so `yos act` or a raw socket did too.
+    #[test]
+    fn what_its_own_description_says_cannot_be_undone_is_asked_about_on_every_door() {
+        let delete = "Take an event off the calendar. It is not recoverable";
+        let update = "Change an event's title, time or notes";
+
+        assert!(decide(&at("sensitive", "auto"), "calendar", "update_event", "sensitive", update).is_ok());
+        let err = decide(&at("sensitive", "auto"), "calendar", "delete_event", "sensitive", delete).unwrap_err();
+        assert_eq!(
+            err,
+            "GRANT: calendar.delete_event is graded `sensitive` and its own description says it \
+             cannot be undone, and this machine is in auto mode, which asks before anything that \
+             cannot be undone — so it was not run. Ask the shell for approval first \
+             (`request_approval` with this app, action and these exact arguments, poll \
+             `approval_status`, then send the granted request_id as `grant` on app.act — `yos act` \
+             does all of that for you), or have the person at the machine press Allow when the card \
+             appears."
+        );
+
+        // Below the floor's grade too: a `standard` action that says so is asked about in ask.
+        let err = decide(&at("sensitive", "ask"), "blender", "delete_object", "standard",
+                         "Delete an object. Past that undo it is not recoverable.").unwrap_err();
+        assert!(err.starts_with("GRANT:") && err.contains("cannot be undone"), "{err}");
+
+        // Bypass asks nobody, a grant answers it, and a `safe` read is never turned into a card.
+        assert!(decide(&at("sensitive", "bypass"), "calendar", "delete_event", "sensitive", delete).is_ok());
+        let mut granted = at("sensitive", "auto");
+        granted.granted = true;
+        assert!(decide(&granted, "calendar", "delete_event", "sensitive", delete).is_ok());
+        assert!(decide(&at("sensitive", "plan"), "files", "describe_trash", "safe",
+                       "Lists what was deleted permanently").is_ok());
+    }
+
+    #[test]
+    fn a_session_rule_never_covers_what_cannot_be_undone_nor_anything_in_plan() {
+        let delete = "Take an event off the calendar. It is not recoverable";
+        let with_rule = |mode: &str, action: &str| Authority {
+            ceiling: "dangerous".into(),
+            mode: Mode { name: mode.into(), session_rules: vec![("calendar".into(), action.into())] },
+            granted: false,
+        };
+        assert!(decide(&with_rule("ask", "update_event"), "calendar", "update_event", "sensitive", "Move it").is_ok());
+        let err = decide(&with_rule("ask", "delete_event"), "calendar", "delete_event", "sensitive", delete).unwrap_err();
+        assert!(err.contains("cannot be undone"), "the rule did not cover it and the refusal says why: {err}");
+        let err = decide(&with_rule("plan", "update_event"), "calendar", "update_event", "sensitive", "Move it").unwrap_err();
+        assert!(err.starts_with("GRANT:") && err.contains("plan mode"), "{err}");
+    }
+
+    #[test]
+    fn the_phrases_are_read_the_way_the_shell_and_the_bridge_read_them() {
+        assert!(unrecoverable("Take an event off the calendar. It is not recoverable"));
+        assert!(unrecoverable("THIS CANNOT BE UNDONE"));
+        assert!(unrecoverable("there is no undo to argue with"));
+        assert!(!unrecoverable("Move a file or folder to recoverable Trash"));
+        assert!(!unrecoverable(""));
+        assert_eq!(UNRECOVERABLE_PHRASES.len(), 7);
+    }
+
+    #[test]
+    fn a_cap_is_compared_on_this_ladder() {
+        assert_eq!(permits("standard", "safe"), Some(true));
+        assert_eq!(permits("standard", "dangerous"), Some(false));
+        assert_eq!(permits("nonsense", "sensitive"), Some(true), "an unreadable cap is the default, sensitive");
+        assert_eq!(permits("nonsense", "dangerous"), Some(false));
+        assert_eq!(permits("dangerous", "spicy"), None, "a grade off the ladder is never within anything");
     }
 
     /// #154, item 2: a grant was spent and then the ceiling refused the act, so the person's
@@ -554,17 +729,17 @@ mod tests {
         let args = serde_json::json!({"pid": 42});
 
         let mut tight = at("sensitive", "ask");
-        let err = permit(&mut tight, "system-monitor", "kill_process", "dangerous", &args, Some("ok-154"))
+        let err = permit(&mut tight, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"))
             .unwrap_err();
         assert!(err.starts_with("CEILING:"), "the ceiling's refusal, not the grant's: {err}");
         assert!(!tight.granted);
 
         let mut raised = at("dangerous", "ask");
-        permit(&mut raised, "system-monitor", "kill_process", "dangerous", &args, Some("ok-154"))
+        permit(&mut raised, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"))
             .expect("the grant was left unspent by the refusal, so it holds now");
         assert!(raised.granted);
 
-        let err = permit(&mut at("dangerous", "ask"), "system-monitor", "kill_process", "dangerous", &args, Some("ok-154"))
+        let err = permit(&mut at("dangerous", "ask"), "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"))
             .unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("already used"), "and holds once: {err}");
     }
@@ -572,7 +747,7 @@ mod tests {
     #[test]
     fn a_grant_that_does_not_hold_ends_the_call_in_the_shells_words() {
         spend_through_a_stand_in_shell();
-        let err = permit(&mut at("dangerous", "bypass"), "system-monitor", "kill_process", "dangerous",
+        let err = permit(&mut at("dangerous", "bypass"), "system-monitor", "kill_process", "dangerous", KILL,
                          &serde_json::json!({"pid": 42}), Some("made-up"))
             .unwrap_err();
         assert!(err.starts_with("GRANT: `made-up` does not authorise system-monitor.kill_process"), "{err}");
@@ -602,7 +777,7 @@ mod tests {
         assert_eq!(agent_token_of(&params, &mut args).as_deref(), Some("tok-1"));
         assert_eq!(args, serde_json::json!({"pid": 42}));
         let mut authority = at("dangerous", "ask");
-        permit(&mut authority, "system-monitor", "kill_process", "dangerous", &args, grant_of(&params).as_deref())
+        permit(&mut authority, "system-monitor", "kill_process", "dangerous", KILL, &args, grant_of(&params).as_deref())
             .expect("bound to {\"pid\": 42}, which is what the shell was handed");
         assert!(authority.granted);
     }
@@ -611,5 +786,325 @@ mod tests {
     fn the_mode_file_sits_beside_the_settings_file() {
         assert_eq!(mode_path().parent(), settings_path().parent());
         assert!(mode_path().ends_with(MODE_FILE));
+    }
+
+    // ── The vectors every other implementation replays ─────────────────
+    //
+    // `deploy/yantrik-os/surface-vectors.json` is this module's decision written out for every
+    // combination of grade, ceiling, mode, session rule, grant and recoverability, with the
+    // sentence it refuses in. The Blender addon, the MCP bridge and the shell's own mode table
+    // replay it in their tests, so a copy that drifts fails its own build — and this test fails
+    // when the file is not what `decide` produces, so the file cannot drift either.
+
+    use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
+
+    /// The action a vector is about, so an id reads like something a person could check on a
+    /// real machine. The pair is cosmetic to `decide`; the description is not.
+    fn subject(unrecoverable: bool) -> (&'static str, &'static str, &'static str) {
+        if unrecoverable {
+            ("calendar", "delete_event", "Take an event off the calendar. It is not recoverable")
+        } else {
+            ("calendar", "update_event", "Change an event's title, time or notes")
+        }
+    }
+
+    /// What a door that raises cards — the shell's `request_approval`, the MCP bridge — does
+    /// with the same inputs, which do not include a grant (the card is how one is made).
+    ///
+    /// Derived from the dispatch's answer without a grant, and that derivation is the claim the
+    /// spec makes: a door asks exactly when the dispatch would refuse for want of a grant, and
+    /// refuses when the dispatch refuses on the ceiling — or when the machine is in plan mode,
+    /// where a door refuses everything above `safe` while the dispatch still runs `standard`
+    /// (`SOCKET_FLOOR`). The shell's `Modes::decide` and the bridge's `decide` are held to it.
+    fn door(without_grant: &Result<(), String>, mode: &str, graded: &str) -> &'static str {
+        match without_grant {
+            Err(why) if why.starts_with("CEILING:") => "refuse",
+            _ if mode == "plan" && grade(graded) != Some(0) => "refuse",
+            Err(_) => "ask",
+            Ok(()) => "run",
+        }
+    }
+
+    fn decision_vectors() -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for mode in ["plan", "ask", "auto", "bypass"] {
+            // The fifth is not a grade: `None` is not `safe`, and the case most likely to be got
+            // wrong twice.
+            for graded in ["safe", "standard", "sensitive", "dangerous", "spicy"] {
+                for ceiling in LADDER {
+                    for cannot_undo in [false, true] {
+                        let (app, action, purpose) = subject(cannot_undo);
+                        for session_rule in [false, true] {
+                            for granted in [false, true] {
+                                let rules = if session_rule {
+                                    vec![(app.to_string(), action.to_string())]
+                                } else {
+                                    Vec::new()
+                                };
+                                let authority = |granted| Authority {
+                                    ceiling: ceiling.to_string(),
+                                    mode: Mode { name: mode.to_string(), session_rules: rules.clone() },
+                                    granted,
+                                };
+                                let decided = decide(&authority(granted), app, action, graded, purpose);
+                                let without = decide(&authority(false), app, action, graded, purpose);
+                                let door = door(&without, mode, graded);
+                                let (outcome, refusal) = match &decided {
+                                    Ok(()) => ("allow", serde_json::Value::Null),
+                                    Err(why) => (
+                                        if why.starts_with("CEILING:") { "CEILING" } else { "GRANT" },
+                                        serde_json::Value::String(why.clone()),
+                                    ),
+                                };
+                                let mut vector = serde_json::json!({
+                                    "id": format!(
+                                        "{mode}/{graded}/ceiling={ceiling}/unrecoverable={cannot_undo}/rule={session_rule}/grant={granted}"
+                                    ),
+                                    "app": app,
+                                    "action": action,
+                                    "purpose": purpose,
+                                    "grade": graded,
+                                    "ceiling": ceiling,
+                                    "mode": mode,
+                                    "session_rule": session_rule,
+                                    "grant": granted,
+                                    "unrecoverable": unrecoverable(purpose),
+                                    "outcome": outcome,
+                                    "refusal": refusal,
+                                    "door": door,
+                                });
+                                if without.is_ok() && door == "refuse" {
+                                    vector["note"] = "socket floor: the dispatch runs `standard` in plan mode; a door that raises cards refuses it".into();
+                                }
+                                out.push(vector);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn purpose_vectors() -> Vec<serde_json::Value> {
+        [
+            "Take an event off the calendar. It is not recoverable",
+            "Move a file or folder to recoverable Trash",
+            "Throw the current scene away and start an empty one. Anything unsaved in it is lost, and in a background Blender there is no undo to argue with.",
+            "Erase the disk. This CANNOT BE UNDONE.",
+            "Remove the saved network permanently",
+            "An irreversible change",
+            "It can't be undone",
+            "Keeps a permanent record of what ran",
+            "Undo is one click away",
+            "",
+        ]
+        .into_iter()
+        .map(|p| serde_json::json!({ "purpose": p, "unrecoverable": unrecoverable(p) }))
+        .collect()
+    }
+
+    fn revision_vectors() -> Vec<serde_json::Value> {
+        let views = [
+            View::new(""),
+            View::new("Blender — \"monkey.blend\", 3 objects, Cycles 1920x1080").state(serde_json::json!({
+                "scene": "Scene", "file": "/tmp/monkey.blend", "unsaved": false,
+                "objects": [{"name": "Suzanne", "type": "MESH", "location": [0.0, 0.0, 0.0], "dimensions": [2.0, 2.0, 2.0]}],
+                "objects_total": 3, "camera": {"name": "Camera", "location": [4.0, -4.0, 3.0]},
+                "render": {"engine": "cycles", "resolution": "1920x1080", "samples": 32, "output": "/tmp/monkey.png"},
+                "last_render": null, "notice": "", "background": true
+            })),
+            View::new("Notes — “Kernel asks”, 412 words, unsaved")
+                .with("title", "Kernel asks")
+                .with("words", 412)
+                .with("unsaved", true)
+                .with("tags", serde_json::json!(["ünïcødé", "🙂", "a/b"])),
+            View::new("keys are sorted, not kept in the order they were added")
+                .with("zebra", 1)
+                .with("apple", serde_json::json!({"y": null, "b": [3, 2, 1]}))
+                .with("Mango", "capitals sort before lowercase"),
+            View::new("tab\there, a newline\nand a \"quote\"")
+                .with("backslash", "\\")
+                .with("control", "\u{1}\u{1f}")
+                .with("quote", "\"quoted\""),
+            View::new("numbers")
+                .with("int", 42)
+                .with("negative", -7)
+                .with("past_2_53", 9_007_199_254_740_993_u64)
+                .with("float", 21.5)
+                .with("zero_float", 0.0)
+                .with("small", 0.001),
+        ];
+        views
+            .iter()
+            .map(|v| serde_json::json!({ "summary": v.summary, "state": v.state, "revision": v.revision() }))
+            .collect()
+    }
+
+    /// Floats whose shortest rendering differs between `serde_json` and a naive port (Python's
+    /// `json.dumps` writes `1e-05` and `1e+16`). Normative — a port renders them as `serde_json`
+    /// does or its revisions disagree — and kept apart because the ports written so far do not.
+    fn float_edge_vectors() -> Vec<serde_json::Value> {
+        [0.00001_f64, 1.5e-7, 1e16, 1.25e21, 0.0001]
+            .into_iter()
+            .map(|x| {
+                let view = View::new("float").with("x", x);
+                serde_json::json!({
+                    "summary": view.summary,
+                    "state": view.state,
+                    "rendered": view.state.to_string(),
+                    "revision": view.revision(),
+                })
+            })
+            .collect()
+    }
+
+    /// One envelope of each kind, as the Rust builders make them, so the JSON Schemas beside the
+    /// spec are checked against what the code actually sends (`yos-selftest.py` validates these).
+    fn envelopes() -> serde_json::Value {
+        let view = View::new("Weather — 21°C in Dallas").with("temp", 21);
+        let actions = [
+            Action::new("refresh", "Fetch the weather again").risk("safe"),
+            Action::new("set_location", "Show the weather somewhere else")
+                .arg(Param::number("lat").describe("Latitude"))
+                .arg(Param::number("lon").describe("Longitude"))
+                .arg(Param::text("label").optional())
+                .defers(),
+        ];
+        serde_json::json!({
+            "describe": describe_json("weather", &view, &actions),
+            "act": act_json("weather", "app-weather#1", false, serde_json::json!({"refreshing": true}), &view),
+        })
+    }
+
+    fn vectors_document() -> String {
+        let decisions = decision_vectors();
+        let lines = |list: &[serde_json::Value]| -> String {
+            list.iter()
+                .map(|v| format!("    {}", serde_json::to_string(v).expect("plain json")))
+                .collect::<Vec<_>>()
+                .join(",\n")
+        };
+        let header = serde_json::json!({
+            "_": [
+                "Generated. Do not hand-edit: YANTRIK_WRITE_VECTORS=1 cargo test -p yantrik-ipc-transport --lib surface_vectors_write",
+                "",
+                "The surface protocol's policy, written out from yantrik_ipc_transport::gate::decide (docs/surface-protocol.md).",
+                "Every implementation of the decision replays `decide`: the Blender addon's port and the SDKs replay",
+                "`outcome` and `refusal` to the byte; the shell's mind_mode::Modes::decide and the MCP bridge's decide",
+                "replay `door`. crates/yantrik-ipc-transport/src/gate.rs fails when this file is not what the code decides.",
+                "",
+                "Inputs: grade (spicy is not a grade), ceiling (tool_permission), mode, session_rule (a rule for this very",
+                "app.action), grant (a grant was attached and the shell spent it), purpose and unrecoverable (the action's",
+                "own published description, and what gate::unrecoverable reads in it).",
+                "outcome: allow | CEILING | GRANT, and refusal is the exact sentence (null when allowed).",
+                "door: run | ask | refuse — what a door that raises cards does with the same inputs, which never include",
+                "a grant. It differs from the dispatch only where a vector carries `note` (the socket floor in plan)."
+            ],
+            "protocol": yantrik_ipc_contracts::control_surface::PROTOCOL,
+            "ladder": LADDER,
+            "modes": MODES.iter().map(|(m, top)| serde_json::json!([m, top])).collect::<Vec<_>>(),
+            "socket_floor": SOCKET_FLOOR,
+            "phrases": UNRECOVERABLE_PHRASES,
+        });
+        let mut text = serde_json::to_string_pretty(&header).expect("plain json");
+        // Reopen the object: drop its closing brace and the newline before it, and carry on inside.
+        text.truncate(text.trim_end().len() - 2);
+        text.push_str(",\n  \"decide\": [\n");
+        text.push_str(&lines(&decisions));
+        text.push_str("\n  ],\n  \"purposes\": [\n");
+        text.push_str(&lines(&purpose_vectors()));
+        text.push_str("\n  ],\n  \"revision\": [\n");
+        text.push_str(&lines(&revision_vectors()));
+        text.push_str("\n  ],\n  \"revision_float_edges\": [\n");
+        text.push_str(&lines(&float_edge_vectors()));
+        text.push_str("\n  ],\n  \"envelopes\": ");
+        text.push_str(&serde_json::to_string(&envelopes()).expect("plain json"));
+        text.push_str("\n}\n");
+        text
+    }
+
+    fn vectors_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/yantrik-os/surface-vectors.json")
+    }
+
+    /// Write the vectors out. Gated, because a test that rewrites its own expectation is not a
+    /// test — it is a way for a change to `decide` to pass CI by regenerating what it broke.
+    ///
+    /// ```sh
+    /// YANTRIK_WRITE_VECTORS=1 cargo test -p yantrik-ipc-transport --lib surface_vectors_write
+    /// ```
+    #[test]
+    fn surface_vectors_write() {
+        if std::env::var("YANTRIK_WRITE_VECTORS").as_deref() != Ok("1") {
+            return;
+        }
+        let path = vectors_path();
+        std::fs::write(&path, vectors_document())
+            .unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+        println!("wrote {} decision vectors to {}", decision_vectors().len(), path.display());
+    }
+
+    /// And the checked-in file is what the code produces today. Changing `decide` without
+    /// regenerating fails here; regenerating without changing the ports fails in theirs.
+    #[test]
+    fn surface_vectors_are_what_decide_produces() {
+        let path = vectors_path();
+        let checked_in = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {}: {e}\n\nGenerate it with:\n  YANTRIK_WRITE_VECTORS=1 cargo test \
+                 -p yantrik-ipc-transport --lib surface_vectors_write",
+                path.display()
+            )
+        });
+        let produced = vectors_document();
+        if checked_in == produced {
+            return;
+        }
+        let old: serde_json::Value = serde_json::from_str(&checked_in).expect("the checked-in vectors are json");
+        let new: serde_json::Value = serde_json::from_str(&produced).expect("the generator makes json");
+        let empty = Vec::new();
+        let old_v = old["decide"].as_array().unwrap_or(&empty);
+        let mut moved: Vec<String> = Vec::new();
+        for want in new["decide"].as_array().unwrap_or(&empty) {
+            let id = want["id"].as_str().unwrap_or_default();
+            match old_v.iter().find(|v| v["id"].as_str() == Some(id)) {
+                Some(had) if had == want => {}
+                Some(had) => moved.push(format!(
+                    "{id}: was {} / {}, is now {} / {}",
+                    had["outcome"], had["door"], want["outcome"], want["door"]
+                )),
+                None => moved.push(format!("{id}: new")),
+            }
+        }
+        panic!(
+            "deploy/yantrik-os/surface-vectors.json is not what gate::decide produces any more.\n{}\n\n\
+             If the change is meant, regenerate it and make every port agree:\n  \
+             YANTRIK_WRITE_VECTORS=1 cargo test -p yantrik-ipc-transport --lib surface_vectors_write\n  \
+             python3 -m unittest discover -s tests/blender-core\n  \
+             python3 deploy/yantrik-os/yos-mcp-selftest.py",
+            if moved.is_empty() { "(every decision is the same; another section of the file changed)".to_string() } else { moved.join("\n") }
+        );
+    }
+
+    /// The file covers what it says it covers: every outcome and every door occurs, and the
+    /// recoverability axis changes an answer somewhere — a dimension that never changes anything
+    /// is a column, not a test.
+    #[test]
+    fn surface_vectors_cover_every_outcome_and_every_axis() {
+        let all = decision_vectors();
+        assert_eq!(all.len(), 4 * 5 * 4 * 2 * 2 * 2);
+        for outcome in ["allow", "CEILING", "GRANT"] {
+            assert!(all.iter().any(|v| v["outcome"] == outcome), "{outcome}");
+        }
+        for door in ["run", "ask", "refuse"] {
+            assert!(all.iter().any(|v| v["door"] == door), "{door}");
+        }
+        let flips = all.iter().filter(|v| v["unrecoverable"] == true && v["outcome"] == "GRANT").filter(|v| {
+            let id = v["id"].as_str().unwrap().replace("unrecoverable=true", "unrecoverable=false");
+            all.iter().any(|w| w["id"] == id && w["outcome"] == "allow")
+        }).count();
+        assert!(flips > 0, "the app's own sentence changes the answer somewhere");
     }
 }

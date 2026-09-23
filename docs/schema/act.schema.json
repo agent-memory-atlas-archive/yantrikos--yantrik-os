@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yantrikos.com/schema/surface/1/act.schema.json",
+  "title": "app.act, surface protocol 1",
+  "description": "The root validates the result of an accepted act. $defs/params is the request's params; $defs/refusal is the JSON-RPC error object a refused act answers with. Normative text: docs/surface-protocol.md.",
+  "$ref": "#/$defs/result",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "description": "The action's exact name, as describe lists it.",
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "description": "The arguments, by the names the action declares. Absent means none.",
+          "type": "object"
+        },
+        "expect_revision": {
+          "description": "The revision the caller decided on. Checked in the same turn as the handler; a mismatch is refused with STALE:.",
+          "type": "string"
+        },
+        "grant": {
+          "description": "The request_id a person's Allow turned into a grant. Spent through the shell once the ceiling has passed. Empty means none.",
+          "type": "string"
+        },
+        "agent_token": {
+          "description": "The token of the agent the call is for. Beside args, never among them.",
+          "type": "string"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["app", "action_id", "accepted", "settled", "result", "revision", "summary", "state"],
+      "properties": {
+        "app": { "type": "string", "minLength": 1 },
+        "action_id": {
+          "description": "A name for this dispatch, unique within the surface's run: <service-id>#<n>.",
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted": {
+          "description": "Always true: the guard passed and the handler ran. Never read as done.",
+          "const": true
+        },
+        "settled": {
+          "description": "Whether the work is finished (the action's settles is on return) or only started (later).",
+          "type": "boolean"
+        },
+        "result": { "description": "The handler's own answer, any JSON." },
+        "revision": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "summary": { "type": "string" },
+        "state": { "type": "object" }
+      }
+    },
+    "refusal": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "description": "-32602 for every refusal of the act itself (the dispatch's or the handler's); -32000 when the app did not answer; -32601 unknown method; -32700 a line that is not a request.",
+          "type": "integer",
+          "enum": [-32700, -32601, -32602, -32000]
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

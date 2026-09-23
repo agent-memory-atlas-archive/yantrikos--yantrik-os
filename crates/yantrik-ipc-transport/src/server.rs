@@ -182,6 +182,12 @@ pub trait ServiceHandler: Send + Sync + 'static {
 /// JSON-RPC server.
 pub struct RpcServer {
     address: String,
+    /// Whether this server bound the socket at `address`. Only then is the file its to remove on
+    /// drop: a server that was refused the name (see [`crate::owner::claim`]) must not delete the
+    /// socket of the process that owns it on the way out, which would leave that process listening
+    /// on a file nobody can find.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    bound: bool,
 }
 
 impl RpcServer {
@@ -190,6 +196,7 @@ impl RpcServer {
     pub fn new(address: &str) -> Self {
         Self {
             address: address.to_string(),
+            bound: false,
         }
     }
 
@@ -241,14 +248,18 @@ impl RpcServer {
     }
 
     #[cfg(unix)]
-    async fn serve_unix(self, handler: Arc<dyn ServiceHandler>) -> std::io::Result<()> {
+    async fn serve_unix(mut self, handler: Arc<dyn ServiceHandler>) -> std::io::Result<()> {
         use tokio::net::UnixListener;
         use std::path::Path;
 
-        let path = Path::new(&self.address);
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
+        let address = self.address.clone();
+        let path = Path::new(&address);
+        // The name is owned by whoever is answering on it. This used to unlink whatever was at
+        // the path, so a second copy of an app or a service took the name from the running one,
+        // which went on listening on a file nobody could reach. A live socket is refused with a
+        // sentence naming it; only one nobody is listening on — a crashed run's — is removed.
+        // Blocking, and bounded by `owner::CLAIM_PING`: it happens once, before anything is served.
+        crate::owner::claim(path)?;
         // Do NOT swallow this. When it failed silently (`/run` is root-owned),
         // the real cause — a permission error — surfaced later as a bare
         // ENOENT from bind(), which reads like a missing binary and sent
@@ -269,6 +280,7 @@ impl RpcServer {
         let listener = UnixListener::bind(&self.address).map_err(|e| {
             std::io::Error::new(e.kind(), format!("cannot bind {}: {e}", self.address))
         })?;
+        self.bound = true;
         private_socket_file(path);
         tracing::info!(socket = %self.address, service = handler.service_id(), "RPC server listening (UDS)");
 
@@ -379,7 +391,9 @@ fn dispatch(
 #[cfg(unix)]
 impl Drop for RpcServer {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.address);
+        if self.bound {
+            let _ = std::fs::remove_file(&self.address);
+        }
     }
 }
 
@@ -468,5 +482,76 @@ mod socket_dir_tests {
     #[test]
     fn asking_twice_returns_the_same_directory() {
         assert_eq!(socket_dir(), socket_dir());
+    }
+
+    struct Named(&'static str);
+
+    impl ServiceHandler for Named {
+        fn service_id(&self) -> &str {
+            self.0
+        }
+        fn handle(
+            &self,
+            method: &str,
+            _params: serde_json::Value,
+        ) -> Result<serde_json::Value, yantrik_ipc_contracts::email::ServiceError> {
+            Ok(serde_json::json!({ "answered_by": self.0, "method": method }))
+        }
+    }
+
+    fn one_line(path: &std::path::Path, line: &str) -> serde_json::Value {
+        use std::io::{BufRead, BufReader, Write};
+        let mut stream = std::os::unix::net::UnixStream::connect(path).expect("connect");
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).unwrap();
+        serde_json::from_str(&reply).expect("one JSON object per line")
+    }
+
+    /// Owned names, end to end through `serve`: a second server on a live name is refused, says
+    /// whose it is, and leaves the first one answering — including after the refused server is
+    /// dropped, whose `Drop` used to delete the socket file it had never bound.
+    #[test]
+    fn a_second_server_on_a_live_name_is_refused_and_the_first_keeps_it() {
+        let dir = std::env::temp_dir().join(format!("yantrik-owned-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app-first.sock");
+        let address = path.to_string_lossy().to_string();
+
+        let first = address.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let _ = rt.block_on(RpcServer::new(&first).serve(Arc::new(Named("app-first"))));
+        });
+        for _ in 0..200 {
+            if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let err = rt
+            .block_on(RpcServer::new(&address).serve(Arc::new(Named("app-second"))))
+            .expect_err("the name is taken by a live server");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(err.to_string().contains("another instance owns") && err.to_string().contains("`app-first`"), "{err}");
+
+        let reply = one_line(&path, r#"{"jsonrpc":"2.0","id":7,"method":"app.describe"}"#);
+        assert_eq!(reply["result"]["answered_by"], "app-first", "{reply}");
+        assert_eq!(reply["id"], 7);
+
+        // Framing, pinned where the spec states it: a request with no `id` is not a request this
+        // transport serves, and the answer says so as a parse error with a null id.
+        let reply = one_line(&path, r#"{"jsonrpc":"2.0","method":"rpc.ping"}"#);
+        assert_eq!(reply["error"]["code"], RPC_PARSE_ERROR, "{reply}");
+        assert!(reply["id"].is_null());
+        let reply = one_line(&path, r#"{"jsonrpc":"2.0","id":"a","method":"rpc.ping"}"#);
+        assert_eq!(reply["result"], "pong");
+        assert_eq!(reply["id"], "a", "the id comes back as it was sent, string or number");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

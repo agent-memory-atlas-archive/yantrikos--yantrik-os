@@ -281,8 +281,8 @@ pub fn other_names(app_id: &str) -> &'static [&'static str] {
 // of the event loop as the handler.
 pub use yantrik_ipc_transport::gate::{
     configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, permit,
-    spend_grants_with, Authority, Mode, AGENT_TOKEN, DEFAULT_MODE, LADDER, MODES, MODE_FILE,
-    SOCKET_FLOOR,
+    spend_grants_with, unrecoverable, Authority, Mode, AGENT_TOKEN, DEFAULT_MODE, LADDER, MODES,
+    MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
 };
 use yantrik_ipc_transport::gate::{agent_token_of, grade};
 #[cfg(test)]
@@ -296,7 +296,9 @@ use yantrik_ipc_transport::gate::{ceiling_from, DEFAULT_CEILING};
 // `yantrik-ipc-contracts::control_surface`, and this module re-exports it: every existing
 // `control::View` / `control::Action` / `control::Param` caller is unchanged, and the shell
 // window and a headless service now share one definition of what an app is.
-pub use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
+pub use yantrik_ipc_contracts::control_surface::{
+    act_json, describe_json, Action, Param, View, PROTOCOL,
+};
 
 // ── The registry, which lives on the UI thread ──────────────────────
 
@@ -394,8 +396,10 @@ impl Registry {
         // the same words. `effective_grade`, not `spec.permission`: an app may have moved its own
         // grade since the surface was published (see `regrade`), and the check has to read the
         // grade that `describe` is currently showing or the two disagree.
+        // With the action's own description beside the grade: an action this app says cannot be
+        // undone is asked about in every mode but bypass, as the shell and the bridge ask.
         let published = effective_grade(name, spec.permission);
-        decide(authority, &self.app_id, name, published)?;
+        decide(authority, &self.app_id, name, published, &spec.description)?;
 
         // Checked here rather than in every handler: a missing argument is the most common way a
         // model gets a call wrong, and the error should name the argument, not panic in the app.
@@ -1238,6 +1242,50 @@ mod tests {
         assert_ne!(service_id_for("notes"), "notes");
     }
 
+    /// Where the guide's table of surfaces starts and ends. Between them is [`SURFACES`] written
+    /// out, and nothing else.
+    const GUIDE_TABLE_BEGIN: &str = "<!-- surfaces: generated from control::SURFACES by \
+        `YANTRIK_WRITE_DOCS=1 cargo test -p yantrik-app-runtime --lib the_guide_lists_every_surface` -->";
+    const GUIDE_TABLE_END: &str = "<!-- /surfaces -->";
+
+    fn surfaces_table() -> String {
+        let mut out = String::from("\n| Surface | Socket | Also answers to |\n| --- | --- | --- |\n");
+        for (id, others) in SURFACES {
+            let also = if others.is_empty() {
+                "—".to_string()
+            } else {
+                others.iter().map(|o| format!("`{o}`")).collect::<Vec<_>>().join(", ")
+            };
+            out.push_str(&format!("| `{id}` | `{}.sock` | {also} |\n", service_id_for(id)));
+        }
+        out
+    }
+
+    /// `docs/app-control.md` lists the surfaces this desktop has, and the list is this table
+    /// rather than one somebody keeps by hand — the hand-kept one had nine rows when there were
+    /// eighteen surfaces. Adding a surface here and not regenerating fails; so does editing the
+    /// guide's copy.
+    #[test]
+    fn the_guide_lists_every_surface_this_desktop_has() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/app-control.md");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let start = text.find(GUIDE_TABLE_BEGIN).expect("the guide marks where its table starts")
+            + GUIDE_TABLE_BEGIN.len();
+        let end = text.find(GUIDE_TABLE_END).expect("the guide marks where its table ends");
+        let table = surfaces_table();
+        if std::env::var("YANTRIK_WRITE_DOCS").as_deref() == Ok("1") {
+            let written = format!("{}{table}{}", &text[..start], &text[end..]);
+            std::fs::write(&path, written).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            return;
+        }
+        assert_eq!(
+            &text[start..end],
+            table,
+            "docs/app-control.md's table of surfaces is not control::SURFACES. Regenerate it:\n  \
+             YANTRIK_WRITE_DOCS=1 cargo test -p yantrik-app-runtime --lib the_guide_lists_every_surface"
+        );
+    }
+
     /// The name the container manager is called everywhere else reaches the id it publishes.
     ///
     /// This is the refusal the table was written for: `yos ls` said `app-containers`, the app was
@@ -1924,6 +1972,39 @@ mod tests {
         }
     }
 
+    /// The dispatch reads the action's own description, not only its grade: Calendar's
+    /// `delete_event` is `sensitive` and says "It is not recoverable", and in auto the shell and
+    /// the bridge asked about it while `yos act` ran it (map gap 4 of the surface SDK). Asked
+    /// about on this door too now; bypass still asks nobody.
+    #[test]
+    fn what_the_app_says_cannot_be_undone_is_asked_about_in_auto() {
+        let delete = |ran: std::rc::Rc<std::cell::Cell<bool>>| Registry {
+            app_id: "calendar".into(),
+            describe: Some(Box::new(|| View::new("Calendar"))),
+            actions: vec![(
+                Action::new("delete_event", "Take an event off the calendar. It is not recoverable")
+                    .risk("sensitive")
+                    .arg(Param::text("id")),
+                Box::new(move |_: &serde_json::Value| {
+                    ran.set(true);
+                    Ok(serde_json::json!({ "deleted": true }))
+                }) as ActFn,
+            )],
+        };
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let err = delete(ran.clone())
+            .act("delete_event", &serde_json::json!({"id": "e1"}), None, "calendar#1", &in_mode("auto", false))
+            .unwrap_err();
+        assert!(err.starts_with("GRANT:") && err.contains("cannot be undone"), "{err}");
+        assert!(!ran.get(), "the handler must not have run");
+
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        delete(ran.clone())
+            .act("delete_event", &serde_json::json!({"id": "e1"}), None, "calendar#2", &in_mode("bypass", false))
+            .expect("bypass asks nobody");
+        assert!(ran.get());
+    }
+
     /// A grant is a person's Allow for this exact call, and that answer stands whatever the
     /// mode — including plan, where the shell raises no card at all, so a grant there can only
     /// have come from somewhere a person said yes.
@@ -2285,6 +2366,48 @@ mod tests {
         let mut line = String::new();
         BufReader::new(socket).read_line(&mut line).expect("read the reply");
         serde_json::from_str(&line).expect(&line)
+    }
+
+    /// The checker an author runs (`yos check`, docs/surface-protocol.md) against this dispatch,
+    /// over a real socket: the protocol written down, read by a program in another language, and
+    /// this code agreeing with it refusal for refusal. The served surface grades `nuke` off the
+    /// ladder on purpose, so the checker has to fail exactly the two checks that say so and pass
+    /// every other — including the missing, undeclared and stale probes, which only a surface
+    /// that answered like the protocol's dispatch is sent.
+    #[cfg(unix)]
+    #[test]
+    fn yos_check_reads_this_dispatch_as_the_protocol() {
+        let address = served_test_surface();
+        let yos = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/yantrik-os/yos");
+        let run = std::process::Command::new("python3").arg(&yos).args(["check", address, "--json"]).output();
+        let Ok(run) = run else {
+            eprintln!("skipped: no python3 to run yos check with");
+            return;
+        };
+        let text = String::from_utf8_lossy(&run.stdout);
+        let report: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("yos check --json said {text} ({e}); stderr: {}", String::from_utf8_lossy(&run.stderr)));
+        let rows = report["surfaces"][0]["checks"].as_array().cloned().unwrap_or_default();
+        let status = |name: &str| {
+            rows.iter().find(|r| r["check"] == name).map(|r| r["status"].as_str().unwrap_or("").to_string())
+        };
+        let failed: Vec<String> = rows
+            .iter()
+            .filter(|r| r["status"] == "fail")
+            .map(|r| format!("{}: {}", r["check"], r["saw"]))
+            .collect();
+        assert_eq!(
+            rows.iter().filter(|r| r["status"] == "fail").map(|r| r["check"].as_str().unwrap_or("")).collect::<Vec<_>>(),
+            vec!["schema", "grades"],
+            "only the deliberately off-ladder `nuke` fails: {failed:#?}"
+        );
+        for check in [
+            "ping", "describe", "protocol", "params", "secrets", "revision", "method", "empty", "unknown",
+            "missing", "undeclared", "stale",
+        ] {
+            assert_eq!(status(check).as_deref(), Some("pass"), "{check}: {text}");
+        }
+        assert_eq!(run.status.code(), Some(1), "a failed check is a non-zero exit");
     }
 
     /// See `test_ui_thread` for why the hop is a channel.

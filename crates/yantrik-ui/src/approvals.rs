@@ -393,19 +393,13 @@ pub fn args_rows(value: &serde_json::Value) -> Vec<String> {
 /// `mind_mode::person_add_rule` refuses to mint a standing yes when it is. A person offered
 /// "stop asking me about this" for something the app says is irreversible has been offered the
 /// wrong thing.
+///
+/// And a third now needs it, which is why the phrase list is not here any more: every app's
+/// dispatch asks the same question before it runs an action (`gate::decide`), so the reading of
+/// the sentence lives in `yantrik_ipc_transport::gate::unrecoverable` and this is that function.
+/// One list on the machine; the MCP bridge's copy is checked against it.
 pub fn unrecoverable(purpose: &str) -> bool {
-    let lower = purpose.to_ascii_lowercase();
-    [
-        "not recoverable",
-        "cannot be undone",
-        "can't be undone",
-        "irreversible",
-        "permanently",
-        "permanent",
-        "no undo",
-    ]
-    .iter()
-    .any(|phrase| lower.contains(phrase))
+    yantrik_app_runtime::control::unrecoverable(purpose)
 }
 
 /// May the card offer "Allow for this session" for this action?

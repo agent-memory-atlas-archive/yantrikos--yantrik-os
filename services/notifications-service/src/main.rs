@@ -323,7 +323,7 @@ impl NotificationsHandler {
         // at: nothing is spent on a call that could never run.
         let graded = published_grade(action).ok_or_else(|| unknown_action(action))?;
         let grant = gate::grant_of(params);
-        gate::permit(&mut authority, APP, action, graded, &args, grant.as_deref())
+        gate::permit(&mut authority, APP, action, graded, &published_purpose(action), &args, grant.as_deref())
             .map_err(bad_request)?;
         tracing::info!(
             action,
@@ -421,6 +421,12 @@ impl NotificationsHandler {
 /// the grade a caller is shown and the grade that is enforced cannot come apart.
 fn published_grade(action: &str) -> Option<&'static str> {
     notification_actions().into_iter().find(|a| a.name == action).map(|a| a.permission)
+}
+
+/// What this surface says `action` does — the sentence `gate::permit` reads for "cannot be undone",
+/// from the same table `describe` publishes, so what a caller is shown is what is enforced.
+fn published_purpose(action: &str) -> String {
+    notification_actions().into_iter().find(|a| a.name == action).map(|a| a.description).unwrap_or_default()
 }
 
 fn unknown_action(action: &str) -> ServiceError {
