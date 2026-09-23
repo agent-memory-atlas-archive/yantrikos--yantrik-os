@@ -44,6 +44,17 @@ pub struct NotificationMirror {
 /// Shared handle, kept on the UI thread.
 pub type SharedStore = Rc<RefCell<NotificationMirror>>;
 
+/// What one poll means for the toasts: which to raise, and which to take down.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Applied {
+    /// New, or replaced by their sender. Each deserves a toast.
+    pub fresh: Vec<Notification>,
+    /// Dismissed since the last poll, by whatever path — the toast's own ×, the centre's
+    /// "Clear all", `yos act notifications dismiss_all`, a button pressed, a sender closing its
+    /// own. Whatever toast is up for one of these comes down with it.
+    pub gone: Vec<String>,
+}
+
 impl Default for NotificationMirror {
     fn default() -> Self {
         Self::new()
@@ -67,29 +78,41 @@ impl NotificationMirror {
         self.revision
     }
 
-    /// Fold in what the store said changed, and answer with what deserves a toast.
+    /// Fold in what the store said changed, and answer with what that means for the toasts.
     ///
     /// A notification earns a toast when it is new, or when its `created_at` moved — which is
     /// what a sender replacing an earlier notification does ("downloading…" becoming
     /// "finished"). Marking one read or dismissing it also changes it, and must not re-raise it.
-    pub fn apply(&mut self, since: Since) -> Vec<Notification> {
+    ///
+    /// A notification that comes back dismissed is named in [`Applied::gone`], so that its toast
+    /// leaves the screen with it. This used to answer only with what to raise, and the toasts
+    /// were taken down only by the shell's own buttons — so `yos act notifications dismiss_all`
+    /// emptied the notification centre to "All caught up" while two critical toasts, which never
+    /// expire on their own, sat on the screen for notifications that no longer existed, and
+    /// nothing a mind could call would press their ×. The store already says what went away
+    /// (`Since::changed` includes dismissals for exactly this reason); the shell was not
+    /// listening.
+    pub fn apply(&mut self, since: Since) -> Applied {
         let first_poll = !self.primed;
         self.primed = true;
         self.notice = None;
 
-        let mut fresh = Vec::new();
+        let mut applied = Applied::default();
         for incoming in since.changed {
+            if incoming.dismissed {
+                applied.gone.push(incoming.id.clone());
+            }
             match self.items.iter().position(|e| e.id == incoming.id) {
                 Some(index) => {
                     let replaced = self.items[index].created_at != incoming.created_at;
                     if replaced && !incoming.dismissed {
-                        fresh.push(incoming.clone());
+                        applied.fresh.push(incoming.clone());
                     }
                     self.items[index] = incoming;
                 }
                 None => {
                     if !first_poll && !incoming.dismissed {
-                        fresh.push(incoming.clone());
+                        applied.fresh.push(incoming.clone());
                     }
                     self.items.push(incoming);
                 }
@@ -101,7 +124,7 @@ impl NotificationMirror {
             let excess = self.items.len() - MAX_MIRRORED;
             self.items.drain(0..excess);
         }
-        fresh
+        applied
     }
 
     /// The service could not be reached. Said once per outage by the caller, held here so the
@@ -308,14 +331,14 @@ mod tests {
         // Otherwise every boot opens with a wall of toasts for everything that happened while
         // the machine was off — which is how a notification system gets turned off.
         let mut mirror = NotificationMirror::new();
-        let fresh = mirror.apply(Since {
+        let applied = mirror.apply(Since {
             revision: 3,
             changed: vec![
                 note("1", "Downloads", "2026-09-21T09:00:00Z"),
                 note("2", "Calendar", "2026-09-21T09:01:00Z"),
             ],
         });
-        assert!(fresh.is_empty());
+        assert!(applied.fresh.is_empty());
         assert_eq!(mirror.unread_count(), 2);
         assert_eq!(mirror.revision(), 3);
     }
@@ -324,12 +347,12 @@ mod tests {
     fn a_new_notification_after_that_is_a_toast() {
         let mut mirror = NotificationMirror::new();
         mirror.apply(Since { revision: 1, changed: vec![note("1", "A", "2026-09-21T09:00:00Z")] });
-        let fresh = mirror.apply(Since {
+        let applied = mirror.apply(Since {
             revision: 2,
             changed: vec![note("2", "B", "2026-09-21T09:05:00Z")],
         });
-        assert_eq!(fresh.len(), 1);
-        assert_eq!(fresh[0].id, "2");
+        assert_eq!(applied.fresh.len(), 1);
+        assert_eq!(applied.fresh[0].id, "2");
     }
 
     #[test]
@@ -338,12 +361,48 @@ mod tests {
         mirror.apply(Since { revision: 1, changed: vec![note("1", "A", "2026-09-21T09:00:00Z")] });
         let mut read = note("1", "A", "2026-09-21T09:00:00Z");
         read.read = true;
-        assert!(mirror.apply(Since { revision: 2, changed: vec![read] }).is_empty());
+        let applied = mirror.apply(Since { revision: 2, changed: vec![read] });
+        assert!(applied.fresh.is_empty());
+        assert!(applied.gone.is_empty(), "reading a notification does not take its toast down");
         let mut gone = note("1", "A", "2026-09-21T09:00:00Z");
         gone.dismissed = true;
-        assert!(mirror.apply(Since { revision: 3, changed: vec![gone] }).is_empty());
+        let applied = mirror.apply(Since { revision: 3, changed: vec![gone] });
+        assert!(applied.fresh.is_empty());
+        assert_eq!(applied.gone, vec!["1".to_string()], "`dismiss(id)` takes the toast with it");
         assert_eq!(mirror.unread_count(), 0);
         assert!(mirror.showing().is_empty());
+    }
+
+    #[test]
+    fn dismiss_all_from_outside_the_shell_takes_every_toast_down() {
+        // 22 September, from the desk of the VM: `yos act notifications dismiss_all` left the
+        // notification centre saying "All caught up" with two critical toasts still on the
+        // screen. The poll that brought the dismissals only ever said what to raise, and a
+        // critical toast never expires on its own, so the only way down was its own × — which
+        // nothing published could press.
+        let mut mirror = NotificationMirror::new();
+        mirror.apply(Since { revision: 1, changed: vec![] });
+        let mut first = note("1", "Yantrik", "2026-09-22T18:00:00Z");
+        first.urgency = Urgency::Critical;
+        let mut second = note("2", "Yantrik", "2026-09-22T18:01:00Z");
+        second.urgency = Urgency::Critical;
+        let applied = mirror.apply(Since {
+            revision: 2,
+            changed: vec![first.clone(), second.clone()],
+        });
+        assert_eq!(applied.fresh.len(), 2, "both are raised");
+        assert!(applied.gone.is_empty());
+
+        // `dismiss_all` marks both in one revision, and the next poll carries both back.
+        for n in [&mut first, &mut second] {
+            n.dismissed = true;
+            n.read = true;
+            n.revision = 3;
+        }
+        let applied = mirror.apply(Since { revision: 3, changed: vec![first, second] });
+        assert!(applied.fresh.is_empty(), "a dismissal is not news");
+        assert_eq!(applied.gone, vec!["1".to_string(), "2".to_string()]);
+        assert!(mirror.showing().is_empty(), "the centre and the toasts agree");
     }
 
     #[test]
@@ -354,11 +413,11 @@ mod tests {
             revision: 1,
             changed: vec![note("1", "Downloads", "2026-09-21T09:00:00Z")],
         });
-        let fresh = mirror.apply(Since {
+        let applied = mirror.apply(Since {
             revision: 2,
             changed: vec![note("1", "Downloads", "2026-09-21T09:07:00Z")],
         });
-        assert_eq!(fresh.len(), 1);
+        assert_eq!(applied.fresh.len(), 1);
         assert_eq!(mirror.showing().len(), 1, "it replaced, it did not add");
     }
 
