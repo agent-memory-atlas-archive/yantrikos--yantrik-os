@@ -46,18 +46,36 @@ class Recorder:
 
     def __init__(self) -> None:
         self.deltas: List[str] = []
+        self.events: List[Dict[str, Any]] = []
 
     def _chunk(self, turn: Any, delta: str) -> bool:
         self.deltas.append(delta)
         return True
 
+    def _event(self, turn: Any, event: Dict[str, Any]) -> bool:
+        self.events.append(event)
+        return True
 
-def recording_turn(text: str, context: Optional[str] = None):
+    def kinds(self) -> List[str]:
+        return [e.get("kind") for e in self.events]
+
+    def calls(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Each tool call's events, in order, by call id."""
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for event in self.events:
+            if "call" in event:
+                out.setdefault(event["call"], []).append(event)
+        return out
+
+
+def recording_turn(text: str, context: Optional[str] = None, conversation: str = "main",
+                   agent_token: str = ""):
     """A real `Turn` — trail framing and all — writing into a list."""
     from yantrik_harness import Turn
 
     recorder = Recorder()
-    return Turn(recorder, "s1", 1, text, context), recorder
+    return Turn(recorder, "s1", 1, text, context, conversation=conversation,
+                agent_token=agent_token), recorder
 
 
 def said(recorder: Recorder) -> str:
@@ -71,9 +89,15 @@ class FakeDesktop:
     shell serves, including the two rules a harness gets caught by: a call on a session that is
     gone is an error telling it to attach again, and closing a turn twice is an error because the
     second close is for a turn this harness was never given.
+
+    It takes `harness.event` as the real host does — for a turn in flight, and a refusal is an
+    answer rather than an error — unless it is made with `events=False`, which is a desktop from
+    before events: the method is unknown. It does NOT hand a conversation one turn at a time;
+    that is the host's rule, tested in Rust, and a fake that enforced it would hide whether the
+    library enforces its own.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, events: bool = True) -> None:
         self.dir = tempfile.mkdtemp(prefix="yantrik-fake-")
         self.path = os.path.join(self.dir, "harness.sock")
         self.lock = threading.Lock()
@@ -85,6 +109,10 @@ class FakeDesktop:
         self.rejected: List[Tuple[str, Dict[str, Any]]] = []
         self.drop: set = set()          # turns the panel has stopped listening to
         self.open_turns: set = set()
+        self.events_supported = events
+        self.events: Dict[int, List[Dict[str, Any]]] = {}
+        self.stopped: set = set()       # turns the desktop cancelled; still open until closed
+        self.notices: Dict[str, List[Any]] = {"cancelled": [], "ended": []}
         self._next_turn = 1
         self._next_session = 1
         self._stop = threading.Event()
@@ -98,7 +126,8 @@ class FakeDesktop:
 
     # ── what a test drives ──────────────────────────────────────────────
 
-    def ask(self, text: str, context: Optional[str] = None) -> int:
+    def ask(self, text: str, context: Optional[str] = None, conversation: Optional[str] = None,
+            agent_token: Optional[str] = None) -> int:
         """Type something into the panel. Returns the turn id it will be handed out as."""
         with self.lock:
             turn_id = self._next_turn
@@ -106,9 +135,31 @@ class FakeDesktop:
             turn = {"turn_id": turn_id, "text": text}
             if context is not None:
                 turn["context"] = context
+            if conversation is not None:
+                turn["conversation"] = conversation
+            if agent_token is not None:
+                turn["agent_token"] = agent_token
             self.queue.append(turn)
             self.deltas[turn_id] = []
+            self.events[turn_id] = []
             return turn_id
+
+    def stop_agent(self, turn_id: int = 0, conversation: Optional[str] = None) -> None:
+        """What `Host::stop_agent` tells a harness: on its next poll, this turn is cancelled and
+        this conversation is ended. The turn stays open until the harness closes it."""
+        with self.lock:
+            if turn_id:
+                self.stopped.add(turn_id)
+                self.notices["cancelled"].append(turn_id)
+            if conversation is not None:
+                self.notices["ended"].append(conversation)
+
+    def events_for(self, turn_id: int) -> List[Dict[str, Any]]:
+        with self.lock:
+            return list(self.events.get(turn_id, []))
+
+    def kinds(self, turn_id: int) -> List[str]:
+        return [e.get("kind") for e in self.events_for(turn_id)]
 
     def invalidate(self) -> None:
         """The shell restarted: every session id a harness is holding is now worthless."""
@@ -193,16 +244,35 @@ class FakeDesktop:
                 return None, "this session is not attached any more; call harness.attach again"
 
             if method == "harness.poll":
-                if not self.queue:
-                    return {}, None
-                turn = self.queue.pop(0)
-                self.open_turns.add(turn["turn_id"])
-                return turn, None
+                reply: Dict[str, Any] = {}
+                for key in ("cancelled", "ended"):
+                    if self.notices[key]:
+                        reply[key] = self.notices[key]
+                        self.notices[key] = []
+                if self.queue:
+                    turn = self.queue.pop(0)
+                    self.open_turns.add(turn["turn_id"])
+                    reply.update(turn)
+                return reply, None
+
+            if method == "harness.event" and self.events_supported:
+                turn_id = params.get("turn_id")
+                if turn_id not in self.open_turns:
+                    return None, "turn %s is not one this harness was given" % turn_id
+                if turn_id in self.stopped or turn_id in self.drop:
+                    return {"dropped": True}, None
+                event = params.get("event") or {}
+                if len(json.dumps(event)) > 64 * 1024:
+                    return {"refused": "too big"}, None
+                self.events.setdefault(turn_id, []).append(event)
+                return {}, None
 
             if method == "harness.chunk":
                 turn_id = params.get("turn_id")
                 if turn_id not in self.open_turns:
                     return None, "turn %s is not one this harness was given" % turn_id
+                if turn_id in self.stopped:
+                    return {"dropped": True}, None
                 self.deltas.setdefault(turn_id, []).append(str(params.get("delta") or ""))
                 if turn_id in self.drop:
                     self.open_turns.discard(turn_id)

@@ -23,6 +23,18 @@ What a harness supplies is a handler:
 The one rule the desktop actually enforces: a turn that was handed over is owed exactly one
 `complete` or `fail`. Whatever the handler does — return, raise, emit nothing, get stopped — that
 happens here, once, in `_close`.
+
+Beside the text, a turn can say what the agent is doing — `turn.tool_start / tool_output /
+tool_end / thinking / status / usage` — and the desktop draws each tool call as a card in the
+agent's pane. Every one of them is optional, and against a desktop too old to take them they are
+quietly skipped: the trail line `tool_start` writes into the text is still there.
+
+A mind that can hold more than one conversation at once wraps itself in `PerConversation`: one
+handler per conversation, made when its first turn arrives and let go when the desktop ends it.
+Turns in different conversations run at once; a second turn in the same conversation still gets
+the "still working" answer.
+
+    Harness("pi", "Pi", PerConversation(lambda conversation, token: PiMind(config, token=token)))
 """
 
 from __future__ import annotations
@@ -45,6 +57,17 @@ CHUNK = "harness.chunk"
 COMPLETE = "harness.complete"
 FAIL = "harness.fail"
 DETACH = "harness.detach"
+EVENT = "harness.event"
+
+# The conversation every turn is in when a harness holds only one, or the desktop is older than
+# conversations.
+MAIN = "main"
+# The desktop refuses an event heavier than this, as JSON (crates/yantrik-harness protocol.rs).
+# A long output is sent as several `tool_output` events, each well under it.
+MAX_EVENT_BYTES = 64 * 1024
+EVENT_PIECE_BYTES = 48 * 1024
+# The environment variable the tools a harness starts for a conversation read their agent from.
+AGENT_TOKEN_ENV = "YANTRIK_AGENT_TOKEN"
 
 # How long to wait after an empty poll. The protocol's own pacing; the host does not hold a poll
 # open, so this is the client's wait and nothing else (crates/yantrik-harness/src/protocol.rs).
@@ -158,6 +181,55 @@ def tool_trail(name: str, arguments: Optional[Dict[str, Any]] = None) -> str:
     return "⚙️ %s" % label
 
 
+# ── What the agent is doing ─────────────────────────────────────────────────────────────
+
+
+def tool_target(name: str, arguments: Optional[Dict[str, Any]] = None) -> str:
+    """What a tool call touched, when that can be said: `calendar.add_event`, `notes`, a path.
+
+    The card's heading, beside the tool's name. Empty when nothing in the arguments names a
+    thing — an empty target is honest, a guessed one is not.
+    """
+    args = arguments if isinstance(arguments, dict) else {}
+    app = str(args.get("app") or "").strip()
+    action = str(args.get("action") or "").strip().split("(", 1)[0].strip()
+    if app and action:
+        return "%s.%s" % (app, action)
+    if app:
+        return app
+    for key in ("path", "file_path", "file", "dir", "directory", "url", "command"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().splitlines()[0][:200]
+    return ""
+
+
+def summary_line(text: str, limit: int = 160) -> str:
+    """The first line worth reading, for a card that has settled: "38 files moved"."""
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line if len(line) <= limit else line[:limit - 1] + "…"
+    return ""
+
+
+def _pieces(text: str, budget: int = EVENT_PIECE_BYTES) -> List[str]:
+    """Cut text into pieces that each fit in one event, as the wire encodes them.
+
+    The wire is `json.dumps` with ASCII escaping, so one character can cost twelve bytes (an
+    emoji is a surrogate pair of `\\uXXXX`). Measured, not assumed.
+    """
+    out: List[str] = []
+    rest = str(text or "")
+    while rest:
+        size = min(len(rest), budget)
+        while size > 1 and len(json.dumps(rest[:size])) > budget:
+            size //= 2
+        out.append(rest[:size])
+        rest = rest[size:]
+    return out
+
+
 # ── One turn ────────────────────────────────────────────────────────────────────────────
 
 
@@ -165,12 +237,18 @@ class Turn:
     """One thing the person typed, and the answer being streamed back to it."""
 
     def __init__(self, harness: "Harness", session: str, turn_id: int, text: str,
-                 context: Optional[str] = None) -> None:
+                 context: Optional[str] = None, conversation: str = MAIN,
+                 agent_token: str = "") -> None:
         self.harness = harness
         self.session = session
         self.turn_id = turn_id
         self.text = text
         self.context = context
+        # Which conversation this turn is in — an id the desktop issued, or `main` — and that
+        # agent's token. The token goes to the tools the harness starts for this conversation
+        # (AGENT_TOKEN_ENV), never to the model and never into a log.
+        self.conversation = conversation or MAIN
+        self.agent_token = agent_token or ""
         # Set when the person said /stop, or /new arrived while this was running. A handler that
         # watches it can stop between steps; one that does not is simply left to finish.
         self.cancelled = threading.Event()
@@ -203,6 +281,87 @@ class Turn:
             lead = "" if (not self.said_anything or self._tail.endswith("\n")) else "\n"
         return self.emit(lead + tool_trail(name, arguments) + "\n\n")
 
+    # What the agent is doing, beside the text. Each is one `harness.event`; each returns False
+    # only when the panel is no longer listening, like `emit`. A desktop that refuses one says
+    # why in the log, and the turn goes on.
+
+    def tool_start(self, call: str, name: str, target: str = "",
+                   args: Optional[Any] = None, trail: bool = True) -> bool:
+        """A tool call began: the pane opens a card for it, running.
+
+        `call` is the harness's own id for the call, unique within the turn (pi's toolCallId, an
+        OpenAI tool_call id); the output and the end name it again. Also writes the same trail
+        line `tool` does, unless `trail` is False, so a panel that draws no cards — and every
+        reader of the text — still sees the call.
+        """
+        name = str(name or "tool")
+        if trail:
+            self.tool(name, args if isinstance(args, dict) else None)
+        event: Dict[str, Any] = {
+            "kind": "tool_start", "call": str(call), "name": name,
+            "target": str(target if target else tool_target(name, args if isinstance(args, dict) else None)),
+            "args": args if args is not None else {},
+        }
+        if len(json.dumps(event)) > EVENT_PIECE_BYTES:
+            # Arguments that big are a file's contents or a page of text. The card shows how it
+            # began and says it was cut, rather than the desktop refusing the whole call.
+            whole = json.dumps(event["args"])
+            event["args"] = {"truncated": True, "bytes": len(whole), "preview": whole[:8000]}
+        return self._event(event)
+
+    def tool_output(self, call: str, delta: str, stream: str = "stdout") -> bool:
+        """Output from a running call, as it arrives. Long output is sent in several events."""
+        listening = not self.dropped
+        for piece in _pieces(delta):
+            listening = self._event({"kind": "tool_output", "call": str(call),
+                                     "stream": stream, "delta": piece})
+            if not listening:
+                break
+        return listening
+
+    def tool_end(self, call: str, ok: bool, summary: str = "",
+                 exit_code: Optional[int] = None) -> bool:
+        """A call ended: the card settles, ✓ or ✗, with one line on how it went."""
+        event: Dict[str, Any] = {"kind": "tool_end", "call": str(call), "ok": bool(ok),
+                                 "summary": summary_line(summary, 400) if summary else ""}
+        if exit_code is not None:
+            event["exit_code"] = int(exit_code)
+        return self._event(event)
+
+    def thinking(self, delta: str) -> bool:
+        """The mind's reasoning, when it shares it. Shown folded, never as the answer."""
+        listening = not self.dropped
+        for piece in _pieces(delta):
+            listening = self._event({"kind": "thinking", "delta": piece})
+            if not listening:
+                break
+        return listening
+
+    def status(self, text: str) -> bool:
+        """What the agent is doing or waiting on, in a few words: "waiting for your approval"."""
+        return self._event({"kind": "status", "text": summary_line(text, 200)})
+
+    def usage(self, model: str = "", input_tokens: Optional[int] = None,
+              output_tokens: Optional[int] = None, cost_usd: Optional[float] = None) -> bool:
+        """What a model call cost. Send what you have; usage events add up over a turn."""
+        event: Dict[str, Any] = {"kind": "usage", "model": str(model or "")}
+        if input_tokens is not None:
+            event["input_tokens"] = max(0, int(input_tokens))
+        if output_tokens is not None:
+            event["output_tokens"] = max(0, int(output_tokens))
+        if cost_usd is not None:
+            event["cost_usd"] = float(cost_usd)
+        return self._event(event)
+
+    def _event(self, event: Dict[str, Any]) -> bool:
+        if self.closed or self.dropped:
+            return not self.dropped
+        send = getattr(self.harness, "_event", None)
+        if send is None:
+            # Something standing in for a harness that only takes text: the events are extra.
+            return True
+        return send(self, event)
+
 
 class Handler:
     """What a harness needs from the mind behind it.
@@ -211,8 +370,13 @@ class Handler:
     """
 
     #: Two turns at once, or one at a time? A mind with a single conversation and a single
-    #: subprocess says False and gets the "still working" answer for free.
+    #: subprocess says False and gets the "still working" answer for free. With conversations,
+    #: this is per conversation: turns in different conversations always run at once.
     concurrent = False
+
+    #: Can this hold more than one conversation? Said to the desktop when attaching;
+    #: `turn.conversation` then says which one each turn is in. `PerConversation` sets it.
+    conversations = False
 
     def answer(self, turn: Turn) -> None:
         raise NotImplementedError
@@ -220,8 +384,121 @@ class Handler:
     def reset(self) -> None:
         """/new — forget the conversation so far."""
 
+    def reset_conversation(self, conversation: str) -> None:
+        """/new in one conversation. A handler that holds one conversation just resets."""
+        self.reset()
+
     def cancel(self, turn: Turn) -> None:
         """/stop — on top of `turn.cancelled` being set, for a mind that needs telling."""
+
+    def end(self, conversation: str) -> None:
+        """The desktop ended this conversation — the person stopped the agent, or the desktop
+        restarted — and it will never be asked anything again. Let go of what it holds. Called on
+        the poll loop's thread, so it must not block: close a process on a thread of its own."""
+
+
+class PerConversation(Handler):
+    """One handler per conversation, made when the conversation's first turn arrives.
+
+    The simplest way to hold many conversations: a mind that already knows how to hold one — a
+    process, a history — is made again for each, with that agent's token, and closed (its
+    `close()`, if it has one) when the desktop ends the conversation. `make(conversation, token)`
+    returns the handler.
+
+    A turn that arrives with a different token than the conversation was made with means the
+    desktop has started that conversation over (its `main` after the agent was stopped, or after
+    the desktop restarted); the old handler is closed and a new one made, so a process started
+    under an old token never answers for a new agent.
+    """
+
+    conversations = True
+
+    def __init__(self, make: Callable[[str, str], Handler], limit: int = 8,
+                 log: Optional[Callable[[str], None]] = None) -> None:
+        self.make = make
+        # The desktop caps live agents itself (six); this is the harness's own backstop, so a
+        # desktop that does not cannot start processes without end.
+        self.limit = limit
+        self.log = log or (lambda message: print("[conversations] %s" % message, file=sys.stderr))
+        self._lock = threading.Lock()
+        self._held: Dict[str, Tuple[Handler, str]] = {}
+
+    def held(self) -> List[str]:
+        """The conversations with a handler right now."""
+        with self._lock:
+            return sorted(self._held)
+
+    def mind(self, conversation: str) -> Optional[Handler]:
+        with self._lock:
+            entry = self._held.get(conversation)
+        return entry[0] if entry else None
+
+    def _for(self, turn: Turn) -> Handler:
+        stale: Optional[Handler] = None
+        with self._lock:
+            entry = self._held.get(turn.conversation)
+            if entry is not None and turn.agent_token and entry[1] != turn.agent_token:
+                stale = entry[0]
+                del self._held[turn.conversation]
+                entry = None
+            if entry is None:
+                if len(self._held) >= self.limit:
+                    raise RuntimeError(
+                        "this harness is already holding %d conversations, the most it keeps at "
+                        "once; stop one of its agents to start another" % self.limit)
+                mind = self.make(turn.conversation, turn.agent_token)
+                self._held[turn.conversation] = (mind, turn.agent_token)
+            else:
+                mind = entry[0]
+        if stale is not None:
+            self._retire(stale)
+        return mind
+
+    def answer(self, turn: Turn) -> None:
+        self._for(turn).answer(turn)
+
+    def cancel(self, turn: Turn) -> None:
+        mind = self.mind(turn.conversation)
+        if mind is not None:
+            mind.cancel(turn)
+
+    def reset(self) -> None:
+        with self._lock:
+            minds = [entry[0] for entry in self._held.values()]
+        for mind in minds:
+            mind.reset()
+
+    def reset_conversation(self, conversation: str) -> None:
+        mind = self.mind(conversation)
+        if mind is not None:
+            mind.reset()
+
+    def end(self, conversation: str) -> None:
+        with self._lock:
+            entry = self._held.pop(conversation, None)
+        if entry is not None:
+            self._retire(entry[0])
+
+    def close(self) -> None:
+        """Close every conversation's handler, and wait for them: the harness is exiting."""
+        with self._lock:
+            minds = [entry[0] for entry in self._held.values()]
+            self._held.clear()
+        for mind in minds:
+            self._close(mind)
+
+    def _retire(self, mind: Handler) -> None:
+        threading.Thread(target=self._close, args=(mind,), name="conversation-close",
+                         daemon=True).start()
+
+    def _close(self, mind: Handler) -> None:
+        close = getattr(mind, "close", None)
+        if close is None:
+            return
+        try:
+            close()
+        except Exception as exc:  # noqa: BLE001 — one conversation's close must not stop the rest
+            self.log("closing a conversation raised: %s" % exc)
 
 
 # ── The harness ─────────────────────────────────────────────────────────────────────────
@@ -260,6 +537,12 @@ class Harness:
         self._workers: List[threading.Thread] = []
         self._beat: Optional[threading.Thread] = None
         self._complained_about_socket = False
+        # Whether this desktop takes `harness.event`. An older one answers "unknown method", and
+        # from then on the events are skipped for the session: the trail lines are in the text.
+        self._events_ok = True
+        # Conversations turns have arrived in this session, so a new session can end them: the
+        # desktop that issued them is gone, and so are their agents and tokens.
+        self._seen: set = set()
 
     # ── running ─────────────────────────────────────────────────────────
 
@@ -283,14 +566,45 @@ class Harness:
                     self.session = None
                     self._stopping.wait(min(self.retry_seconds, 2.0))
                     continue
+                self._notices(reply)
                 turn_id = reply.get("turn_id")
                 if not isinstance(turn_id, int):
                     self._stopping.wait(self.poll_interval)
                     continue
+                conversation = str(reply.get("conversation") or MAIN)
+                self._seen.add(conversation)
                 self._dispatch(Turn(self, self.session, turn_id,
-                                    str(reply.get("text") or ""), reply.get("context")))
+                                    str(reply.get("text") or ""), reply.get("context"),
+                                    conversation=conversation,
+                                    agent_token=str(reply.get("agent_token") or "")))
         finally:
             self._shutdown()
+
+    def _notices(self, reply: Dict[str, Any]) -> None:
+        """What the desktop stopped waiting for: turns it cancelled, conversations it ended."""
+        for turn_id in reply.get("cancelled") or []:
+            with self._lock:
+                turn = self._open.get(turn_id)
+            if turn is not None:
+                # The same as the panel going away: nothing more is sent, and the mind is asked
+                # to stop. The turn is still closed once, by whoever is running it.
+                self._drop(turn)
+        for conversation in reply.get("ended") or []:
+            self._end(str(conversation))
+
+    def _end(self, conversation: str) -> None:
+        with self._lock:
+            running = [t for t in self._open.values() if t.conversation == conversation]
+        for turn in running:
+            self._drop(turn)
+        self._seen.discard(conversation)
+        end = getattr(self.handler, "end", None)
+        if end is None:
+            return
+        try:
+            end(conversation)
+        except Exception as exc:  # noqa: BLE001 — a handler's end must not kill the loop
+            self.log("ending a conversation raised: %s" % exc)
 
     def stop(self) -> None:
         self._stopping.set()
@@ -314,7 +628,8 @@ class Harness:
                 self._complained_about_socket = True
             return False
         params: Dict[str, Any] = {"id": self.id, "name": self.name,
-                                  "tools": self.tools, "memory": self.memory}
+                                  "tools": self.tools, "memory": self.memory,
+                                  "conversations": bool(getattr(self.handler, "conversations", False))}
         if self.detail:
             params["detail"] = self.detail
         try:
@@ -329,7 +644,13 @@ class Harness:
         self.session = str(session)
         self._resolved = address
         self._complained_about_socket = False
+        self._events_ok = True
         self.log("attached as `%s` (session %s)" % (self.id, self.session))
+        # Whatever the last session's conversations held — a process each, a history each — was
+        # for agents that desktop issued. Its tokens name nothing now.
+        for conversation in sorted(self._seen):
+            self._end(conversation)
+        self._seen = set()
         return True
 
     def _call(self, method: str, params: Dict[str, Any]) -> Any:
@@ -347,7 +668,10 @@ class Harness:
             return
 
         with self._lock:
-            busy = bool(self._open) and not getattr(self.handler, "concurrent", False)
+            # Per conversation: a turn in one conversation never waits for another. The desktop
+            # already hands a conversation one turn at a time; this is for one that does not.
+            busy = (not getattr(self.handler, "concurrent", False)
+                    and any(t.conversation == turn.conversation for t in self._open.values()))
             if not busy:
                 self._open[turn.turn_id] = turn
         if busy:
@@ -365,8 +689,9 @@ class Harness:
         worker.start()
 
     def _command(self, turn: Turn, command: str) -> None:
-        """/stop and /new are answered here, never handed to the mind."""
-        running = list(self._open.values())
+        """/stop and /new are answered here, never handed to the mind — in their conversation."""
+        with self._lock:
+            running = [t for t in self._open.values() if t.conversation == turn.conversation]
         for other in running:
             other.cancelled.set()
             try:
@@ -377,7 +702,11 @@ class Harness:
             turn.emit("stopping." if running else "nothing was running.")
         else:
             try:
-                self.handler.reset()
+                reset = getattr(self.handler, "reset_conversation", None)
+                if reset is not None:
+                    reset(turn.conversation)
+                else:
+                    self.handler.reset()
             except Exception as exc:
                 turn.emit("could not start a new conversation: %s" % _readable(exc))
                 self._close(turn)
@@ -425,6 +754,38 @@ class Harness:
         if reply.get("dropped"):
             self._drop(turn)
             return False
+        return True
+
+    def _event(self, turn: Turn, event: Dict[str, Any]) -> bool:
+        """One `harness.event`. False only when the panel is no longer listening."""
+        if turn.closed or turn.dropped or self._stopping.is_set():
+            return not turn.dropped
+        if not self._events_ok:
+            return True
+        try:
+            reply = self._call(EVENT, {"session": turn.session, "turn_id": turn.turn_id,
+                                       "event": event}) or {}
+        except HarnessError as exc:
+            if "unknown method" in str(exc):
+                # A desktop from before events. Nothing is lost that it could have shown: the
+                # trail line is in the text, and the text is all it draws.
+                self._events_ok = False
+                self.log("this desktop does not take harness.event; tool calls show as trail "
+                         "lines only")
+                return True
+            if not turn.dropped:
+                self.log("event on turn %d failed: %s" % (turn.turn_id, exc))
+            self._drop(turn)
+            return False
+        turn.last_call = time.monotonic()
+        if reply.get("dropped"):
+            self._drop(turn)
+            return False
+        if reply.get("refused"):
+            # The desktop kept the turn and refused this one event. Worth a log line — it is a
+            # bug here or in the mind — and not worth the turn.
+            self.log("the desktop refused a %s event on turn %d: %s"
+                     % (event.get("kind"), turn.turn_id, reply["refused"]))
         return True
 
     def _drop(self, turn: Turn) -> None:

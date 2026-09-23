@@ -95,6 +95,8 @@ fn main() {
                 eprintln!("\nfailed: {why}");
                 std::process::exit(1);
             }
+            // What the harness says it is doing; this probe only checks the answer.
+            Chunk::Event(event) => eprintln!("\n[{}]", event.kind()),
         }
     }
     eprintln!("\n");

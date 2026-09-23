@@ -265,6 +265,293 @@ class TrailTests(unittest.TestCase):
         self.assertEqual(said(recorder), "⚙️ os_apps\n\n")
 
 
+class EventTests(unittest.TestCase):
+    """What a turn says it is doing, beside the text."""
+
+    def test_a_tool_call_is_a_card_and_still_a_trail_line(self):
+        turn, recorder = recording_turn("add dentist")
+        turn.tool_start("t1", "os_act", args={"app": "calendar", "action": "add_event"})
+        turn.tool_output("t1", "added\n")
+        turn.tool_end("t1", True, "added the event\nsecond line", exit_code=0)
+        self.assertEqual(recorder.kinds(), ["tool_start", "tool_output", "tool_end"])
+        start, output, end = recorder.events
+        self.assertEqual((start["call"], start["name"], start["target"]),
+                         ("t1", "os_act", "calendar.add_event"))
+        self.assertEqual(start["args"], {"app": "calendar", "action": "add_event"})
+        self.assertEqual((output["stream"], output["delta"]), ("stdout", "added\n"))
+        self.assertEqual((end["ok"], end["summary"], end["exit_code"]),
+                         (True, "added the event", 0))
+        # Every reader of the text — and every panel that draws no cards — still sees the call.
+        self.assertEqual(said(recorder), tool_trail("os_act", {"app": "calendar",
+                                                               "action": "add_event"}) + "\n\n")
+
+    def test_the_trail_line_can_be_left_out_for_a_call_that_touched_nothing(self):
+        turn, recorder = recording_turn("hi")
+        turn.tool_start("t1", "os_act", args={"arguments": "{not json"}, trail=False)
+        self.assertEqual(said(recorder), "")
+        self.assertEqual(recorder.kinds(), ["tool_start"])
+
+    def test_long_output_is_sent_in_pieces_each_under_the_desktops_limit(self):
+        import json
+        turn, recorder = recording_turn("hi")
+        # ASCII, and characters that the wire escapes to twelve bytes each.
+        for text in ("x" * 200_000, "\U0001F600" * 30_000):
+            recorder.events.clear()
+            turn.tool_output("t1", text)
+            self.assertGreater(len(recorder.events), 1)
+            self.assertEqual("".join(e["delta"] for e in recorder.events), text)
+            for event in recorder.events:
+                self.assertLess(len(json.dumps(event)), yantrik_harness.MAX_EVENT_BYTES)
+
+    def test_huge_arguments_are_cut_rather_than_the_call_refused(self):
+        import json
+        turn, recorder = recording_turn("hi")
+        turn.tool_start("t1", "os_act", args={"app": "notes", "body": "y" * 100_000}, trail=False)
+        event = recorder.events[0]
+        self.assertLess(len(json.dumps(event)), yantrik_harness.MAX_EVENT_BYTES)
+        self.assertTrue(event["args"]["truncated"])
+        self.assertEqual(event["target"], "notes")
+
+    def test_thinking_status_and_usage(self):
+        turn, recorder = recording_turn("hi")
+        turn.thinking("let me look")
+        turn.status("waiting for your approval")
+        turn.usage(model="qwen", output_tokens=412)
+        self.assertEqual(recorder.events, [
+            {"kind": "thinking", "delta": "let me look"},
+            {"kind": "status", "text": "waiting for your approval"},
+            # What the harness does not know is left out, not sent as zero.
+            {"kind": "usage", "model": "qwen", "output_tokens": 412},
+        ])
+
+    def test_a_target_is_what_was_touched_when_that_can_be_said(self):
+        self.assertEqual(yantrik_harness.tool_target("os_act", {"app": "notes", "action": "new_note()"}),
+                         "notes.new_note")
+        self.assertEqual(yantrik_harness.tool_target("read", {"path": "~/Pictures"}), "~/Pictures")
+        self.assertEqual(yantrik_harness.tool_target("bash", {"command": "ls -la\npwd"}), "ls -la")
+        self.assertEqual(yantrik_harness.tool_target("os_apps", {}), "")
+
+    def test_a_turn_knows_its_conversation_and_its_agent(self):
+        turn, _ = recording_turn("hi", conversation="c-7f3a91", agent_token="ab" * 16)
+        self.assertEqual((turn.conversation, turn.agent_token), ("c-7f3a91", "ab" * 16))
+        plain, _ = recording_turn("hi")
+        self.assertEqual((plain.conversation, plain.agent_token), ("main", ""))
+
+
+class Minds(Handler):
+    """One `Mind` per conversation, recorded, for the PerConversation tests."""
+
+    def __init__(self):
+        self.made = []          # (conversation, token)
+        self.closed = []        # conversations whose mind was closed
+        self.lock = threading.Lock()
+
+    def make(self, conversation, token):
+        outer = self
+
+        class Mind(Handler):
+            def __init__(self):
+                self.conversation = conversation
+                self.resets = 0
+                self.running = threading.Event()
+                self.release = threading.Event()
+
+            def answer(self, turn):
+                self.running.set()
+                if turn.text == "slow":
+                    self.release.wait(3)
+                turn.emit("%s heard %s" % (conversation, turn.text))
+
+            def reset(self):
+                self.resets += 1
+
+            def close(self):
+                with outer.lock:
+                    outer.closed.append(conversation)
+
+        with self.lock:
+            self.made.append((conversation, token))
+        return Mind()
+
+
+@unittest.skipUnless(support.HAS_UNIX_SOCKETS, "the harness socket is a unix socket")
+class ConversationTests(unittest.TestCase):
+    def setUp(self):
+        self.desktop = FakeDesktop()
+        self.addCleanup(self.desktop.stop)
+        self.logged = []
+
+    def start(self, handler, desktop=None):
+        desktop = desktop or self.desktop
+        harness = Harness("test", "Test", handler, address=desktop.path,
+                          log=self.logged.append, heartbeat_seconds=30.0,
+                          poll_interval=0.02, retry_seconds=0.2)
+        thread = threading.Thread(target=harness.run, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 3)
+        self.addCleanup(harness.stop)
+        self.assertTrue(wait_for(lambda: bool(desktop.attachments)), "never attached")
+        return harness
+
+    def test_a_harness_says_whether_it_holds_many_conversations(self):
+        self.start(yantrik_harness.PerConversation(Minds().make))
+        self.assertTrue(self.desktop.attachments[0]["conversations"])
+        other = FakeDesktop()
+        self.addCleanup(other.stop)
+        self.start(Echo(), desktop=other)
+        self.assertFalse(other.attachments[0]["conversations"])
+
+    def test_each_conversation_gets_its_own_mind_made_with_its_agents_token(self):
+        minds = Minds()
+        self.start(yantrik_harness.PerConversation(minds.make))
+        a = self.desktop.ask("hi", conversation="c-aaaaaa", agent_token="a" * 32)
+        b = self.desktop.ask("hi", conversation="c-bbbbbb", agent_token="b" * 32)
+        again = self.desktop.ask("again", conversation="c-aaaaaa", agent_token="a" * 32)
+        for turn in (a, b, again):
+            self.desktop.wait_closed(turn)
+        self.assertEqual(self.desktop.text(a), "c-aaaaaa heard hi")
+        self.assertEqual(self.desktop.text(b), "c-bbbbbb heard hi")
+        self.assertEqual(self.desktop.text(again), "c-aaaaaa heard again")
+        self.assertEqual(sorted(minds.made), [("c-aaaaaa", "a" * 32), ("c-bbbbbb", "b" * 32)])
+
+    def test_different_conversations_run_at_once_and_the_same_one_does_not(self):
+        minds = Minds()
+        handler = yantrik_harness.PerConversation(minds.make)
+        self.start(handler)
+        slow = self.desktop.ask("slow", conversation="c-aaaaaa")
+        self.assertTrue(wait_for(lambda: handler.mind("c-aaaaaa") is not None
+                                 and handler.mind("c-aaaaaa").running.is_set()))
+        # Another conversation is answered while the first is still working...
+        other = self.desktop.ask("quick", conversation="c-bbbbbb")
+        self.assertEqual(self.desktop.wait_closed(other)[1], "complete")
+        self.assertEqual(self.desktop.text(other), "c-bbbbbb heard quick")
+        # ...and a second message to the busy one is told so, not interleaved into it.
+        same = self.desktop.ask("and this?", conversation="c-aaaaaa")
+        self.desktop.wait_closed(same)
+        self.assertIn("still working", self.desktop.text(same))
+        self.assertEqual(self.desktop.closes_for(slow), [])
+        handler.mind("c-aaaaaa").release.set()
+        self.assertEqual(self.desktop.wait_closed(slow)[1], "complete")
+
+    def test_stop_in_one_conversation_leaves_the_others_running(self):
+        handler = Waiting()
+
+        class Two(Handler):
+            conversations = True
+
+            def answer(self, turn):
+                handler.answer(turn)
+
+            def cancel(self, turn):
+                handler.cancel(turn)
+
+        self.start(Two())
+        one = self.desktop.ask("job", conversation="c-111111")
+        self.assertTrue(handler.started.wait(3))
+        two = self.desktop.ask("job", conversation="c-222222")
+        self.assertTrue(wait_for(lambda: len(self.desktop.open_turns) == 2))
+        stop = self.desktop.ask("/stop", conversation="c-111111")
+        self.desktop.wait_closed(stop)
+        self.desktop.wait_closed(one)
+        self.assertEqual(handler.cancelled_from, [one])
+        self.assertEqual(self.desktop.closes_for(two), [], "stopped a conversation nobody stopped")
+
+    def test_new_forgets_only_its_own_conversation(self):
+        minds = Minds()
+        handler = yantrik_harness.PerConversation(minds.make)
+        self.start(handler)
+        for conversation in ("c-aaaaaa", "c-bbbbbb"):
+            self.desktop.wait_closed(self.desktop.ask("hi", conversation=conversation))
+        self.desktop.wait_closed(self.desktop.ask("/new", conversation="c-aaaaaa"))
+        self.assertEqual(handler.mind("c-aaaaaa").resets, 1)
+        self.assertEqual(handler.mind("c-bbbbbb").resets, 0)
+
+    def test_a_cancelled_turn_is_stopped_and_still_closed_once(self):
+        handler = Waiting()
+        self.start(handler)
+        turn = self.desktop.ask("a long job")
+        self.assertTrue(handler.started.wait(3))
+        self.desktop.stop_agent(turn_id=turn)
+        self.assertTrue(wait_for(lambda: handler.cancelled_from == [turn]), "the mind was not told")
+        self.desktop.wait_closed(turn)
+        time.sleep(0.2)
+        self.assertEqual(len(self.desktop.closes_for(turn)), 1)
+
+    def test_an_ended_conversation_lets_its_mind_go(self):
+        minds = Minds()
+        handler = yantrik_harness.PerConversation(minds.make)
+        self.start(handler)
+        self.desktop.wait_closed(self.desktop.ask("hi", conversation="c-aaaaaa"))
+        self.desktop.wait_closed(self.desktop.ask("hi", conversation="c-bbbbbb"))
+        self.desktop.stop_agent(conversation="c-aaaaaa")
+        self.assertTrue(wait_for(lambda: minds.closed == ["c-aaaaaa"]), minds.closed)
+        self.assertEqual(handler.held(), ["c-bbbbbb"])
+
+    def test_a_conversation_started_over_under_a_new_token_gets_a_new_mind(self):
+        # The desktop stopped `main` and the Lens spoke to it again: the same conversation name,
+        # a new agent. A process made under the old token must not answer for the new one.
+        minds = Minds()
+        self.start(yantrik_harness.PerConversation(minds.make))
+        self.desktop.wait_closed(self.desktop.ask("hi", conversation="main", agent_token="a" * 32))
+        self.desktop.wait_closed(self.desktop.ask("hi", conversation="main", agent_token="b" * 32))
+        self.assertEqual(minds.made, [("main", "a" * 32), ("main", "b" * 32)])
+        self.assertTrue(wait_for(lambda: minds.closed == ["main"]))
+
+    def test_attaching_again_ends_the_conversations_of_the_session_before(self):
+        minds = Minds()
+        handler = yantrik_harness.PerConversation(minds.make)
+        self.start(handler)
+        self.desktop.wait_closed(self.desktop.ask("hi", conversation="c-aaaaaa"))
+        self.desktop.invalidate()
+        self.assertTrue(wait_for(lambda: len(self.desktop.attachments) >= 2, timeout=5))
+        self.assertTrue(wait_for(lambda: minds.closed == ["c-aaaaaa"]), minds.closed)
+        self.assertEqual(handler.held(), [])
+
+    def test_past_its_own_limit_a_new_conversation_is_told_why(self):
+        minds = Minds()
+        self.start(yantrik_harness.PerConversation(minds.make, limit=1))
+        self.desktop.wait_closed(self.desktop.ask("hi", conversation="c-aaaaaa"))
+        closed = self.desktop.wait_closed(self.desktop.ask("hi", conversation="c-bbbbbb"))
+        self.assertEqual(closed[1], "fail")
+        self.assertIn("already holding 1 conversations", closed[2])
+
+    def test_events_reach_the_desktop_for_their_turn(self):
+        class Tooling(Handler):
+            def answer(self, turn):
+                turn.emit("Looking.\n")
+                turn.tool_start("t1", "os_apps")
+                turn.tool_output("t1", "notes, calendar")
+                turn.tool_end("t1", True, "2 apps")
+                turn.usage(model="m", input_tokens=10)
+                turn.emit("Two apps.")
+
+        self.start(Tooling())
+        turn = self.desktop.ask("what is open?")
+        self.assertEqual(self.desktop.wait_closed(turn)[1], "complete")
+        self.assertEqual(self.desktop.kinds(turn), ["tool_start", "tool_output", "tool_end", "usage"])
+        self.assertIn("⚙️ os_apps", self.desktop.text(turn))
+        self.assertTrue(self.desktop.text(turn).endswith("Two apps."))
+
+    def test_against_a_desktop_from_before_events_the_turn_is_unchanged(self):
+        old = FakeDesktop(events=False)
+        self.addCleanup(old.stop)
+
+        class Tooling(Handler):
+            def answer(self, turn):
+                for n in range(3):
+                    turn.tool_start("t%d" % n, "os_apps")
+                    turn.tool_end("t%d" % n, True)
+                turn.emit("done")
+
+        self.start(Tooling(), desktop=old)
+        turn = old.ask("hi")
+        self.assertEqual(old.wait_closed(turn)[1], "complete")
+        self.assertTrue(old.text(turn).endswith("done"))
+        self.assertEqual(old.text(turn).count("⚙️ os_apps"), 3)
+        # Said once, not once per event.
+        self.assertEqual(sum("does not take harness.event" in m for m in self.logged), 1)
+
+
 class SocketDiscoveryTests(unittest.TestCase):
     def test_an_explicit_socket_is_honoured_and_nothing_else_is_looked_at(self):
         # Pointing a harness at one desktop must never silently fall through to another.

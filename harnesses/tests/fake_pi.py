@@ -4,7 +4,10 @@ Scenario comes from argv (everything after the flags pi itself would take, so th
 argv building is exercised unchanged) or from $FAKE_PI_SCENARIO:
 
     text      a couple of text deltas, then agent_end + agent_settled
-    tool      a tool execution around the text
+    tool      a tool execution around the text: start, two accumulated updates, end, and the
+              assistant message's usage in message_end
+    refused   a tool execution whose result is a REFUSED answer
+    slow      waits half a second before answering, so two processes can be seen overlapping
     dialog    an extension_ui_request confirm, which must come back cancelled
     abort     never finishes on its own; answers `abort` with agent_end + agent_settled
     exit      dies in the middle of the turn
@@ -19,12 +22,18 @@ import json
 import os
 import sys
 import threading
+import time
 
 SCENARIO = os.environ.get("FAKE_PI_SCENARIO") or (sys.argv[1] if len(sys.argv) > 1 else "text")
 # What the harness passed us, written out so a test can assert on the command line it builds.
 ARGV_DUMP = os.environ.get("FAKE_PI_ARGV_DUMP")
 # Every command line the harness sends, for the dialog and abort assertions.
 COMMANDS_DUMP = os.environ.get("FAKE_PI_COMMANDS_DUMP")
+# One line per process started — its pid and the agent token in its environment — so a test can
+# see one process per conversation and which agent each one is.
+ENV_DUMP = os.environ.get("FAKE_PI_ENV_DUMP")
+# One line per prompt, with this process's pid, so a test can see which process answered.
+PROMPTS_DUMP = os.environ.get("FAKE_PI_PROMPTS_DUMP")
 
 
 def emit(event):
@@ -45,7 +54,20 @@ def settle():
     emit({"type": "agent_settled"})
 
 
+def assistant_end(text):
+    """What pi says when an assistant message is settled, usage and all."""
+    emit({"type": "message_end", "message": {
+        "role": "assistant", "model": "fake-model",
+        "content": [{"type": "text", "text": text}],
+        "usage": {"input": 100, "output": 20, "cacheRead": 5, "cacheWrite": 0,
+                  "totalTokens": 125,
+                  "cost": {"input": 0.001, "output": 0.002, "cacheRead": 0, "cacheWrite": 0,
+                           "total": 0.003}}}})
+
+
 def handle_prompt(command):
+    record(PROMPTS_DUMP, json.dumps({"pid": os.getpid(), "message": command.get("message"),
+                                     "at": time.time()}))
     emit({"type": "response", "command": "prompt", "id": command.get("id"),
           "success": SCENARIO != "refuse",
           **({"error": "no provider configured"} if SCENARIO == "refuse" else {})})
@@ -65,12 +87,42 @@ def handle_prompt(command):
     if SCENARIO == "tool":
         emit({"type": "message_update",
               "assistantMessageEvent": {"type": "thinking_delta", "delta": "hmm, notes"}})
+        args = {"app": "calendar", "action": "add_event", "args": {"title": "dentist"}}
         emit({"type": "tool_execution_start", "toolCallId": "t1", "toolName": "os_act",
-              "args": {"app": "calendar", "action": "add_event", "args": {"title": "dentist"}}})
+              "args": args})
+        # Pi reports a running call's output accumulated, not as deltas.
+        for so_far in ("checking the calendar\n", "checking the calendar\nadding dentist\n"):
+            emit({"type": "tool_execution_update", "toolCallId": "t1", "toolName": "os_act",
+                  "args": args, "partialResult": {"content": [{"type": "text", "text": so_far}],
+                                                  "details": {}}})
         emit({"type": "tool_execution_end", "toolCallId": "t1", "toolName": "os_act",
-              "result": {"content": [{"type": "text", "text": "done"}]}, "isError": False})
+              "result": {"content": [{"type": "text", "text":
+                                      "checking the calendar\nadding dentist\ndone"}],
+                         "details": {"exitCode": 0}},
+              "isError": False})
         emit({"type": "message_update",
               "assistantMessageEvent": {"type": "text_delta", "delta": "Added it."}})
+        assistant_end("Added it.")
+        settle()
+        return
+
+    if SCENARIO == "refused":
+        emit({"type": "tool_execution_start", "toolCallId": "t2", "toolName": "os_act",
+              "args": {"app": "files", "action": "delete"}})
+        emit({"type": "tool_execution_end", "toolCallId": "t2", "toolName": "os_act",
+              "result": {"content": [{"type": "text", "text":
+                                      "REFUSED: plan mode is on, so nothing was changed."}]},
+              "isError": False})
+        emit({"type": "message_update",
+              "assistantMessageEvent": {"type": "text_delta", "delta": "That was refused."}})
+        settle()
+        return
+
+    if SCENARIO == "slow":
+        time.sleep(0.6)
+        emit({"type": "message_update",
+              "assistantMessageEvent": {"type": "text_delta",
+                                        "delta": "answered by %d" % os.getpid()}})
         settle()
         return
 
@@ -101,6 +153,8 @@ def handle_prompt(command):
 
 def main():
     record(ARGV_DUMP, json.dumps(sys.argv[1:]))
+    record(ENV_DUMP, json.dumps({"pid": os.getpid(),
+                                 "token": os.environ.get("YANTRIK_AGENT_TOKEN")}))
     for line in sys.stdin:
         line = line.strip()
         if not line:

@@ -58,7 +58,14 @@ class _Chat(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
-        for piece in self._frames(model, nth, auth):
+        frames = self._frames(model, nth, auth)
+        if (body.get("stream_options") or {}).get("include_usage") and frames[-1] == DONE:
+            # What OpenAI-compatible servers send when asked: one last chunk, no choices.
+            frames.insert(-1, "data: " + json.dumps({
+                "choices": [], "model": model + "-served",
+                "usage": {"prompt_tokens": 321, "completion_tokens": 45, "total_tokens": 366},
+            }) + "\n\n")
+        for piece in frames:
             self.wfile.write(piece.encode("utf-8"))
             self.wfile.flush()
 
@@ -259,6 +266,80 @@ class DeepSeekTests(unittest.TestCase):
         self.assertIn("Asia/Kolkata", system)
         self.assertIn("REFUSED", system, "the system prompt must say what a refusal means")
 
+    # ── what the agent is doing ─────────────────────────────────────────
+
+    def test_each_tool_call_is_a_card_that_settles_with_its_result(self):
+        mind = self.mind("tools")
+        turn, recorder = recording_turn("add dentist to my calendar")
+        mind.answer(turn)
+        calls = recorder.calls()
+        self.assertEqual(list(calls), ["call_a", "call_b"])
+        self.assertEqual([e["kind"] for e in calls["call_a"]], ["tool_start", "tool_output", "tool_end"])
+        start_b = calls["call_b"][0]
+        self.assertEqual((start_b["name"], start_b["target"]), ("os_act", "calendar.add_event"))
+        self.assertEqual(start_b["args"], {"app": "calendar", "action": "add_event"})
+        self.assertEqual(calls["call_a"][1]["delta"], "open: notes, calendar")
+        self.assertTrue(calls["call_a"][-1]["ok"])
+        # A refusal answered, and nothing was done: the card says so.
+        self.assertFalse(calls["call_b"][-1]["ok"])
+        self.assertIn("REFUSED", calls["call_b"][-1]["summary"])
+
+    def test_the_thinking_goes_beside_the_answer_not_into_it(self):
+        mind = self.mind("tools")
+        turn, recorder = recording_turn("add dentist")
+        mind.answer(turn)
+        thinking = [e["delta"] for e in recorder.events if e["kind"] == "thinking"]
+        self.assertEqual(thinking, ["I should look at the desktop first"])
+        self.assertNotIn("I should look", said(recorder))
+
+    def test_what_each_request_cost_comes_from_the_api_response(self):
+        mind = self.mind("tools")
+        turn, recorder = recording_turn("add dentist")
+        mind.answer(turn)
+        usage = [e for e in recorder.events if e["kind"] == "usage"]
+        # Two requests in this turn, one usage each; they add up.
+        self.assertEqual(usage, [{"kind": "usage", "model": "tools-served",
+                                  "input_tokens": 321, "output_tokens": 45}] * 2)
+        self.assertEqual(self.requests_for("tools")[0]["stream_options"], {"include_usage": True})
+
+    def test_usage_can_be_turned_off_for_a_server_that_rejects_the_field(self):
+        mind = self.mind("plain", include_usage=False)
+        turn, recorder = recording_turn("hi")
+        mind.answer(turn)
+        self.assertNotIn("stream_options", self.requests_for("plain")[0])
+        self.assertNotIn("usage", recorder.kinds())
+
+    def test_each_conversation_has_its_own_history_and_its_own_bridge(self):
+        made = []
+
+        def make_tools(token):
+            tools = FakeTools()
+            made.append((token, tools))
+            return tools
+
+        config = Config(base_url=self.base, model="plain", api_key=TRIPWIRE)
+        handler = yantrik_deepseek.handler(config, make_tools=make_tools, log=self.logged.append)
+        self.assertTrue(handler.conversations)
+        first, _ = recording_turn("about the photos", conversation="c-aaaaaa", agent_token="a" * 32)
+        second, _ = recording_turn("about the release", conversation="c-bbbbbb", agent_token="b" * 32)
+        handler.answer(first)
+        handler.answer(second)
+
+        self.assertEqual([token for token, _ in made], ["a" * 32, "b" * 32])
+        requests = self.requests_for("plain")
+        users = [[m["content"] for m in r["messages"] if m["role"] == "user"] for r in requests]
+        self.assertEqual(users, [["about the photos"], ["about the release"]])
+        history = handler.mind("c-aaaaaa").messages
+        self.assertNotIn("about the release", json.dumps(history))
+
+    def test_the_bridge_for_a_conversation_carries_its_agents_token(self):
+        config = Config(base_url=self.base, model="plain", api_key=TRIPWIRE)
+        handler = yantrik_deepseek.handler(config, log=self.logged.append)
+        turn, _ = recording_turn("hi", conversation="c-aaaaaa", agent_token="a" * 32)
+        tools = handler._for(turn).tools
+        self.assertEqual(tools.env, {"YANTRIK_AGENT_TOKEN": "a" * 32})
+        handler.close()
+
     # ── failures a person can act on ────────────────────────────────────
 
     def test_each_http_failure_is_a_sentence_about_what_to_do(self):
@@ -291,6 +372,7 @@ class DeepSeekTests(unittest.TestCase):
             except ProviderError as exc:
                 leaked.append(str(exc))
             leaked.append(said(recorder))
+            leaked.append(json.dumps(recorder.events))
             leaked.append(repr(mind))
             leaked.append(repr(mind.config))
             leaked.append(str(mind.config))

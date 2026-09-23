@@ -15,7 +15,7 @@
 //! harness already does properly.
 //!
 //! So the OS owns one thing: **which mind the person is talking to**. Everything else belongs to
-//! the harness, and the interface between them is [`protocol`] — six methods, spoken by the
+//! the harness, and the interface between them is [`protocol`] — seven methods, spoken by the
 //! harness, over the socket bus this OS already has.
 //!
 //! # Adding a harness
@@ -49,7 +49,8 @@ pub mod event;
 pub mod host;
 pub mod protocol;
 
-pub use host::{Entry, Host};
+pub use event::{AgentId, Event};
+pub use host::{AgentEntry, AgentState, Entry, EventCounts, Host, TurnEnd};
 
 use std::sync::mpsc::Receiver;
 
@@ -80,13 +81,21 @@ impl Turn {
 }
 
 /// One piece of an answer, as it arrives.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `Eq`: an [`Event`] can carry a cost in dollars and a tool's arguments, and neither has a
+/// total equality.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Chunk {
     /// Text to append to the reply.
     Text(String),
     /// The turn failed. Carries what to show a person — a stream that simply stopped would be
     /// indistinguishable from a harness that had nothing more to say.
     Failed(String),
+    /// What the agent is doing, beside the text: a tool call opening, its output, its end, its
+    /// thinking, what it cost. Already checked by the host — in order, for a turn in flight, from
+    /// the harness that holds it — but still the harness's own account; see `crate::event`. A
+    /// reader that only wants the answer skips these, as [`collect`] does.
+    Event(Event),
 }
 
 /// A stream of answer chunks. It ends when the channel closes.
@@ -163,6 +172,8 @@ pub fn collect(answer: Answer) -> Result<String, String> {
         match chunk {
             Chunk::Text(part) => text.push_str(&part),
             Chunk::Failed(why) => return Err(why),
+            // What the agent did is not what it said.
+            Chunk::Event(_) => {}
         }
     }
     Ok(text)
@@ -198,6 +209,22 @@ mod tests {
             Chunk::Failed("the connection dropped".into()),
         ]);
         assert_eq!(collect(answer).unwrap_err(), "the connection dropped");
+    }
+
+    #[test]
+    fn collecting_an_answer_skips_what_the_agent_did_along_the_way() {
+        let answer = answer_of(vec![
+            Chunk::Text("Looking. ".into()),
+            Chunk::Event(Event::ToolStart {
+                call: "t1".into(),
+                name: "os_apps".into(),
+                target: String::new(),
+                args: serde_json::json!({}),
+            }),
+            Chunk::Event(Event::ToolEnd { call: "t1".into(), ok: true, summary: String::new(), exit_code: None }),
+            Chunk::Text("Two windows.".into()),
+        ]);
+        assert_eq!(collect(answer).unwrap(), "Looking. Two windows.");
     }
 
     #[test]

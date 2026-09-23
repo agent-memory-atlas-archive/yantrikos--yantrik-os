@@ -1,6 +1,6 @@
 //! The wire between a harness and this OS.
 //!
-//! Six methods, spoken by the harness to the `harness` socket. That is the whole interface, and
+//! Seven methods, spoken by the harness to the `harness` socket. That is the whole interface, and
 //! its smallness is the point: a harness already knows how to be itself — `yantrik-mind` has its
 //! own models and config, hermes-agent has its own — and none of that is the OS's business. The
 //! OS offers somewhere to attach and a way to be handed turns.
@@ -22,13 +22,35 @@
 //! # A whole harness
 //!
 //! ```text
-//! attach  {id, name, capabilities}      → {session}
+//! attach  {id, name, conversations?}    → {session}
 //! loop:
-//!   poll  {session}                     → {turn_id, text, context} | {}
-//!   …if {}: wait POLL_INTERVAL_MS and poll again
+//!   poll  {session}                     → {turn_id, text, context, conversation, agent_token} | {}
+//!                                         (+ cancelled: [turn_id], ended: [conversation])
+//!   …if no turn_id: wait POLL_INTERVAL_MS and poll again
 //!   chunk {session, turn_id, delta}     → {}          … as many as you like
+//!   event {session, turn_id, event}     → {}          … optional: what the agent is doing
 //!   complete {session, turn_id}         → {}
 //! ```
+//!
+//! # Conversations
+//!
+//! A harness that can hold more than one conversation at a time says `conversations: true` when
+//! it attaches. Every turn names its conversation — an id the desktop issued, `c-7f3a91`, or
+//! `main` — and the harness keeps a separate history for each. A harness that does not say so
+//! gets every turn in `main`, exactly as before. Either way the desktop hands a conversation one
+//! turn at a time: the next waits until the one in flight is completed or failed. `/stop` is the
+//! one message that does not wait its turn, because it is how a person interrupts the one that is
+//! running.
+//!
+//! Every turn also carries the conversation's `agent_token`: 128 random bits the desktop minted
+//! for that agent. A harness passes it to the tools it starts for that conversation
+//! (`YANTRIK_AGENT_TOKEN`), so an act can be traced to the agent that asked, and never shows it
+//! to the model.
+//!
+//! A poll may also carry `cancelled` — turns the desktop stopped waiting for, because the person
+//! stopped that agent — and `ended` — conversations the desktop ended, whose processes and
+//! history the harness can let go of. Both are advisory and both can be ignored: a harness that
+//! keeps working on a cancelled turn is told `{"dropped": true}` on its next call.
 //!
 //! Driving the desktop is deliberately NOT here. An attached harness reads and steers the OS
 //! through the control surface every app already publishes — `app.describe` / `app.act`, or `yos`
@@ -49,9 +71,21 @@ pub const COMPLETE: &str = "harness.complete";
 pub const FAIL: &str = "harness.fail";
 /// Leave cleanly. Not required — dropping off is also how you leave.
 pub const DETACH: &str = "harness.detach";
+/// What the agent is doing, beside the text: a tool call opening, its output, its end. See
+/// [`crate::event`].
+pub use crate::event::EVENT;
 
 /// Every method this service answers, for the error when something else is called.
-pub const METHODS: &[&str] = &[ATTACH, POLL, CHUNK, COMPLETE, FAIL, DETACH];
+pub const METHODS: &[&str] = &[ATTACH, POLL, CHUNK, EVENT, COMPLETE, FAIL, DETACH];
+
+/// The most one [`EVENT`] may weigh, as JSON. A command's output travels as many small
+/// `tool_output` events, not one large one; an event past this is refused and counted, and the
+/// turn goes on.
+pub const MAX_EVENT_BYTES: usize = 64 * 1024;
+
+/// How many agents may be live at once, across every harness. Starting one more is refused with a
+/// sentence that says so; the Lens's own conversation with the answering mind is never refused.
+pub const MAX_LIVE_AGENTS: usize = 6;
 
 /// How a tool call is written into an answer.
 ///
@@ -113,6 +147,10 @@ pub struct Attach {
     pub tools: bool,
     #[serde(default)]
     pub memory: bool,
+    /// Can hold more than one conversation at once, each with its own history. Without it every
+    /// turn is in the one conversation, `main`, and the desktop says so rather than pretending.
+    #[serde(default)]
+    pub conversations: bool,
 }
 
 /// One turn handed to a harness.
@@ -126,6 +164,15 @@ pub struct Assignment {
     /// safe to ignore.
     #[serde(default)]
     pub context: Option<String>,
+    /// Which conversation this turn belongs to: an id the desktop issued (`c-7f3a91`), or `main`.
+    /// A harness that did not attach with `conversations` only ever sees `main`.
+    #[serde(default)]
+    pub conversation: String,
+    /// The agent's token: 128 random bits as hex, the same for every turn of this conversation.
+    /// Passed to the tools the harness starts for it as `YANTRIK_AGENT_TOKEN`; never shown to
+    /// the model and never written to a log.
+    #[serde(default)]
+    pub agent_token: String,
 }
 
 #[cfg(test)]
@@ -153,6 +200,7 @@ mod tests {
             detail: Some("qwen2.5 on node1".into()),
             tools: true,
             memory: true,
+            conversations: true,
         })
         .unwrap();
         let keys: Vec<&str> = json.as_object().unwrap().keys().map(|k| k.as_str()).collect();
@@ -167,5 +215,22 @@ mod tests {
             serde_json::from_str(r#"{"turn_id":7,"text":"what is open?"}"#).unwrap();
         assert_eq!(a.turn_id, 7);
         assert_eq!(a.context, None);
+        // An assignment from an older desktop has no conversation; it is the one conversation.
+        assert_eq!(a.conversation, "");
+    }
+
+    #[test]
+    fn a_harness_that_says_nothing_about_conversations_holds_one() {
+        let attach: Attach = serde_json::from_str(r#"{"id":"hermes","name":"Hermes"}"#).unwrap();
+        assert!(!attach.conversations);
+        let attach: Attach =
+            serde_json::from_str(r#"{"id":"pi","name":"Pi","conversations":true}"#).unwrap();
+        assert!(attach.conversations);
+    }
+
+    #[test]
+    fn the_event_method_is_one_of_the_methods() {
+        assert!(METHODS.contains(&EVENT));
+        assert_eq!(EVENT, "harness.event");
     }
 }

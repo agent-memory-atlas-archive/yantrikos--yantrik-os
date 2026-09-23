@@ -6,6 +6,16 @@ session handling and its own loop. None of that is this desktop's business (docs
 this harness does the smallest possible thing: it starts `pi --mode rpc`, feeds each turn the
 person types in as a `prompt`, and carries what comes back to the panel.
 
+Each conversation the desktop starts with Pi is its own `pi --mode rpc` process — Pi's RPC mode
+is one session per process — started when the conversation's first message arrives, with that
+agent's token in its environment (`YANTRIK_AGENT_TOKEN`) so the `yos-mcp` its extension starts can
+say which agent is asking, and stopped when the desktop ends the conversation.
+
+What Pi does inside a turn reaches the desktop as events as well as text: each
+`tool_execution_start / _update / _end` becomes a tool call's card, keyed by Pi's `toolCallId`,
+with its output streamed into it; Pi's thinking becomes a folded `thinking` line rather than
+being thrown away; and what each model call cost, from `message_end`, becomes `usage`.
+
 Two things it does that a naive pipe would not:
 
 - **It closes every turn exactly once.** Pi can end a turn four different ways — `agent_settled`,
@@ -37,7 +47,10 @@ _LIB = Path(__file__).resolve().parent.parent / "lib"
 if _LIB.is_dir() and str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from yantrik_harness import Handler, Harness, Turn, end_process  # noqa: E402
+from yantrik_harness import (  # noqa: E402
+    AGENT_TOKEN_ENV, Handler, Harness, PerConversation, Turn, end_process, summary_line,
+    tool_target,
+)
 
 VERSION = "1.0"
 
@@ -60,6 +73,10 @@ SETTLED_GRACE = 5.0
 # After /stop, how long to let Pi wind itself down before closing the turn regardless. An abort
 # that is never acknowledged must not hold the turn open.
 ABORT_GRACE = 10.0
+
+# The most Pi processes this harness keeps at once, one per conversation. The desktop caps live
+# agents at six across every mind; this is the harness's own backstop, with room for `main`.
+MAX_CONVERSATIONS = 8
 
 # What Pi is told about where it is running. Short: Pi has its own system prompt and this is
 # appended to it, not instead of it.
@@ -254,21 +271,35 @@ class PiProcess:
 
 
 class PiMind(Handler):
-    """One Pi process, one turn at a time."""
+    """One Pi process — one conversation — one turn at a time.
+
+    `token` is the agent's, from the desktop; it goes into the process's environment and nowhere
+    else, so the tools Pi's extension starts inherit it and the model never sees it.
+    """
 
     # Pi's RPC mode runs one agent. Two turns at once would interleave into one conversation.
     concurrent = False
 
-    def __init__(self, config: PiConfig, log: Optional[Callable[[str], None]] = None) -> None:
+    def __init__(self, config: PiConfig, log: Optional[Callable[[str], None]] = None,
+                 token: str = "") -> None:
         self.config = config
         self.log = log or (lambda m: print("[pi] %s" % m, file=sys.stderr))
-        self.proc = PiProcess(config.argv(), config.environ(), self._event, self.log)
+        env = config.environ()
+        # Never inherited from this process: a token is one agent's, and a harness that happened
+        # to be started with one must not hand it to every conversation.
+        env.pop(AGENT_TOKEN_ENV, None)
+        if token:
+            env[AGENT_TOKEN_ENV] = token
+        self.proc = PiProcess(config.argv(), env, self._event, self.log)
         self._lock = threading.Lock()
         self._turn: Optional[Turn] = None
         self._done = threading.Event()
         self._error: Optional[str] = None
         self._last_event = time.monotonic()
         self._settle_by: Optional[float] = None
+        # Each open tool call's output as sent so far, by Pi's toolCallId. Pi reports a call's
+        # output accumulated, not as deltas, so what is new is what follows this.
+        self._calls: Dict[str, str] = {}
 
     # ── the turn ────────────────────────────────────────────────────────
 
@@ -279,6 +310,7 @@ class PiMind(Handler):
             self._settle_by = None
             self._done = threading.Event()
             self._last_event = time.monotonic()
+            self._calls = {}
         try:
             self.proc.start()
             self.proc.send({"type": "prompt", "message": turn.text})
@@ -358,17 +390,49 @@ class PiMind(Handler):
 
         if kind == "message_update":
             inner = event.get("assistantMessageEvent") or {}
-            if inner.get("type") == "text_delta" and turn is not None:
+            if turn is None:
+                return
+            if inner.get("type") == "text_delta":
                 turn.emit(str(inner.get("delta") or ""))
-            # thinking_delta is the model talking to itself. The person asked a question, not for
-            # a transcript of the deliberation, and on a desktop panel it reads as rambling.
+            elif inner.get("type") == "thinking_delta":
+                # The model talking to itself. Not the answer — in the text it reads as the mind
+                # rambling — so it goes beside it, where the pane folds it away.
+                turn.thinking(str(inner.get("delta") or ""))
+            return
+
+        if kind == "message_end":
+            message = event.get("message")
+            if turn is not None and isinstance(message, dict) and message.get("role") == "assistant":
+                self._usage(turn, message)
             return
 
         if kind == "tool_execution_start":
             if turn is not None:
                 args = event.get("args")
-                turn.tool(str(event.get("toolName") or "tool"),
-                          args if isinstance(args, dict) else None)
+                name = str(event.get("toolName") or "tool")
+                call = self._call_id(event)
+                self._calls[call] = ""
+                turn.tool_start(call, name, tool_target(name, args if isinstance(args, dict) else None),
+                                args if args is not None else {})
+            return
+
+        if kind == "tool_execution_update":
+            if turn is not None:
+                self._output(turn, self._call_id(event), _result_text(event.get("partialResult")))
+            return
+
+        if kind == "tool_execution_end":
+            if turn is not None:
+                call = self._call_id(event)
+                text = _result_text(event.get("result"))
+                self._output(turn, call, text)
+                self._calls.pop(call, None)
+                failed = bool(event.get("isError"))
+                # A refusal ran and answered; it did not do the thing. The card says ✗, and the
+                # line under it says why.
+                refused = text.lstrip().startswith("REFUSED")
+                turn.tool_end(call, not (failed or refused), summary_line(text),
+                              exit_code=_exit_code(event.get("result")))
             return
 
         if kind == "extension_ui_request":
@@ -397,8 +461,43 @@ class PiMind(Handler):
                 self._settle_by = time.monotonic() + self.config.settled_grace
             return
 
-        # turn_end, auto_retry_start/end, agent_start, tool_execution_end: nothing to say, but
-        # each one is proof of life and has already refreshed the silence clock above.
+        # turn_end, auto_retry_start/end, agent_start, message_start: nothing to say, but each
+        # one is proof of life and has already refreshed the silence clock above.
+
+    @staticmethod
+    def _call_id(event: Dict[str, Any]) -> str:
+        return str(event.get("toolCallId") or "pi-call")
+
+    def _output(self, turn: Turn, call: str, text: str) -> None:
+        """Send what is new in a call's accumulated output."""
+        sent = self._calls.get(call, "")
+        if text.startswith(sent):
+            delta = text[len(sent):]
+        else:
+            # Pi replaced the output rather than extending it — it keeps a long command's tail.
+            # Carry on from where the old tail ends, if it is still in there; otherwise the new
+            # text is all there is to go on.
+            tail = sent[-200:]
+            at = text.find(tail) if tail else -1
+            delta = text[at + len(tail):] if at >= 0 else text
+        self._calls[call] = text
+        if delta:
+            turn.tool_output(call, delta)
+
+    def _usage(self, turn: Turn, message: Dict[str, Any]) -> None:
+        """What one model call cost, from the assistant message Pi settled it into."""
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            return
+        tokens_in = sum(_count(usage.get(k)) for k in ("input", "cacheRead", "cacheWrite"))
+        tokens_out = _count(usage.get("output"))
+        cost = usage.get("cost")
+        total = cost.get("total") if isinstance(cost, dict) else None
+        if not (tokens_in or tokens_out or total):
+            return  # a provider that reports nothing is not a call that cost nothing
+        turn.usage(model=str(message.get("model") or self.config.model or ""),
+                   input_tokens=tokens_in, output_tokens=tokens_out,
+                   cost_usd=float(total) if isinstance(total, (int, float)) else None)
 
     def _decline_dialog(self, event: Dict[str, Any], turn: Optional[Turn]) -> None:
         """Answer Pi's dialogs with "cancelled", and say in the conversation what was asked.
@@ -431,6 +530,38 @@ class PiMind(Handler):
         self._done.set()
 
 
+def _result_text(result: Any) -> str:
+    """The text of a tool result as Pi reports it: `{content: [{type: text, text}], details}`."""
+    if not isinstance(result, dict):
+        return str(result) if isinstance(result, str) else ""
+    parts = result.get("content") or []
+    return "".join(str(p.get("text") or "") for p in parts
+                   if isinstance(p, dict) and p.get("type") == "text")
+
+
+def _exit_code(result: Any) -> Optional[int]:
+    """A command's exit code, when the tool's details carry one."""
+    details = result.get("details") if isinstance(result, dict) else None
+    if not isinstance(details, dict):
+        return None
+    for key in ("exitCode", "exit_code", "code"):
+        value = details.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _count(value: Any) -> int:
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def handler(config: PiConfig, log: Optional[Callable[[str], None]] = None,
+            limit: int = MAX_CONVERSATIONS) -> PerConversation:
+    """Pi as the desktop runs it: one `PiMind`, and so one `pi` process, per conversation."""
+    return PerConversation(lambda conversation, token: PiMind(config, log=log, token=token),
+                           limit=limit, log=log)
+
+
 def _dialog_text(event: Dict[str, Any]) -> str:
     """Whatever a dialog is asking, from a payload whose exact shape is Pi's business."""
     params = event.get("params")
@@ -457,7 +588,7 @@ def main(argv: Optional[List[str]] = None) -> int:
               "`provider` and `model` if that is not what you want." % config.source,
               file=sys.stderr)
 
-    mind = PiMind(config)
+    mind = handler(config)
     harness = Harness(
         id="pi", name="Pi", handler=mind, detail=config.detail, tools=True, memory=False,
     )
