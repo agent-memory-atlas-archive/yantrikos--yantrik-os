@@ -183,7 +183,8 @@ fn specs() -> [Action; 6] {
         .risk("safe")
         .arg(Param::text("agent").describe("The agent, as new_agent answered: `<mind>:<conversation>`"))
         .arg(
-            Param::number("last")
+            // A count of turns: whole, as the dispatch now checks (`"3"` converts; `2.5` does not).
+            Param::integer("last")
                 .optional()
                 .describe("How many of its latest turns. Default 3, at most 20"),
         ),
