@@ -243,19 +243,15 @@ cp "$PROJECT_ROOT/crates/yantrik-design-tokens/slint/fonts/"*.ttf "$ROOT/share/f
 # the launcher needs to list an app -- the catalogue rescans the applications directories every
 # time it opens -- so shipping one for an app the shell refuses to open would put the tile back
 # on the screen and leave the click doing nothing.
+#
+# Which entries those are is shipped-desktop-files.sh's answer, the same one deploy-to-vm.sh
+# ships, so a release and a developer's deploy cannot install different sets.
 mkdir -p "$ROOT/share/applications"
-for f in "$PROJECT_ROOT"/apps/desktop-files/*.desktop; do
-  [ -f "$f" ] || continue
-  shelf=0
-  for b in $SHELVED_BINS; do
-    if grep -q "^Exec=.*$b" "$f"; then shelf=1; fi
-  done
-  if [ "$shelf" = 1 ]; then
-    echo "   (shelved, not installed: $(basename "$f"))"
-    continue
-  fi
+SHIPPED_DESKTOP="$("$SCRIPT_DIR/shipped-desktop-files.sh")" \
+  || fail "could not tell which .desktop files ship (shipped-desktop-files.sh)"
+while IFS= read -r f; do
   cp "$f" "$ROOT/share/applications/"
-done
+done <<< "$SHIPPED_DESKTOP"
 [ -n "$(ls -A "$ROOT/share/applications" 2>/dev/null)" ] \
   || fail "no .desktop files to ship — the launcher would not list this OS's own apps"
 echo "   + $(ls "$ROOT/share/applications" | wc -l) application entries"

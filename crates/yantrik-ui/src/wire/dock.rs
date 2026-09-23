@@ -1941,4 +1941,29 @@ mod tests {
             );
         }
     }
+
+    /// The .desktop entries reach every machine the binaries do, and by one rule.
+    ///
+    /// Our apps are found by their .desktop files (`crate::surfaces`), so a deploy that ships the
+    /// binaries without them leaves a machine whose apps cannot be listed while closed, answer to
+    /// no alias, and — Arcade on VM 520 — cannot be opened at all. deploy-to-vm.sh shipped exactly
+    /// that. Both it and the release ask shipped-desktop-files.sh which entries ship, and that
+    /// asks shelved-bins.sh what is shelved, so neither can drift into its own list.
+    #[test]
+    fn every_packaging_path_ships_the_desktop_entries_by_the_shelfs_rule() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/yantrik-os");
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
+        let Some(rule) = read("shipped-desktop-files.sh") else {
+            return; // Packaged source without the deploy tree; nothing to check against.
+        };
+        assert!(rule.contains("shelved-bins.sh"), "shipped-desktop-files.sh no longer asks the shelf");
+        for script in ["build-release.sh", "deploy-to-vm.sh"] {
+            let text = read(script).unwrap_or_else(|| panic!("deploy/yantrik-os/{script} is missing"));
+            assert!(
+                text.contains("shipped-desktop-files.sh"),
+                "deploy/yantrik-os/{script} does not ship the .desktop entries through \
+                 shipped-desktop-files.sh, so a machine it installs finds none of our apps by name"
+            );
+        }
+    }
 }
