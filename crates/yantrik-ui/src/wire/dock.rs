@@ -382,11 +382,9 @@ pub fn openable_with(
 ///
 /// The route is listed whether or not Blender is on the disk (`open_app` then says what is
 /// missing), and its row should still say what it is for. Read from the shipped file itself
-/// rather than copied here, so the purpose has one home.
+/// (`surfaces::SHIPPED_ENTRIES`) rather than copied here, so the purpose has one home.
 fn shipped_blender() -> Option<crate::surfaces::Declared> {
-    const SHIPPED: &str = include_str!("../../../../apps/desktop-files/yantrik-blender.desktop");
-    let entry = crate::apps::parse_desktop_text("yantrik-blender", SHIPPED)?;
-    crate::surfaces::declared(&[entry]).into_iter().next()
+    crate::surfaces::declared(&crate::surfaces::shipped()).into_iter().find(|d| d.id == "blender")
 }
 
 /// What a `.desktop` file says about a surface, added to its row in the listing.

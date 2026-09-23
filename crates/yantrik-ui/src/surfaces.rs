@@ -136,6 +136,59 @@ pub fn declared(installed: &[DesktopEntry]) -> Vec<Declared> {
     out
 }
 
+/// The `.desktop` files this OS ships, compiled in: `(entry id, contents)`.
+///
+/// The machine's own copies are what the shell reads; these are for the two places that must
+/// know our apps' names whatever is installed. A role's reach is written in names (`text-editor`)
+/// and held against the id an app publishes (`editor`), and a reach has to mean on every machine
+/// what it meant when it was written — so our apps' names come from the build, not from whichever
+/// entry won a name on this disk. And Blender's listing row says what it is for even where its
+/// entry is not installed. `the_compiled_in_entries_are_the_shipped_files` holds this list to the
+/// directory, the way the agent catalog holds `config/agents`.
+pub const SHIPPED_ENTRIES: [(&str, &str); 19] = [
+    ("yantrik-arcade", include_str!("../../../apps/desktop-files/yantrik-arcade.desktop")),
+    ("yantrik-blender", include_str!("../../../apps/desktop-files/yantrik-blender.desktop")),
+    ("yantrik-calendar", include_str!("../../../apps/desktop-files/yantrik-calendar.desktop")),
+    ("yantrik-container-manager", include_str!("../../../apps/desktop-files/yantrik-container-manager.desktop")),
+    ("yantrik-document-editor", include_str!("../../../apps/desktop-files/yantrik-document-editor.desktop")),
+    ("yantrik-download-manager", include_str!("../../../apps/desktop-files/yantrik-download-manager.desktop")),
+    ("yantrik-email", include_str!("../../../apps/desktop-files/yantrik-email.desktop")),
+    ("yantrik-image-viewer", include_str!("../../../apps/desktop-files/yantrik-image-viewer.desktop")),
+    ("yantrik-music-player", include_str!("../../../apps/desktop-files/yantrik-music-player.desktop")),
+    ("yantrik-network-manager", include_str!("../../../apps/desktop-files/yantrik-network-manager.desktop")),
+    ("yantrik-notes", include_str!("../../../apps/desktop-files/yantrik-notes.desktop")),
+    ("yantrik-presentation", include_str!("../../../apps/desktop-files/yantrik-presentation.desktop")),
+    ("yantrik-snippet-manager", include_str!("../../../apps/desktop-files/yantrik-snippet-manager.desktop")),
+    ("yantrik-spreadsheet", include_str!("../../../apps/desktop-files/yantrik-spreadsheet.desktop")),
+    ("yantrik-studio", include_str!("../../../apps/desktop-files/yantrik-studio.desktop")),
+    ("yantrik-system-monitor", include_str!("../../../apps/desktop-files/yantrik-system-monitor.desktop")),
+    ("yantrik-terminal", include_str!("../../../apps/desktop-files/yantrik-terminal.desktop")),
+    ("yantrik-text-editor", include_str!("../../../apps/desktop-files/yantrik-text-editor.desktop")),
+    ("yantrik-weather", include_str!("../../../apps/desktop-files/yantrik-weather.desktop")),
+];
+
+/// The shipped entries, parsed. The shelf still applies: [`declared`] leaves a shelved app out.
+pub fn shipped() -> Vec<DesktopEntry> {
+    SHIPPED_ENTRIES
+        .iter()
+        .filter_map(|(stem, text)| crate::apps::parse_desktop_text(stem, text))
+        .collect()
+}
+
+/// The id a declared surface publishes, given any name it answers to — this OS's own apps by the
+/// names their shipped files give them, then anything installed here.
+///
+/// For a role's reach (`agents::catalog`), which used to fold names through the apps' table in the
+/// runtime. Ours first and from the build, so a third-party entry that won an alias like
+/// `text-editor` on this disk cannot turn a reach written for our editor into a reach over its app.
+pub fn surface_id(name: &str) -> Option<String> {
+    if let Some((surface, _)) = find(name, &shipped()) {
+        return Some(surface.id);
+    }
+    let installed = Catalogue::shared().get();
+    find(name, &installed).map(|(surface, _)| surface.id)
+}
+
 /// Whether an entry's declaration counts at all: an app this build has shelved declares nothing,
 /// whatever an old `.desktop` file left on the disk says.
 fn counts(entry: &DesktopEntry) -> bool {
@@ -511,6 +564,49 @@ mod tests {
         let raw: usize = shipped.iter().map(|e| e.aliases.len()).sum();
         let kept: usize = declared.iter().map(|d| d.aliases.len()).sum();
         assert_eq!(raw, kept, "a shipped alias collides with another name");
+    }
+
+    /// The compiled-in copy of the shipped entries is the directory, file for file, byte for byte.
+    #[test]
+    fn the_compiled_in_entries_are_the_shipped_files() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop-files");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".desktop").map(str::to_string))
+            .collect();
+        on_disk.sort();
+        let mut compiled: Vec<String> = SHIPPED_ENTRIES.iter().map(|(stem, _)| stem.to_string()).collect();
+        compiled.sort();
+        assert_eq!(on_disk, compiled, "every file in apps/desktop-files is compiled in, and nothing else");
+        for (stem, text) in SHIPPED_ENTRIES {
+            let file = std::fs::read_to_string(dir.join(format!("{stem}.desktop"))).unwrap();
+            assert_eq!(file, text, "{stem}.desktop is compiled in under its own name");
+        }
+        let by_id = |mut list: Vec<Declared>| {
+            list.sort_by(|a, b| a.id.cmp(&b.id));
+            list
+        };
+        assert_eq!(
+            by_id(declared(&shipped())),
+            by_id(declared(&shipped_catalogue())),
+            "the compiled-in entries and the directory declare the same surfaces"
+        );
+    }
+
+    /// A reach names apps the way people do, and holds them to the id each publishes — ours by the
+    /// names the build gives them, whatever this machine has installed.
+    #[test]
+    fn a_name_folds_to_the_id_its_app_publishes() {
+        assert_eq!(surface_id("text-editor").as_deref(), Some("editor"));
+        assert_eq!(surface_id("sysmonitor").as_deref(), Some("system-monitor"));
+        assert_eq!(surface_id("container_manager").as_deref(), Some("containers"));
+        assert_eq!(surface_id("notes").as_deref(), Some("notes"));
+        assert_eq!(surface_id("blender").as_deref(), Some("blender"));
+        // Not an app: the desktop's own names are kept as written by the caller.
+        assert_eq!(surface_id("shell"), None);
+        assert_eq!(surface_id("files"), None);
+        assert_eq!(surface_id("music"), None, "a shelved app declares nothing");
     }
 
     /// A name the desktop answers to, or that another app holds, is not handed out twice.
