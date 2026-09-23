@@ -4,7 +4,7 @@ Two names on one machine (`15.204.233.63`, user `ubuntu`), both plain nginx dire
 
 | Name | Root | What is in it |
 |---|---|---|
-| `iso.yantrikos.com` | `/var/www/iso.yantrikos.com/{nightly,beta,stable}` | ISOs, a `.sha256` beside each, `yantrik-os-latest.iso` → the newest |
+| `iso.yantrikos.com` | `/var/www/iso.yantrikos.com/{nightly,beta,stable}` | ISOs, a `.sha256` beside each, `yantrik-os-latest.iso` → the newest; each image's `<stem>.changelog.md` beside it (`yantrik-os-latest.changelog.md` → the newest), named in `latest.json` |
 | `releases.yantrikos.com` | `/var/www/releases.yantrikos.com/{nightly,beta,stable}` + `manifest.json` | what `yantrik-update` reads: the bundle, its `.sha256`, `yantrik-os-latest-linux-amd64.tar.zst`, and the manifest that names each channel's current build and hash |
 
 `releases.yantrikos.com` also exists *inside* the author's network, at a private address, fed by
