@@ -12,6 +12,8 @@ pub mod client;
 pub mod gate;
 pub mod owner;
 pub mod peer_identity;
+// An agent's reach: what a role from the agent catalog may touch (design/desk-and-mind, section 5).
+pub mod reach;
 pub mod service;
 pub mod sync_client;
 

@@ -68,7 +68,8 @@ const CALL_TIMEOUT_MS = 300_000;
  * 120 by default, at most 600. They are given that on top of CALL_TIMEOUT_MS, or the client
  * would cut off the command it asked to wait for.
  */
-const WAITING_TOOLS: Record<string, number> = { run_command: 120, command_status: 120 };
+// `hand_off` waits for a catalog role's answer the same way, and not at all unless told to.
+const WAITING_TOOLS: Record<string, number> = { run_command: 120, command_status: 120, hand_off: 0 };
 const WAIT_MOST_S = 600;
 
 /** How long one call to `name` may take, in milliseconds. */

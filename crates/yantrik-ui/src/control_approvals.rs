@@ -144,6 +144,12 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // one name on the card, one name on the grant, one name on a session rule.
                 let app = surface_for(&app).unwrap_or(app);
 
+                // ── Agents catalog: an agent held to a role's reach is never shown asking for an
+                // act its reach refuses — its door would refuse it whatever the person pressed.
+                if let Some(Ok(agent)) = crate::control_agent_terminal::calling_agent() {
+                    crate::control_agents::within_reach(&agent, &app, &action, &grade)?;
+                }
+
                 // Whether the app's own sentence says this cannot be taken back. `auto` asks
                 // about those exactly as it asks about a `dangerous` action — the defect of
                 // 21 September, where `calendar.delete_event` ("It is not recoverable", graded

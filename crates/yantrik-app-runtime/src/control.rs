@@ -285,6 +285,7 @@ pub use yantrik_ipc_transport::gate::{
     MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
 };
 use yantrik_ipc_transport::gate::{agent_token_of, grade};
+use yantrik_ipc_transport::reach;
 #[cfg(test)]
 use yantrik_ipc_transport::gate::{ceiling_from, DEFAULT_CEILING};
 
@@ -951,6 +952,16 @@ impl ControlRpc {
                 // Lifted off before anything reads `args` — the grant below is bound to them —
                 // and out of `args` if a caller put it there. See `agent_token`.
                 let token = agent_token_of(&params, &mut args);
+                // ── Agents catalog: the calling agent's reach (`yantrik_ipc_transport::reach`) —
+                // read here, where IO belongs, and held to below before any grant is spent and
+                // before the handler runs. No token, or a token with no reach, is not held.
+                let reach = match token.as_deref() {
+                    Some(token) => reach::reach_of(token).map_err(|why| ServiceError {
+                        code: -32602,
+                        message: format!("REACH: {why}, so no act carrying an agent token runs until it can be. Nothing was run."),
+                    })?,
+                    None => None,
+                };
                 // Optional, and deliberately so: a caller acting on its own initiative has nothing
                 // to compare against, and demanding a revision it never read would only teach it
                 // to send back whatever it last saw.
@@ -981,6 +992,11 @@ impl ControlRpc {
                     let graded = on_ui_thread(who, move |reg| reg.grade_of(&name))
                         .map_err(|m| ServiceError { code: -32000, message: m })?
                         .map_err(|m| ServiceError { code: -32602, message: m })?;
+                    // Outside the agent's reach, a person's Allow is not used up on it either.
+                    if let Some(reach) = &reach {
+                        reach::within(reach, &self.app_id, &action, graded)
+                            .map_err(|m| ServiceError { code: -32602, message: m })?;
+                    }
                     authority
                         .spend(id, &self.app_id, &action, graded, &args)
                         .map_err(|m| ServiceError { code: -32602, message: m })?;
@@ -1000,8 +1016,13 @@ impl ControlRpc {
                     "app.act"
                 );
                 let id = action_id.clone();
+                let app_id = self.app_id.clone();
                 let outcome = on_ui_thread(who, move |reg| {
                     let _agent = AgentTokenScope::enter(token);
+                    // The reach, on the grade this surface publishes now — the one `act` decides on.
+                    if let Some(reach) = &reach {
+                        reach::within(reach, &app_id, &action, reg.grade_of(&action)?)?;
+                    }
                     reg.act(&action, &args, expect.as_deref(), &id, &authority)
                 })
                 .map_err(|m| ServiceError { code: -32000, message: m })?;
@@ -2590,6 +2611,57 @@ mod tests {
         // And the grant the two refusals carried was never spent.
         spend_for_render(open(), "fresh-socket", &serde_json::json!({"out": "x.png"}))
             .expect("nothing spent `fresh-socket` on the way to either refusal");
+    }
+
+    /// Agents catalog: an agent started from a role is held to the role's reach on the real
+    /// dispatch — its token names a reach (here through an installed reader, as the shell installs
+    /// its own registry), an act on its surfaces runs, one off them is refused in the reach's words
+    /// before the handler and before any grant is spent, and a token with no reach is not held.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_held_to_its_reach_on_the_socket_before_any_grant_is_spent() {
+        spend_through_a_stand_in_shell();
+        reach::read_reach_with(|token| {
+            (token == "tok-reach-reviewer").then(|| reach::Reach {
+                agent: "deepseek:c-reach1".into(),
+                role: "reviewer".into(),
+                name: "Reviewer".into(),
+                surfaces: vec!["caller-test.echo".into(), "caller-test.nuke".into()],
+                ceiling: "safe".into(),
+            })
+        });
+        let act = |action: &str, token: &str, grant: Option<&str>| {
+            let mut params = serde_json::json!({ "action": action, "args": {}, "agent_token": token });
+            if let Some(grant) = grant {
+                params["grant"] = grant.into();
+            }
+            call(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "app.act", "params": params }).to_string())
+        };
+
+        let reply = act("echo", "tok-reach-reviewer", None);
+        assert_eq!(reply["result"]["result"]["agent_token"], "tok-reach-reviewer", "on its surfaces it runs: {reply}");
+
+        let reply = act("who", "tok-reach-reviewer", None);
+        let err = reply["error"]["message"].as_str().unwrap_or_default();
+        assert!(err.starts_with("REACH: caller-test.who is outside the Reviewer's reach"), "{reply}");
+        assert!(err.contains("`deepseek:c-reach1` is the Reviewer"), "{err}");
+        assert_eq!(reply["error"]["code"], -32602, "a policy answer, not a transport fault");
+
+        // A grade off the ladder is refused by the reach before the machine's ceiling is asked.
+        let reply = act("nuke", "tok-reach-reviewer", None);
+        assert!(reply["error"]["message"].as_str().unwrap_or_default().starts_with("REACH: caller-test.nuke is graded"), "{reply}");
+
+        // Refused by the reach, a person's Allow is not used up on it.
+        let reply = act("who", "tok-reach-reviewer", Some("fresh-reach"));
+        assert!(reply["error"]["message"].as_str().unwrap_or_default().starts_with("REACH:"), "{reply}");
+        spend_for_render(open(), "fresh-reach", &serde_json::json!({"out": "x.png"}))
+            .expect("the reach's refusal spent nothing");
+
+        // Another agent's token, with no reach, is not held; and the person's call has none.
+        let reply = act("who", "tok-no-reach", None);
+        assert!(reply["error"].is_null(), "{reply}");
+        let reply = call(r#"{"jsonrpc":"2.0","id":9,"method":"app.act","params":{"action":"who","args":{}}}"#);
+        assert!(reply["error"].is_null(), "{reply}");
     }
 
     #[test]

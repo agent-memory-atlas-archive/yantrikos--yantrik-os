@@ -33,6 +33,9 @@ pub use yantrik_ipc_transport::server::{RpcServer, ServiceHandler};
 /// from the table it publishes in `describe` — the rule an app window's dispatch enforces, in the
 /// same words (docs/surface-protocol.md, section 7).
 pub use yantrik_ipc_transport::gate;
+/// An agent's reach: a service calls [`reach::permits`] with the token `gate::agent_token_of`
+/// lifted, before [`gate::permit`], so an agent started from a catalog role is held to its role.
+pub use yantrik_ipc_transport::reach;
 
 /// Commonly-needed imports for service authors.
 pub mod prelude {

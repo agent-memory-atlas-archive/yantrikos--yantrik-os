@@ -30,6 +30,7 @@ export struct AgentRowData {
     label: string,     // "running a tool"
     since: string,     // "2m" while it works, "21:02" once it is done
     parent: string,    // the agent that started this one, if any
+    role: string,      // the catalog role it was started as ("Reviewer"), if any
 }
 
 // One run of same-looking cells in a command's terminal.
@@ -94,12 +95,24 @@ export struct AgentDetailsData {
     cost: string,
     refused: string,
     basis: string,
+    role: string,          // the catalog role it was started as, if any
+    reach: string,         // what that role may touch: "editor, documents and notes · at most safe"
 }
 
 export struct AgentMindData {
     id: string,
     name: string,
     detail: string,
+}
+
+// A role from the agent catalog, as New agent lists it.
+export struct AgentRoleData {
+    id: string,
+    name: string,
+    purpose: string,       // what it is for, in one line
+    reach: string,         // what it may touch
+    runs-on: string,       // the attached mind it would run on now; "" when none of its minds is
+    available: bool,
 }
 
 export global AgentsState {
@@ -122,6 +135,10 @@ export global AgentsState {
     in-out property <string> new-mind: "";
     in-out property <string> new-note: "";
     in-out property <string> new-error: "";
+    // New agent → from the catalog: a role instead of a mind.
+    in-out property <[AgentRoleData]> roles: [];
+    in-out property <bool> new-from-catalog: false;
+    in-out property <string> new-role: "";
     // What the last press came to, when it did not go as asked.
     in-out property <string> notice: "";
     // Close, while work is running: the agent waiting for a yes.
@@ -138,6 +155,9 @@ export global AgentsState {
     callback open-all(string);
     callback pick-mind(string);
     callback start(string, string);
+    callback pick-role(string);
+    // A role's id and the task: the shell hands it off as the person (`hand_off`).
+    callback start-role(string, string);
     callback send(string, string);
     callback dismiss-notice();
     // An approval card in a pane. Each names the one request id; the shell answers it through the
@@ -223,7 +243,8 @@ component AgentRow inherits Rectangle {
             spacing: 1px;
             alignment: center;
             Text {
-                text: root.data.parent == "" ? root.data.mind : root.data.mind + " · started by " + root.data.parent;
+                text: (root.data.role == "" ? root.data.mind : root.data.role + " · " + root.data.mind)
+                    + (root.data.parent == "" ? "" : " · started by " + root.data.parent);
                 color: Theme.text-primary;
                 font-size: Theme.fs-caption;
                 font-weight: 600;
@@ -612,6 +633,14 @@ export component AgentDetailsColumn inherits Rectangle {
             font-size: Theme.fs-micro;
             letter-spacing: 2px;
         }
+        if AgentsState.details.role != "" : DetailRow { label: "Role"; value: AgentsState.details.role; }
+        // What the role may touch — held on every door, not advice.
+        if AgentsState.details.role != "" : Text {
+            text: "Reach · " + AgentsState.details.reach;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-micro;
+            wrap: word-wrap;
+        }
         DetailRow { label: "Mind"; value: AgentsState.details.mind; }
         DetailRow { label: "Model"; value: AgentsState.details.model; }
         DetailRow { label: "Since"; value: AgentsState.details.since; }
@@ -722,6 +751,51 @@ component MindChip inherits Rectangle {
     }
 }
 
+// One role in New agent's list: its name, what it is for, and the mind it would run on now.
+component RoleRow inherits Rectangle {
+    in property <AgentRoleData> role;
+    in property <bool> chosen;
+    callback clicked;
+    height: 48px;
+    border-radius: 8px;
+    background: root.chosen ? Theme.accent-glow : ta.has-hover ? Theme.hover-fill : transparent;
+    border-width: root.chosen ? 1px : 0px;
+    border-color: Theme.accent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.role.name;
+                color: Theme.text-primary;
+                font-size: Theme.fs-caption;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.role.purpose;
+                color: Theme.text-secondary;
+                font-size: Theme.fs-caption;
+                overflow: elide;
+            }
+        }
+        Text {
+            text: root.role.available ? "on " + root.role.runs-on : "no mind attached";
+            color: root.role.available ? Theme.text-dim : Theme.amber;
+            font-size: Theme.fs-micro;
+            vertical-alignment: center;
+        }
+    }
+}
+
 // The Agents screen: the tabs, the list, the selected agent's session and its details.
 export component AgentsScreen inherits Rectangle {
     background: Theme.bg-surface;
@@ -821,7 +895,7 @@ export component AgentsScreen inherits Rectangle {
     property <bool> hovering: list-area.has-hover;
     changed hovering => { AgentsState.list-hovered = self.hovering; }
 
-    // New agent: a mind, and what it is to do.
+    // New agent: a mind and what it is to do — or, from the catalog, a role and its task.
     if AgentsState.new-open : Rectangle {
         background: #00000080;
         TouchArea { }
@@ -843,21 +917,72 @@ export component AgentsScreen inherits Rectangle {
                     font-size: Theme.fs-headline;
                     font-weight: 600;
                 }
+                // A mind of your choosing, or a role from the catalog.
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    MindChip {
+                        mind: { id: "mind", name: "A mind", detail: "" };
+                        chosen: !AgentsState.new-from-catalog;
+                        clicked => {
+                            AgentsState.new-from-catalog = false;
+                            AgentsState.new-error = "";
+                            if (AgentsState.new-mind != "") {
+                                AgentsState.pick-mind(AgentsState.new-mind);
+                            } else {
+                                AgentsState.new-note = "";
+                            }
+                        }
+                    }
+                    MindChip {
+                        mind: { id: "catalog", name: "From the catalog", detail: "" };
+                        chosen: AgentsState.new-from-catalog;
+                        clicked => {
+                            AgentsState.new-from-catalog = true;
+                            AgentsState.new-error = "";
+                            if (AgentsState.new-role != "") {
+                                AgentsState.pick-role(AgentsState.new-role);
+                            } else {
+                                AgentsState.new-note = "";
+                            }
+                        }
+                    }
+                }
                 Text {
-                    text: AgentsState.minds.length == 0
+                    text: AgentsState.new-from-catalog
+                        ? "Pick a role, and say what it is to do. It works in its own pane, within the role's reach."
+                        : AgentsState.minds.length == 0
                         ? "No mind is attached right now. Start one in Settings → Harnesses, then come back."
                         : "Pick a mind, and say what it is to do.";
                     color: Theme.text-secondary;
                     font-size: Theme.fs-caption;
                     wrap: word-wrap;
                 }
-                HorizontalLayout {
+                if !AgentsState.new-from-catalog : HorizontalLayout {
                     spacing: 6px;
                     alignment: start;
                     for mind in AgentsState.minds : MindChip {
                         mind: mind;
                         chosen: mind.id == AgentsState.new-mind;
                         clicked => { AgentsState.pick-mind(mind.id); }
+                    }
+                }
+                if AgentsState.new-from-catalog : Rectangle {
+                    height: min(AgentsState.roles.length * 50px, 250px);
+                    roles-flick := Flickable {
+                        viewport-height: roles-col.preferred-height;
+                        Rectangle {
+                            width: roles-flick.width;
+                            height: roles-col.preferred-height;
+                            roles-col := VerticalLayout {
+                                spacing: 2px;
+                                for role in AgentsState.roles : RoleRow {
+                                    role: role;
+                                    chosen: role.id == AgentsState.new-role;
+                                    clicked => { AgentsState.pick-role(role.id); }
+                                }
+                            }
+                        }
                     }
                 }
                 if AgentsState.new-note != "" : Text {
@@ -885,7 +1010,9 @@ export component AgentsScreen inherits Rectangle {
                     if prompt.text == "" : Text {
                         x: 10px;
                         y: 8px;
-                        text: "What should it do? — e.g. tidy the photos folder, duplicates into Trash";
+                        text: AgentsState.new-from-catalog
+                            ? "What is the task? — e.g. review the change in ~/src/app before I ship it"
+                            : "What should it do? — e.g. tidy the photos folder, duplicates into Trash";
                         color: Theme.text-dim;
                         font-size: Theme.fs-body;
                     }
@@ -908,8 +1035,14 @@ export component AgentsScreen inherits Rectangle {
                         label: "Start";
                         icon-path: Icons.play;
                         variant: 0;
-                        disabled: AgentsState.new-mind == "";
-                        clicked => { AgentsState.start(AgentsState.new-mind, prompt.text); }
+                        disabled: AgentsState.new-from-catalog ? AgentsState.new-role == "" : AgentsState.new-mind == "";
+                        clicked => {
+                            if (AgentsState.new-from-catalog) {
+                                AgentsState.start-role(AgentsState.new-role, prompt.text);
+                            } else {
+                                AgentsState.start(AgentsState.new-mind, prompt.text);
+                            }
+                        }
                     }
                 }
             }

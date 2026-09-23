@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-settings") { return settings_tests::run(&window, output, width, height); }
     if args.iter().any(|a| a == "verify-files") { return files_tests::run(&window); }
     if args.iter().any(|a| a == "verify-agents") { return agents_tests::run(&window, output); }
+    if args.iter().any(|a| a == "verify-agents-catalog") { return agents_tests::run_catalog(&window, output); }
     if args.iter().any(|a| a == "verify-mind-panel") { return mind_panel_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-recipes") { return recipes_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-lens-agents") { return agents_tests::run_lens(&window, output); }

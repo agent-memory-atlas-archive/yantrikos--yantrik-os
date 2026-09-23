@@ -42,7 +42,12 @@ What it is actually checking, in one line each:
   * the other-agent tools — new_agent, send_to_agent, stop_agent, read_agent — are listed only with
     a token, keep the shell's grades (new_agent asks in `ask`), pass the shell's own argument names
     and nothing else, answer in the shell's sentences, never carry the token, and reading another
-    agent's session taints this one as reading private state does.
+    agent's session taints this one as reading private state does;
+  * `hand_off` — a role from the agent catalog — is listed only with a token, asks like new_agent,
+    passes only the shell's names, is given as long as its wait (and the harness's client allows
+    it), taints the session when it waited for the role's answer, and an agent held to a role's
+    reach hears the reach's refusal as a policy answer and is never shown asking the person for an
+    act outside it.
 """
 
 import importlib.util
@@ -185,6 +190,12 @@ SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
        Read an agent's recent turns as text.
          agent: string - the agent
          last?: number - how many of its latest turns
+  act: hand_off(role, task, context?, wait_seconds?)  [sensitive, settles on return]
+       Hand a piece of work to a role from the agent catalog.
+         role: string - the role's id or name
+         task: string - what it is to do
+         context?: string - what it should read first
+         wait_seconds?: number - seconds to wait for its answer
 """
 DESCRIBE_TERMINAL = """Terminal - 1 tab
 revision: 7e57
@@ -283,6 +294,19 @@ if argv[:1] == ["act"]:
     no_ask = "--no-ask" in rest
     rest = [a for a in rest if a != "--no-ask"]
     args = parse_args(rest, declared(target, action))
+    # An agent started as a catalog role, asking about or acting outside its reach: the shell and
+    # the app's own dispatch refuse it in the reach's words (yantrik_ipc_transport::reach) — before
+    # any grant is spent, as the dispatch does.
+    reach = state.get("reach")
+    if reach and target == "shell" and action == "request_approval":
+        die("shell.app.act refused: REACH: %s.%s is graded `%s`, above the Reviewer's `safe` ceiling, "
+            "so it was not run, and nobody was asked. `deepseek:c-role1` is the Reviewer, which may "
+            "touch editor, documents and notes, at most `safe`." % (args.get("app"), args.get("action"), args.get("grade")))
+    if reach and target != "shell":
+        die("%s.app.act refused: REACH: %s.%s is outside the Reviewer's reach, so it was not run. "
+            "`deepseek:c-role1` is the Reviewer, which may touch editor, documents and notes, at most "
+            "`safe`." % (target, target, action))
+
     if grant is not None and target != "shell":
         def spent_refusal(why):
             die("%s.app.act refused: GRANT: `%s` does not authorise %s.%s — %s Nothing was run; "
@@ -399,6 +423,19 @@ if argv[:1] == ["act"]:
                                "log\" — ok · exit 0" % child)
         if state.get("echo_token"):
             answer["said"] = answer["text"] = "token=%s" % os.environ.get("YANTRIK_AGENT_TOKEN")
+        envelope(answer)
+        raise SystemExit(0)
+    if target == "shell" and action == "hand_off":
+        # The shell's answer, in the shape `control_agents::Handed::answer` gives it.
+        role = "the Reviewer (`deepseek:c-role1`, on deepseek)"
+        answer = {"agent": "deepseek:c-role1", "role": "reviewer", "role_name": "Reviewer",
+                  "mind": "deepseek", "reach": "editor, documents and notes · at most safe",
+                  "said": "Handed to %s. It works on its own, in its own pane, within its reach." % role}
+        if args.get("wait_seconds"):
+            answer.update(done=True, ok=True, answer="Verdict — fix first.",
+                          said="The Reviewer (`deepseek:c-role1`, on deepseek) answered:\n\nVerdict — fix first.")
+        if state.get("echo_token"):
+            answer["said"] = "token=%s" % os.environ.get("YANTRIK_AGENT_TOKEN")
         envelope(answer)
         raise SystemExit(0)
     envelope({"done": True})
@@ -1579,6 +1616,115 @@ with tempfile.TemporaryDirectory() as d:
     s = read(state)
     check("an argument the shell does not take is not sent",
           [a["args"] for a in s.get("acted", [])] == [{"agent": CHILD}], s.get("acted"))
+
+    # ── 24. Handing work to a role from the agent catalog ───────────────────────────────
+    #
+    # design/desk-and-mind-2026-09-23.md, section 5: `hand_off` is the shell's, offered only with a
+    # token like the other-agent tools, `sensitive` like new_agent, and it may wait for the role's
+    # answer — so the call is given that wait, and what comes back counts as reading private state.
+    # An agent started as a role is held to its reach on every door: a refusal in the reach's words
+    # is a policy answer, not a fault, and the person is never asked about an act it cannot reach.
+
+    # 24a. Without a token it is not listed or callable.
+    module, state = case(tmp, "handoff-notoken", ceiling=None)
+    replies, _, _ = served(module, LIST, {"id": 2, "method": "tools/call", "params": {
+        "name": "hand_off", "arguments": {"role": "reviewer", "task": "x"}}})
+    names = [t["name"] for t in replies[1]["result"]["tools"]]
+    check("without a token hand_off is not listed", "hand_off" not in names, names)
+    check("and cannot be called", "no such tool" in json.dumps(replies[2].get("error")), replies[2])
+    check("and nothing reached the desktop", not read(state).get("acted"), read(state))
+
+    # 24b. With a token, in `ask`: a card for shell.hand_off, sensitive, with the shell's own
+    # argument names and nothing else; the grant rides on it; the mind reads the shell's sentence.
+    module, state = case(tmp, "handoff-ask", answer="granted", ceiling=None, token=TOKEN)
+    replies, _, _ = served(module, LIST)
+    check("with a token hand_off is listed",
+          "hand_off" in [t["name"] for t in replies[1]["result"]["tools"]], replies[1])
+    text, is_error, _ = module.call_tool(module.AGENT_BY_NAME["hand_off"], {
+        "role": "reviewer", "task": "review the change", "context": "diff --git a/x b/x",
+        "mind": "pi", "agent_token": "f" * 32})
+    s = read(state)
+    reqs = s.get("requests", [])
+    check("hand_off asks, as new_agent does: shell.hand_off, sensitive",
+          [(r.get("app"), r.get("action"), r.get("grade")) for r in reqs] == [("shell", "hand_off", "sensitive")], reqs)
+    check("with the role, the task and the context, and nothing a model added",
+          reqs and reqs[0].get("args_json") == {"role": "reviewer", "task": "review the change",
+                                                  "context": "diff --git a/x b/x"}
+          and [a["args"] for a in s.get("acted", [])] == [reqs[0].get("args_json")], s)
+    check("the grant rides on the hand_off it was minted for",
+          [a.get("grant") for a in s.get("acted", [])] == ["appr-1"], s.get("acted"))
+    check("the mind reads the shell's sentence, not its JSON",
+          not is_error and "Handed to the Reviewer (`deepseek:c-role1`, on deepseek)" in text
+          and "{" not in text.split("\n\n")[-1], text)
+    check("and the token travels beside it and leaks into nothing",
+          all(c["env_token"] == TOKEN for c in s.get("carried", [])) and not leaks(state, text)
+          and "f" * 32 not in json.dumps(s), leaks(state, text))
+
+    # 24c. Told to wait, the call is given that wait and a margin — more than `yos` gives the same
+    # act, which is more than the shell waits — and the harness's client allows for all of it. Not
+    # told to, it is an ordinary act.
+    module, state = case(tmp, "handoff-wait", mode="auto", ceiling=None, token=TOKEN)
+    seen = []
+    real_run = module.subprocess.run
+
+    def spy(argv, **kw):
+        if argv[1:4] == ["act", "shell", "hand_off"]:
+            seen.append(kw.get("timeout"))
+        return real_run(argv, **kw)
+
+    module.subprocess.run = spy
+    try:
+        waited, _, _ = module.call_tool(module.AGENT_BY_NAME["hand_off"],
+                                        {"role": "chair", "task": "weigh them", "wait_seconds": 240})
+        module.call_tool(module.AGENT_BY_NAME["hand_off"], {"role": "scribe", "task": "sum up"})
+    finally:
+        module.subprocess.run = real_run
+    check("a hand_off told to wait is given its wait and a margin; one not told, an act's minute",
+          seen == [270, module.ACT_TIMEOUT], seen)
+    check("and a wait is longer here than yos gives it",
+          all(module.hand_off_timeout(w) > yos_timeouts.act_timeout("hand_off", {"wait_seconds": w})
+              for w in (5, 240, 600)), None)
+    allowed = harness_lib.mcp_timeout("hand_off", {"wait_seconds": 600})
+    longest = module.OS_ACT_MAX_SECONDS - module.ACT_TIMEOUT + module.hand_off_timeout(600) \
+        - module.APPROVAL_WAIT + 110
+    check("and the harness's MCP client waits out the longest hand_off (%ds of %ds)" % (allowed, longest),
+          allowed >= longest, (allowed, longest))
+    check("the role's answer comes back as what it said",
+          "The Reviewer (`deepseek:c-role1`, on deepseek) answered:\n\nVerdict — fix first." in waited, waited)
+
+    # 24d. What a role hands back after a wait is another session's work: typing into a page is
+    # refused afterwards. A hand_off that did not wait read nothing.
+    module, state = case(tmp, "handoff-taint", mode="auto", ceiling=None, token=TOKEN)
+    module.call_tool(module.AGENT_BY_NAME["hand_off"], {"role": "scribe", "task": "sum up"})
+    text, _ = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "hello"})
+    check("a hand_off that did not wait does not taint", not text.startswith("REFUSED"), text)
+    module.call_tool(module.AGENT_BY_NAME["hand_off"], {"role": "chair", "task": "weigh", "wait_seconds": 30})
+    text, _ = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "secret"})
+    check("one that waited for the role's answer does", text.startswith("REFUSED") and "hand_off" in text, text)
+
+    # 24e. An agent held to a role's reach: an act its door refuses is a policy answer naming the
+    # role, not a failure; and an act it would have to ask about is refused by the shell before any
+    # card goes up, in the shell's words.
+    module, state = case(tmp, "handoff-reach-auto", mode="auto", ceiling=None, token=TOKEN, reach=True)
+    text, is_error = act(module, "calendar", "add_event", {"title": "x", "date": "2026-10-02"})
+    check("a door's reach refusal is a policy answer naming the role, not a fault",
+          not is_error and text.startswith("REFUSED") and "outside the Reviewer's reach" in text, (text, is_error))
+    module, state = case(tmp, "handoff-reach-ask", mode="ask", ceiling=None, token=TOKEN, reach=True)
+    text, is_error = act(module, "calendar", "move_event", {"id": "evt-3", "date": "2026-10-03"})
+    s = read(state)
+    check("an act outside the reach is never put to the person",
+          not s.get("requests") and not s.get("acted") and not is_error, s)
+    check("and the mind hears the reach's own words, not a ceiling it could raise",
+          "above the Reviewer's `safe` ceiling" in text and "could not be asked" not in text, text)
+
+    # 24f. In `auto`, hand_off runs unasked and is written down — without the token.
+    module, state = case(tmp, "handoff-auto", mode="auto", ceiling=None, token=TOKEN)
+    module.call_tool(module.AGENT_BY_NAME["hand_off"], {"role": "reviewer", "task": "tidy"})
+    s = read(state)
+    audited = (s.get("audited") or [{}])[0]
+    check("in auto, hand_off runs unasked and lands in the record, without the token",
+          not s.get("requests") and (audited.get("app"), audited.get("action"), audited.get("args_json"))
+          == ("shell", "hand_off", {"role": "reviewer", "task": "tidy"}) and not leaks(state), s)
 
 print()
 if failures:

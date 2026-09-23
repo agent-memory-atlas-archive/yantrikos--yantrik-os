@@ -887,8 +887,9 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 # The bridge's command tools, offered to a conversation's bridge when it carries the agent's
 # token, wait for the command itself as well: `wait_seconds`, 120 by default and at most 600, on
 # top of everything an os_act can wait for. A client that allowed only MCP_TIMEOUT would cut off
-# the command it asked to wait for.
-MCP_WAITING_TOOLS = {"run_command": 120.0, "command_status": 120.0}
+# the command it asked to wait for. `hand_off` waits for a catalog role's answer the same way,
+# and not at all when it is not told to.
+MCP_WAITING_TOOLS = {"run_command": 120.0, "command_status": 120.0, "hand_off": 0.0}
 MCP_WAIT_MOST = 600.0
 
 

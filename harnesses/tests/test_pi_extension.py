@@ -65,6 +65,8 @@ out.timeouts = {
   run_command: mod.callTimeoutMs("run_command", { command: "ls" }),
   run_command_600: mod.callTimeoutMs("run_command", { wait_seconds: 600 }),
   command_status_huge: mod.callTimeoutMs("command_status", { wait_seconds: 99999 }),
+  hand_off: mod.callTimeoutMs("hand_off", { role: "reviewer", task: "x" }),
+  hand_off_240: mod.callTimeoutMs("hand_off", { role: "reviewer", task: "x", wait_seconds: 240 }),
 };
 console.log(JSON.stringify(out));
 process.exit(0);
@@ -201,6 +203,9 @@ class PiExtensionTests(unittest.TestCase):
         self.assertEqual(timeouts["run_command"], 420_000)
         self.assertEqual(timeouts["run_command_600"], 900_000)
         self.assertEqual(timeouts["command_status_huge"], 900_000)
+        # hand_off waits only when told to, for a catalog role's answer.
+        self.assertEqual(timeouts["hand_off"], 300_000)
+        self.assertEqual(timeouts["hand_off_240"], 540_000)
 
 
 if __name__ == "__main__":

@@ -199,6 +199,16 @@ refused. `consume_approval` refuses a grant asked for another agent when the cal
 token. An app's own dispatch spends a grant without one (#116), so a grant is not yet bound to
 its agent on that path.
 
+An agent started from a role in the agent catalog (`shell.hand_off`) is also held to the role's
+**reach** — the surfaces it may touch (`notes`, `shell.agent_run`, `shell.agent_*`) and a grade
+ceiling narrower than the machine's. Every door that lifts a token checks it before any grant is
+spent and before the handler runs: a window's dispatch here, a service through
+`yantrik_service_sdk::reach::permits` before `gate::permit`. The shell publishes each such agent's
+reach in `~/.config/yantrik/agent-reach.json`, keyed by the SHA-256 of its token (never the token),
+and an act outside it is refused with `REACH:` and a sentence naming the role
+(`yantrik_ipc_transport::reach`). A token with no reach is not held; a call with no token is the
+person's.
+
 The rule lives in `yantrik_ipc_transport::gate` (re-exported as `yantrik_app_runtime::control`), so
 a service that answers `app.act` in its own handler meets it too, without linking Slint. System
 Monitor, Notifications and Weather do: each lifts an agent token off the call, then calls

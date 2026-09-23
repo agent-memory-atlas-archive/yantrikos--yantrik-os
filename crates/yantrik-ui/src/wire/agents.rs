@@ -27,8 +27,9 @@ use crate::agents::model::{
 use crate::agents::{self, feed, launch, AgentId, Store};
 use crate::app_context::AppContext;
 use crate::{
-    AccentPreset, AgentDetailsData, AgentHeaderData, AgentItemData, AgentMindData, AgentRowData, AgentRunData,
-    AgentTabData, AgentWindow, AgentsState, App, ApprovalRequest, ThemeMode, ThemeOverrides, ToolCallData,
+    AccentPreset, AgentDetailsData, AgentHeaderData, AgentItemData, AgentMindData, AgentRoleData, AgentRowData,
+    AgentRunData, AgentTabData, AgentWindow, AgentsState, App, ApprovalRequest, ThemeMode, ThemeOverrides,
+    ToolCallData,
 };
 
 /// The screen id `app.slint` draws the Agents screen at.
@@ -99,6 +100,8 @@ struct Screen {
     order: Vec<AgentId>,
     main: Surface,
     windows: BTreeMap<AgentId, Popped>,
+    /// When New agent last read the catalog, while it is open.
+    roles_read: Option<std::time::Instant>,
 }
 
 type Shared = Rc<RefCell<Screen>>;
@@ -110,6 +113,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         order: Vec::new(),
         main: Surface::new(),
         windows: BTreeMap::new(),
+        roles_read: None,
     }));
     let g = ui.global::<AgentsState>();
     g.set_items(ModelRc::from(state.borrow().main.items.clone()));
@@ -172,24 +176,20 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         let (weak, state) = (weak.clone(), state.clone());
         move |mind, prompt| {
             let Some(ui) = weak.upgrade() else { return };
-            let g = ui.global::<AgentsState>();
-            match launch::start(&mind, &prompt) {
-                Ok(agent) => {
-                    g.set_new_open(false);
-                    g.set_new_error("".into());
-                    {
-                        let mut st = state.borrow_mut();
-                        if st.tab != Tab::All {
-                            st.tab = Tab::Active;
-                            g.set_tab(Tab::Active.key().into());
-                        }
-                        st.order.clear();
-                        st.selected = Some(agent);
-                    }
-                    refresh(&ui, &state, true);
-                }
-                Err(why) => g.set_new_error(why.into()),
-            }
+            let outcome = launch::start(&mind, &prompt);
+            started(&ui, &state, outcome);
+        }
+    });
+    // ── Agents catalog: New agent → from the catalog. A role, its purpose and where it would run
+    // are shown; Start hands the task to it as the person (`control_agents::hand_off`), held to
+    // the role's reach like any hand-off.
+    g.on_pick_role(on(|ui, _state, role| pick_role(&ui.global::<AgentsState>(), &role)));
+    g.on_start_role({
+        let (weak, state) = (weak.clone(), state.clone());
+        move |role, task| {
+            let Some(ui) = weak.upgrade() else { return };
+            let outcome = crate::control_agents::hand_off_from_screen(&role, &task);
+            started(&ui, &state, outcome);
         }
     });
     g.on_send({
@@ -257,6 +257,72 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
     }
     // The timer lives as long as the shell, the idiom every wire module uses.
     std::mem::forget(timer);
+}
+
+/// New agent's Start, either way: the new agent selected on Active, or why it did not start.
+fn started(ui: &App, state: &Shared, outcome: Result<AgentId, String>) {
+    let g = ui.global::<AgentsState>();
+    match outcome {
+        Ok(agent) => {
+            g.set_new_open(false);
+            g.set_new_error("".into());
+            {
+                let mut st = state.borrow_mut();
+                if st.tab != Tab::All {
+                    st.tab = Tab::Active;
+                    g.set_tab(Tab::Active.key().into());
+                }
+                st.order.clear();
+                st.selected = Some(agent);
+            }
+            refresh(ui, state, true);
+        }
+        Err(why) => g.set_new_error(why.into()),
+    }
+}
+
+/// The catalog's roles as New agent lists them: each one's purpose and reach, and the mind it
+/// would run on now — or that none of its minds is attached.
+fn roles_now() -> Vec<AgentRoleData> {
+    let catalog = crate::agents::catalog::Catalog::load();
+    let attached = crate::wire::harness::host().map(crate::agents::catalog::minds_now).unwrap_or_default();
+    catalog
+        .roles
+        .iter()
+        .map(|r| {
+            let runs_on = r.pick_mind(&attached).ok().unwrap_or_default();
+            AgentRoleData {
+                id: r.id.as_str().into(),
+                name: r.name.as_str().into(),
+                purpose: r.purpose.as_str().into(),
+                reach: r.reach.text().into(),
+                available: !runs_on.is_empty(),
+                runs_on: runs_on.into(),
+            }
+        })
+        .collect()
+}
+
+fn pick_role(g: &AgentsState, role: &str) {
+    g.set_new_role(role.into());
+    g.set_new_error("".into());
+    let catalog = crate::agents::catalog::Catalog::load();
+    let Some(r) = catalog.find(role) else {
+        g.set_new_note("".into());
+        return;
+    };
+    let attached = crate::wire::harness::host().map(crate::agents::catalog::minds_now).unwrap_or_default();
+    let note = match r.pick_mind(&attached) {
+        Ok(mind) => format!(
+            "Runs on {mind}. May touch {}. Hands back: {} Up to {} turns and {} minutes.",
+            r.reach.text(),
+            r.returns,
+            r.budget.turns,
+            r.budget.minutes
+        ),
+        Err(why) => why,
+    };
+    g.set_new_note(note.into());
 }
 
 /// Say how a press went, when it did not go as asked.
@@ -418,8 +484,21 @@ fn refresh(ui: &App, state: &Shared, force: bool) {
                 }
             }
         }
+        // The catalog's roles, read again every couple of seconds while the dialog is open: the
+        // person's own files and the minds attached can change under it.
+        if st.roles_read.is_none_or(|at| at.elapsed() >= ROLES_EVERY) {
+            st.roles_read = Some(std::time::Instant::now());
+            if let Some(model) = crate::models::changed(g.get_roles(), roles_now()) {
+                g.set_roles(model);
+            }
+        }
+    } else {
+        st.roles_read = None;
     }
 }
+
+/// How often New agent reads the catalog again while it is open.
+const ROLES_EVERY: Duration = Duration::from_secs(2);
 
 /// Redraw every popped-out window, and let go of the ones whose × was pressed.
 fn refresh_windows(ui: &App, state: &Shared) {
@@ -514,6 +593,7 @@ fn row_of(a: &Agent) -> AgentRowData {
         label: a.state.label().into(),
         since: since(a).into(),
         parent: a.meta.parent.as_ref().map(|p| p.0.clone()).unwrap_or_default().into(),
+        role: a.meta.role.as_ref().map(|r| r.name.clone()).unwrap_or_default().into(),
     }
 }
 
@@ -632,6 +712,9 @@ fn details_of(a: &Agent, d: Details) -> AgentDetailsData {
         tokens: tokens.into(),
         cost: cost.into(),
         refused: if d.refused > 0 { format!("{} events", d.refused).into() } else { "".into() },
+        // The catalog role it was started as, and what that role may touch — held on every door.
+        role: a.meta.role.as_ref().map(|r| r.name.clone()).unwrap_or_default().into(),
+        reach: a.meta.role.as_ref().map(|r| r.reach.clone()).unwrap_or_default().into(),
         basis: "Commands, files and approvals count only what the shell itself ran or asked. Calls \
                 include what the harness reported."
             .into(),
@@ -1513,6 +1596,33 @@ mod tests {
         // The screen's own route for the button: the shell publishes `show_agent`.
         let actions = read("src/control_agents.rs");
         assert!(actions.contains("\"show_agent\""));
+    }
+
+    /// Agents catalog: a role's agent is named by its role in the list, and its details say what
+    /// the role may touch; an agent started on a mind alone says neither.
+    #[test]
+    fn a_roles_row_names_the_role_and_its_details_say_its_reach() {
+        let mut s = Store::new();
+        let reviewer = AgentId("deepseek:c-role01".into());
+        let mut meta = agents::AgentMeta::new(reviewer.clone(), "deepseek");
+        meta.role = crate::agents::catalog::Catalog::from_layers(&crate::agents::catalog::SHIPPED, &[])
+            .find("reviewer")
+            .map(|r| r.meta());
+        s.upsert_agent(meta);
+        s.upsert_agent(agents::AgentMeta::new(AgentId("pi:c-plain1".into()), "pi"));
+        let a = s.agent(&reviewer).unwrap();
+        let row = row_of(a);
+        assert_eq!((row.role.as_str(), row.mind.as_str()), ("Reviewer", "deepseek"));
+        let details = details_of(a, s.details(&reviewer).unwrap_or_default());
+        assert_eq!((details.role.as_str(), details.reach.as_str()), ("Reviewer", "editor, documents and notes · at most safe"));
+        let plain = s.agent(&AgentId("pi:c-plain1".into())).unwrap();
+        assert_eq!((row_of(plain).role.as_str(), details_of(plain, Details::default()).reach.as_str()), ("", ""));
+
+        // The screen offers the catalog in New agent and draws both.
+        let slint = read("../yantrik-ui-slint/ui/agents.slint");
+        for drawn in ["From the catalog", "AgentsState.start-role(AgentsState.new-role", "AgentsState.pick-role(role.id)", "label: \"Role\"", "AgentsState.details.reach"] {
+            assert!(slint.contains(drawn), "{drawn:?} is not in agents.slint");
+        }
     }
 
     #[test]

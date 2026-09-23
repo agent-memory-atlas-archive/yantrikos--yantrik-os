@@ -584,6 +584,9 @@ class NoteTests(unittest.TestCase):
         self.assertEqual(yantrik_harness.mcp_timeout("command_status", {"wait_seconds": 5000}), 900.0)
         self.assertEqual(yantrik_harness.mcp_timeout("command_status", {"wait_seconds": "x"}), 420.0)
         self.assertEqual(yantrik_harness.mcp_timeout("command_kill", {"job": "j"}), 300.0)
+        # hand_off waits only when told to, for the role's answer.
+        self.assertEqual(yantrik_harness.mcp_timeout("hand_off", {"role": "reviewer", "task": "x"}), 300.0)
+        self.assertEqual(yantrik_harness.mcp_timeout("hand_off", {"wait_seconds": 240}), 540.0)
 
 
 class SocketDiscoveryTests(unittest.TestCase):

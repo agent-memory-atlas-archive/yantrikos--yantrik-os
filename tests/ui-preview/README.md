@@ -100,6 +100,17 @@ window beside the output path.
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/agents.png 1280 800 verify-agents
 ```
 
+`verify-agents-catalog` draws the same screen with an agent started from the agent catalog — its
+row names its role, its details say the role's reach — and New agent opened "from the catalog",
+listing the shipped roles with their purposes. Real pointer events pick a role, press Start (which
+hands the picked role its task, and starts no mind) and switch the dialog back to "A mind". It
+writes the dialog, the role picked, the "A mind" view, the light theme and the role's row beside
+the output path.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/agents-catalog.png 1280 800 verify-agents-catalog
+```
+
 ## Mind panel
 
 `verify-mind-panel` draws the whole shell — app.slint's `App`, every screen, the status bar,

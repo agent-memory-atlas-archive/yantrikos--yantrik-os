@@ -805,8 +805,9 @@ WAITING_ACTIONS = {"agent_run": 120, "agent_job": 120}
 
 
 def act_timeout(action, args):
-    """How long to wait for an act's answer: longer than the act itself was told to wait."""
-    wait = args.get("wait", WAITING_ACTIONS.get(action))
+    """How long to wait for an act's answer: longer than the act itself was told to wait —
+    `wait` for a command, `wait_seconds` for `hand_off`, which waits for a role's answer."""
+    wait = args.get("wait", args.get("wait_seconds", WAITING_ACTIONS.get(action)))
     if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
         return max(ACT_TIMEOUT, float(wait) + WAIT_MARGIN)
     return ACT_TIMEOUT
