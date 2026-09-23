@@ -4,9 +4,15 @@
 // Native workbench: virtualized content, explicit actions, on-demand previews.
 // Enterprise features: multi-select, context menu, detail panel toggle,
 // create file/folder, status bar with selection info.
+//
+// The redesign (design/desk-and-mind-2026-09-23.md, section 2): a places sidebar, a
+// breadcrumb, large folder tiles in the app's blue with the real item count and when each
+// changed, a row of the folder's most recent files under the grid, and a grid/list switch.
+// Every number on a tile is read off the disk by the Rust side (filebrowser.rs); one that
+// could not be read says so ("Items unknown"), because an unreadable folder is not an empty one.
 
 import { Theme } from "theme.slint";
-import { AppIdentity } from "components/app_color.slint";
+import { AppColor, AppIdentity } from "components/app_color.slint";
 import { Icon, Icons } from "components/icon.slint";
 import { YEmptyState } from "components/y_empty_state.slint";
 import { AppHeader } from "app_header.slint";
@@ -21,6 +27,199 @@ export struct FileEntry {
     modified-text: string,
     icon-char: string,
     selected: bool,
+    // A folder's entries, meaningful only when `count-known`. False with `count-reason` set
+    // means the folder could not be read (permission, a budget) — drawn as unknown, never 0.
+    item-count: int,
+    count-known: bool,
+    count-reason: string,
+    // "2 h ago", from the entry's modification time; "" when that time could not be read.
+    changed-text: string,
+}
+
+/// One place in the sidebar. `id` picks the icon: home, documents, downloads, pictures,
+/// music, videos, projects. Only places that exist on this machine are sent.
+export struct FilePlaceData {
+    id: string,
+    label: string,
+    path: string,
+}
+
+/// One file in the recent row under the grid: the folder's most recently changed files.
+export struct FileRecentData {
+    name: string,
+    size-text: string,
+    changed-text: string,
+    icon-char: string,
+}
+
+// The words on a tile, in one place so the grid, the list and the recent row agree.
+global FileText {
+    public pure function items(e: FileEntry) -> string {
+        return !e.count-known ? "Items unknown"
+             : e.item-count == 1 ? "1 item"
+             : "\{e.item-count} items";
+    }
+    public pure function with-time(first: string, time: string) -> string {
+        return time == "" ? first : first == "" ? time : first + " · " + time;
+    }
+    /// "12 items · 2 h ago" for a folder, "2.4 KB · 3 h ago" for a file.
+    public pure function meta(e: FileEntry, trash: bool) -> string {
+        return trash ? (e.is-dir ? root.items(e) : e.size-text)
+             : e.is-dir ? root.with-time(root.items(e), e.changed-text)
+             : root.with-time(e.size-text, e.changed-text);
+    }
+    public pure function place-icon(id: string) -> string {
+        return id == "home" ? Icons.home
+             : id == "documents" ? Icons.doc
+             : id == "downloads" ? Icons.download
+             : id == "pictures" ? Icons.image
+             : id == "music" ? Icons.music
+             : id == "videos" ? Icons.play
+             : id == "projects" ? Icons.code
+             : Icons.folder;
+    }
+    /// A file's glyph colour, by kind. A stroke on a surface, never a fill: the loud colour
+    /// in this OS belongs to app tiles.
+    public pure function kind-tint(c: string) -> color {
+        return c == "\u{25A3}" ? AppColor.magenta     // image
+             : c == "\u{266A}" ? AppColor.pink        // audio
+             : c == "\u{25B6}" ? AppColor.orange      // video
+             : c == "\u{25C7}" ? AppColor.violet      // code
+             : c == "\u{25A4}" ? AppColor.amber       // archive
+             : c == "\u{25A7}" ? AppColor.red         // pdf
+             : c == "\u{2261}" ? AppColor.sky         // text
+             : Theme.text-secondary;
+    }
+}
+
+// A folder, drawn filled in the Files blue: a back panel with its tab and a lighter front.
+// The tile colour rather than the glyph tone, and the same in both themes, because a folder
+// icon is an object — the mockup the owner liked draws them this way in light and dark alike.
+component FolderGlyph inherits Rectangle {
+    in property <length> size: 56px;
+    width: root.size;
+    height: root.size * 40 / 48;
+    Path {
+        width: 100%; height: 100%;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 48; viewbox-height: 40;
+        commands: "M3 9Q3 5 7 5L17 5Q19 5 20.4 6.4L23 9L41 9Q45 9 45 13L45 33Q45 37 41 37L7 37Q3 37 3 33Z";
+        fill: AppColor.tile-sky.darker(18%);
+        stroke-width: 0px;
+    }
+    Path {
+        width: 100%; height: 100%;
+        viewbox-x: 0; viewbox-y: 0; viewbox-width: 48; viewbox-height: 40;
+        commands: "M3 16Q3 13 6 13L42 13Q45 13 45 16L45 33Q45 37 41 37L7 37Q3 37 3 33Z";
+        fill: @linear-gradient(180deg, AppColor.tile-sky.brighter(22%) 0%, AppColor.tile-sky 100%);
+        stroke-width: 0px;
+    }
+}
+
+// A file on a tile: a page with its kind's glyph on it.
+component FilePage inherits Rectangle {
+    in property <string> kind;
+    in property <length> size: 46px;
+    width: root.size * 0.82;
+    height: root.size;
+    border-radius: Theme.r-md;
+    background: Theme.bg-elevated;
+    border-width: 1px;
+    border-color: Theme.border-card;
+    Icon {
+        commands: Icons.file-kind(root.kind);
+        size: root.size * 0.46;
+        tint: FileText.kind-tint(root.kind);
+        thickness: 1.8px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
+component ViewToggle inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+    width: 30px; height: 26px;
+    border-radius: Theme.r-sm;
+    background: root.active ? Theme.bg-elevated : touch.has-hover ? Theme.hover-fill : transparent;
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.border-card;
+    accessible-role: button; accessible-label: root.label; accessible-action-default => { root.clicked(); }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    Icon {
+        commands: root.icon; size: 15px; thickness: 1.7px;
+        tint: root.active ? AppIdentity.accent : Theme.text-secondary;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+    }
+}
+
+// One step of the breadcrumb: a chevron before every step but the first, and the folder's
+// name, the current one in full weight.
+component Crumb inherits Rectangle {
+    in property <string> label;
+    in property <bool> first;
+    in property <bool> current;
+    in property <bool> disabled;
+    callback clicked();
+    // How wide this step wants to be; the breadcrumb caps it and hides the steps that do not fit.
+    out property <length> natural: crumb-text.preferred-width + 16px + (root.first ? 0px : 18px);
+    height: 32px;
+    accessible-role: button; accessible-label: root.label;
+    accessible-action-default => { if !root.disabled { root.clicked(); } }
+    HorizontalLayout {
+        spacing: 2px;
+        if !root.first : Icon {
+            commands: Icons.chevron-right; size: 12px; thickness: 1.7px; tint: Theme.text-dim;
+            y: (parent.height - self.height) / 2;
+        }
+        Rectangle {
+            border-radius: Theme.r-sm;
+            background: touch.has-hover && !root.disabled && !root.current ? Theme.hover-fill : transparent;
+            touch := TouchArea { enabled: !root.disabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+            crumb-text := Text {
+                x: 8px; width: parent.width - 16px;
+                text: root.label;
+                font-size: 13px;
+                font-weight: root.current ? 600 : 400;
+                color: root.current ? Theme.text-primary : Theme.text-secondary;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// A file in the recent row: its glyph, its name, its size and when it changed.
+component RecentCard inherits Rectangle {
+    in property <FileRecentData> file;
+    callback activate();
+    height: 54px;
+    border-radius: Theme.r-lg;
+    background: touch.has-hover ? Theme.bg-elevated : Theme.bg-card;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.border-strong : Theme.border-card;
+    accessible-role: button; accessible-label: "Open " + root.file.name;
+    accessible-action-default => { root.activate(); }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.activate(); } }
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 12px; spacing: 10px;
+        Rectangle {
+            width: 34px; height: 34px; y: (parent.height - self.height) / 2;
+            border-radius: Theme.r-md;
+            background: FileText.kind-tint(root.file.icon-char).transparentize(0.86);
+            Icon {
+                commands: Icons.file-kind(root.file.icon-char); size: 18px; thickness: 1.7px;
+                tint: FileText.kind-tint(root.file.icon-char);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            }
+        }
+        VerticalLayout {
+            alignment: center; spacing: 2px; horizontal-stretch: 1; min-width: 0px;
+            Text { text: root.file.name; color: Theme.text-primary; font-size: 12.5px; font-weight: 500; overflow: elide; }
+            Text { text: FileText.with-time(root.file.size-text, root.file.changed-text); color: Theme.text-dim; font-size: 11px; overflow: elide; }
+        }
+    }
 }
 
 export struct BreadcrumbSegment {
@@ -53,50 +252,83 @@ export struct FileOpItem {
     status: string,     // "in_progress", "done", "error"
 }
 
+// A place in the sidebar. The selected one wears the Files blue, as the app's identity (see
+// AppIdentity): which app you are in, not which control is primary.
 component FilePlace inherits Rectangle {
     in property <string> label;
     in property <string> icon;
     in property <bool> active;
     callback clicked();
-    height: 36px; border-radius: 6px;
-    background: root.active ? Theme.accent.transparentize(88%) : touch.has-hover ? Theme.hover-fill : transparent;
+    height: 34px; border-radius: Theme.r-md;
+    background: root.active ? AppIdentity.tint : touch.has-hover ? Theme.hover-fill : transparent;
     accessible-role: button; accessible-label: root.label; accessible-action-default => { root.clicked(); }
     focus := FocusScope { key-pressed(e) => { if e.text == Key.Return || e.text == " " { root.clicked(); return accept; } reject } }
-    touch := TouchArea { clicked => { focus.focus(); root.clicked(); } }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
     HorizontalLayout { padding-left: 10px; padding-right: 8px; spacing: 10px;
-        Icon { commands: root.icon; size: 16px; tint: root.active ? Theme.accent : Theme.text-secondary; y: (parent.height - self.height)/2; }
-        Text { text: root.label; font-size: 12px; color: root.active ? Theme.text-primary : Theme.text-secondary; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+        Icon { commands: root.icon; size: 16px; thickness: 1.7px; tint: root.active ? AppIdentity.accent : Theme.text-secondary; y: (parent.height - self.height)/2; }
+        Text { text: root.label; font-size: 13px; font-weight: root.active ? 600 : 400; color: root.active ? Theme.text-primary : Theme.text-secondary; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
     }
-    border-width: focus.has-focus ? 1px : 0px; border-color: Theme.accent;
+    border-width: focus.has-focus ? 1px : 0px; border-color: AppIdentity.accent;
 }
 component FileRow inherits Rectangle {
     in property <FileEntry> entry;
     in property <bool> selected;
     in property <bool> focused;
+    in property <bool> trash;
     callback clicked(); callback activate(); callback context();
-    background: root.selected ? Theme.accent.transparentize(88%) : touch.has-hover ? Theme.hover-fill : transparent;
-    border-width: root.focused ? 1px : 0px; border-color: Theme.accent.transparentize(55%);
     accessible-role: list-item; accessible-label: root.entry.name; accessible-action-default => { root.activate(); }
     touch := TouchArea { clicked => { root.clicked(); } double-clicked => { root.activate(); } pointer-event(e) => { if e.button == PointerEventButton.right && e.kind == PointerEventKind.down { root.context(); } } }
-    HorizontalLayout { padding-left: 18px; padding-right: 16px; spacing: 14px;
-        Icon { commands: root.entry.is-dir ? Icons.folder : Icons.file-kind(root.entry.icon-char); tint: root.entry.is-dir ? Theme.accent : Theme.text-secondary; size: 21px; y: (parent.height - self.height)/2; }
+    // The highlight is inset from the list's edges and rounded, so a selected row reads as a
+    // thing you picked rather than a stripe across the window.
+    Rectangle {
+        x: 8px; width: parent.width - 16px; y: 2px; height: parent.height - 4px;
+        border-radius: Theme.r-md;
+        background: root.selected ? AppIdentity.tint : touch.has-hover ? Theme.hover-fill : transparent;
+        border-width: root.focused ? 1px : 0px; border-color: AppIdentity.accent.transparentize(0.45);
+    }
+    HorizontalLayout { padding-left: 20px; padding-right: 20px; spacing: 14px;
+        Rectangle {
+            width: 24px;
+            if root.entry.is-dir : FolderGlyph { size: 24px; y: (parent.height - self.height) / 2; }
+            if !root.entry.is-dir : Icon { commands: Icons.file-kind(root.entry.icon-char); tint: FileText.kind-tint(root.entry.icon-char); size: 19px; thickness: 1.7px; x: 2px; y: (parent.height - self.height) / 2; }
+        }
         Text { text: root.entry.name; color: Theme.text-primary; font-size: 13px; font-weight: root.entry.is-dir ? 500 : 400; vertical-alignment: center; horizontal-stretch: 1; min-width: 0px; overflow: elide; }
-        if root.width >= 420px : Text { text: root.entry.is-dir ? "Folder" : root.entry.size-text; color: Theme.text-dim; font-size: 11px; width: 76px; vertical-alignment: center; horizontal-alignment: right; }
-        if root.width >= 680px : Text { text: root.entry.modified-text; color: Theme.text-dim; font-size: 11px; width: 64px; vertical-alignment: center; horizontal-alignment: right; }
+        if root.width >= 420px : Text {
+            text: root.entry.is-dir ? FileText.items(root.entry) : root.entry.size-text;
+            color: root.entry.is-dir && !root.entry.count-known ? Theme.text-dim : Theme.text-secondary;
+            font-size: 12px; width: 96px; vertical-alignment: center; horizontal-alignment: right;
+        }
+        if root.width >= 680px : Text {
+            text: root.trash ? root.entry.modified-text : root.entry.changed-text;
+            color: Theme.text-dim; font-size: 12px; width: 88px; vertical-alignment: center; horizontal-alignment: right;
+        }
     }
 }
+// A tile in the grid: a folder in the Files blue with its item count and when it changed, or a
+// file as a page with its kind, size and time.
 component FileTile inherits Rectangle {
     in property <FileEntry> entry;
     in property <bool> focused;
+    in property <bool> trash;
     callback clicked(); callback activate();
-    background: root.entry.selected ? Theme.accent.transparentize(88%) : touch.has-hover ? Theme.hover-fill : transparent;
-    border-width: root.focused ? 1px : 0px; border-color: Theme.accent.transparentize(55%);
+    border-radius: Theme.r-lg;
+    background: root.entry.selected ? AppIdentity.tint : touch.has-hover ? Theme.hover-fill : transparent;
+    border-width: root.focused || root.entry.selected ? 1px : 0px;
+    border-color: root.focused ? AppIdentity.accent.transparentize(0.3) : AppIdentity.accent.transparentize(0.6);
     accessible-role: list-item; accessible-label: root.entry.name; accessible-action-default => { root.activate(); }
     touch := TouchArea { clicked => { root.clicked(); } double-clicked => { root.activate(); } }
-    VerticalLayout { padding: 12px; spacing: 6px;
-        Rectangle { height: 40px; Icon { commands: root.entry.is-dir ? Icons.folder : Icons.file-kind(root.entry.icon-char); tint: root.entry.is-dir ? Theme.accent : Theme.text-secondary; size: 36px; x: (parent.width - self.width)/2; } }
-        Text { text: root.entry.name; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; overflow: elide; height: 18px; }
-        Text { text: root.entry.is-dir ? "Folder" : root.entry.size-text; color: Theme.text-dim; font-size: 10px; horizontal-alignment: center; height: 14px; }
+    VerticalLayout { padding: 10px; padding-top: 14px; spacing: 3px; alignment: start;
+        Rectangle { height: 62px;
+            if root.entry.is-dir : FolderGlyph { size: 62px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 + 2px; }
+            if !root.entry.is-dir : FilePage { kind: root.entry.icon-char; size: 52px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+        }
+        Rectangle { height: 6px; }
+        Text { text: root.entry.name; color: Theme.text-primary; font-size: 13px; font-weight: 500; horizontal-alignment: center; overflow: elide; height: 18px; }
+        Text {
+            text: FileText.meta(root.entry, root.trash);
+            color: root.entry.is-dir && !root.entry.count-known ? Theme.text-dim : Theme.text-secondary;
+            font-size: 11.5px; horizontal-alignment: center; overflow: elide; height: 16px;
+        }
     }
 }
 
@@ -119,6 +351,18 @@ export component FileBrowser inherits Rectangle {
     in property <string> free-space-text: "";
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
+
+    // The sidebar's places, only those that exist here (filebrowser.rs `places`). Empty until
+    // the shell has looked, when the standard four are drawn so the sidebar is never blank.
+    in property <[FilePlaceData]> places: [];
+    property <[FilePlaceData]> standard-places: [
+        {id: "home", label: "Home", path: "~"},
+        {id: "documents", label: "Documents", path: "~/Documents"},
+        {id: "downloads", label: "Downloads", path: "~/Downloads"},
+        {id: "pictures", label: "Pictures", path: "~/Pictures"}
+    ];
+    // The folder's most recently changed files, newest first, for the row under the grid.
+    in property <[FileRecentData]> recent: [];
 
     // AI features
     in property <string> ai-summary: "";
@@ -252,7 +496,21 @@ export component FileBrowser inherits Rectangle {
     property <string> dialog-value;
     property <string> dialog-old;
     property <bool> open-with-visible;
-    property <int> columns: max(1, floor(list-area.width / 148px));
+    // The grid's cell: large enough for a folder drawn at 62px with two lines under it.
+    property <length> tile-w: 160px;
+    property <length> tile-h: 148px;
+    property <int> columns: max(1, floor(list-area.width / root.tile-w));
+    // How many recent files fit across the row under the grid.
+    property <length> recent-card-w: 214px;
+    // The width the listing gets, worked out from the screen's own width rather than read
+    // back from list-area: anything inside list-area's layout that sized itself from
+    // list-area.width would be a binding loop (its width is what the layout is solving for).
+    property <length> content-w: root.width
+        - (root.width >= 900px ? 200px : root.width >= 620px ? 140px : 0px)
+        - (root.detail-panel-visible && root.width >= 1050px && root.selected-index >= 0 ? 250px : 0px);
+    property <int> recent-fit: max(1, floor((root.content-w - 32px + 10px) / (root.recent-card-w + 10px)));
+    property <bool> show-recent: root.grid-view && !root.file-trash-mode && !root.is-loading
+        && root.search-text == "" && root.recent.length > 0 && root.entries.length > 0;
     property <string> selected-name: root.selected-index >= 0 && root.selected-index < root.entries.length ? root.entries[root.selected-index].name : "";
     public function focus-list() { listing.focus(); }
     function open-selected() {
@@ -290,9 +548,9 @@ export component FileBrowser inherits Rectangle {
     function reveal-selection() {
         if root.selected-index < 0 { return; }
         if root.grid-view {
-            let y = floor(root.selected-index / root.columns) * 116px;
+            let y = floor(root.selected-index / root.columns) * root.tile-h;
             if y + grid-list.viewport-y < 0px { grid-list.viewport-y = -y; }
-            if y + 116px + grid-list.viewport-y > grid-list.visible-height { grid-list.viewport-y = grid-list.visible-height - y - 116px; }
+            if y + root.tile-h + grid-list.viewport-y > grid-list.visible-height { grid-list.viewport-y = grid-list.visible-height - y - root.tile-h; }
         } else {
             let y = root.selected-index * 46px;
             if y + list-view.viewport-y < 0px { list-view.viewport-y = -y; }
@@ -365,25 +623,48 @@ export component FileBrowser inherits Rectangle {
                     }
                 }
             }
+            // ── Toolbar: history, the breadcrumb, search, and the view switch ──
             Rectangle {
                 height: 54px; background: Theme.bg-surface;
+                Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border-subtle; }
                 HorizontalLayout { padding: 10px; spacing: 5px;
                     YButton { label: "Back"; icon-path: Icons.arrow-left; icon-only: true; variant: 2; disabled: !root.can-go-back || root.file-trash-mode; clicked => { root.go-back(); } }
                     YButton { label: "Forward"; icon-path: Icons.arrow-right; icon-only: true; variant: 2; disabled: !root.can-go-forward || root.file-trash-mode; clicked => { root.go-forward(); } }
                     YButton { label: "Parent folder"; icon-path: Icons.arrow-up; icon-only: true; variant: 2; disabled: root.file-trash-mode || root.current-path == "/"; clicked => { root.go-up(); } }
+                    Rectangle { width: 6px; }
                     path-area := Rectangle { horizontal-stretch: 1; min-width: 80px; clip: true;
                         if root.address-editing : YInput { init => { self.focus(); } value: root.current-path; placeholder: "Enter a folder path"; accepted(path) => { root.navigate-to-path(path); root.address-editing = false; listing.focus(); } }
+                        // The breadcrumb: Home › Documents › Reports. The last three steps
+                        // (one when narrow), each as wide as its name up to a cap; the steps
+                        // before them are hidden rather than squeezed into unreadable stubs.
                         if !root.address-editing : HorizontalLayout { spacing: 0px; alignment: start;
-                            for crumb[index] in root.breadcrumbs : YButton {
-                                visible: index >= root.breadcrumbs.length - (root.width < 800px ? 1 : 3);
-                                width: index < root.breadcrumbs.length - (root.width < 800px ? 1 : 3) ? 0px : min(120px, path-area.width / min(root.breadcrumbs.length, root.width < 800px ? 1 : 3));
-                                label: crumb.label; size: 0; variant: 2; disabled: root.file-trash-mode;
+                            for crumb[index] in root.breadcrumbs : Crumb {
+                                property <int> keep: root.width < 800px ? 1 : 3;
+                                property <int> count: root.breadcrumbs.length;
+                                property <bool> shown: index >= self.count - self.keep;
+                                visible: self.shown;
+                                width: self.shown ? min(170px, self.natural) : 0px;
+                                label: crumb.label;
+                                first: index == max(0, self.count - self.keep);
+                                current: index == self.count - 1;
+                                disabled: root.file-trash-mode;
                                 clicked => { root.navigate-to-path(crumb.full-path); }
                             }
-                            YButton { width: 24px; label: "Edit location · Ctrl L"; icon-path: Icons.editor; icon-only: true; variant: 2; size: 0; disabled: root.file-trash-mode; clicked => { root.address-editing = true; } }
+                            YButton { width: 28px; label: "Edit location · Ctrl L"; icon-path: Icons.pencil; icon-only: true; variant: 2; size: 0; disabled: root.file-trash-mode; clicked => { root.address-editing = true; } }
                         }
                     }
                     search-input := YInput { width: root.width >= 1000px ? 240px : 180px; mode: 1; value <=> root.search-text; placeholder: "Search this folder"; edited(text) => { root.file-filter-changed(text); } }
+                    // Grid or list, as a two-way switch so the current one is visible.
+                    Rectangle {
+                        width: 70px; height: 32px;
+                        border-radius: Theme.r-md;
+                        background: Theme.bg-input;
+                        border-width: 1px; border-color: Theme.border-default;
+                        HorizontalLayout { padding: 2px; spacing: 4px; padding-left: 3px;
+                            ViewToggle { icon: Icons.grid; label: "Grid view"; active: root.grid-view; y: 2px; clicked => { root.grid-view = true; listing.focus(); } }
+                            ViewToggle { icon: Icons.list; label: "List view"; active: !root.grid-view; y: 2px; clicked => { root.grid-view = false; listing.focus(); } }
+                        }
+                    }
                 }
             }
             if root.notice != "" : Rectangle {
@@ -403,21 +684,18 @@ export component FileBrowser inherits Rectangle {
                 Rectangle { y: parent.height - 2px; height: 2px; width: max(4px, parent.width * root.operation-progress); background: Theme.accent; }
             }
             HorizontalLayout { spacing: 0px;
+                // ── Places ──
                 if root.width >= 620px : Rectangle {
-                    width: root.width >= 900px ? 184px : 140px; background: Theme.bg-surface;
-                    VerticalLayout { padding: 12px; spacing: 4px;
-                        Text { text: "PLACES"; color: Theme.text-dim; font-size: 10px; font-weight: 600; height: 28px; vertical-alignment: center; }
-                        for place in [
-                            {label:"Home", path:"~", icon:Icons.home},
-                            {label:"Documents", path:"~/Documents", icon:Icons.file},
-                            {label:"Downloads", path:"~/Downloads", icon:Icons.download},
-                            {label:"Pictures", path:"~/Pictures", icon:Icons.image},
-                            {label:"File system", path:"/", icon:Icons.folder}
-                        ] : FilePlace {
-                            label: place.label; icon: place.icon; active: root.current-path == place.path && !root.file-trash-mode;
+                    width: root.width >= 900px ? 200px : 140px; background: Theme.bg-surface;
+                    Rectangle { x: parent.width - 1px; width: 1px; background: Theme.border-subtle; }
+                    VerticalLayout { padding: 10px; padding-top: 12px; spacing: 2px;
+                        for place in (root.places.length > 0 ? root.places : root.standard-places) : FilePlace {
+                            label: place.label; icon: FileText.place-icon(place.id);
+                            active: root.current-path == place.path && !root.file-trash-mode;
                             clicked => { root.navigate-to-path(place.path); listing.focus(); }
                         }
-                        Rectangle { height: 16px; }
+                        Rectangle { height: 12px; }
+                        FilePlace { label: "File system"; icon: Icons.disk; active: root.current-path == "/" && !root.file-trash-mode; clicked => { root.navigate-to-path("/"); listing.focus(); } }
                         FilePlace { label: "Trash"; icon: Icons.trash; active: root.file-trash-mode; clicked => { if !root.file-trash-mode { root.file-toggle-trash(); } } }
                         Rectangle { vertical-stretch: 1; }
                         Text { text: root.free-space-text; color: Theme.text-dim; font-size: 11px; overflow: elide; height: 28px; vertical-alignment: center; }
@@ -426,22 +704,35 @@ export component FileBrowser inherits Rectangle {
                 list-area := Rectangle {
                     horizontal-stretch: 1; min-width: 0px; background: Theme.bg-deep;
                     VerticalLayout { spacing: 0px;
-                        Rectangle { height: 52px;
-                            HorizontalLayout { padding-left: 18px; padding-right: 12px; spacing: 6px;
-                                Text { text: root.file-trash-mode ? "Trash" : root.breadcrumbs.length > 0 ? root.breadcrumbs[root.breadcrumbs.length - 1].label : "Files"; font-size: 20px; font-weight: 600; color: Theme.text-primary; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
-                                if root.file-trash-mode : YButton { label: "Restore"; size: 0; variant: 1; disabled: root.selection-count != 1 || root.operation-busy; clicked => { root.command("restore"); } }
-                                if root.file-trash-mode && root.width >= 900px : YButton { label: "Empty Trash"; size: 0; variant: 2; disabled: root.entries.length == 0 || root.operation-busy; clicked => { root.command("empty-trash"); } }
-                                if !root.file-trash-mode : YButton { label: root.sort-field == "name" ? "Name" : root.sort-field == "size" ? "Size" : "Modified"; size: 0; variant: 2; clicked => { root.sort-field = root.sort-field == "name" ? "size" : root.sort-field == "size" ? "modified" : "name"; root.file-sort-changed(root.sort-field, root.sort-ascending); } }
-                                if !root.file-trash-mode : YButton { label: "Reverse sort order"; icon-path: root.sort-ascending ? Icons.arrow-up : Icons.arrow-down; icon-only: true; size: 0; variant: 2; clicked => { root.sort-ascending = !root.sort-ascending; root.file-sort-changed(root.sort-field, root.sort-ascending); } }
-                                YButton { label: root.grid-view ? "List view" : "Grid view"; icon-path: root.grid-view ? Icons.list : Icons.grid; icon-only: true; size: 0; variant: 2; clicked => { root.grid-view = !root.grid-view; } }
+                        // ── The folder's name, what it holds, and how it is sorted ──
+                        Rectangle { height: 56px;
+                            HorizontalLayout { padding-left: 20px; padding-right: 12px; spacing: 6px;
+                                VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1; min-width: 0px;
+                                    Text { text: root.file-trash-mode ? "Trash" : root.breadcrumbs.length > 0 ? root.breadcrumbs[root.breadcrumbs.length - 1].label : "Files"; font-size: 20px; font-weight: 600; color: Theme.text-primary; overflow: elide; }
+                                    Text {
+                                        text: root.is-loading ? "Reading…"
+                                            : root.selection-count > 0 ? root.selection-size-text != "" ? root.selection-size-text : "\{root.selection-count} selected"
+                                            : root.entries.length == 1 ? "1 item" : "\{root.entries.length} items";
+                                        color: Theme.text-secondary; font-size: 12px; overflow: elide;
+                                    }
+                                }
+                                if root.selection-count > 0 && !root.file-trash-mode : YButton { y: 14px; label: "Copy"; icon-path: Icons.copy; icon-only: root.width < 950px; size: 0; variant: 2; clicked => { root.copy-selected(); } }
+                                if root.selection-count > 0 && !root.file-trash-mode : YButton { y: 14px; label: "Move to Trash"; icon-path: Icons.trash; icon-only: true; size: 0; variant: 2; disabled: root.operation-busy; clicked => { root.delete-selected(); } }
+                                if root.selection-count > 0 : YButton { y: 14px; label: "Clear selection"; icon-path: Icons.close; icon-only: true; size: 0; variant: 2; clicked => { root.clear-selection(); listing.focus(); } }
+                                if root.file-trash-mode : YButton { y: 14px; label: "Restore"; size: 0; variant: 1; disabled: root.selection-count != 1 || root.operation-busy; clicked => { root.command("restore"); } }
+                                if root.file-trash-mode && root.width >= 900px : YButton { y: 14px; label: "Empty Trash"; size: 0; variant: 2; disabled: root.entries.length == 0 || root.operation-busy; clicked => { root.command("empty-trash"); } }
+                                if !root.file-trash-mode : YButton { y: 14px; label: root.sort-field == "name" ? "Name" : root.sort-field == "size" ? "Size" : "Modified"; icon-path: Icons.sort; size: 0; variant: 2; clicked => { root.sort-field = root.sort-field == "name" ? "size" : root.sort-field == "size" ? "modified" : "name"; root.file-sort-changed(root.sort-field, root.sort-ascending); } }
+                                if !root.file-trash-mode : YButton { y: 14px; label: "Reverse sort order"; icon-path: root.sort-ascending ? Icons.arrow-up : Icons.arrow-down; icon-only: true; size: 0; variant: 2; clicked => { root.sort-ascending = !root.sort-ascending; root.file-sort-changed(root.sort-field, root.sort-ascending); } }
                             }
                         }
-                        Rectangle { height: 36px; background: Theme.bg-surface;
-                            HorizontalLayout { padding-left: 16px; padding-right: 10px; spacing: 4px;
-                                Text { text: root.selection-count > 0 ? "\{root.selection-count} selected" : "\{root.entries.length} items"; color: Theme.text-secondary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                if root.selection-count > 0 && !root.file-trash-mode : YButton { label: "Copy"; icon-path: Icons.copy; icon-only: root.width < 950px; size: 0; variant: 2; clicked => { root.copy-selected(); } }
-                                if root.selection-count > 0 && !root.file-trash-mode : YButton { label: "Move to Trash"; icon-path: Icons.trash; icon-only: true; size: 0; variant: 2; disabled: root.operation-busy; clicked => { root.delete-selected(); } }
-                                if root.selection-count > 0 : YButton { label: "Clear selection"; icon-path: Icons.close; icon-only: true; size: 0; variant: 2; clicked => { root.clear-selection(); listing.focus(); } }
+                        // ── Column heads, in the list ──
+                        if !root.grid-view && !root.is-loading && root.entries.length > 0 : Rectangle { height: 30px;
+                            Rectangle { x: 16px; width: parent.width - 32px; y: parent.height - 1px; height: 1px; background: Theme.border-subtle; }
+                            HorizontalLayout { padding-left: 20px; padding-right: 20px; spacing: 14px;
+                                Rectangle { width: 24px; }
+                                Text { text: "Name"; color: Theme.text-dim; font-size: 11px; font-weight: 600; letter-spacing: 0.4px; vertical-alignment: center; horizontal-stretch: 1; }
+                                if root.content-w >= 420px : Text { text: "Items · Size"; color: Theme.text-dim; font-size: 11px; font-weight: 600; letter-spacing: 0.4px; width: 96px; vertical-alignment: center; horizontal-alignment: right; }
+                                if root.content-w >= 680px : Text { text: root.file-trash-mode ? "Where" : "Changed"; color: Theme.text-dim; font-size: 11px; font-weight: 600; letter-spacing: 0.4px; width: 88px; vertical-alignment: center; horizontal-alignment: right; }
                             }
                         }
                         listing := FocusScope {
@@ -468,7 +759,7 @@ export component FileBrowser inherits Rectangle {
                             list-view := ListView {
                                 visible: !root.is-loading && !root.grid-view;
                                 for entry[index] in (root.grid-view || root.is-loading ? [] : root.entries) : FileRow {
-                                    entry: entry; height: 46px;
+                                    entry: entry; height: 46px; trash: root.file-trash-mode;
                                     selected: entry.selected; focused: listing.has-focus && index == root.selected-index;
                                     clicked => { listing.focus(); root.multi-select-clicked(index, root.ctrl-held, root.shift-held); }
                                     activate => { root.selected-index = index; root.open-selected(); }
@@ -478,13 +769,15 @@ export component FileBrowser inherits Rectangle {
                             grid-list := ListView {
                                 visible: !root.is-loading && root.grid-view;
                                 for row in (root.grid-view && !root.is-loading ? ceil(root.entries.length / root.columns) : 0) : Rectangle {
-                                    height: 116px;
+                                    height: root.tile-h;
                                     HorizontalLayout { spacing: 0px; alignment: start;
                                         for col in root.columns : cell := Rectangle {
-                                            width: list-area.width / root.columns; height: 116px;
+                                            width: list-area.width / root.columns; height: root.tile-h;
                                             property <int> index: row * root.columns + col;
                                             if cell.index < root.entries.length : FileTile {
-                                                entry: root.entries[cell.index]; focused: listing.has-focus && cell.index == root.selected-index;
+                                                x: 5px; y: 4px; width: parent.width - 10px; height: parent.height - 8px;
+                                                entry: root.entries[cell.index]; trash: root.file-trash-mode;
+                                                focused: listing.has-focus && cell.index == root.selected-index;
                                                 clicked => { listing.focus(); root.multi-select-clicked(cell.index, root.ctrl-held, root.shift-held); }
                                                 activate => { root.selected-index = cell.index; root.open-selected(); }
                                             }
@@ -496,6 +789,26 @@ export component FileBrowser inherits Rectangle {
                                 icon-path: root.is-loading ? Icons.folder : root.file-trash-mode ? Icons.trash : root.search-text != "" ? Icons.search : Icons.folder;
                                 title: root.is-loading ? "Opening folder…" : root.search-text != "" ? "No matching files" : root.file-trash-mode ? "Trash is empty" : "This folder is empty";
                                 description: root.is-loading ? "Reading this folder’s contents." : root.search-text != "" ? "Try another name. Search stays in this folder." : root.file-trash-mode ? "Items moved to Trash can be restored here." : "Create a folder or paste files to get started.";
+                            }
+                        }
+                        // ── Recent: the files in this folder that changed last ──
+                        //
+                        // Under the grid, as the design has it. Real files by their real times
+                        // (filebrowser.rs `most_recent`); hidden while a search narrows the view,
+                        // in Trash, and when the folder holds no files at all.
+                        if root.show-recent : Rectangle {
+                            height: 104px;
+                            Rectangle { x: 16px; width: parent.width - 32px; y: 0px; height: 1px; background: Theme.border-subtle; }
+                            VerticalLayout { padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 14px; spacing: 10px;
+                                Text { text: "Recent in this folder"; color: Theme.text-secondary; font-size: 12px; font-weight: 600; }
+                                HorizontalLayout { spacing: 10px; alignment: start;
+                                    for file[i] in root.recent : RecentCard {
+                                        visible: i < root.recent-fit;
+                                        width: i < root.recent-fit ? root.recent-card-w : 0px;
+                                        file: file;
+                                        activate => { root.open-file(file.name); }
+                                    }
+                                }
                             }
                         }
                     }

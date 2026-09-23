@@ -20,7 +20,7 @@ import { LoginScreen } from "login.slint";
 import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData, HarnessRowData } from "settings.slint";
 import { SkillData } from "skill_store.slint";
 import { MemoryBrowser, MemoryItem } from "memory_browser.slint";
-import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem } from "file_browser.slint";
+import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem, FilePlaceData, FileRecentData } from "file_browser.slint";
 import { NotificationCenter, NotificationData, NotifActionData } from "notification_center.slint";
 import { SystemDashboard, ProcessData } from "system_dashboard.slint";
 import { VoiceOverlay } from "voice_overlay.slint";
@@ -548,7 +548,11 @@ export component App inherits Window {
     in property <[BreadcrumbSegment]> file-breadcrumbs: [];
     in property <bool> file-has-clipboard: false;
     in-out property <bool> file-show-hidden: false;
-    in-out property <bool> file-grid-view: false;
+    // Grid first: the folder tiles, with their counts and times, are the view (desk-look).
+    in-out property <bool> file-grid-view: true;
+    // desk-look: the sidebar's places that exist here, and the folder's most recent files.
+    in property <[FilePlaceData]> file-places: [];
+    in property <[FileRecentData]> file-recent: [];
     callback file-navigate-dir(string);
     callback file-open(string);
     callback file-go-up();
@@ -1927,6 +1931,8 @@ export component App inherits Window {
                 file-toggle-trash => { root.file-toggle-trash(); }
                 file-empty-trash => { root.file-empty-trash(); }
                 file-restore-from-trash(idx) => { root.file-restore-from-trash(idx); }
+                places: root.file-places;
+                recent: root.file-recent;
             }
         }
 

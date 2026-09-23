@@ -44,7 +44,7 @@ export component YContextMenu inherits Rectangle {
         border-radius: Theme.r-lg;
         background: Theme.bg-elevated;
         border-width: 1px;
-        border-color: Theme.border-subtle;
+        border-color: Theme.border-card;
         drop-shadow-blur: 20px;
         drop-shadow-color: Theme.overlay-backdrop;
         clip: true;
@@ -59,7 +59,7 @@ export component YContextMenu inherits Rectangle {
                     property <bool> hovered: action-ta.has-hover;
 
                     height: 32px;
-                    border-radius: Theme.r-sm;
+                    border-radius: Theme.r-md;
                     background: hovered && !action.disabled ? Theme.hover-fill : transparent;
                     opacity: action.disabled ? 0.4 : 1.0;
 

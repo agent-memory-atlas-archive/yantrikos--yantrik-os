@@ -145,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_scene(
         args.get(4)
             .filter(|a| {
-                ["notes", "files", "files-grid", "files-empty", "settings"].contains(&a.as_str())
+                ["notes", "files", "files-grid", "files-empty", "files-home", "files-home-list", "settings"].contains(&a.as_str())
             })
             .cloned()
             .unwrap_or_default()

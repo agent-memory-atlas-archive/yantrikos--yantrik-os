@@ -20,51 +20,56 @@ export global ThemeMode {
 
 // Accent color presets — index selects which accent palette is active.
 // 0 = cyan (default), 1 = amber, 2 = purple, 3 = green, 4 = pink
+//
+// Crisp, not louder (desk-and-mind, "bright and sharp"). Each preset keeps its hue and gains
+// saturation: the old cyan #4ecdc4 sat at 56% saturation, which on a near-black ground reads as
+// a pastel wash rather than an edge. The light-mode values stay dark enough to carry white text
+// on a primary button (the cyan is 5.5:1 against #ffffff, up from 5.2).
 export global AccentPreset {
     in-out property <int> index: 0;
 
     // Resolved accent colors — reactive to index + dark mode.
     out property <color> accent:
-        index == 0 ? (ThemeMode.dark ? #4ecdc4 : #137881)   // teal-cyan
-      : index == 1 ? (ThemeMode.dark ? #e8b44c : #906719)   // amber
-      : index == 2 ? (ThemeMode.dark ? #b484e0 : #7840b0)   // purple
-      : index == 3 ? (ThemeMode.dark ? #6cd480 : #237c32)   // green
-      :               (ThemeMode.dark ? #e87898 : #c04068);  // pink
+        index == 0 ? (ThemeMode.dark ? #38d8cd : #08747e)   // teal-cyan
+      : index == 1 ? (ThemeMode.dark ? #f2b73e : #8f6512)   // amber
+      : index == 2 ? (ThemeMode.dark ? #b98aef : #7338b4)   // purple
+      : index == 3 ? (ThemeMode.dark ? #5ede78 : #1f7d30)   // green
+      :               (ThemeMode.dark ? #f27aa0 : #bd3563);  // pink
 
     out property <color> accent-light:
-        index == 0 ? (ThemeMode.dark ? #7ee0d8 : #40a8b4)
-      : index == 1 ? (ThemeMode.dark ? #f0cc78 : #b88838)
-      : index == 2 ? (ThemeMode.dark ? #cca0f0 : #9060c8)
-      : index == 3 ? (ThemeMode.dark ? #90e8a0 : #48a858)
-      :               (ThemeMode.dark ? #f098b4 : #d06080);
+        index == 0 ? (ThemeMode.dark ? #74e6de : #3aa9b4)
+      : index == 1 ? (ThemeMode.dark ? #f6cd75 : #b88838)
+      : index == 2 ? (ThemeMode.dark ? #d0a8f6 : #9060c8)
+      : index == 3 ? (ThemeMode.dark ? #8eeba2 : #48a858)
+      :               (ThemeMode.dark ? #f69cbb : #d06080);
 
     out property <color> accent-dim:
-        index == 0 ? (ThemeMode.dark ? #2a9d8f : #80c8d0)
-      : index == 1 ? (ThemeMode.dark ? #a07a30 : #c8a860)
-      : index == 2 ? (ThemeMode.dark ? #7a50a0 : #b090d0)
-      : index == 3 ? (ThemeMode.dark ? #3a7a48 : #80c090)
-      :               (ThemeMode.dark ? #a04868 : #d898b0);
+        index == 0 ? (ThemeMode.dark ? #1fa89b : #80c8d0)
+      : index == 1 ? (ThemeMode.dark ? #a87c28 : #c8a860)
+      : index == 2 ? (ThemeMode.dark ? #7c4fae : #b090d0)
+      : index == 3 ? (ThemeMode.dark ? #33854a : #80c090)
+      :               (ThemeMode.dark ? #aa4570 : #d898b0);
 
     out property <color> accent-glow:
-        index == 0 ? (ThemeMode.dark ? #4ecdc440 : #4ecdc430)
-      : index == 1 ? (ThemeMode.dark ? #e8b44c40 : #e8b44c30)
-      : index == 2 ? (ThemeMode.dark ? #b484e040 : #b484e030)
-      : index == 3 ? (ThemeMode.dark ? #6cd48040 : #6cd48030)
-      :               (ThemeMode.dark ? #e8789840 : #e8789830);
+        index == 0 ? (ThemeMode.dark ? #38d8cd40 : #08747e30)
+      : index == 1 ? (ThemeMode.dark ? #f2b73e40 : #8f651230)
+      : index == 2 ? (ThemeMode.dark ? #b98aef40 : #7338b430)
+      : index == 3 ? (ThemeMode.dark ? #5ede7840 : #1f7d3030)
+      :               (ThemeMode.dark ? #f27aa040 : #bd356330);
 
     out property <color> accent-glow-strong:
-        index == 0 ? (ThemeMode.dark ? #4ecdc470 : #4ecdc450)
-      : index == 1 ? (ThemeMode.dark ? #e8b44c70 : #e8b44c50)
-      : index == 2 ? (ThemeMode.dark ? #b484e070 : #b484e050)
-      : index == 3 ? (ThemeMode.dark ? #6cd48070 : #6cd48050)
-      :               (ThemeMode.dark ? #e8789870 : #e8789850);
+        index == 0 ? (ThemeMode.dark ? #38d8cd70 : #08747e50)
+      : index == 1 ? (ThemeMode.dark ? #f2b73e70 : #8f651250)
+      : index == 2 ? (ThemeMode.dark ? #b98aef70 : #7338b450)
+      : index == 3 ? (ThemeMode.dark ? #5ede7870 : #1f7d3050)
+      :               (ThemeMode.dark ? #f27aa070 : #bd356350);
 
     out property <color> tint:
-        index == 0 ? (ThemeMode.dark ? #4ecdc418 : #1a8a9a14)
-      : index == 1 ? (ThemeMode.dark ? #e8b44c18 : #90671914)
-      : index == 2 ? (ThemeMode.dark ? #b484e018 : #7840b014)
-      : index == 3 ? (ThemeMode.dark ? #6cd48018 : #237c3214)
-      :               (ThemeMode.dark ? #e8789818 : #c0406814);
+        index == 0 ? (ThemeMode.dark ? #38d8cd1c : #08747e17)
+      : index == 1 ? (ThemeMode.dark ? #f2b73e1c : #8f651217)
+      : index == 2 ? (ThemeMode.dark ? #b98aef1c : #7338b417)
+      : index == 3 ? (ThemeMode.dark ? #5ede781c : #1f7d3017)
+      :               (ThemeMode.dark ? #f27aa01c : #bd356317);
 
     // Label for current accent (for settings display)
     out property <string> label:
@@ -79,32 +84,55 @@ export global AccentPreset {
 // When enabled, these override the 10 key color tokens in Theme.
 export global ThemeOverrides {
     in-out property <bool> enabled: false;
-    in-out property <color> bg-deep-override:     #101318;
-    in-out property <color> bg-surface-override:   #181d25;
-    in-out property <color> bg-card-override:      #202731;
-    in-out property <color> bg-elevated-override:  #2a3340;
+    // The defaults a theme file falls back to for any key it leaves out: the stock palette.
+    in-out property <color> bg-deep-override:     #0e1117;
+    in-out property <color> bg-surface-override:   #161b23;
+    in-out property <color> bg-card-override:      #212937;
+    in-out property <color> bg-elevated-override:  #2c3545;
     in-out property <color> amber-override:        #d4a574;
-    in-out property <color> cyan-override:         #4ecdc4;
-    in-out property <color> text-primary-override: #e8eaef;
-    in-out property <color> text-secondary-override: #a5afbf;
-    in-out property <color> text-dim-override:     #8b98ab;
-    in-out property <color> accent-override:       #4ecdc4;
+    in-out property <color> cyan-override:         #38d8cd;
+    in-out property <color> text-primary-override: #f4f6fa;
+    in-out property <color> text-secondary-override: #c0c8d6;
+    in-out property <color> text-dim-override:     #95a1b4;
+    in-out property <color> accent-override:       #38d8cd;
 }
 
+// ─── Bright and sharp (design/desk-and-mind-2026-09-23.md, section 1) ─────
+//
+// The desktop read muddy: grey text on grey cards on a grey ground, each step a few percent
+// from the next, so nothing had an edge. The pass that fixed it changed values here, not call
+// sites, and every name below still answers exactly as before:
+//
+//   * Text. Primary is near-white (#f4f6fa, 13.5:1 on a card, was 12.5), secondary is a clear
+//     light grey rather than a mid one (#c0c8d6, 8.7:1, was 6.8), dim stays readable for
+//     metadata (#95a1b4, 5.6:1, was 5.1). Light mode mirrors it: near-black (18.9:1 on white),
+//     then two readable greys that are actually two (8.4:1 and 5.7:1; they were 6.0 and 5.9,
+//     the same grey twice).
+//   * Surfaces. The ground went a step deeper and the card a step lighter, so a card sits OFF
+//     the background instead of on it.
+//   * Hairlines. A card or panel carries a one-pixel border a little lighter than itself
+//     (`border-card`), the edge that catches the light. Lighter, because a border darker than
+//     its fill reads as a hole rather than a pane.
+//   * One radius scale (below), with the legacy names pointed into it.
+//   * The accent is the same hue, more saturated (AccentPreset).
+//
+// No blur anywhere: Slint has none and the VM renders in software. Panels over the wallpaper
+// stay the glass tokens below, an alpha blend over a wallpaper that is already soft; see the
+// Glass section.
 export global Theme {
     // ─── Surface hierarchy (4-tier depth) ─────────────────────────
     // base → default → raised → floating
-    // Each tier +6-8% luminance for clear depth without blur.
+    // Each tier a clear step in luminance for depth without blur.
     out property <color> bg-deep:     ThemeOverrides.enabled ? ThemeOverrides.bg-deep-override
-        : (ThemeMode.dark ? #101318 : #f3f5f8);
+        : (ThemeMode.dark ? #0e1117 : #eef1f6);
     out property <color> bg-surface:  ThemeOverrides.enabled ? ThemeOverrides.bg-surface-override
-        : (ThemeMode.dark ? #181d25 : #e9edf3);
+        : (ThemeMode.dark ? #161b23 : #e6eaf1);
     out property <color> bg-card:     ThemeOverrides.enabled ? ThemeOverrides.bg-card-override
-        : (ThemeMode.dark ? #202731 : #ffffff);
+        : (ThemeMode.dark ? #212937 : #ffffff);
     out property <color> bg-elevated: ThemeOverrides.enabled ? ThemeOverrides.bg-elevated-override
-        : (ThemeMode.dark ? #2a3340 : #ffffff);
-    out property <color> bg-input:    ThemeMode.dark ? #131920 : #f0f0f4;
-    out property <color> bg-selected: ThemeMode.dark ? #263444 : #e4e4ee;
+        : (ThemeMode.dark ? #2c3545 : #ffffff);
+    out property <color> bg-input:    ThemeMode.dark ? #10141b : #f5f7fa;
+    out property <color> bg-selected: ThemeMode.dark ? #243a52 : #dce7f7;
 
     // ─── Glass ────────────────────────────────────────────────────
     //
@@ -119,18 +147,25 @@ export global Theme {
     //
     // Light mode stays nearly opaque on purpose: white glass over a photograph is haze, not
     // depth, and the text on it has to stay readable.
-    out property <color> glass-card:    ThemeMode.dark ? #202731c8 : #fffffff0;
-    out property <color> glass-panel:   ThemeMode.dark ? #181d25d8 : #e9edf3f2;
-    out property <color> glass-raised:  ThemeMode.dark ? #2a3340d0 : #fffffff5;
+    //
+    // Bright and sharp raised the opacity a notch (c8 → d6 on a card): at the old value a
+    // bright stretch of wallpaper came through far enough to pull white text down to the
+    // contrast of grey on grey. A pre-blurred copy of the wallpaper behind each panel was
+    // considered and not done: it needs a decoder and blur in the shell (no `image` crate
+    // here), a full-screen RGBA copy in memory per wallpaper, and every glass panel tracking
+    // its own screen position to crop it — for a wallpaper that is already soft.
+    out property <color> glass-card:    ThemeMode.dark ? #212937d6 : #fffffff2;
+    out property <color> glass-panel:   ThemeMode.dark ? #161b23e0 : #f8f9fcf0;
+    out property <color> glass-raised:  ThemeMode.dark ? #2c3545dc : #fffffff5;
     // The hairline that gives a glass edge its shape. Slightly lighter than the fill, because
     // a border darker than what it contains reads as a hole rather than a pane.
     // The two full-height rails. More transparent than a card, because they are the only
     // surfaces large enough for the wallpaper behind them to read as a scene rather than as a
     // sliver -- and because what they hold is labels and numbers, which stay legible over a
     // pre-blurred photograph in a way a paragraph would not.
-    out property <color> glass-rail:    ThemeMode.dark ? #12121ca0 : #f4f4f8ef;
-    out property <color> glass-border:  ThemeMode.dark ? #ffffff1a : #00000014;
-    out property <color> glass-border-strong: ThemeMode.dark ? #ffffff2e : #00000022;
+    out property <color> glass-rail:    ThemeMode.dark ? #12151ca8 : #f4f5f8ef;
+    out property <color> glass-border:  ThemeMode.dark ? #ffffff21 : #0000001a;
+    out property <color> glass-border-strong: ThemeMode.dark ? #ffffff36 : #00000026;
 
     // ─── Amber palette ────────────────────────────────────────────
     out property <color> amber:             ThemeOverrides.enabled ? ThemeOverrides.amber-override
@@ -141,12 +176,14 @@ export global Theme {
     out property <color> amber-glow-strong: ThemeMode.dark ? #d4a574a0 : #d4a57460;
 
     // ─── Cyan palette ─────────────────────────────────────────────
+    // The same crisp cyan as the default accent: most of what reads "cyan" here is the accent
+    // written before AccentPreset existed, and the two must not drift apart.
     out property <color> cyan:             ThemeOverrides.enabled ? ThemeOverrides.cyan-override
-        : (ThemeMode.dark ? #4ecdc4 : #137881);
-    out property <color> cyan-light:       ThemeMode.dark ? #7ee0d8 : #40a8b4;
-    out property <color> cyan-dim:         ThemeMode.dark ? #2a9d8f : #80c8d0;
-    out property <color> cyan-glow:        ThemeMode.dark ? #4ecdc440 : #4ecdc430;
-    out property <color> cyan-glow-strong: ThemeMode.dark ? #4ecdc470 : #4ecdc450;
+        : (ThemeMode.dark ? #38d8cd : #08747e);
+    out property <color> cyan-light:       ThemeMode.dark ? #74e6de : #3aa9b4;
+    out property <color> cyan-dim:         ThemeMode.dark ? #1fa89b : #80c8d0;
+    out property <color> cyan-glow:        ThemeMode.dark ? #38d8cd40 : #08747e30;
+    out property <color> cyan-glow-strong: ThemeMode.dark ? #38d8cd70 : #08747e50;
 
     // ─── Holographic blue palette (kept for legacy, alias to accent) ──
     out property <color> holo-blue:       ThemeOverrides.enabled ? ThemeOverrides.accent-override
@@ -199,24 +236,33 @@ export global Theme {
     out property <color> color-conflict:  ThemeMode.dark ? #e8a06b : #c07030;
 
     // ─── Text hierarchy ───────────────────────────────────────────
-    // Primary (92% white), Secondary (60%), Tertiary/dim (40%)
+    // Primary near-white, secondary a clear light grey, dim for metadata — every one readable
+    // on bg-card, which is where text mostly sits (ratios in the note above Theme).
     out property <color> text-primary:   ThemeOverrides.enabled ? ThemeOverrides.text-primary-override
-        : (ThemeMode.dark ? #e8eaef : #1a1c20);
+        : (ThemeMode.dark ? #f4f6fa : #0e1116);
     out property <color> text-secondary: ThemeOverrides.enabled ? ThemeOverrides.text-secondary-override
-        : (ThemeMode.dark ? #a5afbf : #5a6474);
+        : (ThemeMode.dark ? #c0c8d6 : #444e5e);
     out property <color> text-dim:       ThemeOverrides.enabled ? ThemeOverrides.text-dim-override
-        : (ThemeMode.dark ? #8b98ab : #586579);
+        : (ThemeMode.dark ? #95a1b4 : #5c6778);
 
     // ─── Borders & overlays ───────────────────────────────────────
     out property <color> overlay-backdrop:  ThemeMode.dark ? #00000060 : #00000030;
     out property <color> overlay-shadow:    ThemeMode.dark ? #00000080 : #00000040;
-    out property <color> border-subtle:     ThemeMode.dark ? #ffffff09 : #00000006;
-    out property <color> border-default:    ThemeMode.dark ? #ffffff12 : #0000000a;
-    out property <color> border-strong:     ThemeMode.dark ? #ffffff22 : #00000014;
-    out property <color> separator:         ThemeMode.dark ? #ffffff08 : #0000000c;
-    out property <color> hover-fill:        ThemeMode.dark ? #ffffff08 : #00000008;
-    out property <color> hover-fill-strong: ThemeMode.dark ? #ffffff10 : #00000010;
-    out property <color> tint-cyan:         ThemeMode.dark ? #4ecdc418 : #1a8a9a14;
+    // border-subtle is what a hundred and fifty cards across the apps already draw their edge
+    // with, so it is where the hairline had to land for them to get one: at 3.5% white it was
+    // there in the markup and invisible on screen. Now 7%, visible as an edge and still quiet as
+    // a divider inside a list.
+    out property <color> border-subtle:     ThemeMode.dark ? #ffffff12 : #0000000f;
+    out property <color> border-default:    ThemeMode.dark ? #ffffff1a : #00000017;
+    out property <color> border-strong:     ThemeMode.dark ? #ffffff29 : #00000024;
+    // The hairline on a card or a panel drawn from now on: one pixel, a little lighter than the
+    // surface it edges, so the surface has an outline in dark mode and a crisp rim in light
+    // mode. New with bright-and-sharp.
+    out property <color> border-card:       ThemeMode.dark ? #ffffff1f : #00000017;
+    out property <color> separator:         ThemeMode.dark ? #ffffff0e : #0000000f;
+    out property <color> hover-fill:        ThemeMode.dark ? #ffffff0a : #0000000a;
+    out property <color> hover-fill-strong: ThemeMode.dark ? #ffffff14 : #00000012;
+    out property <color> tint-cyan:         ThemeMode.dark ? #38d8cd1c : #08747e17;
     out property <color> tint-amber:        ThemeMode.dark ? #d4a57414 : #b0784014;
 
     // ─── Typefaces ────────────────────────────────────────────────
@@ -278,16 +324,31 @@ export global Theme {
     out property <length> touch-target: 44px;
 
     // ─── Radius scale ─────────────────────────────────────────────
-    // Legacy aliases (kept for backward compatibility)
-    out property <length> radius-bubble: 18px;
-    out property <length> radius-card: 12px;
-    out property <length> radius-pill: 16px;
-    out property <length> radius-round: 50px;
+    //
+    // ONE scale. Five steps, and every radius in the kit is one of them:
+    //
+    //   r-xs   4px   marks inside a control: a tab underline, a chip, a checkbox
+    //   r-sm   6px   badges, small controls, a list row's highlight
+    //   r-md   8px   buttons, inputs, menu rows, sidebar items
+    //   r-lg  12px   cards, panels, tiles, dialogs
+    //   r-xl  16px   windows, the launcher, modals, the command palette
+    //
+    // The legacy names point into it rather than holding numbers of their own, so they can no
+    // longer drift from it. An app icon tile is not on the scale on purpose: its radius is a
+    // fraction of its size (AppTile), because a 20px taskbar tile and a 46px desktop tile have
+    // to be the same SHAPE, and one length cannot give both.
+    //
     // Standard radius scale
-    out property <length> r-sm: 6px;       // Small controls, badges
-    out property <length> r-md: 8px;       // Buttons, inputs, cards
-    out property <length> r-lg: 12px;      // Panels, dialogs
-    out property <length> r-xl: 16px;      // Modals, command palette
+    out property <length> r-xs: 4px;
+    out property <length> r-sm: 6px;
+    out property <length> r-md: 8px;
+    out property <length> r-lg: 12px;
+    out property <length> r-xl: 16px;
+    // Legacy aliases (kept for backward compatibility)
+    out property <length> radius-bubble: root.r-xl;
+    out property <length> radius-card: root.r-lg;
+    out property <length> radius-pill: root.r-xl;
+    out property <length> radius-round: 50px;
     // A stadium is `self.height / 2`, written at the element. Do NOT use a constant for it.
     //
     // This was 999px, on the CSS assumption that an over-large radius clamps to half the
@@ -338,13 +399,13 @@ export global Theme {
 
     // ─── Result type colors ───────────────────────────────────────
     out property <color> color-do:        ThemeMode.dark ? #d4a574 : #8a6030;
-    out property <color> color-find:      ThemeMode.dark ? #4ecdc4 : #137881;
+    out property <color> color-find:      ThemeMode.dark ? #38d8cd : #08747e;
     out property <color> color-ask:       ThemeMode.dark ? #c4a050 : #8a7020;
     out property <color> color-memory:    ThemeMode.dark ? #a07a50 : #806030;
     out property <color> color-setting:   ThemeMode.dark ? #a5afbf : #5a6474;
     out property <color> color-tool:      ThemeMode.dark ? #d4a574 : #8a6030;
     out property <color> color-clipboard: ThemeMode.dark ? #a5afbf : #5a6474;
-    out property <color> color-context:   ThemeMode.dark ? #4ecdc4 : #137881;
+    out property <color> color-context:   ThemeMode.dark ? #38d8cd : #08747e;
     out property <color> color-recent:    ThemeMode.dark ? #4a5464 : #8a9aa4;
     out property <color> color-answer:    ThemeMode.dark ? #4ab8f0 : #2080c0;
 

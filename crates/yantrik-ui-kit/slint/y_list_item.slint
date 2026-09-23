@@ -72,7 +72,7 @@ export component YListItem inherits Rectangle {
             Rectangle {
                 width: 16px; height: 16px;
                 x: 2px; y: 2px;
-                border-radius: 4px;
+                border-radius: Theme.r-xs;
                 border-width: 1px;
                 border-color: root.checked ? Theme.accent : Theme.text-dim;
                 background: root.checked ? Theme.accent : transparent;
@@ -151,7 +151,7 @@ export component YListItem inherits Rectangle {
             width: badge-text.preferred-width + 12px;
             height: 18px;
             y: (parent.height - 18px) / 2;
-            border-radius: 4px;
+            border-radius: Theme.r-xs;
             background: root.badge-color.transparentize(85%);
             badge-text := Text {
                 text: root.badge;

@@ -16,6 +16,226 @@ pub struct DirEntry {
     pub modified_text: String,
     pub icon_char: String,
     pub selected: bool,
+    /// For a folder, how many entries it holds, once [`count_folders`] has looked. `None` for a
+    /// file, and for a folder nobody has counted yet.
+    pub items: Option<ItemCount>,
+}
+
+// ── What a folder holds, and when it changed ──
+//
+// The folder tiles say "12 items · 2 h ago" (desk-and-mind, "Files"). Both halves are read off
+// the disk for every tile, and a half that could not be read says so: a folder the shell may
+// not open is not an empty folder, and drawing it as "0 items" would be the same lie #131 took
+// out of the mail folder list.
+
+/// How many entries a folder holds, as far as it could be read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemCount {
+    /// Every entry, and the ones whose names do not start with a dot.
+    Known { all: usize, visible: usize },
+    /// Not counted, and why — the OS refused, or a budget ran out. Never shown as zero.
+    Unknown(String),
+}
+
+impl ItemCount {
+    /// The number to show beside the folder: the entries you would see on opening it, with
+    /// hidden files shown or not. `None` when the folder was not counted.
+    pub fn shown(&self, show_hidden: bool) -> Option<usize> {
+        match self {
+            ItemCount::Known { all, visible } => Some(if show_hidden { *all } else { *visible }),
+            ItemCount::Unknown(_) => None,
+        }
+    }
+}
+
+/// Past this many entries a count stops, and says it stopped rather than print a number that
+/// is only a floor.
+pub const COUNT_CAP: usize = 100_000;
+
+/// How many folders one listing counts. Each count is a `read_dir` — names only, no `stat` —
+/// which is nothing for a home folder's dozen and real time for a `node_modules` with thousands
+/// of packages. The rest are marked as not counted, with this reason, rather than guessed.
+pub const FOLDER_COUNT_BUDGET: usize = 400;
+
+/// Count the entries in one folder. Reads names only.
+pub fn count_items(dir: &Path) -> ItemCount {
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) => return ItemCount::Unknown(io_reason(&e)),
+    };
+    let (mut all, mut visible) = (0usize, 0usize);
+    for entry in read {
+        match entry {
+            Ok(entry) => {
+                all += 1;
+                if !entry.file_name().to_string_lossy().starts_with('.') {
+                    visible += 1;
+                }
+            }
+            Err(e) => return ItemCount::Unknown(io_reason(&e)),
+        }
+        if all >= COUNT_CAP {
+            return ItemCount::Unknown(format!("more than {COUNT_CAP} entries; not counted to the end"));
+        }
+    }
+    ItemCount::Known { all, visible }
+}
+
+/// Count every folder in a listing of `dir`, up to [`FOLDER_COUNT_BUDGET`] of them.
+///
+/// `stop` is asked between folders, so a listing that has been superseded (the person clicked
+/// somewhere else) stops counting for a view nobody will see.
+pub fn count_folders(dir: &Path, entries: &mut [DirEntry], stop: &dyn Fn() -> bool) {
+    let mut counted = 0usize;
+    for entry in entries.iter_mut().filter(|e| e.is_dir) {
+        if stop() {
+            return;
+        }
+        entry.items = Some(if counted < FOLDER_COUNT_BUDGET {
+            counted += 1;
+            count_items(&dir.join(&entry.name))
+        } else {
+            ItemCount::Unknown(format!(
+                "not counted: this folder holds more than {FOLDER_COUNT_BUDGET} folders"
+            ))
+        });
+    }
+}
+
+/// An I/O error in the words a tile has room for.
+fn io_reason(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission denied".into(),
+        std::io::ErrorKind::NotFound => "no longer there".into(),
+        _ => e.to_string(),
+    }
+}
+
+/// "2 h ago": how long before `now` a thing changed, short enough for a tile.
+///
+/// An unreadable time arrives as the epoch (see `list_dir_checked`) and comes back as "", so a
+/// tile says nothing rather than "56 y ago". A time in the future — a clock that moved — is
+/// "just now", not a negative age.
+pub fn ago(modified: std::time::SystemTime, now: std::time::SystemTime) -> String {
+    if modified == std::time::UNIX_EPOCH {
+        return String::new();
+    }
+    let secs = now.duration_since(modified).map(|d| d.as_secs()).unwrap_or(0);
+    const MIN: u64 = 60;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+    match secs {
+        s if s < MIN => "just now".into(),
+        s if s < HOUR => format!("{} min ago", s / MIN),
+        s if s < DAY => format!("{} h ago", s / HOUR),
+        s if s < 30 * DAY => format!("{} d ago", s / DAY),
+        s if s < 365 * DAY => format!("{} mo ago", s / (30 * DAY)),
+        s => format!("{} y ago", s / (365 * DAY)),
+    }
+}
+
+/// [`ago`], from now.
+pub fn changed_text(modified: std::time::SystemTime) -> String {
+    ago(modified, std::time::SystemTime::now())
+}
+
+/// The files in a folder that changed most recently, newest first: the row under the grid.
+///
+/// Files only — a folder's time moves when anything is added to it, which is not "recent work"
+/// — and only ones whose time could be read. Hidden files count only when they are shown.
+/// Ties go by name, so the row does not reshuffle between two refreshes of the same folder.
+pub fn most_recent<'a, I>(entries: I, show_hidden: bool, n: usize) -> Vec<&'a DirEntry>
+where
+    I: IntoIterator<Item = &'a DirEntry>,
+{
+    let mut files: Vec<&DirEntry> = entries
+        .into_iter()
+        .filter(|e| !e.is_dir && e.modified != std::time::UNIX_EPOCH)
+        .filter(|e| show_hidden || !e.name.starts_with('.'))
+        .collect();
+    files.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.name.cmp(&b.name)));
+    files.truncate(n);
+    files
+}
+
+// ── Places ──
+
+/// One entry in the Files sidebar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// What the sidebar draws its icon by: home, documents, downloads, pictures, music, videos,
+    /// projects.
+    pub id: &'static str,
+    pub label: String,
+    /// As the address bar shows it: `~`, `~/Documents`.
+    pub path: String,
+}
+
+/// The sidebar's places for a home folder: Home, then each standard folder that exists.
+///
+/// A place that is not on disk is not listed. Offering "Music" on a machine with no ~/Music
+/// would be a button whose only result is an error, so the list is whatever this home really
+/// has. The standard folders are read from `~/.config/user-dirs.dirs` when it names them — on
+/// a German desktop Documents is `~/Dokumente` — and fall back to the English names.
+/// Projects is not an XDG folder; it is listed when `~/Projects` or `~/projects` exists.
+pub fn places(home: &Path) -> Vec<Place> {
+    let named = user_dirs(home);
+    let mut out = vec![Place { id: "home", label: "Home".into(), path: "~".into() }];
+    let standard: [(&str, &str, &str); 5] = [
+        ("documents", "Documents", "XDG_DOCUMENTS_DIR"),
+        ("downloads", "Downloads", "XDG_DOWNLOAD_DIR"),
+        ("pictures", "Pictures", "XDG_PICTURES_DIR"),
+        ("music", "Music", "XDG_MUSIC_DIR"),
+        ("videos", "Videos", "XDG_VIDEOS_DIR"),
+    ];
+    for (id, label, key) in standard {
+        let dir = named
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, p)| p.clone())
+            .unwrap_or_else(|| home.join(label));
+        // XDG points an unused folder at $HOME itself; that is not a place of its own.
+        if dir != home && dir.is_dir() {
+            out.push(Place { id, label: label.into(), path: display_under(home, &dir) });
+        }
+    }
+    if let Some(dir) = ["Projects", "projects"].iter().map(|n| home.join(n)).find(|d| d.is_dir()) {
+        out.push(Place { id: "projects", label: "Projects".into(), path: display_under(home, &dir) });
+    }
+    out
+}
+
+/// `~/x` for a folder under `home`, the full path otherwise.
+fn display_under(home: &Path, dir: &Path) -> String {
+    match dir.strip_prefix(home) {
+        Ok(rel) if rel.as_os_str().is_empty() => "~".into(),
+        Ok(rel) => format!("~/{}", rel.display()),
+        Err(_) => dir.display().to_string(),
+    }
+}
+
+/// `XDG_*_DIR="$HOME/…"` lines from `~/.config/user-dirs.dirs`, resolved against `home`.
+fn user_dirs(home: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(text) = std::fs::read_to_string(home.join(".config/user-dirs.dirs")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let (key, value) = line.trim().split_once('=')?;
+            if key.starts_with('#') {
+                return None;
+            }
+            let value = value.trim().trim_matches('"');
+            let path = if let Some(rest) = value.strip_prefix("$HOME") {
+                home.join(rest.trim_start_matches('/'))
+            } else if value.starts_with('/') {
+                PathBuf::from(value)
+            } else {
+                return None;
+            };
+            Some((key.trim().to_string(), path))
+        })
+        .collect()
 }
 
 /// Expand ~ to $HOME.
@@ -103,6 +323,7 @@ pub fn list_dir_checked(
                 file_icon(&name)
             },
             selected: false,
+            items: None,
         });
         if entries.len() > 50000 {
             return Err(

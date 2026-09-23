@@ -39,6 +39,7 @@ fn where_now(ui: &App) -> serde_json::Value {
         "loading": ui.get_file_browser_loading(),
         "operation_busy": ui.get_file_operation_busy(),
         "notice": ui.get_file_notice().to_string(),
+        "view": if ui.get_file_grid_view() { "grid" } else { "list" },
     })
 }
 
@@ -188,6 +189,24 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 args["extend"].as_bool().unwrap_or(false),
                 false,
             );
+            Ok(where_now(&ui))
+        },
+    );
+    // The grid/list switch in the toolbar, for a caller. Grid is the folder tiles with their
+    // item counts and times and the recent row under them; list is one row per entry.
+    let weak = ui.as_weak();
+    let surface = surface.action(
+        Action::new("files_view", "Show the folder as tiles (grid) or as rows (list)")
+            .arg(Param::text("view").describe("grid or list")),
+        move |args| {
+            let ui = up(&weak)?;
+            let grid = match args["view"].as_str().unwrap_or_default() {
+                "grid" => true,
+                "list" => false,
+                other => return Err(format!("`view` is grid or list, not `{other}`")),
+            };
+            ensure_files_screen(&ui);
+            ui.set_file_grid_view(grid);
             Ok(where_now(&ui))
         },
     );

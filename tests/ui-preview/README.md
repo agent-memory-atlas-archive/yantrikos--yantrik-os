@@ -50,6 +50,17 @@ cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/f
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/settings.png 1280 800 settings light
 ```
 
+`files-home` (grid) and `files-home-list` draw Files at home as the desk-and-mind redesign
+has it: the places sidebar, folder tiles with item counts and "changed … ago" (one folder
+whose count could not be read, drawn as unknown), and the recent row under the grid.
+
+A target directory shared with another checkout of this repository can run THAT checkout's
+build script: the preview's build.rs bakes in `CARGO_MANIFEST_DIR`, and cargo hashes a path
+package by its path relative to the workspace, so the script from the other tree is reused
+and compiles the other tree's .slint files. The symptom is an error about a property that is
+plainly in the file. Use a target directory per checkout, or
+`cargo clean -p yantrik-ui-preview` before building.
+
 App interaction regression checks (1280×800):
 
 ```sh
