@@ -664,9 +664,9 @@ class Surface:
             args = dict(args)
         # Lifted off before anything reads `args` — the grant below is bound to them.
         token = gate.agent_token_of(params, args)
+        # A string, or no guard: what the transport reads with `as_str` (a client MUST send one).
         expect = params.get("expect_revision")
-        if expect is not None and not isinstance(expect, str):
-            expect = str(expect)
+        expect = expect if isinstance(expect, str) else None
         grant = gate.grant_of(params)
         action_id = self._next_action_id()
         authority = gate.Authority(self.configured_ceiling(), self.configured_mode())
@@ -718,7 +718,7 @@ class Surface:
         if spec is None:
             raise Refusal(self._unknown(name))
 
-        refusal = gate.decide(authority, self.app_id, name, self._grade(spec))
+        refusal = gate.decide(authority, self.app_id, name, self._grade(spec), spec.description)
         if refusal is not None:
             raise Refusal(refusal)
 

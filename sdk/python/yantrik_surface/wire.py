@@ -15,12 +15,12 @@ this package from one built on the Rust runtime, and these are the things it can
   * the revision — FNV-1a-64 over the summary, a zero byte, and the state rendered the way
     `serde_json::Value::to_string` renders it, which is what `View::revision()` hashes.
 
-Two things here go past the Rust transport on `main`, both on purpose. A request without an
-`id` is answered (with `id: null`) rather than refused, because Blender's port always did and
-a caller that forgot the field deserves an answer, not silence. And a name is owned: binding
-refuses when a live process already answers at the path, and only a dead socket or a stale
-file is replaced — the "bind if dead" rule of the surface SDK's design, which the Rust
-transport is adopting beside this.
+Framing is the protocol's (docs/surface-protocol.md, section 1): a request is a JSON object with
+`jsonrpc`, `method` and `id` present — a batch or a notification is answered as a parse error with
+`"id": null`, as the transport's serde parse answers it. Names are owned (section 3): before
+binding, whatever is at the path is asked `rpc.ping`, and a socket that answers — or accepts and
+stays silent for a second — keeps its name; only a socket nobody listens on, a symlink or a stray
+file is replaced (`owner::claim` in the transport).
 """
 
 import errno
@@ -277,7 +277,16 @@ class RpcError(Exception):
 
 
 class SocketBusy(OSError):
-    """A live process already answers at the path: binding over it would take its name."""
+    """A live process already answers at the path: binding over it would take its name.
+    Its text is the sentence alone, as the transport's error reads."""
+
+    def __str__(self):
+        return self.strerror or super().__str__()
+
+
+class PeerRefused(ConnectionError):
+    """The process listening at a path is not the one a caller may talk to (the shell's rule);
+    nothing was written to it. The message is the rule's sentence."""
 
 
 PeerCred = namedtuple("PeerCred", "pid uid gid")
@@ -357,7 +366,7 @@ class Server:
                 raise OSError(e.errno, "cannot create socket directory %s: %s (set "
                               "XDG_RUNTIME_DIR to a writable per-user path)"
                               % (directory, e.strerror)) from e
-        _clear_dead(self.path)
+        claim(self.path)
         self.linked = [link for link in self.links if self._link(link)]
         try:
             self._server = _UnixServer(self.path, _Connection)
@@ -438,19 +447,70 @@ def _inode(path):
     return (st.st_dev, st.st_ino)
 
 
-def _clear_dead(path):
-    """Make room at `path`, unless somebody is alive there."""
-    if not os.path.lexists(path):
+# How long a bind waits for whatever is on its path to answer `rpc.ping`, as `CLAIM_PING`.
+CLAIM_PING = 1.0
+
+
+def who_holds(path, patience=CLAIM_PING):
+    """Who holds a socket path now: ("nobody", None) when nothing listens there, ("answers",
+    service_id or None) when something answered `rpc.ping`, ("silent", None) when something
+    accepted the connection and said nothing in time — `owner::who_holds`."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(patience)
+    try:
+        try:
+            probe.connect(path)
+        except OSError:
+            return "nobody", None
+        reader = probe.makefile("rb")
+
+        def ask(method):
+            try:
+                probe.sendall(('{"jsonrpc":"2.0","id":1,"method":"%s"}\n' % method).encode())
+                return json.loads(reader.readline().decode("utf-8"))
+            except (OSError, ValueError):
+                return None
+
+        reply = ask("rpc.ping")
+        if isinstance(reply, dict) and ("result" in reply or "error" in reply):
+            named = ask("rpc.service_id")
+            name = named.get("result") if isinstance(named, dict) else None
+            return "answers", name if isinstance(name, str) else None
+        return "silent", None
+    finally:
+        probe.close()
+
+
+def claim(path):
+    """Make `path` free to bind, or raise `SocketBusy` saying whose it is — `owner::claim`,
+    in its sentences. A symlink or a regular file is not a listener and is removed; a socket
+    nobody listens on (a crashed process's) is removed; one that answers, or accepts and keeps
+    quiet, belongs to a running process and is left alone."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
         return
-    if answers(path):
+    if not stat.S_ISSOCK(st.st_mode):
+        os.unlink(path)
+        return
+    holder, name = who_holds(path)
+    if holder == "nobody":
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        return
+    if holder == "answers":
         raise SocketBusy(
             errno.EADDRINUSE,
-            "%s is already answered by a running process; a surface does not bind over a live "
-            "one. Stop that process, or give this surface another name" % path)
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
+            "another instance owns %s: it answered rpc.ping%s. Refusing to start rather than take "
+            "the name from a running process — stop that one first, or talk to it."
+            % (path, " as `%s`" % name if name else ""))
+    raise SocketBusy(
+        errno.EADDRINUSE,
+        "something is listening on %s but did not answer rpc.ping within %ds. Refusing to start "
+        "rather than take the name from a process that may only be busy — stop it first."
+        % (path, int(CLAIM_PING)))
 
 
 class _UnixServer(socketserver.ThreadingUnixStreamServer):
@@ -495,15 +555,22 @@ def answer(handler, line, peer=None):
         request = json.loads(line)
     except ValueError as e:
         return _error(None, RPC_PARSE_ERROR, "Parse error: %s" % e)
+    # What the transport's `RpcRequest` requires: an object with `jsonrpc` and `method` as text
+    # and an `id` (a notification has none, and is not served). A line that is not such a
+    # request is a parse error, answered with `"id": null` as serde's refusal is.
     if not isinstance(request, dict):
         return _error(None, RPC_PARSE_ERROR,
                       "Parse error: a request is a JSON object, not %s" % _kind(request))
-    request_id = request.get("id")
-    method = request.get("method")
-    if method is None:
-        return _error(request_id, RPC_PARSE_ERROR, "Parse error: missing field `method`")
-    if not isinstance(method, str):
-        return _error(request_id, RPC_PARSE_ERROR, "Parse error: `method` must be a string")
+    for key in ("jsonrpc", "method"):
+        if key in request and not isinstance(request[key], str):
+            return _error(None, RPC_PARSE_ERROR,
+                          "Parse error: `%s` must be a string, not %s"
+                          % (key, _kind(request[key])))
+    for key in ("jsonrpc", "method", "id"):
+        if key not in request:
+            return _error(None, RPC_PARSE_ERROR, "Parse error: missing field `%s`" % key)
+    request_id = request["id"]
+    method = request["method"]
     params = request.get("params")
     if params is None:
         params = {}
@@ -551,12 +618,19 @@ def _error(request_id, code, message):
 # ── the client half, for spending grants and for tests ───────────────────────
 
 
-def call_once(path, method, params, timeout=10.0, request_id=1):
-    """One request over a socket, the way `yos` sends one; the whole reply object back."""
+def call_once(path, method, params, timeout=10.0, request_id=1, peer_rule=None):
+    """One request over a socket, the way `yos` sends one; the whole reply object back.
+
+    `peer_rule`, when given, is asked about the process listening at `path` (its `PeerCred`, or
+    None) before anything is written; a sentence back raises `PeerRefused` with it."""
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(timeout)
     try:
         client.connect(path)
+        if peer_rule is not None:
+            problem = peer_rule(peer_cred(client))
+            if problem:
+                raise PeerRefused(problem)
         payload = json.dumps(
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
             ensure_ascii=False) + "\n"

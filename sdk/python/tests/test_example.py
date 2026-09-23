@@ -2,8 +2,9 @@
 `deploy/yantrik-os/yos` run against it exactly as the README tells a person to — describe, act,
 a refusal, and a sensitive act in ask mode, where `yos` raises the card, waits for the person,
 and acts again with the grant, which the surface spends through the shell. The shell here is a
-stand-in built with this package, answering the three approval actions `yos` and the dispatch
-call; everything else is the real thing over real sockets.
+stand-in built with this package (tests/fake_shell.py) run as a program named yantrik-ui, so
+the shell-peer rule in yos and in the dispatch is met, not patched; it answers the three approval
+actions yos and the dispatch call. Everything else is the real thing over real sockets.
 """
 
 import importlib.util
@@ -14,7 +15,6 @@ import time
 import unittest
 
 import support
-from yantrik_surface import Refusal, Surface
 
 
 def load_example():
@@ -22,41 +22,6 @@ def load_example():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-class ApprovingShell:
-    """`request_approval`, `approval_status` and `consume_approval`, as the shell publishes
-    them; every request is granted at once, and each grant is spent once, for its own call."""
-
-    def __init__(self):
-        self.requests = {}
-        self.spent = []
-        s = self.surface = Surface("shell")
-
-        @s.action("request_approval")
-        def request_approval(app: str, action: str, grade: str, args_json: dict,
-                             requester: str = "") -> dict:
-            """Put an approval card up."""
-            request_id = "appr-%d" % (len(self.requests) + 1)
-            self.requests[request_id] = (app, action, args_json)
-            return {"status": "pending", "request_id": request_id}
-
-        @s.action("approval_status")
-        def approval_status(request_id: str) -> dict:
-            """Say what the person answered."""
-            if request_id in self.spent:
-                return {"status": "consumed"}
-            return {"status": "granted" if request_id in self.requests else "unknown"}
-
-        @s.action("consume_approval")
-        def consume_approval(request_id: str, app: str, action: str, args_json: dict) -> dict:
-            """Spend a grant."""
-            if self.requests.get(request_id) != (app, action, args_json):
-                raise Refusal("`%s` was approved for another call." % request_id)
-            if request_id in self.spent:
-                raise Refusal("`%s` was already used." % request_id)
-            self.spent.append(request_id)
-            return {"spent": request_id}
 
 
 class TestTheExample(support.MachineCase):
@@ -111,16 +76,17 @@ class TestWithYos(TestTheExample):
                       done.stderr)
 
     def test_a_sensitive_act_in_ask_mode_goes_through_the_card_and_the_grant(self):
-        shell = ApprovingShell()
-        shell.surface.serve_in_thread()
-        self.addCleanup(shell.surface.stop)
+        # The shell is a stand-in whose program is a `yantrik-ui` binary, so both `yos` and
+        # this package's dispatch find the desktop's shell behind `app-shell.sock`.
+        shell = support.ShellStandIn(self.machine).start(self)
         self.surface.act({"action": "add", "args": {"text": "milk"}})
         started = time.monotonic()
         out = self.yos("act", "hello", "clear").stdout
         self.assertIn("asking", out)
         self.assertIn("accepted: True, settled: False", out)
-        self.assertEqual(shell.spent, ["appr-1"], "the grant was spent, once, by the dispatch")
-        self.assertEqual(shell.requests["appr-1"], ("hello", "clear", {}))
+        seen = shell.state()
+        self.assertEqual(seen["spent"], ["appr-1"], "the grant was spent, once, by the dispatch")
+        self.assertEqual(seen["requests"]["appr-1"], ["hello", "clear", {}])
         # Settles later: the list empties after the answer.
         deadline = started + 10
         while self.example.items and time.monotonic() < deadline:
@@ -152,7 +118,8 @@ class TestWithYos(TestTheExample):
         program = subprocess.run([sys.executable, support.EXAMPLE], env=self.machine.env(),
                                  capture_output=True, text=True, timeout=30)
         self.assertNotEqual(program.returncode, 0)
-        self.assertIn("already answered by a running process", program.stderr)
+        self.assertIn("another instance owns", program.stderr)
+        self.assertIn("it answered rpc.ping as `app-hello`", program.stderr)
         self.assertEqual(self.yos("describe", "hello").returncode, 0)
 
     def test_without_a_shell_to_ask_nothing_runs(self):

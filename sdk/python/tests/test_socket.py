@@ -1,10 +1,10 @@
 """A real unix socket, real threads, real bytes: the surface as a caller meets it.
 
 The socket-directory chain and its tightening (dir 0700, node 0600), the framing (one line in,
-one line out, several per connection, with or without an `id`), `rpc.ping` and `rpc.service_id`,
-the error codes, the peer's credentials reaching a handler, a name that is owned (a live socket
-is not bound over; a dead one is replaced), the other names linked beside it, and a grant spent
-through a stand-in shell that is itself a surface on a socket.
+one line out, several per connection, a request without an `id` refused as the protocol has it),
+`rpc.ping` and `rpc.service_id`, the error codes, the peer's credentials reaching a handler, a
+name that is owned (a live socket is not bound over; a dead one is replaced), the other names
+linked beside it, and a grant spent only through a shell whose program is `yantrik-ui`.
 """
 
 import contextlib
@@ -16,7 +16,7 @@ import stat
 import threading
 
 import support
-from yantrik_surface import (Refusal, SocketBusy, Surface, call_once, caller, socket_dir, wire)
+from yantrik_surface import SocketBusy, Surface, call_once, caller, socket_dir, wire
 
 
 def hello(**kwargs):
@@ -121,19 +121,43 @@ class TestTheWire(support.MachineCase):
         self.assertEqual(reply["result"]["result"]["pid"], os.getpid())
         self.assertEqual(reply["result"]["result"]["uid"], os.getuid())
 
-    def test_several_requests_on_one_connection_with_and_without_an_id(self):
+    def test_several_requests_on_one_connection(self):
         conn = Lines(self.path)
         try:
             first = conn.ask('{"jsonrpc":"2.0","id":"a","method":"rpc.ping"}')
             self.assertEqual((first["id"], first["result"]), ("a", "pong"))
-            second = conn.ask('{"jsonrpc":"2.0","method":"app.describe","params":{}}')
-            self.assertIsNone(second["id"])
-            self.assertEqual(second["result"]["app"], "hello")
+            second = conn.ask('{"jsonrpc":"2.0","id":2,"method":"app.describe"}')
+            self.assertEqual((second["id"], second["result"]["app"]), (2, "hello"))
             conn.sock.sendall(b"\n\n")  # blank lines are not requests
-            third = conn.ask('{"method":"app.act","params":{"action":"add","args":{"text":"x"}},'
-                             '"id":7}')
+            third = conn.ask('{"jsonrpc":"2.0","method":"app.act","params":{"action":"add",'
+                             '"args":{"text":"x"}},"id":7}')
             self.assertEqual(third["id"], 7)
             self.assertTrue(third["result"]["accepted"])
+        finally:
+            conn.close()
+
+    def test_a_request_is_jsonrpc_method_and_id_or_it_is_a_parse_error(self):
+        # docs/surface-protocol.md, section 1: `jsonrpc`, `method` and `id` MUST be present;
+        # a notification (no `id`) and a batch are answered as a parse error with `"id": null`,
+        # as the transport's `RpcRequest` refuses them.
+        support.quoted(self, "crates/yantrik-ipc-transport/src/protocol.rs",
+                       "pub struct RpcRequest {\n    pub jsonrpc: String,\n    pub method: String,")
+        conn = Lines(self.path)
+        try:
+            for line, missing in (('{"jsonrpc":"2.0","method":"rpc.ping"}', "id"),
+                                  ('{"id":1,"method":"rpc.ping"}', "jsonrpc"),
+                                  ('{"jsonrpc":"2.0","id":1}', "method")):
+                reply = conn.ask(line)
+                self.assertEqual(reply["error"], {
+                    "code": -32700, "message": "Parse error: missing field `%s`" % missing}, line)
+                self.assertIsNone(reply["id"], line)
+            batch = conn.ask('[{"jsonrpc":"2.0","id":1,"method":"rpc.ping"}]')
+            self.assertEqual((batch["error"]["code"], batch["id"]), (-32700, None))
+            typed = conn.ask('{"jsonrpc":"2.0","id":1,"method":7}')
+            self.assertEqual((typed["error"]["code"], typed["id"]), (-32700, None))
+            # And the connection still serves a proper request after all of that.
+            self.assertEqual(conn.ask('{"jsonrpc":"2.0","id":9,"method":"rpc.ping"}')["result"],
+                             "pong")
         finally:
             conn.close()
 
@@ -144,15 +168,14 @@ class TestTheWire(support.MachineCase):
             self.assertEqual(parse["error"]["code"], -32700)
             self.assertIsNone(parse["id"])
             self.assertTrue(parse["error"]["message"].startswith("Parse error: "))
-            self.assertEqual(conn.ask("[1,2]")["error"]["code"], -32700)
-            self.assertEqual(conn.ask('{"id":3}')["error"]["code"], -32700)
-            unknown = conn.ask('{"id":4,"method":"app.explode"}')
-            self.assertEqual(unknown["error"]["code"], -32601)
-            refused = conn.ask('{"id":5,"method":"app.act","params":{"action":"nope"}}')
+            unknown = conn.ask('{"jsonrpc":"2.0","id":4,"method":"app.explode"}')
+            self.assertEqual((unknown["error"]["code"], unknown["id"]), (-32601, 4))
+            refused = conn.ask('{"jsonrpc":"2.0","id":5,"method":"app.act",'
+                               '"params":{"action":"nope"}}')
             self.assertEqual(refused["error"]["code"], -32602)
             self.assertTrue(refused["error"]["message"].startswith("unknown action `nope`"))
-            # And the connection is still good after all of that.
-            self.assertEqual(conn.ask('{"id":6,"method":"rpc.ping"}')["result"], "pong")
+            self.assertEqual(conn.ask('{"jsonrpc":"2.0","id":6,"method":"rpc.ping"}')["result"],
+                             "pong")
         finally:
             conn.close()
         support.quoted(self, support.RUST_SERVER, 'format!("Parse error: {}", e)')
@@ -196,7 +219,13 @@ class TestTheWire(support.MachineCase):
 
 
 class TestOwnedNames(support.MachineCase):
+    """docs/surface-protocol.md, section 3, "Owned names": `owner::claim`, in its sentences."""
+
     def test_a_live_surface_is_not_bound_over(self):
+        fragment = ('"another instance owns {}: it answered rpc.ping{}. Refusing to start rather '
+                    'than take the name from a running process — stop that one first, or talk to '
+                    'it."')
+        support.quoted(self, support.RUST_OWNER, fragment, skip=False)
         first = hello()
         first.serve_in_thread()
         self.addCleanup(first.stop)
@@ -204,9 +233,26 @@ class TestOwnedNames(support.MachineCase):
         with self.assertRaises(SocketBusy) as caught:
             second.serve_in_thread()
         self.assertIsInstance(caught.exception, OSError)
-        self.assertIn("already answered by a running process", str(caught.exception))
-        # The first is untouched and still answers.
+        self.assertEqual(str(caught.exception), support.render(
+            fragment.strip('"'), first.server.path, " as `app-hello`"))
+        # The first is untouched and still answers, and the refused one removes nothing.
+        second.stop()
         self.assertEqual(call_once(first.server.path, "rpc.ping", {})["result"], "pong")
+
+    def test_a_listener_that_never_answers_still_owns_its_name(self):
+        fragment = ('"something is listening on {} but did not answer rpc.ping within {}s. '
+                    'Refusing to start rather than take the name from a process that may only be '
+                    'busy — stop it first."')
+        support.quoted(self, support.RUST_OWNER, fragment, skip=False)
+        os.makedirs(self.machine.socket_dir, exist_ok=True)
+        path = os.path.join(self.machine.socket_dir, "app-hello.sock")
+        busy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        busy.bind(path)
+        busy.listen(4)  # accepts into the backlog, never reads
+        self.addCleanup(busy.close)
+        with self.assertRaises(SocketBusy) as caught:
+            hello().serve_in_thread()
+        self.assertEqual(str(caught.exception), support.render(fragment.strip('"'), path, 1))
 
     def test_a_dead_socket_or_a_stale_file_is_replaced(self):
         os.makedirs(self.machine.socket_dir, exist_ok=True)
@@ -223,6 +269,22 @@ class TestOwnedNames(support.MachineCase):
             f.write("stale")
         s.serve_in_thread()
         self.assertEqual(call_once(path, "rpc.ping", {})["result"], "pong")
+
+    def test_a_symlink_at_the_path_is_not_a_listener(self):
+        # As the transport's claim has it: a symlink is removed, not followed — even one that
+        # leads to a live socket, which keeps answering under its own name.
+        other = Surface("greetings")
+        other.serve_in_thread()
+        self.addCleanup(other.stop)
+        path = os.path.join(self.machine.socket_dir, "app-hello.sock")
+        os.symlink("app-greetings.sock", path)
+        s = hello()
+        s.serve_in_thread()
+        self.addCleanup(s.stop)
+        self.assertFalse(os.path.islink(path))
+        self.assertEqual(call_once(path, "app.describe", {})["result"]["app"], "hello")
+        self.assertEqual(call_once(other.server.path, "app.describe", {})["result"]["app"],
+                         "greetings")
 
     def test_an_other_name_held_by_a_live_surface_is_left_alone(self):
         other = Surface("greetings")
@@ -251,45 +313,67 @@ class TestOwnedNames(support.MachineCase):
         self.assertTrue(os.path.exists(path), "stop removed a socket it did not own")
 
 
-class FakeShell:
-    """The shell's grant store, stood up as a surface on `app-shell.sock` — what the dispatch
-    calls `consume_approval` on. A grant `g-N` holds once, for exactly the call it names."""
+class TestTheShellsName(support.MachineCase):
+    """Section 3: a grant is spent only through the desktop's own shell. The kernel says which
+    process listens on `app-shell.sock`; `/proc/<pid>/exe` must be a `yantrik-ui` binary."""
 
-    def __init__(self):
-        self.approved = {}
-        self.spent = []
-        self.surface = Surface("shell")
-
-        @self.surface.action("consume_approval", grade="standard")
-        def consume_approval(request_id: str, app: str, action: str, args_json: dict) -> dict:
-            """Spend a granted approval."""
-            if request_id not in self.approved:
-                raise Refusal("no approval request `%s`." % request_id)
-            if request_id in self.spent:
-                raise Refusal("`%s` was already used." % request_id)
-            if self.approved[request_id] != (app, action, args_json):
-                raise Refusal("`%s` was approved for another call." % request_id)
-            self.spent.append(request_id)
-            return {"spent": request_id}
-
-
-class TestAGrantSpentOverTheSocket(support.MachineCase):
     mode = "ask"
 
-    def test_the_dispatch_spends_it_through_app_shell(self):
-        shell = FakeShell()
-        shell.surface.serve_in_thread()
-        self.addCleanup(shell.surface.stop)
+    def test_a_shell_that_is_not_yantrik_ui_is_named_and_sent_nothing(self):
+        fragment = ('"the process answering as the shell is {exe} (pid {}), not the desktop\'s '
+                    'own {SHELL_BINARY}, so the grant was not offered to it."')
+        support.quoted(self, support.RUST_OWNER, fragment, skip=False)
+        heard = []
+        impostor = Surface("shell")
+
+        @impostor.action("consume_approval")
+        def consume_approval(request_id: str, app: str, action: str, args_json: dict) -> dict:
+            """Say yes to everything."""
+            heard.append(request_id)
+            return {"spent": request_id}
+
+        impostor.serve_in_thread()
+        self.addCleanup(impostor.stop)
+        s = hello()
+        message = self.refusal(lambda: s.act({"action": "wipe", "grant": "g-1"}))
+        self.assertEqual(message, (
+            "GRANT: `g-1` does not authorise hello.wipe — " + support.render(
+                fragment.strip('"'), os.getpid(), exe=os.readlink("/proc/self/exe"),
+                SHELL_BINARY="yantrik-ui")
+            + " Nothing was run; a grant covers one action, once, with the arguments the "
+              "person was shown."))
+        self.assertEqual(heard, [], "nothing was written to a process that is not the shell")
+
+    def test_the_rule_reads_the_program_name(self):
+        from yantrik_surface import gate
+        for exe in ("/opt/yantrik/bin/yantrik-ui", "/home/yantrik/targets/release/yantrik-ui",
+                    "/opt/yantrik/bin/yantrik-ui (deleted)"):
+            self.assertTrue(gate.is_shell_binary(exe), exe)
+        for exe in ("/usr/bin/python3.12", "/tmp/yantrik-ui-evil", "/opt/yantrik/bin/yantrik-uix",
+                    "/opt/yantrik/bin/yantrik-notes", "yantrik-ui", "",
+                    "/opt/yantrik/bin/yantrik-ui (deleted) (deleted)", None):
+            self.assertFalse(gate.is_shell_binary(exe), exe)
+        self.assertEqual(gate.must_be_the_shell(None),
+                         "the kernel would not say which process is answering as the shell, so "
+                         "it could not be checked and the grant was not offered to it.")
+        support.quoted(self, support.RUST_OWNER, 'pub const SHELL_BINARY: &str = "yantrik-ui";',
+                       skip=False)
+
+    def test_the_desktops_shell_spends_it(self):
+        shell = support.ShellStandIn(self.machine).start(self)
         s = hello()
         self.assertTrue(self.refusal(lambda: s.act({"action": "wipe"})).startswith("GRANT:"))
-        shell.approved["g-1"] = ("hello", "wipe", {})
-        out = s.act({"action": "wipe", "grant": "g-1"})
+        # The stand-in grants whatever it is asked for; ask it as `yos` would.
+        asked = call_once(shell.path, "app.act", {"action": "request_approval", "args": {
+            "app": "hello", "action": "wipe", "grade": "sensitive", "args_json": {}}})
+        grant = asked["result"]["result"]["request_id"]
+        out = s.act({"action": "wipe", "grant": grant})
         self.assertTrue(out["accepted"])
-        self.assertEqual(shell.spent, ["g-1"])
-        message = self.refusal(lambda: s.act({"action": "wipe", "grant": "g-1"}))
-        self.assertEqual(message, "GRANT: `g-1` does not authorise hello.wipe — `g-1` was "
-                                  "already used. Nothing was run; a grant covers one action, "
-                                  "once, with the arguments the person was shown.")
+        self.assertEqual(shell.state()["spent"], [grant])
+        message = self.refusal(lambda: s.act({"action": "wipe", "grant": grant}))
+        self.assertEqual(message, "GRANT: `%s` does not authorise hello.wipe — `%s` was already "
+                                  "used. Nothing was run; a grant covers one action, once, with "
+                                  "the arguments the person was shown." % (grant, grant))
 
     def test_no_shell_to_ask_is_a_refusal_not_a_run(self):
         s = hello()

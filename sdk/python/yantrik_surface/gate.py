@@ -15,7 +15,14 @@ The order, as the Rust dispatch runs it:
   3. **The mode** (`mind-mode.json`, beside the settings): above what it runs unasked, with no
      grant spent and no session rule for the action, the call is refused with `GRANT:` and
      told how to get one. Every mode runs `standard` on a socket (`SOCKET_FLOOR`), because the
-     desktop's own processes make standard calls and cannot yet be told from a mind (#43).
+     desktop's own processes make standard calls and cannot yet be told from a mind (#43). So
+     is an action whose own published description says it cannot be undone, in every mode but
+     bypass and whatever its grade above `safe`; a session rule never covers one, and in plan
+     mode no session rule covers anything (docs/surface-protocol.md, section 7).
+
+A grant is spent only through the desktop's own shell: before anything is written to
+`app-shell.sock`, the process listening on it must be a `yantrik-ui` binary
+(`must_be_the_shell`, the transport's `owner::must_be_the_shell`).
 
 `describe` never comes here. Reading an app is free.
 
@@ -56,11 +63,8 @@ def grade(permission):
 # ── what an action says cannot be undone ─────────────────────────────────────
 
 # The wording that makes an action's own description a promise that it cannot be taken back:
-# the seven phrases, in order, of the shell's `approvals::unrecoverable` and the MCP bridge's
-# `UNRECOVERABLE_PHRASES`. The approval card draws its red warning line from this reading, and
-# the bridge asks about such an action in `auto` as it asks about a `dangerous` one. The
-# dispatch here does not apply it, because `gate::decide` on main does not; the surface SDK's
-# design moves the rule into the gate, and the policy vectors say when it has.
+# the seven phrases, in order, of the gate's `UNRECOVERABLE_PHRASES` (which the shell's card and
+# the MCP bridge read too). `decide` reads the action's published description with it.
 UNRECOVERABLE_PHRASES = (
     "not recoverable",
     "cannot be undone",
@@ -215,6 +219,52 @@ def agent_token_of(params, args):
     return None
 
 
+# ── who answers as the shell ─────────────────────────────────────────────────
+
+# The shell's program name. The rule is the file name, not the directory, so the installed shell
+# and a developer's `target/release/yantrik-ui` both pass and nothing else does.
+SHELL_BINARY = "yantrik-ui"
+# What Linux appends to `/proc/<pid>/exe` when the file a process was started from has since been
+# replaced: an update replaces the shell's binary under a running shell, which is still the shell.
+_DELETED = " (deleted)"
+
+
+def is_shell_binary(exe):
+    """Whether `exe` — `/proc/<pid>/exe` resolved — is a `yantrik-ui` binary."""
+    if not isinstance(exe, str):
+        return False
+    if exe.endswith(_DELETED):
+        exe = exe[:-len(_DELETED)]
+    return exe.startswith("/") and os.path.basename(exe) == SHELL_BINARY
+
+
+def exe_of(pid):
+    """The program behind a pid, as `/proc` says it, or None when it cannot be read."""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        return os.readlink("/proc/%d/exe" % pid)
+    except OSError:
+        return None
+
+
+def must_be_the_shell(peer):
+    """The rule for `app-shell`: the process answering on it must be a `yantrik-ui` binary.
+    None when it is; otherwise the sentence, which ends in a full stop because it is dropped into
+    the middle of the gate's own refusal — `owner::must_be_the_shell`, word for word."""
+    if peer is None:
+        return ("the kernel would not say which process is answering as the shell, so it could "
+                "not be checked and the grant was not offered to it.")
+    exe = exe_of(peer.pid)
+    if exe is None:
+        return ("the process answering as the shell (pid %d) could not be identified from /proc, "
+                "so the grant was not offered to it." % peer.pid)
+    if is_shell_binary(exe):
+        return None
+    return ("the process answering as the shell is %s (pid %d), not the desktop's own %s, so the "
+            "grant was not offered to it." % (exe, peer.pid, SHELL_BINARY))
+
+
 # ── spending a grant ─────────────────────────────────────────────────────────
 
 
@@ -225,16 +275,20 @@ class GrantRefused(Exception):
 def spend_through_shell(grant, app, action, args):
     """Burn `grant` for exactly `app.action(args)` through the shell's `consume_approval`.
 
-    The check is the shell's — granted, unspent, unexpired, bound to this app, this action and
-    these arguments — and a refusal carries the shell's sentence. A shell that cannot be
-    reached is a refusal too, worded as the Rust client words it.
+    Only through the shell: before the grant is written to `app-shell.sock`, the process
+    listening on it must pass `must_be_the_shell`. The check of the grant is the shell's —
+    granted, unspent, unexpired, bound to this app, this action and these arguments — and a
+    refusal carries the shell's sentence. A shell that cannot be reached is a refusal too, worded
+    as the Rust client words it.
     """
     path = wire.default_socket_path(SHELL)
     try:
         reply = wire.call_once(path, "app.act", {
             "action": "consume_approval",
             "args": {"request_id": grant, "app": app, "action": action, "args_json": args},
-        }, timeout=GRANT_ROUNDTRIP)
+        }, timeout=GRANT_ROUNDTRIP, peer_rule=must_be_the_shell)
+    except wire.PeerRefused as e:
+        raise GrantRefused(str(e)) from e
     except ConnectionError as e:
         if str(e) == "Connection closed before response":
             raise GrantRefused(str(e)) from e
@@ -289,6 +343,17 @@ class Authority:
         return None
 
 
+def permits(cap, graded):
+    """Whether a caller capped at `cap` may use an action graded `graded` — the ceiling's
+    comparison alone. None when `graded` is not a level this OS defines; a cap off the ladder
+    reads as the default ceiling."""
+    level = grade(graded)
+    if level is None:
+        return None
+    top = grade(cap)
+    return level <= (top if top is not None else grade(DEFAULT_CEILING))
+
+
 def within_ceiling(ceiling, app_id, action, graded):
     """`(level, None)`, or `(None, the ceiling's refusal)`.
 
@@ -296,60 +361,86 @@ def within_ceiling(ceiling, app_id, action, graded):
     unrecognised grade is refused rather than waved through — a typo in a grade must fail
     closed, or the typo silently becomes an exemption.
     """
-    level = grade(graded)
-    if level is None:
+    within = permits(ceiling, graded)
+    if within is None:
         return None, ("CEILING: %s.%s is graded `%s`, which is not a level this OS defines "
                       "(%s), so it was not run." % (app_id, action, graded, " < ".join(LADDER)))
-    cap = grade(ceiling)
-    if cap is None:
-        cap = grade(DEFAULT_CEILING)
-    if level > cap:
+    if not within:
         return None, ("CEILING: %s.%s is graded `%s`, above this machine's `%s` ceiling "
                       "(`tool_permission` in ~/.config/yantrik/settings.yaml), so it was not "
                       "run. An action at that grade needs a person to authorise it directly — "
                       "raise the ceiling in Settings if that is the intent."
                       % (app_id, action, graded, ceiling))
-    return level, None
+    return grade(graded), None
 
 
-def decide(authority, app_id, action, graded):
-    """May `app_id.action`, graded `graded`, run under `authority`? The refusal, or None.
+def decide(authority, app_id, action, graded, purpose=""):
+    """May `app_id.action`, graded `graded` and published with the description `purpose`, run
+    under `authority`? The refusal, or None — `gate::decide`, rule for rule.
 
-    The ceiling, then the mode — on the grade alone, before the arguments, the revision guard
-    or the handler. Pure: nothing is read and nothing is spent here.
+    The ceiling, then the mode — on the grade and the action's own description alone, before
+    the arguments, the revision guard or the handler. A grant answers every question after the
+    ceiling. Bypass runs everything under the ceiling; every other mode runs what its column
+    says (never less than the socket floor) and asks about anything whose description says it
+    cannot be undone (a `safe` read excepted). A session rule covers its action — except one
+    that cannot be undone, and except in plan mode, which raises no card and so has no standing
+    answers. Pure: nothing is read and nothing is spent here.
     """
     level, refusal = within_ceiling(authority.ceiling, app_id, action, graded)
     if refusal is not None:
         return refusal
-    unasked = max(authority.mode.allows(), grade(SOCKET_FLOOR))
-    if level > unasked and not authority.granted and not authority.mode.covers(app_id, action):
-        return grant_refusal(app_id, action, graded, authority.mode)
-    return None
+    if authority.granted:
+        return None
+    mode = authority.mode
+    everything = len(LADDER) - 1
+    irreversible = level > 0 and unrecoverable(purpose)
+    asks = mode.allows() < everything and (
+        irreversible or level > max(mode.allows(), grade(SOCKET_FLOOR)))
+    if not asks:
+        return None
+    plan = mode.allows() == 0
+    if not plan and not irreversible and mode.covers(app_id, action):
+        return None
+    return grant_refusal(app_id, action, graded, mode, irreversible)
 
 
-def permit(authority, app_id, action, graded, args, grant=None, spender=None):
+def permit(authority, app_id, action, graded, purpose, args, grant=None, spender=None):
     """The whole rule for one call, for a caller that holds the grade where it holds the call:
     the ceiling, then the grant (spent only past the ceiling), then the mode."""
     if grant:
         refusal = authority.spend(grant, app_id, action, graded, args, spender)
         if refusal is not None:
             return refusal
-    return decide(authority, app_id, action, graded)
+    return decide(authority, app_id, action, graded, purpose)
 
 
-def grant_refusal(app, action, graded, mode):
-    """The refusal for a call above what the mode allows with no grant — `grant_refusal` in
-    the Rust gate, to the punctuation. `mode` is a `Mode` or a mode's name."""
+_HOW = ("Ask the shell for approval first (`request_approval` with this app, action and these "
+        "exact arguments, poll `approval_status`, then send the granted request_id as `grant` on "
+        "app.act — `yos act` does all of that for you), or have the person at the machine press "
+        "Allow when the card appears.")
+_PLAN = ("Say what you would do and let the person decide; they switch the mode from the chip "
+         "in the status bar.")
+_FINAL_WORD = "its own description says it cannot be undone"
+
+
+def grant_refusal(app, action, graded, mode, irreversible=False):
+    """The refusal for a call the mode will not run without a grant — `grant_refusal` in the
+    Rust gate, its four sentences to the punctuation: plan or not, and whether the reason is the
+    grade or the action's own word that it cannot be undone. `mode` is a `Mode` or a name."""
     mode = mode if isinstance(mode, Mode) else Mode(mode, frozenset())
-    if mode.name == "plan":
+    if mode.name == "plan" and not irreversible:
         return ("GRANT: %s.%s is graded `%s` and this machine is in plan mode, which raises no "
-                "card for anything above `%s` — so it was not run. Say what you would do and let "
-                "the person decide; they switch the mode from the chip in the status bar."
-                % (app, action, graded, SOCKET_FLOOR))
-    allowed = LADDER[max(mode.allows(), grade(SOCKET_FLOOR))]
-    return ("GRANT: %s.%s is graded `%s` and this machine is in %s mode, which runs nothing "
-            "above `%s` without asking — so it was not run. Ask the shell for approval first "
-            "(`request_approval` with this app, action and these exact arguments, poll "
-            "`approval_status`, then send the granted request_id as `grant` on app.act — "
-            "`yos act` does all of that for you), or have the person at the machine press Allow "
-            "when the card appears." % (app, action, graded, mode.name, allowed))
+                "card for anything above `%s` — so it was not run. %s"
+                % (app, action, graded, SOCKET_FLOOR, _PLAN))
+    if mode.name == "plan":
+        return ("GRANT: %s.%s is graded `%s` and %s, and this machine is in plan mode, which "
+                "raises no card for that — so it was not run. %s"
+                % (app, action, graded, _FINAL_WORD, _PLAN))
+    if not irreversible:
+        allowed = LADDER[max(mode.allows(), grade(SOCKET_FLOOR))]
+        return ("GRANT: %s.%s is graded `%s` and this machine is in %s mode, which runs nothing "
+                "above `%s` without asking — so it was not run. %s"
+                % (app, action, graded, mode.name, allowed, _HOW))
+    return ("GRANT: %s.%s is graded `%s` and %s, and this machine is in %s mode, which asks "
+            "before anything that cannot be undone — so it was not run. %s"
+            % (app, action, graded, _FINAL_WORD, mode.name, _HOW))

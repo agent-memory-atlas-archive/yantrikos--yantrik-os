@@ -9,7 +9,7 @@ import unittest
 
 import support
 from yantrik_surface import (Authority, GrantRefused, Mode, Surface, agent_token, decide,
-                             gate, grant_refusal, mode_from)
+                             gate, grant_refusal, mode_from, wire)
 
 G = support.RUST_GATE
 
@@ -140,6 +140,101 @@ class TestDecide(unittest.TestCase):
     def test_auto_names_what_it_runs_unasked(self):
         self.assertIn("in auto mode, which runs nothing above `sensitive`",
                       decide(at("dangerous", "auto"), "a", "b", "dangerous"))
+
+
+DELETE = "Take an event off the calendar. It is not recoverable"
+UPDATE = "Change an event's title, time or notes"
+
+
+class TestWhatCannotBeUndone(unittest.TestCase):
+    """`gate.rs`'s tests of the action's own description, ported: the dispatch reads the
+    published purpose, so `yos act` or a raw socket is asked about `calendar.delete_event` in auto
+    exactly as the shell's card and the bridge ask about it."""
+
+    def test_what_its_own_description_says_cannot_be_undone_is_asked_about_on_every_door(self):
+        self.assertIsNone(decide(at("sensitive", "auto"), "calendar", "update_event", "sensitive",
+                                 UPDATE))
+        fragment = ('"GRANT: {app}.{action} is graded `{graded}` and {final_word}, and this machine '
+                    'is in {mode} mode, which asks before anything that cannot be undone — so it '
+                    'was not run. {HOW}"')
+        support.quoted(self, G, fragment)
+        self.assertEqual(
+            decide(at("sensitive", "auto"), "calendar", "delete_event", "sensitive", DELETE),
+            "GRANT: calendar.delete_event is graded `sensitive` and its own description says it "
+            "cannot be undone, and this machine is in auto mode, which asks before anything that "
+            "cannot be undone — so it was not run. Ask the shell for approval first "
+            "(`request_approval` with this app, action and these exact arguments, poll "
+            "`approval_status`, then send the granted request_id as `grant` on app.act — `yos act` "
+            "does all of that for you), or have the person at the machine press Allow when the "
+            "card appears.")
+        # Below the floor's grade too: a `standard` action that says so is asked about in ask.
+        err = decide(at("sensitive", "ask"), "blender", "delete_object", "standard",
+                     "Delete an object. Past that undo it is not recoverable.")
+        self.assertTrue(err.startswith("GRANT:") and "cannot be undone" in err, err)
+        # Bypass asks nobody, a grant answers it, and a `safe` read is never turned into a card.
+        self.assertIsNone(decide(at("sensitive", "bypass"), "calendar", "delete_event",
+                                 "sensitive", DELETE))
+        self.assertIsNone(decide(at("sensitive", "auto", granted=True), "calendar",
+                                 "delete_event", "sensitive", DELETE))
+        self.assertIsNone(decide(at("sensitive", "plan"), "files", "describe_trash", "safe",
+                                 "Lists what was deleted permanently"))
+
+    def test_a_session_rule_never_covers_what_cannot_be_undone_nor_anything_in_plan(self):
+        def with_rule(mode, action):
+            return Authority("dangerous", Mode(mode, frozenset({("calendar", action)})))
+
+        self.assertIsNone(decide(with_rule("ask", "update_event"), "calendar", "update_event",
+                                 "sensitive", "Move it"))
+        err = decide(with_rule("ask", "delete_event"), "calendar", "delete_event", "sensitive",
+                     DELETE)
+        self.assertIn("cannot be undone", err)
+        err = decide(with_rule("plan", "update_event"), "calendar", "update_event", "sensitive",
+                     "Move it")
+        self.assertTrue(err.startswith("GRANT:") and "plan mode" in err, err)
+
+    def test_plan_says_so_when_the_reason_is_the_description(self):
+        fragment = ('"GRANT: {app}.{action} is graded `{graded}` and {final_word}, and this machine '
+                    'is in plan mode, which raises no card for that — so it was not run. {PLAN}"')
+        support.quoted(self, G, fragment)
+        self.assertEqual(
+            decide(at("dangerous", "plan"), "calendar", "delete_event", "sensitive", DELETE),
+            "GRANT: calendar.delete_event is graded `sensitive` and its own description says it "
+            "cannot be undone, and this machine is in plan mode, which raises no card for that — "
+            "so it was not run. Say what you would do and let the person decide; they switch the "
+            "mode from the chip in the status bar.")
+
+    def test_the_phrases_are_read_the_way_the_gate_reads_them(self):
+        support.quoted(self, G, 'pub const UNRECOVERABLE_PHRASES: [&str; 7] = [')
+        self.assertTrue(gate.unrecoverable(DELETE))
+        self.assertTrue(gate.unrecoverable("THIS CANNOT BE UNDONE"))
+        self.assertTrue(gate.unrecoverable("there is no undo to argue with"))
+        self.assertFalse(gate.unrecoverable("Move a file or folder to recoverable Trash"))
+        self.assertFalse(gate.unrecoverable(""))
+        self.assertEqual(len(gate.UNRECOVERABLE_PHRASES), 7)
+
+    def test_a_cap_is_compared_on_this_ladder(self):
+        self.assertIs(gate.permits("standard", "safe"), True)
+        self.assertIs(gate.permits("standard", "dangerous"), False)
+        self.assertIs(gate.permits("nonsense", "sensitive"), True)
+        self.assertIs(gate.permits("nonsense", "dangerous"), False)
+        self.assertIsNone(gate.permits("dangerous", "spicy"))
+
+    def test_the_dispatch_reads_the_published_description(self):
+        with support.Machine("dangerous", "auto"):
+            s = Surface("calendar")
+
+            @s.action("delete_event", grade="sensitive", description=DELETE)
+            def delete_event(id: str) -> dict:
+                return {"deleted": id}
+
+            @s.action("update_event", grade="sensitive", description=UPDATE)
+            def update_event(id: str) -> dict:
+                return {"updated": id}
+
+            self.assertTrue(s.act({"action": "update_event", "args": {"id": "1"}})["accepted"])
+            with self.assertRaises(wire.RpcError) as caught:
+                s.act({"action": "delete_event", "args": {"id": "1"}})
+            self.assertIn("its own description says it cannot be undone", caught.exception.message)
 
 
 class Shell:

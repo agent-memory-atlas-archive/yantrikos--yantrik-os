@@ -30,6 +30,8 @@ RUST_SERVER = "crates/yantrik-ipc-transport/src/server.rs"
 RUST_CONTRACTS = "crates/yantrik-ipc-contracts/src/control_surface.rs"
 # The `yantrik-surface` crate (piece B of the SDK design): typed arguments. Quoted when present.
 RUST_SURFACE_ARGS = "crates/yantrik-surface/src/args.rs"
+# Owned names and the shell-peer rule (piece A of the SDK design).
+RUST_OWNER = "crates/yantrik-ipc-transport/src/owner.rs"
 YOS = os.path.join(REPO, "deploy", "yantrik-os", "yos")
 EXAMPLE = os.path.join(PACKAGE_ROOT, "examples", "hello_surface.py")
 
@@ -127,6 +129,59 @@ class Machine:
         env["XDG_RUNTIME_DIR"] = self.runtime
         env["PYTHONPATH"] = PACKAGE_ROOT + os.pathsep + env.get("PYTHONPATH", "")
         return env
+
+
+class ShellStandIn:
+    """`fake_shell.py` serving `app-shell.sock` on `machine`, as a process whose program is a
+    `yantrik-ui` binary: a copy of this interpreter under that name. The shell-peer rule (in
+    this package and in `yos`) is met as the real shell meets it, unpatched."""
+
+    def __init__(self, machine):
+        self.machine = machine
+        self.dir = tempfile.mkdtemp(prefix="yantrik-shell-")
+        self.exe = os.path.join(self.dir, "yantrik-ui")
+        self.path = os.path.join(machine.socket_dir, "app-shell.sock")
+        self.process = None
+
+    def start(self, case):
+        import shutil
+        import subprocess
+        import time
+
+        try:
+            shutil.copy2(os.path.realpath(sys.executable), self.exe)
+        except OSError as e:
+            case.skipTest("cannot copy this interpreter to stand in for yantrik-ui: %s" % e)
+        env = self.machine.env()
+        env["PYTHONHOME"] = sys.base_prefix
+        self.process = subprocess.Popen([self.exe, os.path.join(HERE, "fake_shell.py")],
+                                        env=env, stderr=subprocess.PIPE, text=True)
+        case.addCleanup(self.stop)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                case.skipTest("the stand-in shell would not start under a copied interpreter: %s"
+                              % self.process.stderr.read()[-300:])
+            if wire.answers(self.path):
+                return self
+            time.sleep(0.05)
+        case.fail("the stand-in shell never answered on %s" % self.path)
+
+    def state(self):
+        return wire.call_once(self.path, "app.describe", {})["result"]["state"]
+
+    def stop(self):
+        import shutil
+
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.communicate(timeout=10)
+            except Exception:  # noqa: BLE001 - a stand-in that will not stop is killed
+                self.process.kill()
+        if self.process is not None and self.process.stderr:
+            self.process.stderr.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
 
 
 class MachineCase(unittest.TestCase):
