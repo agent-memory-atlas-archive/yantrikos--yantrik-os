@@ -179,7 +179,9 @@ export component ToastBanner inherits Rectangle {
                         wrap: word-wrap;
                         // Two lines of detail; the rest is in the notification centre. A toast
                         // that can grow to any height is a toast that can cover the screen.
-                        max-height: 32px;
+                        // Two full lines at fs-caption. 32px clipped the second line through its
+                        // descenders, and the cut fell mid-word with no ellipsis.
+                        max-height: 38px;
                         overflow: elide;
                     }
 
