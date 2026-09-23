@@ -240,10 +240,12 @@ component MindCard inherits Rectangle {
     // As tall as what it holds, like the rail it replaces: a card that ran to the taskbar over
     // nothing would be a dark rectangle claiming something lived there.
     height: Math.min(body.preferred-height, root.height-ceiling);
+    // A panel on the scale (r-lg), with the hairline every card and panel carries now: one pixel a
+    // little lighter than the surface, the edge that catches the light.
     border-radius: Theme.r-lg;
     background: Theme.glass-rail;
     border-width: 1px;
-    border-color: Theme.glass-border;
+    border-color: Theme.border-card;
     clip: true;
 
     // Clicks between the rows stay on the card.
@@ -635,11 +637,12 @@ component MindStrip inherits Rectangle {
     width: 44px;
     background: Theme.glass-rail;
 
+    // The strip's one edge, the same hairline as the card's.
     Rectangle {
         x: 0;
         width: 1px;
         height: 100%;
-        background: Theme.glass-border;
+        background: Theme.border-card;
     }
 
     strip-ta := TouchArea {
