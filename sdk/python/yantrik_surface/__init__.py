@@ -38,6 +38,7 @@ from .gate import (
     decide,
     grant_refusal,
     mode_from,
+    unrecoverable,
 )
 from .surface import (
     PROTOCOL,
@@ -50,7 +51,7 @@ from .surface import (
     agent_token,
     caller,
 )
-from .wire import PeerCred, RpcError, SocketBusy, call_once, revision, socket_dir
+from .wire import PeerCred, PeerRefused, RpcError, SocketBusy, call_once, revision, socket_dir
 
 __version__ = "0.1.0"
 
@@ -68,6 +69,7 @@ __all__ = [
     "PROTOCOL",
     "Param",
     "PeerCred",
+    "PeerRefused",
     "Refusal",
     "RpcError",
     "SOCKET_FLOOR",
@@ -81,4 +83,5 @@ __all__ = [
     "mode_from",
     "revision",
     "socket_dir",
+    "unrecoverable",
 ]

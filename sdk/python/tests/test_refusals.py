@@ -44,6 +44,11 @@ def notes():
         """Delete a note. It is not recoverable."""
         return {"deleted": title}
 
+    @s.action("rename_note", grade="sensitive")
+    def rename_note(title: str) -> dict:
+        """Rename a note; its old title stays in its history."""
+        return {"renamed": title}
+
     @s.action("wipe_disk", grade="dangerous")
     def wipe_disk(disk: str) -> dict:
         """Erase a disk."""
@@ -74,7 +79,8 @@ class TestTheOrder(support.MachineCase):
         fragment = 'format!("unknown action `{name}`; this app offers: {}", known.join(", "))'
         support.quoted(self, C, fragment)
         expected = support.render("unknown action `{name}`; this app offers: {}",
-                                  "open_note, tidy, delete_note, wipe_disk", name="make_coffee")
+                                  "open_note, tidy, delete_note, rename_note, wipe_disk",
+                                  name="make_coffee")
         self.assertEqual(self.refusal(lambda: self.act("make_coffee")), expected)
 
     def test_a_missing_argument_is_named(self):
@@ -176,15 +182,25 @@ class TestTheGateInTheDispatch(support.MachineCase):
     def test_the_mode_comes_before_the_arguments(self):
         fragment = ('"GRANT: {app}.{action} is graded `{graded}` and this machine is in {mode} '
                     'mode, which runs nothing above `{allowed}` without asking — so it was not '
-                    'run. Ask the shell for approval first (`request_approval` with this app, '
-                    'action and these exact arguments, poll `approval_status`, then send the '
-                    'granted request_id as `grant` on app.act — `yos act` does all of that for '
-                    'you), or have the person at the machine press Allow when the card appears."')
+                    'run. {HOW}"')
         support.quoted(self, G, fragment)
-        message = self.refusal(lambda: self.s.act({"action": "delete_note"}))
+        support.quoted(self, G, 'const HOW: &str = "%s";' % support.GATE_HOW)
+        message = self.refusal(lambda: self.s.act({"action": "rename_note"}))
+        self.assertEqual(message, support.render(
+            fragment.strip('"'), app="notes", action="rename_note", graded="sensitive",
+            mode="ask", allowed="standard", HOW=support.GATE_HOW))
+
+    def test_what_its_own_description_says_cannot_be_undone_is_asked_about(self):
+        fragment = ('"GRANT: {app}.{action} is graded `{graded}` and {final_word}, and this machine '
+                    'is in {mode} mode, which asks before anything that cannot be undone — so it '
+                    'was not run. {HOW}"')
+        support.quoted(self, G, fragment)
+        support.quoted(self, G, 'let final_word = "%s";' % support.GATE_FINAL_WORD)
+        message = self.refusal(lambda: self.s.act({"action": "delete_note",
+                                                   "args": {"title": "x"}}))
         self.assertEqual(message, support.render(
             fragment.strip('"'), app="notes", action="delete_note", graded="sensitive",
-            mode="ask", allowed="standard"))
+            final_word=support.GATE_FINAL_WORD, mode="ask", HOW=support.GATE_HOW))
 
     def test_standard_runs_unasked_in_ask(self):
         self.assertTrue(self.s.act({"action": "tidy"})["accepted"])

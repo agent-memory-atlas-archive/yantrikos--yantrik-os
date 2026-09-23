@@ -128,12 +128,12 @@ class TestDecide(unittest.TestCase):
     def test_plan_says_no_card_is_coming(self):
         fragment = ('"GRANT: {app}.{action} is graded `{graded}` and this machine is in plan '
                     'mode, which raises no card for anything above `{SOCKET_FLOOR}` — so it was '
-                    'not run. Say what you would do and let the person decide; they switch the '
-                    'mode from the chip in the status bar."')
+                    'not run. {PLAN}"')
         support.quoted(self, G, fragment)
+        support.quoted(self, G, 'const PLAN: &str = "%s";' % support.GATE_PLAN)
         self.assertEqual(grant_refusal("notes", "delete", "sensitive", "plan"), support.render(
             fragment.strip('"'), app="notes", action="delete", graded="sensitive",
-            SOCKET_FLOOR="standard"))
+            SOCKET_FLOOR="standard", PLAN=support.GATE_PLAN))
         self.assertEqual(decide(at("dangerous", "plan"), "notes", "delete", "sensitive"),
                          grant_refusal("notes", "delete", "sensitive", Mode("plan")))
 

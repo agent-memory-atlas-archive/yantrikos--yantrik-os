@@ -32,6 +32,14 @@ RUST_CONTRACTS = "crates/yantrik-ipc-contracts/src/control_surface.rs"
 RUST_SURFACE_ARGS = "crates/yantrik-surface/src/args.rs"
 # Owned names and the shell-peer rule (piece A of the SDK design).
 RUST_OWNER = "crates/yantrik-ipc-transport/src/owner.rs"
+# The pieces `gate::grant_refusal` builds its four sentences from (quoted where they are used).
+GATE_HOW = ("Ask the shell for approval first (`request_approval` with this app, action and these "
+            "exact arguments, poll `approval_status`, then send the granted request_id as `grant` "
+            "on app.act — `yos act` does all of that for you), or have the person at the machine "
+            "press Allow when the card appears.")
+GATE_PLAN = ("Say what you would do and let the person decide; they switch the mode from the chip "
+             "in the status bar.")
+GATE_FINAL_WORD = "its own description says it cannot be undone"
 YOS = os.path.join(REPO, "deploy", "yantrik-os", "yos")
 EXAMPLE = os.path.join(PACKAGE_ROOT, "examples", "hello_surface.py")
 

@@ -12,8 +12,9 @@ with that description, the ceiling and the mode (and the session rule) written t
 dispatch reads, a stand-in shell holding the grant when one is attached, and `app.act` — so what
 is checked is what the dispatch does, not a second reading of the table.
 
-Until the file is in the tree the replay is skipped, and the harness runs on vectors transcribed
-from `gate.rs`'s own tests, in the same shape. `YANTRIK_SURFACE_VECTORS=<path>` replays another
+Every section is replayed, and a missing file is a failure inside this repository. The harness
+also runs on vectors transcribed from `gate.rs`'s own tests, in the same shape, so it is checked
+even where the package is tested on its own. `YANTRIK_SURFACE_VECTORS=<path>` replays another
 copy of the file (a sibling branch's, say).
 """
 
@@ -195,15 +196,17 @@ class TestTheGeneratedVectors(support.MachineCase):
     def setUp(self):
         super().setUp()
         if not os.path.isfile(VECTORS):
-            self.skipTest("deploy/yantrik-os/surface-vectors.json is not in this tree yet — piece "
-                          "A of the surface SDK generates it from gate::decide; until then there "
-                          "is nothing to replay (the harness runs on gate.rs's own cases above)")
+            if os.path.isdir(os.path.join(support.REPO, "deploy", "yantrik-os")):
+                self.fail("%s is missing: this repository generates it from gate::decide "
+                          "(YANTRIK_WRITE_VECTORS=1 cargo test -p yantrik-ipc-transport --lib "
+                          "surface_vectors_write), and every port replays it" % VECTORS)
+            self.skipTest("the package is being tested outside the repository, so there are no "
+                          "generated vectors to replay (the harness runs on gate.rs's cases)")
         with open(VECTORS, encoding="utf-8") as f:
             self.doc = json.load(f)
 
     def section(self, name):
-        if name not in self.doc:
-            self.skipTest("this copy of the vectors has no `%s` section" % name)
+        self.assertIn(name, self.doc, "surface-vectors.json has no `%s` section" % name)
         return self.doc[name]
 
     def test_the_decisions(self):

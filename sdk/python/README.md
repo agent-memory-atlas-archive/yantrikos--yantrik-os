@@ -144,8 +144,9 @@ Every action carries one. Choose by what the action can cost the person:
 | `sensitive` | overwriting, sending, spending, anything that leaves the machine | save over a file, send mail, call a paid API |
 | `dangerous` | destroying work, running arbitrary code | delete for good, `run_python` |
 
-Say in the description what cannot be undone ("It is not recoverable"): the approval card shows
-it in red, and in `auto` mode the MCP bridge asks about it as it asks about `dangerous`.
+Say in the description what cannot be undone ("It is not recoverable", "cannot be undone",
+"permanently"…): the approval card shows it in red, and the dispatch asks about such an action in
+every mode but `bypass`, whatever its grade above `safe` — and no session rule covers it.
 
 What happens to a call, in order — the same order every door uses:
 
@@ -153,12 +154,15 @@ What happens to a call, in order — the same order every door uses:
    unset. Above it nothing runs: not with a mode, not with a grant. Refused with `CEILING:`.
 2. **The grant** — if the call carries one, it is spent through the shell's
    `consume_approval`, bound to this app, this action and these exact arguments. Only after the
-   ceiling has passed, so a person's Allow is never used up on an act that cannot run.
+   ceiling has passed, so a person's Allow is never used up on an act that cannot run; and only
+   to the desktop's own shell — the process listening on `app-shell.sock` must be a
+   `yantrik-ui` binary, or the grant is not offered to it.
 3. **The mode** — `plan`, `ask`, `auto` or `bypass`, published by the shell in
    `mind-mode.json`. Above what the mode runs unasked (`ask` runs `standard`, `auto` runs
-   `sensitive`, `bypass` everything under the ceiling), with no grant and no session rule, the
-   call is refused with `GRANT:`, which says how to get one. `standard` runs unasked in every
-   mode on a socket, because the desktop's own processes make standard calls.
+   `sensitive`, `bypass` everything under the ceiling), or anything whose description says it
+   cannot be undone, with no grant and no session rule (none in plan), the call is refused with
+   `GRANT:`, which says how to get one. `standard` runs unasked in every mode on a socket,
+   because the desktop's own processes make standard calls.
 
 `describe` is always free. Grades can change while the app runs: `surface.regrade("generate",
 "sensitive")` when a setting makes an action costlier.
@@ -231,10 +235,15 @@ reads them, and not used.
 ## Names
 
 A surface binds `app-<id>.sock` in `$XDG_RUNTIME_DIR/yantrik` (then `/run/yantrik`, then
-`/tmp/yantrik-<uid>`), directory 0700, socket 0600. It will not bind over a socket another live
-process answers on — `serve()` exits with that sentence — and replaces only a dead one.
-`Surface(..., aliases=["other-name"])` links other names beside it. `serve()` answers until
-Ctrl-C or SIGTERM and unbinds on the way out; `serve_in_thread()` returns at once.
+`/tmp/yantrik-<uid>`), directory 0700, socket 0600. Before binding it asks whatever is at the
+path `rpc.ping`: a process that answers — or accepts and stays silent for a second — keeps its
+name, and `serve()` exits with "another instance owns …"; only a socket nobody listens on, a
+symlink or a stray file is replaced. `Surface(..., aliases=["other-name"])` links other names
+beside it. `serve()` answers until Ctrl-C or SIGTERM and unbinds on the way out;
+`serve_in_thread()` returns at once.
+
+A request is JSON-RPC 2.0 with `jsonrpc`, `method` and `id`; one without an `id` (a notification)
+or a batch is answered as a parse error, as the Rust transport answers it.
 
 ## Testing a surface
 
@@ -254,7 +263,7 @@ python3 -m unittest discover -s sdk/python/tests -v
 
 ## Where it comes from
 
-`design/surface-sdk-2026-09-23.md` (the SDK design, PR #167) and `docs/surface-protocol.md` (the
-protocol, normative; written beside this package). The policy vectors in
-`deploy/yantrik-os/surface-vectors.json`, generated from the Rust gate, are replayed through
-this dispatch by `tests/test_vectors.py` once they land.
+[`docs/surface-protocol.md`](../../docs/surface-protocol.md) is the protocol (normative, version 1)
+and `design/surface-sdk-2026-09-23.md` the SDK's design. Every one of the policy vectors in
+`deploy/yantrik-os/surface-vectors.json`, generated from the Rust gate, is replayed through this
+dispatch by `tests/test_vectors.py` — decisions, sentences, phrases, revisions and float edges.
