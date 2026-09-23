@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use yantrik_ipc_contracts::email::{
-    AccountSettings, AccountsResult, EmailAccountSummary, GoogleSignIn, OAuthStatus,
+    AccountSettings, AccountsResult, EmailAccountSummary, EmailFolder, GoogleSignIn, OAuthStatus,
 };
 
 // ── The three states ─────────────────────────────────────────────────
@@ -170,6 +170,81 @@ pub fn decide(answer: Result<AccountsResult, String>) -> MailState {
                 },
             }
         }
+    }
+}
+
+// ── What the header says about the open folder ───────────────────────
+
+/// The two numbers in "INBOX, 12 unread of 35", as the mail server counts them.
+///
+/// They come from the folder list — the same list `describe` prints two lines under the header
+/// — and from nowhere else. They used to be counted over the page of messages in hand: "9 unread
+/// of 21" for a folder the list beside it said held 35, where 21 was one page and 9 the unread
+/// among those, so one reply gave two answers to one question (#74, #123). The comment on that
+/// code already said the counts were "of the folder, not of the tab"; now they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FolderCounts {
+    pub unread: i32,
+    pub total: i32,
+}
+
+impl FolderCounts {
+    /// The counts for `folder`, off the list the server gave.
+    ///
+    /// A folder the list does not have — a mailbox opened by a name LIST did not return — has no
+    /// server count, and then the page in hand is all there is: `loaded` messages, `loaded_unread`
+    /// of them unread. A lower bound, and the only honest number left; there is no row in the
+    /// list for it to contradict.
+    pub fn of(folders: &[EmailFolder], folder: &str, loaded_unread: usize, loaded: usize) -> Self {
+        folders
+            .iter()
+            .find(|f| f.name.eq_ignore_ascii_case(folder))
+            .map(|f| FolderCounts { unread: f.unread_count, total: f.total_count })
+            .unwrap_or(FolderCounts { unread: loaded_unread as i32, total: loaded as i32 })
+    }
+
+    /// The same folder after one of its messages was marked read or unread, and the mail server
+    /// agreed. Reading a message marks it read; a Refresh asks the server again and replaces
+    /// this, but between the two the header must not say twelve unread over a list with eleven
+    /// unread dots in it.
+    pub fn after_read_change(self, was_read: bool, now_read: bool) -> Self {
+        let unread = match (was_read, now_read) {
+            (false, true) => self.unread - 1,
+            (true, false) => self.unread + 1,
+            _ => self.unread,
+        };
+        FolderCounts { unread: unread.max(0), total: self.total }
+    }
+
+    /// The same folder after a message left it — deleted, or moved elsewhere — and the server
+    /// confirmed it is gone.
+    pub fn after_removal(self, was_read: bool) -> Self {
+        FolderCounts {
+            unread: if was_read { self.unread } else { (self.unread - 1).max(0) },
+            total: (self.total - 1).max(0),
+        }
+    }
+
+    /// The folder a message was moved into, after it arrived.
+    pub fn after_arrival(self, is_read: bool) -> Self {
+        FolderCounts {
+            unread: if is_read { self.unread } else { self.unread + 1 },
+            total: self.total + 1,
+        }
+    }
+}
+
+/// The one line over a folder that is open, when nothing is being read or written.
+///
+/// With a search on, the list under the header is the results and not the folder, and the
+/// header says so rather than putting the folder's counts over a list they do not describe.
+pub fn folder_summary(folder: &str, counts: FolderCounts, search: Option<(&str, usize)>) -> String {
+    match search {
+        Some((query, hits)) => format!(
+            "Email — {folder}, {hits} {} for \u{201c}{query}\u{201d}",
+            if hits == 1 { "result" } else { "results" }
+        ),
+        None => format!("Email — {folder}, {} unread of {}", counts.unread, counts.total),
     }
 }
 

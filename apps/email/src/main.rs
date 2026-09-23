@@ -27,7 +27,7 @@ use yantrik_ipc_contracts::email::{
     EmailSummary, OAuthBeginResult, OAuthStatus, TestAccountResult,
 };
 
-use state::{Draft, GoogleOutcome, MailState, MessageRow, Triage};
+use state::{Draft, FolderCounts, GoogleOutcome, MailState, MessageRow, Triage};
 
 slint::include_modules!();
 
@@ -707,10 +707,71 @@ fn show_rows(ui: &EmailApp, mail: &Rc<Mail>) {
 
     // The counts are of the folder, not of the tab: "3 unread of 128" is about the mailbox, and
     // it would be a strange thing for pressing Unread to change.
-    ui.set_email_folder_total(all.len() as i32);
-    ui.set_email_folder_unread(all.iter().filter(|(_, it)| !it.is_read).count() as i32);
     ui.set_email_triage_view(triage.index());
     ui.set_email_list(ModelRc::new(VecModel::from(items)));
+    show_folder_counts(ui, mail);
+}
+
+/// Put the open folder's counts on the header, off the folder list.
+///
+/// They were counted here over the rows in hand, which is one page: "9 unread of 21" for a
+/// folder the list in the sidebar — and two lines below in `describe` — said held 35. The header
+/// now reads that same entry, so the two cannot disagree; when the mail server agrees to a
+/// change, [`change_counts_of`] alters the entry first and this follows.
+fn show_folder_counts(ui: &EmailApp, mail: &Rc<Mail>) {
+    let folder = mail.folder.borrow().clone();
+    let all = mail.all_rows.borrow();
+    let loaded_unread = all.iter().filter(|(_, it)| !it.is_read).count();
+    let counts = FolderCounts::of(&folder_records(ui), &folder, loaded_unread, all.len());
+    ui.set_email_folder_unread(counts.unread);
+    ui.set_email_folder_total(counts.total);
+}
+
+/// The folder list as the wire had it, read back off the sidebar's model.
+fn folder_records(ui: &EmailApp) -> Vec<EmailFolder> {
+    let folders = ui.get_folders();
+    (0..folders.row_count())
+        .filter_map(|i| folders.row_data(i))
+        .map(|f| EmailFolder {
+            name: f.name.to_string(),
+            unread_count: f.unread_count,
+            total_count: f.total_count,
+        })
+        .collect()
+}
+
+/// Change one folder's entry in the list, for the cases where the mail server has already agreed
+/// — a message read, deleted or moved — and put the header right afterwards. The next sync
+/// replaces the whole list with the server's count; until then this is what is known. A folder
+/// that is not listed is left alone, and the header counts what is in hand.
+fn change_counts_of(
+    ui: &EmailApp,
+    mail: &Rc<Mail>,
+    folder: &str,
+    change: impl FnOnce(FolderCounts) -> FolderCounts,
+) {
+    let folders = ui.get_folders();
+    let at = (0..folders.row_count()).find(|i| {
+        folders.row_data(*i).map(|f| f.name.eq_ignore_ascii_case(folder)).unwrap_or(false)
+    });
+    if let Some(mut row) = at.and_then(|i| folders.row_data(i).map(|row| (i, row))) {
+        let counts = change(FolderCounts { unread: row.1.unread_count, total: row.1.total_count });
+        row.1.unread_count = counts.unread;
+        row.1.total_count = counts.total;
+        folders.set_row_data(row.0, row.1);
+    }
+    show_folder_counts(ui, mail);
+}
+
+/// One flag of a row in hand, read before the mail server is asked to change it. A row that is
+/// not there reads as read, so nothing is later taken off a count for it.
+fn row_flag(mail: &Rc<Mail>, id: &str, flag: impl Fn(&EmailListItem) -> bool) -> bool {
+    mail.all_rows
+        .borrow()
+        .iter()
+        .find(|(row_id, _)| row_id == id)
+        .map(|(_, it)| flag(it))
+        .unwrap_or(true)
 }
 
 /// Open a folder, reporting what happened.
@@ -780,6 +841,8 @@ fn open_message(ui: &EmailApp, mail: &Rc<Mail>, row: usize) -> Result<EmailDetai
         match mark_read_via_service(&account, &id, true) {
             Ok(()) => {
                 mark_row_locally(mail, &id, |it| it.is_read = true);
+                let folder = mail.folder.borrow().clone();
+                change_counts_of(ui, mail, &folder, |c| c.after_read_change(false, true));
                 show_rows(ui, mail);
                 clear_notice(ui);
             }
@@ -799,12 +862,15 @@ fn open_message(ui: &EmailApp, mail: &Rc<Mail>, row: usize) -> Result<EmailDetai
 fn set_read(ui: &EmailApp, mail: &Rc<Mail>, row: usize, read: bool) -> Result<bool, String> {
     let account = mail.account();
     let id = mail.id_at(row).ok_or_else(|| format!("there is no message at row {}", row + 1))?;
+    let was_read = row_flag(mail, &id, |it| it.is_read);
     mark_read_via_service(&account, &id, read).map_err(|e| {
         let text = format!("Could not mark that message read: {e}");
         say(ui, text.clone());
         text
     })?;
     let observed = observe_flag(ui, mail, &id, |it| it.is_read)?;
+    let folder = mail.folder.borrow().clone();
+    change_counts_of(ui, mail, &folder, |c| c.after_read_change(was_read, observed));
     clear_notice(ui);
     Ok(observed)
 }
@@ -868,12 +934,15 @@ fn delete_message(ui: &EmailApp, mail: &Rc<Mail>, row: usize) -> Result<String, 
         .map(|(_, it)| it.subject.to_string())
         .unwrap_or_default();
 
+    let was_read = row_flag(mail, &id, |it| it.is_read);
     delete_message_via_service(&account, &id).map_err(|e| {
         let text = format!("Could not delete \u{201c}{subject}\u{201d}: {e}");
         say(ui, text.clone());
         text
     })?;
     confirm_gone(ui, mail, &id, "delete", &subject)?;
+    let folder = mail.folder.borrow().clone();
+    change_counts_of(ui, mail, &folder, |c| c.after_removal(was_read));
     Ok(subject)
 }
 
@@ -894,12 +963,17 @@ fn move_message(
         .map(|(_, it)| it.subject.to_string())
         .unwrap_or_default();
 
+    let was_read = row_flag(mail, &id, |it| it.is_read);
     move_message_via_service(&account, &id, target).map_err(|e| {
         let text = format!("Could not move \u{201c}{subject}\u{201d} to {target}: {e}");
         say(ui, text.clone());
         text
     })?;
     confirm_gone(ui, mail, &id, "move", &subject)?;
+    // Both ends of the move: it left this folder and arrived in that one.
+    let folder = mail.folder.borrow().clone();
+    change_counts_of(ui, mail, target, |c| c.after_arrival(was_read));
+    change_counts_of(ui, mail, &folder, |c| c.after_removal(was_read));
     Ok(subject)
 }
 
@@ -1210,11 +1284,17 @@ fn publish_control(app: &EmailApp, mail: &Rc<Mail>) {
                     detail.subject, detail.from_name
                 )
             } else {
-                format!(
-                    "Email — {folder}, {} unread of {}",
-                    ui.get_email_folder_unread(),
-                    ui.get_email_folder_total()
-                )
+                // The same two numbers as the folder's entry in `folders` below, by
+                // construction: `show_folder_counts` reads them off that list.
+                let counts = FolderCounts {
+                    unread: ui.get_email_folder_unread(),
+                    total: ui.get_email_folder_total(),
+                };
+                let query = ui.get_email_search_query().to_string();
+                let search = ui
+                    .get_email_search_active()
+                    .then(|| (query.as_str(), ui.get_email_list().row_count()));
+                state::folder_summary(&folder, counts, search)
             };
 
             let list = ui.get_email_list();
@@ -1267,8 +1347,12 @@ fn publish_control(app: &EmailApp, mail: &Rc<Mail>) {
                 .with("account", ui.get_account_name().to_string())
                 .with("folder", folder)
                 .with("triage", mail.triage.get().label())
+                // `unread` and `total` are the folder's, as the mail server counts them —
+                // the same numbers as its entry in `folders`. `listed` is how many of them are
+                // in hand: the newest page, which is what `messages` is drawn from.
                 .with("unread", ui.get_email_folder_unread())
                 .with("total", ui.get_email_folder_total())
+                .with("listed", list.row_count())
                 .with("composing", ui.get_is_composing())
                 .with("search_query", ui.get_email_search_query().to_string())
                 .with("open_message", open)
