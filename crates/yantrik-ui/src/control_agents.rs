@@ -24,17 +24,44 @@
 //!   agents it started. The person may use them on any agent.
 //! - `read_agent` is **safe**. An agent may read itself and the agents it started.
 //! - `show_agent` is **safe**: it puts a pane on screen, as `show_screen` does.
+//!
+//! # Handing work to a role
+//!
+//! `hand_off {role, task, context?, wait_seconds?}` starts a role from the agent catalog
+//! (`agents::catalog`, design/desk-and-mind-2026-09-23.md section 5) on its first attached mind
+//! that can give it a conversation of its own, with the role's brief, the task and the context as
+//! its first turn. It is gated like `new_agent` — **sensitive**, the same depth-one and
+//! three-children rules through [`may_start_child`], the child starts with nothing of its parent's
+//! — and the role's **reach caps it further**: before its first turn is sent the agent is held to
+//! the role's surfaces and ceiling on every door (`agents::reaches`), so an act outside them is
+//! refused whoever the door is. An agent held to a reach cannot start a plain agent (which has
+//! none) and cannot hand work to a role whose ceiling is above its own. With `wait_seconds` the
+//! answer waits for the role's first turn to end, off the UI thread, and hands back what it said.
+
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use slint::ComponentHandle;
-use yantrik_app_runtime::control::{Action, App as ControlSurface, Param};
+use yantrik_app_runtime::control::{self, Action, App as ControlSurface, Param};
 use yantrik_harness::Host;
+use yantrik_ipc_transport::gate;
 
-use crate::agents::{self, launch, AgentId, Store};
+use crate::agents::catalog::{self, Catalog};
+use crate::agents::model::{Item, Turn};
+use crate::agents::{self, launch, reaches, AgentId, Store};
 use crate::App;
 
 /// How many live agents one agent may have started (design decision 1).
 pub const MAX_CHILDREN: usize = 3;
+
+/// The longest `hand_off` waits for a role's answer, as `agent_run` waits for a command.
+pub const HAND_OFF_WAIT_MOST: u64 = 600;
+
+/// The most `context` a hand-off carries into the role's first turn.
+pub const CONTEXT_MOST_BYTES: usize = 32 * 1024;
+
+/// The most of a role's answer `hand_off` hands back; `read_agent` has all of it.
+const ANSWER_MOST_BYTES: usize = 32 * 1024;
 
 /// How many turns `read_agent` gives when not told, and the most it gives.
 const READ_TURNS: usize = 3;
@@ -83,8 +110,8 @@ const WHO: &str = " You are the agent named by the agent token your call carries
                    (YANTRIK_AGENT_TOKEN in yos's environment) — never an argument; with no token, \
                    the call is the person's.";
 
-/// The five actions as published.
-fn specs() -> [Action; 5] {
+/// The six actions as published.
+fn specs() -> [Action; 6] {
     [
         // Sensitive: it starts work that runs as the person, and more of it than one call.
         Action::new(
@@ -145,13 +172,46 @@ fn specs() -> [Action; 5] {
         )
         .risk("safe")
         .arg(Param::text("agent").describe("The agent: `<mind>:<conversation>`")),
+        // Sensitive, as `new_agent` is: it starts work that runs as the person.
+        Action::new(
+            "hand_off",
+            &format!(
+                "Hand a piece of work to a role from the agent catalog — Researcher, Planner, \
+                 Coder, Reviewer, Red team, Writer, Chair, Scribe, or the person's own; `describe \
+                 shell` lists them under `catalog` with what each is for, what it may touch and \
+                 whether a mind it runs on is attached. It starts that role's agent on its first \
+                 attached mind, in its own pane, with the role's standing instructions, your task \
+                 and your context as its first prompt. It can act only within the role's reach: \
+                 anything else it tries is refused. Without `wait_seconds` it answers at once with \
+                 the agent's id; with it, it waits up to that long for the role's answer and hands \
+                 it back. It starts with nothing of yours: no grants. An agent another agent \
+                 started cannot hand off; one agent holds at most {MAX_CHILDREN} running at once, \
+                 and the desktop caps how many run in all.{WHO}"
+            ),
+        )
+        .risk("sensitive")
+        .arg(Param::text("role").describe(
+            "The role: its id as `describe shell` lists under `catalog` (reviewer, coder, red-team …), or its name",
+        ))
+        .arg(Param::text("task").describe("What it is to do, in full: its first prompt, after the role's own instructions"))
+        .arg(Param::text("context").optional().describe(
+            "What it should read first — the change to review, the answers to weigh. At most 32 KiB",
+        ))
+        .arg(Param::number("wait_seconds").optional().describe(
+            "Seconds to wait for its answer. Left out, the answer is its id at once. At most 600",
+        )),
     ]
 }
 
-/// The five actions, for the shell's surface.
+/// The six actions, for the shell's surface.
 pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
-    let [new, send, stop, read, show] = specs();
+    let [new, send, stop, read, show, hand] = specs();
     let show_ui = ui.as_weak();
+    // ── Agents catalog: this shell's own dispatch holds a role's agent to its reach from the
+    // registry, in-process, as it spends grants in-process; and nothing an earlier run published
+    // is held any more — those tokens are gone.
+    yantrik_ipc_transport::reach::read_reach_with(reaches::lookup);
+    reaches::reset();
     surface
         .action(new, |args| new_agent(host()?, &caller()?, &text(args, "mind"), &text(args, "task")))
         .action(send, |args| send_to_agent(host()?, &caller()?, &agent_arg(args)?, &text(args, "text")))
@@ -168,6 +228,37 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             let raised = crate::windows::raise_shell().is_ok();
             Ok(json!({ "showing": agent, "raised": raised }))
         })
+        .action(hand, |args| {
+            let wait = wait_arg(args)?;
+            let handed = hand_off(
+                host()?,
+                &caller()?,
+                &Catalog::load(),
+                &text(args, "role"),
+                &text(args, "task"),
+                &text(args, "context"),
+            )?;
+            let Some(wait) = wait else { return Ok(handed.answer(None)) };
+            // The wait is for the role's answer, which may be minutes away: off the UI thread.
+            let work = move || Ok(handed.answer(Some((wait, wait_for_answer(&handed.agent, wait)))));
+            control::answer_later(work).map(|()| json!({ "answering": "off the UI thread" })).or_else(|work| work())
+        })
+}
+
+/// `wait_seconds`: none, or a number of seconds up to [`HAND_OFF_WAIT_MOST`]. Zero is none.
+fn wait_arg(args: &Value) -> Result<Option<Duration>, String> {
+    let Some(given) = args.get("wait_seconds").filter(|v| !v.is_null()) else { return Ok(None) };
+    let secs = given
+        .as_f64()
+        .or_else(|| given.as_str().and_then(|s| s.trim().parse().ok()))
+        .ok_or_else(|| "`wait_seconds` is a number of seconds.".to_string())?;
+    if !(0.0..=HAND_OFF_WAIT_MOST as f64).contains(&secs) {
+        return Err(format!(
+            "`wait_seconds` is between 0 and {HAND_OFF_WAIT_MOST}. Left out, hand_off answers at once \
+             with the agent's id, and `read_agent` shows its answer when it comes."
+        ));
+    }
+    Ok((secs > 0.0).then(|| Duration::from_secs_f64(secs)))
 }
 
 // ── The rules ─────────────────────────────────────────────────────
@@ -248,6 +339,15 @@ pub fn new_agent(host: &Host, caller: &Caller, mind: &str, task: &str) -> Result
         Caller::Agent(me) => Some(me),
     };
     if let Some(parent) = parent {
+        // A plain agent has no reach, so one held to a reach may not start one: that would be a
+        // way out of its own.
+        if let Some(mine) = reaches::of(parent) {
+            return Err(format!(
+                "`{parent}` is the {}, which works within a reach, and an agent started on a mind \
+                 alone has none. Hand the work to a role from the catalog with hand_off instead.",
+                mine.name
+            ));
+        }
         let live: Vec<AgentId> = host.agents().into_iter().map(|a| a.id).collect();
         agents::store().read(|s| may_start_child(parent, s, &live))?;
     }
@@ -335,6 +435,219 @@ pub fn read_agent(caller: &Caller, target: &AgentId, last: Option<&Value>) -> Re
     })
 }
 
+// ── Handing work to a role ────────────────────────────────────────
+
+/// What `hand_off` started.
+#[derive(Clone, Debug)]
+pub struct Handed {
+    pub agent: AgentId,
+    pub role: catalog::Role,
+    pub mind: String,
+}
+
+/// How a role's first turn came out, as far as a wait saw.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answered {
+    /// Its first turn ended within the wait.
+    pub done: bool,
+    /// And ended well — not failed, not stopped.
+    pub ok: bool,
+    /// What it said in that turn.
+    pub text: String,
+}
+
+/// Start `role` on `task`, for `caller`: the rules of `new_agent`, then the role's own — its first
+/// attached mind that can give it a conversation of its own, and its reach held on every door
+/// before its first turn is sent.
+pub fn hand_off(host: &Host, caller: &Caller, catalog: &Catalog, role: &str, task: &str, context: &str) -> Result<Handed, String> {
+    if role.trim().is_empty() {
+        return Err(format!("`role` is empty: a role from the catalog — {}.", catalog.listing()));
+    }
+    let Some(role) = catalog.find(role) else {
+        return Err(format!(
+            "There is no role `{}` in the catalog; it has {}. `describe shell` lists them under `catalog`.",
+            role.trim(),
+            catalog.listing()
+        ));
+    };
+    if task.trim().is_empty() {
+        return Err(format!("`task` is empty: what the {} is to do.", role.name));
+    }
+    if context.len() > CONTEXT_MOST_BYTES {
+        return Err(format!(
+            "`context` is {} KiB; at most {} KiB goes into a first turn. Put the rest in a file and \
+             name it in the task.",
+            context.len() / 1024,
+            CONTEXT_MOST_BYTES / 1024
+        ));
+    }
+    let parent = match caller {
+        Caller::NoAgent => None,
+        Caller::Agent(me) => Some(me),
+    };
+    if let Some(parent) = parent {
+        let live: Vec<AgentId> = host.agents().into_iter().map(|a| a.id).collect();
+        agents::store().read(|s| may_start_child(parent, s, &live))?;
+        // A reach caps the agents it hands work to as well: never above its own ceiling.
+        if let Some(mine) = reaches::of(parent) {
+            if gate::grade(&role.reach.ceiling) > gate::grade(&mine.ceiling) {
+                return Err(format!(
+                    "`{parent}` is the {}, at most `{}`, and cannot hand work to the {}, whose reach \
+                     goes up to `{}`: a role never hands work above its own ceiling.",
+                    mine.name, mine.ceiling, role.name, role.reach.ceiling
+                ));
+            }
+        }
+    }
+    let mind = role.pick_mind(&catalog::minds_now(host))?;
+    let hold = |agent: &AgentId| reaches::hold(host, agent, role);
+    let how = launch::Start { title: Some(task.trim()), role: Some(role.meta()), before_first_turn: Some(&hold) };
+    let agent = launch::start_with(host, &mind, &role.first_turn(task, context), parent, how)?;
+    watch_budget(host.clone(), agent.clone(), role.name.clone(), role.budget.minutes);
+    tracing::info!(agent = %agent, role = %role.id, mind = %mind, parent = ?parent.map(|p| p.to_string()), "work was handed to a catalog role");
+    Ok(Handed { agent, role: role.clone(), mind })
+}
+
+/// The Agents screen's New agent → from the catalog: the person hands `task` to `role`.
+pub fn hand_off_from_screen(role: &str, task: &str) -> Result<AgentId, String> {
+    hand_off(host()?, &Caller::NoAgent, &Catalog::load(), role, task, "").map(|handed| handed.agent)
+}
+
+/// A role's budget in minutes, held: when it runs out the agent is stopped — its conversation let
+/// go, its place under the desktop's cap freed — and its pane says why. Ends early once it is
+/// stopped some other way.
+fn watch_budget(host: Host, agent: AgentId, name: String, minutes: u32) {
+    let budget = Duration::from_secs(u64::from(minutes) * 60);
+    let spawned = std::thread::Builder::new().name("agent-budget".into()).spawn(move || {
+        let started = Instant::now();
+        let live = |host: &Host| host.agents().iter().any(|a| a.id == agent);
+        loop {
+            let left = budget.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_secs(5)));
+            if !live(&host) {
+                return;
+            }
+        }
+        if live(&host) {
+            let _ = launch::stop_on(&host, &agent);
+            agents::store().note(&agent, &format!("Its budget of {minutes} minutes as the {name} ran out, so it was stopped."));
+            tracing::info!(agent = %agent, minutes, "a role's budget ran out; it was stopped");
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "could not watch a role's budget");
+    }
+}
+
+/// Wait up to `wait` for a role's first turn to end, and read what it said.
+pub fn wait_for_answer(agent: &AgentId, wait: Duration) -> Answered {
+    let deadline = Instant::now() + wait;
+    loop {
+        let seen = agents::store().read(|s| {
+            let first = s.agent(agent)?.turns.iter().find(|t| !t.prompt.is_empty())?;
+            first.ended.map(|_| (first.ok == Some(true), turn_text(first)))
+        });
+        if let Some((ok, text)) = seen {
+            return Answered { done: true, ok, text };
+        }
+        if Instant::now() >= deadline {
+            return Answered { done: false, ok: false, text: String::new() };
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// What a turn said, in words: its text, and — for a turn that did not end well — the shell's
+/// notes on why. Cut at [`ANSWER_MOST_BYTES`], saying so.
+fn turn_text(turn: &Turn) -> String {
+    let mut text = String::new();
+    for item in &turn.items {
+        match item {
+            Item::Text(t) => text.push_str(&t.text()),
+            Item::Note(note) if turn.ok != Some(true) => text.push_str(&format!("\n[{note}]\n")),
+            _ => {}
+        }
+    }
+    let text = text.trim();
+    if text.len() <= ANSWER_MOST_BYTES {
+        return text.to_string();
+    }
+    let mut cut = ANSWER_MOST_BYTES;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n… {} more bytes; `read_agent` has the rest.", &text[..cut], text.len() - cut)
+}
+
+impl Handed {
+    /// What `hand_off` answers: the agent, the role, where it runs and what it may touch — and,
+    /// after a wait, what it said or that it is still working.
+    pub fn answer(&self, waited: Option<(Duration, Answered)>) -> Value {
+        let role = &self.role;
+        let who = format!("the {} (`{}`, on {})", role.name, self.agent, self.mind);
+        let mut out = json!({
+            "agent": self.agent,
+            "role": role.id,
+            "role_name": role.name,
+            "mind": self.mind,
+            "reach": role.reach.text(),
+            "budget": { "turns": role.budget.turns, "minutes": role.budget.minutes },
+        });
+        let follow = format!(
+            "`read_agent` with agent `{agent}` shows how it is going; `send_to_agent` says more; \
+             `stop_agent` stops it.",
+            agent = self.agent
+        );
+        let said = match waited {
+            None => format!(
+                "Handed to {who}. It works on its own, in its own pane, within its reach ({reach}), \
+                 for up to {turns} turns and {minutes} minutes, and it has none of your grants. {follow}",
+                reach = role.reach.text(),
+                turns = role.budget.turns,
+                minutes = role.budget.minutes,
+            ),
+            Some((_, answered)) if answered.done => {
+                out["done"] = true.into();
+                out["ok"] = answered.ok.into();
+                out["answer"] = answered.text.clone().into();
+                let how = if answered.ok { "answered" } else { "could not finish; what it said" };
+                let text = if answered.text.is_empty() { "(it said nothing)".to_string() } else { answered.text };
+                format!("{} {how}:\n\n{text}", capitalised(&who))
+            }
+            Some((wait, _)) => {
+                out["done"] = false.into();
+                format!(
+                    "Handed to {who}; it is still working after {} s. {follow}",
+                    wait.as_secs()
+                )
+            }
+        };
+        out["said"] = said.into();
+        out
+    }
+}
+
+/// Whether `agent` may be shown asking for `app.action`, graded `grade`: an agent held to a
+/// role's reach is refused, in the reach's words, before a card for an act its reach refuses
+/// would reach the person — the act itself would be refused on its door whatever they pressed.
+pub fn within_reach(agent: &AgentId, app: &str, action: &str, grade: &str) -> Result<(), String> {
+    match reaches::of(agent) {
+        Some(reach) => yantrik_ipc_transport::reach::within(&reach, app, action, grade),
+        None => Ok(()),
+    }
+}
+
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,10 +672,218 @@ mod tests {
         }
         let grade = |name: &str| specs().into_iter().find(|s| s.name == name).unwrap().permission;
         assert_eq!(
-            [grade("new_agent"), grade("send_to_agent"), grade("stop_agent"), grade("read_agent"), grade("show_agent")],
-            ["sensitive", "standard", "standard", "safe", "safe"],
-            "the grades the design settled"
+            [grade("new_agent"), grade("send_to_agent"), grade("stop_agent"), grade("read_agent"), grade("show_agent"), grade("hand_off")],
+            ["sensitive", "standard", "standard", "safe", "safe", "sensitive"],
+            "the grades the design settled: hand_off is gated like new_agent"
         );
+    }
+
+    // ── Handing work to a role ──
+
+    fn attach(host: &Host, id: &str, conversations: bool) -> String {
+        let attach = json!({ "id": id, "name": id, "conversations": conversations });
+        host.handle_from(protocol::ATTACH, &attach, Some(std::process::id())).unwrap()["session"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn shipped() -> Catalog {
+        Catalog::from_layers(&catalog::SHIPPED, &[])
+    }
+
+    /// Every turn waiting for a harness, by conversation.
+    fn handed_out(host: &Host, session: &str) -> std::collections::HashMap<String, Value> {
+        let mut out = std::collections::HashMap::new();
+        for _ in 0..16 {
+            let turn = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+            let Some(conversation) = turn["conversation"].as_str() else { break };
+            out.insert(conversation.to_string(), turn.clone());
+        }
+        out
+    }
+
+    fn settled(agent: &AgentId) -> bool {
+        (0..100).any(|_| {
+            let done = agents::store().read(|s| s.agent(agent).is_some_and(|a| a.open_turn().is_none()));
+            if !done {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            done
+        })
+    }
+
+    /// The whole of hand_off against a real host: the role's preferred attached mind, a first turn
+    /// of brief, task and context with a token of its own, a row named for the task with its role
+    /// — and the role's reach held before that first turn, on the shell's registry and in the file
+    /// a door in another process reads, which never holds the token. Then in reach, off its
+    /// surfaces and above its ceiling, as every door decides them; and a stop lets it go.
+    #[test]
+    fn hand_off_starts_the_role_on_its_first_attached_mind_held_to_its_reach() {
+        let host = Host::new(vec![]);
+        let pi = attach(&host, "pi", true);
+        let deepseek = attach(&host, "deepseek", true);
+        let handed = hand_off(&host, &Caller::NoAgent, &shipped(), "Reviewer", "review the change in ~/src/app", "diff --git a/x b/x").unwrap();
+        assert_eq!((handed.mind.as_str(), handed.agent.harness()), ("deepseek", "deepseek"), "the Reviewer runs on deepseek first");
+
+        let first = host.handle(protocol::POLL, &json!({ "session": deepseek })).unwrap();
+        let text = first["text"].as_str().unwrap();
+        for says in ["You are the Reviewer", "Find what is wrong with a change", "The task:\nreview the change in ~/src/app", "Read this first:\ndiff --git a/x b/x"] {
+            assert!(text.contains(says), "{says:?} missing:\n{text}");
+        }
+        let token = first["agent_token"].as_str().unwrap().to_string();
+        assert!(host.handle(protocol::POLL, &json!({ "session": pi })).unwrap()["turn_id"].is_null(), "nothing went to pi");
+
+        let (title, role) = agents::store().read(|s| s.agent(&handed.agent).map(|a| (a.meta.title.clone(), a.meta.role.clone()))).unwrap();
+        assert_eq!(title, "review the change in ~/src/app", "its row is named for the task, not the brief");
+        assert_eq!(role.map(|r| (r.name, r.reach)), Some(("Reviewer".to_string(), "editor, documents and notes · at most safe".to_string())));
+
+        let held = reaches::lookup(&token).expect("the shell's own dispatch holds it");
+        assert_eq!(held.agent, handed.agent.0);
+        assert_eq!(reaches::read_as_a_door(&token).unwrap(), Some(held.clone()), "and so does every other door");
+        assert!(!std::fs::read_to_string(reaches::path()).unwrap().contains(&token), "the file keeps a digest, never the token");
+
+        use yantrik_ipc_transport::reach::within;
+        assert!(within(&held, "notes", "list_notes", "safe").is_ok(), "in reach");
+        let err = within(&held, "files", "move", "safe").unwrap_err();
+        assert!(err.starts_with("REACH: files.move is outside the Reviewer's reach") && err.contains(&handed.agent.0), "{err}");
+        let err = within(&held, "notes", "new_note", "standard").unwrap_err();
+        assert!(err.contains("above the Reviewer's `safe` ceiling"), "{err}");
+        let err = within(&held, "shell", "agent_run", "sensitive").unwrap_err();
+        assert!(err.starts_with("REACH: shell.agent_run is outside"), "a reviewer runs no commands: {err}");
+        // Asking the person about an act its reach refuses is refused too, in the same words.
+        let err = within_reach(&handed.agent, "files", "move", "sensitive").unwrap_err();
+        assert!(err.starts_with("REACH:"), "{err}");
+        assert!(within_reach(&AgentId("pi:c-noreach".into()), "files", "move", "sensitive").is_ok(), "an agent with no role has no reach");
+
+        let answer = handed.answer(None);
+        let said = answer["said"].as_str().unwrap();
+        assert!(said.starts_with(&format!("Handed to the Reviewer (`{}`, on deepseek)", handed.agent)), "{said}");
+        assert!(said.contains("editor, documents and notes · at most safe") && said.contains("4 turns and 15 minutes"), "{said}");
+        assert!(!answer.to_string().contains(&token), "{answer}");
+
+        stop_agent(&host, &Caller::NoAgent, &handed.agent).unwrap();
+        assert_eq!(reaches::lookup(&token), None, "stopped, it is let go");
+        assert_eq!(reaches::read_as_a_door(&token).unwrap(), None);
+    }
+
+    /// Down its list to the first mind attached that can give it a conversation of its own; a
+    /// one-conversation mind is never used, and none at all is said plainly with nothing started.
+    #[test]
+    fn a_role_falls_back_down_its_list_and_is_refused_plainly_when_none_of_its_minds_is_attached() {
+        let host = Host::new(vec![]);
+        attach(&host, "hermes", false);
+        let err = hand_off(&host, &Caller::NoAgent, &shipped(), "reviewer", "review it", "").unwrap_err();
+        assert!(err.starts_with("No mind the Reviewer runs on is attached: it runs on deepseek, pi, openclaw"), "{err}");
+        assert!(err.contains("hermes holds one conversation at a time — the person's own"), "{err}");
+        assert!(host.agents().is_empty(), "nothing was started, and the person's own conversation with hermes is untouched");
+
+        attach(&host, "pi", true);
+        let handed = hand_off(&host, &Caller::NoAgent, &shipped(), "reviewer", "review it", "").unwrap();
+        assert_eq!(handed.mind, "pi", "past deepseek, which is not attached, to pi");
+
+        let err = hand_off(&host, &Caller::NoAgent, &shipped(), "janitor", "x", "").unwrap_err();
+        assert!(err.contains("no role `janitor`") && err.contains("reviewer (Reviewer)"), "{err}");
+        assert!(hand_off(&host, &Caller::NoAgent, &shipped(), "", "x", "").unwrap_err().contains("`role` is empty"));
+        assert!(hand_off(&host, &Caller::NoAgent, &shipped(), "reviewer", "  ", "").unwrap_err().contains("`task` is empty"));
+        let err = hand_off(&host, &Caller::NoAgent, &shipped(), "reviewer", "x", &"a".repeat(40 * 1024)).unwrap_err();
+        assert!(err.contains("at most 32 KiB"), "{err}");
+        stop_agent(&host, &Caller::NoAgent, &handed.agent).unwrap();
+    }
+
+    /// new_agent's rules, word for word — depth one, three children, nothing of the parent's — and
+    /// the reach capping further: an agent held to a reach cannot hand work above its own ceiling,
+    /// nor start a plain agent that would have no reach at all.
+    #[test]
+    fn hand_off_meets_new_agents_rules_and_a_reach_caps_what_it_hands_on() {
+        let host = Host::new(vec![]);
+        let session = attach(&host, "pi", true);
+        let started = new_agent(&host, &Caller::NoAgent, "pi", "plan the release").unwrap();
+        let parent = AgentId(started["agent"].as_str().unwrap().to_string());
+        let parent_token = handed_out(&host, &session)[parent.conversation()]["agent_token"].as_str().unwrap().to_string();
+        let as_parent = Caller::Agent(parent.clone());
+
+        let kids: Vec<Handed> = ["researcher", "writer", "scribe"]
+            .iter()
+            .map(|role| hand_off(&host, &as_parent, &shipped(), role, &format!("{role}'s part"), "").unwrap())
+            .collect();
+        let err = hand_off(&host, &as_parent, &shipped(), "planner", "a fourth", "").unwrap_err();
+        assert!(err.contains("already has 3 agents running"), "{err}");
+        let err = hand_off(&host, &Caller::Agent(kids[0].agent.clone()), &shipped(), "chair", "weigh them", "").unwrap_err();
+        assert!(err.contains("one level only"), "{err}");
+
+        let turns = handed_out(&host, &session);
+        for kid in &kids {
+            let turn = &turns[kid.agent.conversation()];
+            assert!(!turn.to_string().contains(&parent_token), "nothing of the parent's token");
+            assert_ne!(turn["agent_token"].as_str().unwrap(), parent_token, "a token of its own");
+            let parent_of = agents::store().read(|s| s.agent(&kid.agent).and_then(|a| a.meta.parent.clone()));
+            assert_eq!(parent_of, Some(parent.clone()), "its row says who handed it the work");
+        }
+        let stopped = stop_agent(&host, &Caller::NoAgent, &parent).unwrap();
+        assert_eq!(stopped["children_stopped"].as_array().map(Vec::len), Some(3), "{stopped}");
+
+        // A Reviewer (safe) the person started: it may hand work to the Red team (safe), not to the
+        // Coder (sensitive), and it may not start a plain agent.
+        let reviewer = hand_off(&host, &Caller::NoAgent, &shipped(), "reviewer", "review it", "").unwrap();
+        let as_reviewer = Caller::Agent(reviewer.agent.clone());
+        let err = hand_off(&host, &as_reviewer, &shipped(), "coder", "fix it", "").unwrap_err();
+        assert!(err.contains("is the Reviewer, at most `safe`, and cannot hand work to the Coder"), "{err}");
+        let err = new_agent(&host, &as_reviewer, "pi", "do anything").unwrap_err();
+        assert!(err.contains("works within a reach"), "{err}");
+        let red = hand_off(&host, &as_reviewer, &shipped(), "red-team", "attack it", "").unwrap();
+        assert_eq!(red.role.id, "red-team");
+        stop_agent(&host, &Caller::NoAgent, &reviewer.agent).unwrap();
+    }
+
+    /// With a wait, hand_off hands back what the role said once its first turn ends; a wait that
+    /// runs out says it is still working. And a role's turns are its budget.
+    #[test]
+    fn hand_off_with_a_wait_hands_back_the_roles_answer_and_its_turns_are_a_budget() {
+        let host = Host::new(vec![]);
+        let session = attach(&host, "pi", true);
+        let handed = hand_off(&host, &Caller::NoAgent, &shipped(), "chair", "weigh the three answers", "A says ship; B says wait").unwrap();
+        let harness = {
+            let (host, session) = (host.clone(), session.clone());
+            std::thread::spawn(move || {
+                let turn = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+                let id = turn["turn_id"].clone();
+                host.handle(protocol::CHUNK, &json!({ "session": session, "turn_id": id, "delta": "Verdict — ship on Friday." })).unwrap();
+                host.handle(protocol::COMPLETE, &json!({ "session": session, "turn_id": id })).unwrap();
+            })
+        };
+        let answered = wait_for_answer(&handed.agent, Duration::from_secs(10));
+        harness.join().unwrap();
+        assert_eq!(answered, Answered { done: true, ok: true, text: "Verdict — ship on Friday.".into() });
+        let answer = handed.answer(Some((Duration::from_secs(10), answered)));
+        assert_eq!((answer["done"].clone(), answer["answer"].clone()), (json!(true), json!("Verdict — ship on Friday.")));
+        let said = answer["said"].as_str().unwrap();
+        assert!(said.starts_with(&format!("The Chair (`{}`, on pi) answered:\n\nVerdict", handed.agent)), "{said}");
+
+        // The Chair has two turns: a second is sent, a third is refused.
+        assert!(settled(&handed.agent));
+        send_to_agent(&host, &Caller::NoAgent, &handed.agent, "and C says never").unwrap();
+        let turn = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+        host.handle(protocol::COMPLETE, &json!({ "session": session, "turn_id": turn["turn_id"] })).unwrap();
+        assert!(settled(&handed.agent));
+        let err = send_to_agent(&host, &Caller::NoAgent, &handed.agent, "one more").unwrap_err();
+        assert!(err.contains("is the Chair, whose budget is 2 turns, and it has had them all"), "{err}");
+
+        // A wait that runs out.
+        let other = hand_off(&host, &Caller::NoAgent, &shipped(), "scribe", "summarise it", "").unwrap();
+        let answered = wait_for_answer(&other.agent, Duration::from_millis(300));
+        assert!(!answered.done);
+        let said = other.answer(Some((Duration::from_millis(300), answered)))["said"].as_str().unwrap().to_string();
+        assert!(said.contains("it is still working after 0 s") && said.contains("`read_agent` with agent"), "{said}");
+
+        assert_eq!(wait_arg(&json!({})).unwrap(), None);
+        assert_eq!(wait_arg(&json!({ "wait_seconds": 0 })).unwrap(), None, "zero is not waiting");
+        assert_eq!(wait_arg(&json!({ "wait_seconds": 90 })).unwrap(), Some(Duration::from_secs(90)));
+        assert!(wait_arg(&json!({ "wait_seconds": 601 })).is_err());
+        assert!(wait_arg(&json!({ "wait_seconds": "soon" })).is_err());
+        for agent in [&handed.agent, &other.agent] {
+            stop_agent(&host, &Caller::NoAgent, agent).unwrap();
+        }
     }
 
     /// Depth one, three children, and the host's own cap — checked without a host.

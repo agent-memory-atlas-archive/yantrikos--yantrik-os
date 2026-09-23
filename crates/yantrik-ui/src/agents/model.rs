@@ -243,6 +243,25 @@ pub struct AgentMeta {
     /// Whether its harness holds more than one conversation. One that does not says so in the
     /// pane (design decision 1) rather than pretending.
     pub conversations: bool,
+    /// The catalog role it was started as (`hand_off`), as the role stood then. `None` for an
+    /// agent started on a mind alone.
+    pub role: Option<RoleMeta>,
+}
+
+/// The catalog role an agent was started as, kept with the agent: what its row, its details and
+/// `describe shell` say, and the budget it is held to — as the role was when it started, so a role
+/// edited later does not rewrite what an older agent was given.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleMeta {
+    /// The role's id in the catalog (`reviewer`).
+    pub id: String,
+    /// The role's name as a person reads it (`Reviewer`).
+    pub name: String,
+    /// Its reach in words: "editor, documents and notes · at most safe".
+    pub reach: String,
+    /// Its budget: turns, and minutes from its start.
+    pub turns: u32,
+    pub minutes: u32,
 }
 
 impl AgentMeta {
@@ -255,6 +274,7 @@ impl AgentMeta {
             parent: None,
             started: 0,
             conversations: false,
+            role: None,
         }
     }
 }

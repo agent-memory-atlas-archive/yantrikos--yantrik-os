@@ -14,7 +14,7 @@
 
 use yantrik_harness::{Host, Turn};
 
-use super::model::{title_of, AgentId, State};
+use super::model::{title_of, AgentId, RoleMeta, State};
 
 fn host() -> Result<&'static Host, String> {
     crate::wire::harness::host().ok_or_else(|| "the harness host is not running".to_string())
@@ -42,6 +42,26 @@ pub fn start(mind: &str, prompt: &str) -> Result<AgentId, String> {
 /// context, as any agent's is. No grant, request id, note or token of the parent's goes with it,
 /// and the host mints its own token for it (design decision 1: "a child starts with no grants").
 pub fn start_on(host: &Host, mind: &str, prompt: &str, parent: Option<&AgentId>) -> Result<AgentId, String> {
+    start_with(host, mind, prompt, parent, Start::default())
+}
+
+/// What more there is to starting an agent as a role from the catalog (`hand_off`).
+#[derive(Default)]
+pub struct Start<'a> {
+    /// Its row's title, when that is not its first prompt: a role's first prompt is its brief and
+    /// then the task, and its row is named for the task.
+    pub title: Option<&'a str>,
+    /// The role it is started as. A role is only ever a conversation of its own — never a
+    /// one-conversation harness's `main`, which is the person's own.
+    pub role: Option<RoleMeta>,
+    /// Run once the conversation exists and before its first turn is sent: where a role's reach is
+    /// published, so there is no moment in which the agent can act unheld. An `Err` ends the start,
+    /// and the conversation is let go.
+    pub before_first_turn: Option<&'a dyn Fn(&AgentId) -> Result<(), String>>,
+}
+
+/// [`start_on`], with what a role adds.
+pub fn start_with(host: &Host, mind: &str, prompt: &str, parent: Option<&AgentId>, how: Start<'_>) -> Result<AgentId, String> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err("Say what the agent is to do.".into());
@@ -49,6 +69,16 @@ pub fn start_on(host: &Host, mind: &str, prompt: &str, parent: Option<&AgentId>)
     if builtin(mind) {
         return Err("The built-in companion answers in the Lens; it cannot be started as an agent yet.".into());
     }
+    if let Some(role) = &how.role {
+        if host.holds_conversations(mind) != Some(true) {
+            return Err(format!(
+                "{mind} is not attached as a mind that holds a conversation per agent, so it cannot \
+                 take the {} role: a role is never started in the person's own conversation.",
+                role.name
+            ));
+        }
+    }
+    let fresh = how.role.is_some();
     let agent = match host.start_agent(mind) {
         Ok(agent) => agent,
         // One conversation, already open: the agent is that conversation — for the person, who
@@ -57,7 +87,7 @@ pub fn start_on(host: &Host, mind: &str, prompt: &str, parent: Option<&AgentId>)
         Err(why) => {
             let main = AgentId::new(mind, AgentId::MAIN);
             let continues = host.agents().iter().any(|a| a.id == main && !a.conversations);
-            if !continues || parent.is_some() {
+            if !continues || parent.is_some() || fresh {
                 return Err(why);
             }
             main
@@ -67,20 +97,29 @@ pub fn start_on(host: &Host, mind: &str, prompt: &str, parent: Option<&AgentId>)
     if busy {
         return Err(format!("`{agent}` is still on its last turn; one turn at a time."));
     }
+    if let Some(before) = how.before_first_turn {
+        if let Err(why) = before(&agent) {
+            host.stop_agent(&agent);
+            super::reaches::release(&agent);
+            return Err(why);
+        }
+    }
     let answer = match host.send_to(&agent, turn(prompt)) {
         Ok(answer) => answer,
         Err(why) => {
-            if parent.is_some() {
+            if parent.is_some() || fresh {
                 // Nothing was asked of it: let the conversation go rather than hold a place
                 // under the cap for a child that never started.
                 host.stop_agent(&agent);
+                super::reaches::release(&agent);
             }
             return Err(why);
         }
     };
     let mut meta = super::feed::meta_for(&agent);
-    meta.title = title_of(prompt);
+    meta.title = title_of(how.title.unwrap_or(prompt));
     meta.parent = parent.cloned();
+    meta.role = how.role;
     super::store().upsert_agent(meta);
     super::store().open_turn(&agent, prompt);
     super::feed::record(agent.clone(), answer, false);
@@ -107,10 +146,10 @@ pub fn send_on(host: &Host, agent: &AgentId, text: &str) -> Result<(), String> {
     if builtin(agent.harness()) {
         return Err("The built-in companion answers in the Lens.".into());
     }
-    let (busy, gone) = super::store().read(|s| {
+    let (busy, gone, spent) = super::store().read(|s| {
         s.agent(agent)
-            .map(|a| (a.open_turn().is_some(), a.state == State::HarnessGone))
-            .unwrap_or((false, false))
+            .map(|a| (a.open_turn().is_some(), a.state == State::HarnessGone, over_budget(a)))
+            .unwrap_or((false, false, None))
     });
     if busy {
         return Err("It is still on its last turn; one turn at a time.".into());
@@ -118,11 +157,29 @@ pub fn send_on(host: &Host, agent: &AgentId, text: &str) -> Result<(), String> {
     if gone {
         return Err("Its harness is gone. Start it again, then ask.".into());
     }
+    if let Some(spent) = spent {
+        return Err(spent);
+    }
     let answer = host.send_to(agent, turn(text))?;
     super::store().upsert_agent(super::feed::meta_for(agent));
     super::store().open_turn(agent, text);
     super::feed::record(agent.clone(), answer, false);
     Ok(())
+}
+
+/// Why a role's agent may not be given another turn: its budget's turns are all used. `None` for
+/// an agent with turns left, or with no role.
+pub fn over_budget(a: &super::model::Agent) -> Option<String> {
+    let role = a.meta.role.as_ref()?;
+    // Turns it was asked something in; a turn the shell opened only to say something has no prompt.
+    let used = a.turns.iter().filter(|t| !t.prompt.is_empty()).count();
+    (used >= role.turns as usize).then(|| {
+        format!(
+            "`{}` is the {}, whose budget is {} turns, and it has had them all. Start another from \
+             the catalog to go on.",
+            a.meta.id, role.name, role.turns
+        )
+    })
 }
 
 /// What a Stop came to.
@@ -174,6 +231,8 @@ pub fn stop_on(host: &Host, agent: &AgentId) -> Result<Stopped, String> {
 fn stop_one(host: &Host, agent: &AgentId) -> Stopped {
     let killed = crate::control_agent_terminal::jobs().kill_agent(agent);
     let stopped = host.stop_agent(agent);
+    // Stopped, it acts no more; its token names nothing now either.
+    super::reaches::release(agent);
     // A card for work that is no longer happening is refused, never granted. The approval store's
     // own tick redraws the Lens, and the pane with it.
     let approvals = crate::approvals::withdraw_for_agent(&agent.0).len();

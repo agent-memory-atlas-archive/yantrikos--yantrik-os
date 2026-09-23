@@ -38,6 +38,8 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+# The agent catalog's roles are TOML files (src/agents/catalog.rs, config/agents/).
+toml = "0.8"
 # Notification timestamps arrive from the service as RFC 3339; the centre draws "4 minutes ago".
 chrono = { workspace = true }
 cpal = { workspace = true }

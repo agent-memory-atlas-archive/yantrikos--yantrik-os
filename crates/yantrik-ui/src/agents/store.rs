@@ -124,6 +124,10 @@ impl Store {
                 if meta.parent.is_some() {
                     known.parent = meta.parent;
                 }
+                // A role is set once, when the agent is started as one; nothing takes it away.
+                if meta.role.is_some() {
+                    known.role = meta.role;
+                }
                 known.conversations = meta.conversations;
                 self.mark(i);
             }
@@ -1030,6 +1034,8 @@ struct AgentRecord {
     started: u64,
     #[serde(default)]
     conversations: bool,
+    #[serde(default)]
+    role: Option<RoleMeta>,
     state: State,
     since: u64,
     #[serde(default)]
@@ -1133,6 +1139,7 @@ fn serialize(agent: &Agent) -> String {
         parent: meta.parent.clone(),
         started: meta.started,
         conversations: meta.conversations,
+        role: meta.role.clone(),
         state: agent.state,
         since: agent.since,
         status: agent.status.clone(),
@@ -1217,6 +1224,7 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
             parent: record.parent,
             started: record.started,
             conversations: record.conversations,
+            role: record.role,
         },
         state: record.state,
         since: record.since,
@@ -1745,7 +1753,17 @@ mod tests {
         let pi = id("pi:c-7f3a91");
         let mut meta = AgentMeta::new(pi.clone(), "pi");
         meta.model = "qwen3.8-27b".into();
+        let coder = RoleMeta {
+            id: "coder".into(),
+            name: "Coder".into(),
+            reach: "shell.agent_* and editor · at most sensitive".into(),
+            turns: 12,
+            minutes: 45,
+        };
+        meta.role = Some(coder.clone());
         s.upsert_agent(meta);
+        // A later upsert that knows nothing of the role leaves it as it was.
+        s.upsert_agent(AgentMeta::new(pi.clone(), "pi"));
         s.open_turn(&pi, "tidy the photos folder");
         s.text(&pi, "Looking for duplicates.");
         s.event(&pi, &Event::Thinking { delta: "hash them first".into() }, Provenance::Reported);
@@ -1770,6 +1788,7 @@ mod tests {
         let agent = back.agent(&pi).expect("the agent is back");
         assert_eq!(agent.meta.title, "tidy the photos folder");
         assert_eq!(agent.meta.model, "qwen3.8-27b");
+        assert_eq!(agent.meta.role, Some(coder), "the role it was started as comes back with it");
         assert_eq!(agent.state, State::Done);
         assert_eq!(agent.usage.input_tokens, 40_000);
         let items = &agent.turns[0].items;

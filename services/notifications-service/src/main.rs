@@ -314,7 +314,8 @@ impl NotificationsHandler {
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         // Lifted off before anything reads `args`, and out of them if a caller put it there: a grant
-        // is spent against the arguments, and an agent token is not one. Nothing here uses it yet.
+        // is spent against the arguments, and an agent token is not one. It says whose reach to
+        // hold the call to, below.
         let token = gate::agent_token_of(params, &mut args);
         if action.is_empty() {
             return Err(bad_request("act needs a non-empty `action`".to_string()));
@@ -322,6 +323,8 @@ impl NotificationsHandler {
         // An action this service does not have is answered as that, before a grant is looked
         // at: nothing is spent on a call that could never run.
         let graded = published_grade(action).ok_or_else(|| unknown_action(action))?;
+        // An agent started from a catalog role is held to the role's reach first (agents catalog).
+        yantrik_service_sdk::reach::permits(token.as_deref(), APP, action, graded).map_err(bad_request)?;
         let grant = gate::grant_of(params);
         gate::permit(&mut authority, APP, action, graded, &published_purpose(action), &args, grant.as_deref())
             .map_err(bad_request)?;

@@ -190,6 +190,24 @@ is not spent by another through `consume_approval`. Stop on a parent stops its c
 `read_agent` answers with the agent's recent turns as text, and counts as reading private state
 for the bridge's taint rule: after it, the bridge will not type into a page.
 
+And one more, for handing work to a role from the desktop's **agent catalog** rather than to a
+mind (design/desk-and-mind-2026-09-23.md, section 5):
+
+| tool | runs | grade |
+|---|---|---|
+| `hand_off {role, task, context?, wait_seconds?}` | `shell.hand_off` | sensitive, as `new_agent` |
+
+A role — Researcher, Planner, Coder, Reviewer, Red team, Writer, Chair, Scribe, or one of the
+person's own in `~/.config/yantrik/agents/*.toml` — names the minds that run it, best first; the
+shell starts it on the first one attached that holds a conversation per agent, with the role's
+standing instructions, the task and the context as its first turn. `describe shell` lists the roles
+under `catalog`. The same rules as `new_agent` apply, and the role's **reach** caps it further: its
+agent is held to the role's surfaces and grade ceiling on every door that carries its token, and
+anything else is refused with `REACH:` (the bridge relays that as a policy answer, and never puts a
+question outside the reach to the person). With `wait_seconds` the call waits for the role's
+answer and hands it back — which counts as reading private state — so a client allows
+`wait_seconds` more, as for `run_command`.
+
 An approval a call with a token asks for is drawn in that agent's pane as well as in the Lens —
 the same card under the same request id, so answering either answers both — and the card names
 the agent. A token that does not check out puts the card in no pane and says so on it.

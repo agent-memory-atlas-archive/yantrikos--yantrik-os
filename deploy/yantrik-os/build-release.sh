@@ -305,6 +305,15 @@ cp -r "$PROJECT_ROOT/sdk/python/yantrik_surface" "$ROOT/share/blender/" \
 find "$ROOT/share/blender" -name __pycache__ -type d -prune -exec rm -rf {} +
 echo "   + blender control-surface addon (bootstrap + yantrik_blender + yantrik_surface SDK)"
 
+# The agent catalog's shipped roles (design/desk-and-mind-2026-09-23.md, section 5): Researcher,
+# Planner, Coder, Reviewer, Red team, Writer, Chair, Scribe. The shell has the same files compiled
+# in (crates/yantrik-ui/src/agents/catalog.rs); these copies are the image's layer over them, and
+# what a person reads and copies into ~/.config/yantrik/agents/ to make a role their own.
+mkdir -p "$ROOT/share/agents"
+cp "$PROJECT_ROOT/config/agents/"*.toml "$ROOT/share/agents/" \
+  || fail "config/agents/*.toml missing — the image would ship no agent catalog of its own"
+echo "   + $(ls "$ROOT/share/agents" | wc -l) agent catalog roles"
+
 echo "   + labwc theme and $(ls "$ROOT/share/fonts" | wc -l) fonts"
 
 # ── Nothing in this bundle may have CRLF line endings ──

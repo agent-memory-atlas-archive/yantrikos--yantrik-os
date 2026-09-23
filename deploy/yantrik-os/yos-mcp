@@ -20,8 +20,9 @@ Config for the mind (YM_MCP_CONFIG, default /etc/yantrik-mind/mcp.json):
 Started with YANTRIK_AGENT_TOKEN — by a harness, for one of the person's agents — every act
 carries that agent's token, a command runs in the agent's own terminal rather than the person's,
 and `run_command` / `command_status` / `command_input` / `command_kill` are offered as well, with
-`new_agent` / `send_to_agent` / `stop_agent` / `read_agent` for handing work to another agent. See
-"Which agent this bridge acts for" below.
+`new_agent` / `send_to_agent` / `stop_agent` / `read_agent` for handing work to another agent, and
+`hand_off` for handing it to a role from the desktop's agent catalog. See "Which agent this bridge
+acts for" below.
 """
 
 import json
@@ -610,6 +611,52 @@ AGENT_TOOLS += [
     },
 ]
 
+# ── Handing work to a role from the agent catalog ───────────────────────────────────────
+#
+# design/desk-and-mind-2026-09-23.md, section 5: the shell's `hand_off` starts a catalog role —
+# Researcher, Coder, Reviewer … — on its preferred attached mind, with the role's brief, the task
+# and the context as its first turn, and holds it to the role's reach on every door. Made with
+# `os_act` underneath like the tools above, so it is `sensitive` (a card in `ask` mode, in this
+# agent's pane), passes the shell's own argument names and nothing else, and never carries the
+# token as one. With `wait_seconds` the shell answers when the role's first turn ends, so the call
+# is given that long; the answer is what the role said, which counts as reading private state.
+AGENT_TOOLS += [
+    {
+        "name": "hand_off",
+        "agent_action": "hand_off",
+        "pass": ["role", "task", "context", "wait_seconds"],
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+        "description": "Hand a piece of work to a role from the desktop's agent catalog — "
+                       "researcher, planner, coder, reviewer, red-team, writer, chair, scribe, or "
+                       "the person's own (os_describe shell lists them under `catalog`, with what "
+                       "each is for, what it may touch and whether a mind it runs on is attached). "
+                       "It starts that role's agent on its preferred attached mind, in its own pane, "
+                       "with the role's standing instructions, your task and your context. It can "
+                       "act only within the role's reach. Without wait_seconds it answers at once "
+                       "with the agent's id (read_agent shows its answer later); with it, it waits "
+                       "up to that long and hands back what the role said. It starts with none of "
+                       "your grants; an agent you started cannot hand off, and you may have at "
+                       "most three running at once. Graded sensitive: in `ask` mode the person "
+                       "allows it first.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string",
+                         "description": "The role's id as os_describe shell lists under "
+                                        "`catalog` (reviewer, coder, red-team …), or its name."},
+                "task": {"type": "string", "description": "What it is to do, in full."},
+                "context": {"type": "string",
+                            "description": "What it should read first: the change to review, the "
+                                           "answers to weigh. At most 32 KiB."},
+                "wait_seconds": {"type": "number",
+                                 "description": "Seconds to wait for its answer. Left out, it "
+                                                "answers at once with the agent's id. At most 600."},
+            },
+            "required": ["role", "task"],
+        },
+    },
+]
+
 AGENT_BY_NAME = {t["name"]: t for t in AGENT_TOOLS}
 
 # What `os_act` says in addition when this bridge has a token, so a mind that reaches for the
@@ -643,6 +690,16 @@ def agent_timeout(wait):
         wait = AGENT_WAIT_DEFAULT
     wait = min(max(wait, 0.0), float(AGENT_WAIT_MOST))
     return max(ACT_TIMEOUT, int(wait + AGENT_WAIT_MARGIN))
+
+
+def hand_off_timeout(wait):
+    """How long a `yos act shell hand_off` is given: an ordinary act's minute, or — when it waits
+    for the role's answer — that wait and a margin, as a command's wait is given."""
+    try:
+        waiting = wait not in (None, "") and float(wait) > 0
+    except (TypeError, ValueError):
+        waiting = False
+    return agent_timeout(wait) if waiting else ACT_TIMEOUT
 
 
 def agent_route(args):
@@ -790,7 +847,10 @@ def run_agent_tool(tool, args):
     act = {"app": "shell", "action": tool["agent_action"], "args": agent_args(tool["name"], args)}
     if "pass" in tool:
         text, is_error = run_tool(BY_NAME["os_act"], act, present=present_agent)
-        if tool["name"] in PRIVATE_READS and not is_error and not text.startswith("REFUSED"):
+        # A hand-off that waited hands back what the role said — whatever it read on the way.
+        read_another = (tool["name"] in PRIVATE_READS
+                        or (tool["name"] == "hand_off" and act["args"].get("wait_seconds")))
+        if read_another and not is_error and not text.startswith("REFUSED"):
             # Another agent's session holds whatever it read: this session has now seen it too.
             _SAW_PRIVATE.append(tool["name"])
         return text, is_error, None
@@ -1482,6 +1542,10 @@ def ask_the_person(app, action, grade, purpose, args, requester):
         "args_json": args,
         "requester": requester,
     })
+    if request is None and "REACH:" in (err or ""):
+        # This agent was started as a catalog role, and the act is outside its reach: the shell
+        # will not put that question in front of the person. Its own words, naming the role.
+        return False, re.sub(r"^yos: ", "", err.strip()), None
     if request is None:
         return False, (
             "%s.%s is graded %s, above this session's %s ceiling, so it needs the person at the "
@@ -1871,6 +1935,11 @@ def run_tool(tool, args, present=None):
         # given that long and a margin, not a flat minute: `yos` itself allows `wait + 20`.
         given = args.get("args") if isinstance(args.get("args"), dict) else {}
         timeout = agent_timeout(given.get("wait"))
+    if (tool["name"] == "os_act" and str(args.get("app")) in ("shell", "app-shell")
+            and args.get("action") == "hand_off"):
+        # Answered when the role's first turn ends, or its `wait_seconds` runs out.
+        given = args.get("args") if isinstance(args.get("args"), dict) else {}
+        timeout = hand_off_timeout(given.get("wait_seconds"))
 
     try:
         # stdin closed to the child, for the reason in `yos`: this process's stdin belongs to
@@ -1912,6 +1981,10 @@ def run_tool(tool, args, present=None):
                 "the person allowed %s.%s, but the grant could not be spent: %s Nothing was "
                 "run. Tell them it did not go through." % (app, args.get("action"), why)), False
         return policy_answer(why), False
+    if p.returncode != 0 and tool["name"] == "os_act" and "REACH:" in err:
+        # This agent was started as a catalog role, and the act is outside the role's reach. A
+        # policy answer, as GRANT is: the desktop is healthy and said no, naming the role.
+        return policy_answer(re.sub(r"^yos: ", "", err.strip())), False
     if p.returncode != 0:
         # The note goes on a failure as well. A person who has just pressed Allow and then hears
         # only "failed (exit 1)" has been told the wrong half of what happened — and worse, the

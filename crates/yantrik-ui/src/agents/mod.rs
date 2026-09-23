@@ -25,16 +25,20 @@
 //! Every turn the shell sends a mind passes through `feed`, which does the host's part: the
 //! prompt, the text, the events, and — for a harness that writes only text — its trail lines.
 
+// The agent catalog — roles work can be handed to — and the reach each role's agent is held to
+// (design/desk-and-mind-2026-09-23.md, section 5).
+pub mod catalog;
 pub mod feed;
 pub mod launch;
 pub mod model;
+pub mod reaches;
 pub mod store;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-pub use model::{AgentId, AgentMeta, ApprovalOutcome, CallState, Event, Provenance, State, Stream, Tab};
+pub use model::{AgentId, AgentMeta, ApprovalOutcome, CallState, Event, Provenance, RoleMeta, State, Stream, Tab};
 pub use store::Store;
 
 /// The title every popped-out agent window starts with, so the window list can tell an agent's
@@ -240,6 +244,12 @@ pub fn for_describe() -> serde_json::Value {
                     "last_activity": a.touched,
                     "last_activity_secs_ago": now.saturating_sub(a.touched),
                     "parent": a.meta.parent,
+                    // The catalog role it was started as (`hand_off`), what it may touch and its
+                    // budget — or null for an agent started on a mind alone.
+                    "role": a.meta.role.as_ref().map(|r| serde_json::json!({
+                        "id": r.id, "name": r.name, "reach": r.reach,
+                        "budget": { "turns": r.turns, "minutes": r.minutes },
+                    })),
                     "children": s.children_of(&a.meta.id),
                     "turns": d.turns,
                     "calls": d.calls,
@@ -279,6 +289,7 @@ mod tests {
         store().open_turn(&pi, "tidy the photos folder");
         let mut meta = AgentMeta::new(kid.clone(), "pi");
         meta.parent = Some(pi.clone());
+        meta.role = catalog::Catalog::from_layers(&catalog::SHIPPED, &[]).find("reviewer").map(|r| r.meta());
         store().upsert_agent(meta);
         store().approval_asked(&pi, "appr-describe", "files.move");
         let jobs = crate::control_agent_terminal::jobs();
@@ -301,8 +312,12 @@ mod tests {
         assert!(entry["last_activity"].as_u64().is_some_and(|t| t > 1_700_000_000), "{entry}");
         assert!(entry["last_activity_secs_ago"].as_u64().is_some_and(|s| s < 60), "{entry}");
         assert_eq!(entry["children"], json!(["pi:c-describe-kid"]));
+        assert!(entry["role"].is_null(), "an agent started on a mind alone has no role: {entry}");
         let kid_entry = described["agents"].as_array().unwrap().iter().find(|a| a["id"] == "pi:c-describe-kid").unwrap();
         assert_eq!((kid_entry["parent"].clone(), kid_entry["needs_you"].clone()), (json!("pi:c-describe"), json!(false)));
+        assert_eq!(kid_entry["role"]["name"], "Reviewer", "each agent says its role: {kid_entry}");
+        assert_eq!(kid_entry["role"]["reach"], "editor, documents and notes · at most safe");
+        assert_eq!(kid_entry["role"]["budget"], json!({"turns": 4, "minutes": 15}));
         assert!(!described.to_string().contains("agent_token"), "{described}");
         jobs.kill(&pi, &job).unwrap();
     }

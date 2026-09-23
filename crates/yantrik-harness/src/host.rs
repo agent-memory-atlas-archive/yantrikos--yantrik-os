@@ -666,6 +666,30 @@ impl Host {
         None
     }
 
+    /// Whether an attached harness holds a conversation per agent — `None` when nothing by that id
+    /// is attached. A role from the agent catalog is only ever started as a conversation of its
+    /// own: a harness that holds one has only the person's own conversation to offer.
+    pub fn holds_conversations(&self, harness_id: &str) -> Option<bool> {
+        let mut state = self.lock();
+        Self::reap(&mut state);
+        state.attached.get(harness_id).map(|h| h.announced.conversations)
+    }
+
+    /// Hand a live agent's token to `f`, for the one thing the shell derives from it: the one-way
+    /// digest it publishes an agent's reach under (`yantrik_ipc_transport::reach`). The token
+    /// itself goes no further than `f`. `None` for an agent that is not live.
+    pub fn with_agent_token<R>(&self, agent: &AgentId, f: impl FnOnce(&str) -> R) -> Option<R> {
+        let mut state = self.lock();
+        Self::reap(&mut state);
+        let token = state
+            .attached
+            .get(agent.harness())
+            .and_then(|harness| harness.agents.get(agent.conversation()))
+            .map(|live| live.token.clone())?;
+        drop(state);
+        Some(f(&token))
+    }
+
     /// Leave a note for an agent's next turn: something the desktop has to tell it that no call
     /// of its own carried — a command it ran that finished after the call that started it had
     /// returned.
@@ -1887,6 +1911,25 @@ mod tests {
         // A stopped agent's token names nothing.
         host.stop_agent(&first);
         assert_eq!(host.agent_for_token(&token_one), None);
+    }
+
+    /// Agents catalog: the shell asks whether a mind can give a role a conversation of its own, and
+    /// derives the reach file's digest from an agent's token without the token being handed out.
+    #[test]
+    fn a_harness_says_whether_it_holds_conversations_and_a_live_agents_token_is_lent_not_given() {
+        let host = host_with_nothing();
+        let session = attach_many(&host, "pi");
+        host.handle(protocol::ATTACH, &json!({ "id": "hermes", "name": "Hermes" })).unwrap();
+        assert_eq!(host.holds_conversations("pi"), Some(true));
+        assert_eq!(host.holds_conversations("hermes"), Some(false));
+        assert_eq!(host.holds_conversations("openclaw"), None, "not attached");
+
+        let agent = host.start_agent("pi").unwrap();
+        let _a = host.send_to(&agent, Turn::new("one")).unwrap();
+        let token = poll(&host, &session)["agent_token"].as_str().unwrap().to_string();
+        assert_eq!(host.with_agent_token(&agent, |t| t == token), Some(true), "the same token the harness holds");
+        host.stop_agent(&agent);
+        assert_eq!(host.with_agent_token(&agent, |t| t.len()), None, "a stopped agent lends nothing");
     }
 
     #[test]

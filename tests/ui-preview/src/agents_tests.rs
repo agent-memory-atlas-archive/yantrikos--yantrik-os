@@ -54,6 +54,7 @@ fn fill(g: &AgentsState, popped: bool) {
         label: label.into(),
         since: since.into(),
         parent: "".into(),
+        role: "".into(),
     };
     g.set_rows(ModelRc::new(VecModel::from(vec![
         row("deepseek:main", "DeepSeek", "release notes for 0.4", "waiting_for_you", "waiting for you", "40s"),
@@ -150,6 +151,8 @@ fn fill(g: &AgentsState, popped: bool) {
         cost: "".into(),
         refused: "".into(),
         basis: "Commands, files and approvals count only what the shell itself ran or asked. Calls include what the harness reported.".into(),
+        role: "".into(),
+        reach: "".into(),
     });
 }
 
@@ -331,6 +334,163 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     w.draw_if_needed(|r| { r.render(pixels.make_mut_slice(), ww as usize); });
     save(&pixels, &output.replace(".png", "-window.png"), ww, wh)?;
     println!("PASS: Agents list hover reported and cleared, row select, tab filter, Stop, a card opened from its line; an approval card in the pane answered Allow and Deny for its one request id, and drew no buttons once answered; screen and window rendered");
+    Ok(())
+}
+
+/// The shipped catalog as the shell lists it in New agent: name, purpose, reach, and the mind each
+/// would run on with deepseek and pi attached (the Researcher and the Writer prefer openclaw first).
+fn roles() -> ModelRc<AgentRoleData> {
+    let role = |id: &str, name: &str, purpose: &str, reach: &str, runs_on: &str| AgentRoleData {
+        id: id.into(),
+        name: name.into(),
+        purpose: purpose.into(),
+        reach: reach.into(),
+        runs_on: runs_on.into(),
+        available: !runs_on.is_empty(),
+    };
+    ModelRc::new(VecModel::from(vec![
+        role("researcher", "Researcher", "Finds out what is true and says how it knows, with sources.", "shell.open_app · at most standard", "deepseek"),
+        role("planner", "Planner", "Turns a goal into steps someone can start on today; reads only.", "calendar and notes · at most safe", "deepseek"),
+        role("coder", "Coder", "Makes a code change and proves it with the build and the tests.", "shell.agent_*, shell.editor_* and editor · at most sensitive", "pi"),
+        role("reviewer", "Reviewer", "Reviews a change for bugs and risks; reads only.", "editor, documents and notes · at most safe", "deepseek"),
+        role("red-team", "Red team", "Attacks a proposal to find how it breaks; touches nothing.", "nothing on this desktop beyond asking the person and reading its own session · at most safe", "deepseek"),
+        role("writer", "Writer", "Writes a piece for its reader: a note, an email, release notes, a page.", "notes, documents, editor and shell.editor_* · at most standard", ""),
+        role("chair", "Chair", "Weighs several answers to one question and gives a verdict.", "nothing on this desktop beyond asking the person and reading its own session · at most safe", "deepseek"),
+        role("scribe", "Scribe", "Summarises a session, a document or a discussion for someone who was not there.", "notes · at most standard", "pi"),
+    ]))
+}
+
+/// Agents catalog: New agent → from the catalog, drawn by the production screen. A role's row
+/// names its role and its details say its reach; the dialog lists each role with its purpose and
+/// where it would run; a real press on a role picks it, on the mode chips switches between a mind
+/// and the catalog, and Start hands the picked role its task.
+pub fn run_catalog(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (width, height) = (1280u32, 800u32);
+    let ui = AgentsProbe::new()?;
+    let g = ui.global::<AgentsState>();
+    fill(&g, false);
+    // A Reviewer handed a change to look at, selected: its row names the role, its details the reach.
+    let row = AgentRowData {
+        id: "deepseek:c-1a2b3c".into(),
+        mind: "deepseek".into(),
+        title: "review the change in ~/src/app before I ship it".into(),
+        state: "thinking".into(),
+        label: "thinking".into(),
+        since: "12s".into(),
+        parent: "".into(),
+        role: "Reviewer".into(),
+    };
+    let mut rows: Vec<AgentRowData> = slint::Model::iter(&g.get_rows()).collect();
+    rows.insert(0, row);
+    g.set_rows(ModelRc::new(VecModel::from(rows)));
+    g.set_selected("deepseek:c-1a2b3c".into());
+    let mut header = g.get_header();
+    header.id = "deepseek:c-1a2b3c".into();
+    header.mind = "deepseek".into();
+    header.title = "review the change in ~/src/app before I ship it".into();
+    header.note = "".into();
+    g.set_header(header);
+    let mut details = g.get_details();
+    details.mind = "deepseek".into();
+    details.role = "Reviewer".into();
+    details.reach = "editor, documents and notes · at most safe".into();
+    g.set_details(details);
+    g.set_roles(roles());
+
+    let log: Rc<RefCell<Vec<String>>> = Rc::default();
+    {
+        let (l, weak) = (log.clone(), ui.as_weak());
+        g.on_pick_role(move |id| {
+            l.borrow_mut().push(format!("pick-role:{id}"));
+            // What the shell does: the role is picked, and the note says where it runs and what it may touch.
+            if let Some(ui) = weak.upgrade() {
+                let g = ui.global::<AgentsState>();
+                g.set_new_role(id.clone());
+                g.set_new_note(format!("Runs on deepseek. May touch editor, documents and notes · at most safe. Up to 4 turns and 15 minutes. ({id})").into());
+            }
+        });
+        let l = log.clone();
+        g.on_start_role(move |role, task| l.borrow_mut().push(format!("start-role:{role}:{task}")));
+        let l = log.clone();
+        g.on_start(move |mind, task| l.borrow_mut().push(format!("start:{mind}:{task}")));
+        let l = log.clone();
+        g.on_pick_mind(move |mind| l.borrow_mut().push(format!("pick-mind:{mind}")));
+    }
+    ui.show()?;
+    w.set_size(slint::PhysicalSize::new(width, height));
+    let draw = || {
+        slint::platform::update_timers_and_animations();
+        let mut pixels = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(width, height);
+        w.request_redraw();
+        w.draw_if_needed(|r| { r.render(pixels.make_mut_slice(), width as usize); });
+        pixels
+    };
+    draw();
+    save(&draw(), &output.replace(".png", "-role.png"), width, height)?;
+
+    // New agent, from the catalog.
+    g.set_new_open(true);
+    g.set_new_from_catalog(true);
+    draw();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    save(&draw(), output, width, height)?;
+
+    // A press on a role picks it — the list's rows are the dialog's full width.
+    for y in (120..680).step_by(6) {
+        if log.borrow().iter().any(|e| e.starts_with("pick-role:")) {
+            break;
+        }
+        click(w, 640., y as f32);
+    }
+    let picked: Vec<String> = log.borrow().iter().filter(|e| e.starts_with("pick-role:")).cloned().collect();
+    assert_eq!(picked.len(), 1, "one press, one role: {:?}", log.borrow());
+    assert!(g.get_new_open(), "picking a role keeps the dialog open");
+    draw();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    save(&draw(), &output.replace(".png", "-picked.png"), width, height)?;
+
+    // Start hands the picked role its task: the rightmost button along the dialog's bottom.
+    for y in (300..760).rev().step_by(4) {
+        if log.borrow().iter().any(|e| e.starts_with("start")) || !g.get_new_open() {
+            break;
+        }
+        for x in (820..900).rev().step_by(8) {
+            click(w, x as f32, y as f32);
+            if log.borrow().iter().any(|e| e.starts_with("start")) || !g.get_new_open() {
+                break;
+            }
+        }
+    }
+    let role = picked[0].trim_start_matches("pick-role:");
+    assert!(
+        log.borrow().iter().any(|e| e == &format!("start-role:{role}:")),
+        "Start hands the picked role its task, and nothing else starts: {:?}",
+        log.borrow()
+    );
+    assert!(!log.borrow().iter().any(|e| e.starts_with("start:")), "not a mind: {:?}", log.borrow());
+
+    // The chips switch between a mind and the catalog.
+    for y in (100..400).step_by(4) {
+        if !g.get_new_from_catalog() {
+            break;
+        }
+        for x in (380..520).step_by(10) {
+            click(w, x as f32, y as f32);
+            if !g.get_new_from_catalog() {
+                break;
+            }
+        }
+    }
+    assert!(!g.get_new_from_catalog(), "the \"A mind\" chip leaves the catalog");
+    assert!(g.get_new_open());
+    draw();
+    save(&draw(), &output.replace(".png", "-mind.png"), width, height)?;
+    ui.set_light(true);
+    g.set_new_from_catalog(true);
+    draw();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    save(&draw(), &output.replace(".png", "-light.png"), width, height)?;
+    println!("PASS: a role's row names its role and its details its reach; New agent lists the catalog's roles with their purposes; a press picks a role, Start hands it the task, and the chips switch between a mind and the catalog");
     Ok(())
 }
 
