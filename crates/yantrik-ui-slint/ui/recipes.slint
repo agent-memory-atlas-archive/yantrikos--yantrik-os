@@ -10,6 +10,11 @@
 // crates/yantrik-ui/src/wire/recipes.rs out of the companion's recipe store. Step kinds are an
 // open set: a kind this file does not know is drawn as a plain stage. See
 // design/desk-and-mind-2026-09-23.md, section 4.
+//
+// A formation (section 6) is a recipe whose steps are catalog agents: an Agent stage is called by
+// its role and the mind it runs on ("Chair · deepseek"), waits while its agent works, and is
+// ticked when the answer is in. A formation's built-in definition opens with a box for its input
+// and Start: the person's own press, which is their leave for its agents.
 
 import { Theme } from "theme.slint";
 import { Icon, Icons } from "components/icon.slint";
@@ -41,7 +46,7 @@ export struct RecipeStepData {
     result: string,        // the head of what it produced, or the error it failed with
     path: string,          // JumpIf / Branch: the way it went
     unbound: string,       // "{{topic}} has no value — it is sent as written"
-    agent: string,         // the catalog agent that runs it (none yet)
+    agent: string,         // an Agent step's agent: "the Chair on deepseek (deepseek:c-02be44)"
     detail: string,        // its whole definition, a line per field
 }
 
@@ -63,6 +68,10 @@ export struct RecipeRowData {
     can-resume: bool,
     can-cancel: bool,
     stages: [RecipeStageData],
+    formation: bool,       // its steps hand work to agents from the catalog
+    can-start: bool,       // a formation's built-in definition, startable here with its one input
+    start-hint: string,    // what that input is: "The question the council is to answer"
+    needs-you: bool,       // its agents need the person: a card to answer, a place to free
 }
 
 export global RecipesState {
@@ -89,6 +98,8 @@ export global RecipesState {
     callback pause(string);
     callback resume(string);
     callback cancel(string);
+    // Start a run of a built-in formation with its one input: the person's leave for its agents.
+    callback start(string, string);
     callback dismiss-notice();
 }
 
@@ -150,7 +161,11 @@ component StageDot inherits Rectangle {
 
     if root.state == "done" : Icon { commands: Icons.check; size: 14px; tint: Theme.color-success; thickness: 2px; }
     if root.state == "failed" : Icon { commands: Icons.close; size: 12px; tint: Theme.color-danger; thickness: 2px; }
-    if root.state == "waiting" : Icon { commands: root.kind == "ask_user" ? Icons.chat : Icons.clock; size: 14px; tint: Theme.amber; }
+    if root.state == "waiting" : Icon {
+        commands: root.kind == "ask_user" ? Icons.chat : root.kind == "agent" ? Icons.people : Icons.clock;
+        size: 14px;
+        tint: Theme.amber;
+    }
     if root.state == "paused" : Icon { commands: Icons.pause; size: 12px; tint: Theme.amber; thickness: 2px; }
     if root.state == "stopped" : Icon { commands: Icons.stop; size: 10px; tint: Theme.text-dim; }
     if root.state == "skipped" : Icon { commands: Icons.arrow-right; size: 12px; tint: Theme.text-dim; }
@@ -348,8 +363,8 @@ component StepLine inherits Rectangle {
                 wrap: word-wrap;
             }
             if root.step.agent != "" : Text {
-                text: "run by " + root.step.agent;
-                color: Theme.text-secondary;
+                text: (root.step.state == "waiting" ? "at work: " : root.step.state == "done" ? "answered by " : "hands to ") + root.step.agent;
+                color: root.step.state == "waiting" ? Theme.amber : Theme.text-secondary;
                 font-size: Theme.fs-micro;
             }
             if root.step.result != "" : Rectangle {
@@ -385,7 +400,7 @@ component RecipeCard inherits Rectangle {
     border-radius: 12px;
     background: Theme.bg-card;
     border-width: 1px;
-    border-color: root.selected ? Theme.accent : root.recipe.can-answer ? Theme.amber-glow-strong : Theme.border-subtle;
+    border-color: root.selected ? Theme.accent : root.recipe.can-answer || root.recipe.needs-you ? Theme.amber-glow-strong : Theme.border-subtle;
     opacity: root.recipe.template ? 0.8 : 1.0;
 
     VerticalLayout {
@@ -504,6 +519,32 @@ component RecipeCard inherits Rectangle {
             spacing: 4px;
             Rectangle { height: 1px; background: Theme.separator; }
             for step in RecipesState.steps : StepLine { step: step; }
+            // A formation's definition: its one input, and Start — the person's own press.
+            if root.recipe.can-start : HorizontalLayout {
+                spacing: 8px;
+                padding-top: 4px;
+                start-input := YInput {
+                    horizontal-stretch: 1;
+                    placeholder: root.recipe.start-hint;
+                    accepted(text) => {
+                        if (text != "") {
+                            RecipesState.start(root.recipe.id, text);
+                            self.value = "";
+                        }
+                    }
+                }
+                YButton {
+                    label: "Start";
+                    icon-path: Icons.play;
+                    variant: 0;
+                    size: 0;
+                    disabled: start-input.value == "";
+                    clicked => {
+                        RecipesState.start(root.recipe.id, start-input.value);
+                        start-input.value = "";
+                    }
+                }
+            }
             if root.recipe.can-pause || root.recipe.can-resume || root.recipe.can-cancel : HorizontalLayout {
                 spacing: 8px;
                 alignment: end;

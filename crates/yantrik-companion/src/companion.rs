@@ -644,6 +644,10 @@ pub struct CompanionService {
 
     /// Silence policy — learns when to shut up from dismissal patterns.
     pub silence_policy: crate::silence_policy::SilencePolicy,
+
+    /// What starts and hears a recipe's agents (Agent steps). The shell installs one
+    /// ([`CompanionService::set_agent_hook`]); without it an Agent step fails, saying so.
+    pub(crate) agent_hook: Option<Box<dyn crate::recipe_executor::AgentHook>>,
 }
 
 impl CompanionService {
@@ -911,7 +915,14 @@ impl CompanionService {
             policy_engine: crate::policy_engine::PolicyEngine::new(),
             silence_policy,
             provider_registry: None,
+            agent_hook: None,
         }
+    }
+
+    /// Install what hands a recipe's Agent steps to the agent catalog. The shell does, on the
+    /// worker, before the worker resumes the recipes a restart left running.
+    pub fn set_agent_hook(&mut self, hook: Box<dyn crate::recipe_executor::AgentHook>) {
+        self.agent_hook = Some(hook);
     }
 
     /// Attach a cognitive event bus for tool execution tracing.

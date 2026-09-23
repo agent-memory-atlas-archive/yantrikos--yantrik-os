@@ -45,6 +45,10 @@ export struct ApprovalRequest {
     // caller's process — never from the request's words. The same card is drawn in that agent's
     // pane on the Agents screen, under the same id (design/agents-workspace-2026-09-23.md, 4).
     agent: string,
+    // Who that agent works for, when not simply the person: "Council recipe → Reviewer" for a
+    // recipe's agent, "Reviewer" for a role. The shell's own record of how it started the agent,
+    // never the request's words.
+    on-behalf: string,
     // What the caller CALLS itself. Nothing authenticates it; the card says so underneath.
     requester: string,
     // What this MACHINE knows: the program the kernel says opened the socket, resolved through
@@ -242,7 +246,7 @@ export component ApprovalCard inherits Rectangle {
                 spacing: 0px;
 
                 Text {
-                    text: "agent " + root.data.agent;
+                    text: "agent " + (root.data.on-behalf == "" ? "" : root.data.on-behalf + " · ") + root.data.agent;
                     color: Theme.text-primary;
                     font-size: Theme.fs-micro;
                     font-weight: 600;

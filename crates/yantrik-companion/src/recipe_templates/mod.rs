@@ -6,12 +6,13 @@
 //! communication, research, system administration, and personal tasks.
 
 mod communication;
+pub mod formations;
 mod personal;
 mod research;
 mod routines;
 mod system;
 
-use crate::recipe::{RecipeStep, RecipeStore, TriggerType};
+use crate::recipe::{hands_off, roles_named, Leave, Recipe, RecipeStep, RecipeStore, TriggerType};
 use rusqlite::Connection;
 
 /// A recipe template definition.
@@ -42,7 +43,95 @@ pub fn all_templates() -> Vec<RecipeTemplate> {
     templates.extend(research::templates());
     templates.extend(system::templates());
     templates.extend(personal::templates());
+    templates.extend(formations::templates());
     templates
+}
+
+/// The inputs a built-in fills in by itself when a run is not given them — a formation's seats —
+/// as (name, value, what it is for). Empty for most.
+pub fn defaults(template_id: &str) -> &'static [(&'static str, &'static str, &'static str)] {
+    formations::defaults(template_id)
+}
+
+/// The inputs a built-in needs that `vars` does not give, or gives blank: (name, what it is).
+pub fn missing_inputs(
+    template_id: &str,
+    vars: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Vec<(&'static str, &'static str)> {
+    let Some(template) = get_template(template_id) else { return Vec::new() };
+    template
+        .required_vars
+        .iter()
+        .filter(|(name, _)| {
+            !vars.and_then(|v| v.get(*name)).is_some_and(|v| match v {
+                serde_json::Value::Null => false,
+                serde_json::Value::String(s) => !s.trim().is_empty(),
+                _ => true,
+            })
+        })
+        .copied()
+        .collect()
+}
+
+/// The roles a run of `id_or_name` given `vars` would hand work to — its Agent steps' roles with
+/// the inputs, and the template's defaults for those not given, filled in — so the door starting
+/// it can record the definition of each the person agrees to. Empty for a recipe with no Agent
+/// step.
+pub fn roles_for(
+    conn: &Connection,
+    id_or_name: &str,
+    vars: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<Vec<String>, String> {
+    let recipe = RecipeStore::get(conn, id_or_name)
+        .or_else(|| RecipeStore::find_by_name(conn, id_or_name))
+        .ok_or_else(|| format!("Recipe not found: {id_or_name}"))?;
+    let steps: Vec<RecipeStep> = RecipeStore::get_steps(conn, &recipe.id).into_iter().map(|s| s.step).collect();
+    let mut all: std::collections::HashMap<String, serde_json::Value> =
+        defaults(&recipe.id).iter().map(|(k, v, _)| (k.to_string(), serde_json::Value::String(v.to_string()))).collect();
+    for (k, v) in vars.into_iter().flatten() {
+        if !v.is_null() {
+            all.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(roles_named(&steps, &all))
+}
+
+/// Start a run of a recipe — by id or by name — with its inputs, for a door that may or may not
+/// have the person's leave for agents.
+///
+/// A recipe that hands work to agents (a formation) starts only with `leave`, and only with every
+/// input it needs: the run is then allowed its agents ([`RecipeStore::allow_agents`]). Anything
+/// else starts as `run_recipe` always started it. The shell's `run_recipe` (graded sensitive, so
+/// the person is asked) and the Recipes screen's Start pass a leave; the companion's own
+/// `run_recipe` tool does not.
+pub fn start(
+    conn: &Connection,
+    id_or_name: &str,
+    vars: Option<&serde_json::Map<String, serde_json::Value>>,
+    leave: Option<&Leave>,
+) -> Result<(Recipe, String), String> {
+    let recipe = RecipeStore::get(conn, id_or_name)
+        .or_else(|| RecipeStore::find_by_name(conn, id_or_name))
+        .ok_or_else(|| format!("Recipe not found: {id_or_name}"))?;
+    let steps: Vec<RecipeStep> = RecipeStore::get_steps(conn, &recipe.id).into_iter().map(|s| s.step).collect();
+    if !hands_off(&steps) {
+        return RecipeStore::start_run(conn, &recipe.id, vars);
+    }
+    let Some(leave) = leave else {
+        return Err(format!(
+            "'{}' hands work to agents from the catalog, and starting agents needs the person's leave:              start it from the Recipes screen, or with the shell's run_recipe, which is graded sensitive              and asks them first.",
+            recipe.name
+        ));
+    };
+    let missing = missing_inputs(&recipe.id, vars);
+    if !missing.is_empty() {
+        let list: Vec<String> = missing.iter().map(|(name, what)| format!("`{name}` ({what})")).collect();
+        return Err(format!("'{}' needs {} to start.", recipe.name, list.join(" and ")));
+    }
+    let (template, run) = RecipeStore::start_run(conn, &recipe.id, vars)?;
+    RecipeStore::allow_agents(conn, &run, leave);
+    tracing::info!(recipe_id = %run, name = %template.name, by = %leave.by, agent = ?leave.agent, "A formation was started");
+    Ok((template, run))
 }
 
 /// Register all built-in recipe templates in the database.

@@ -246,6 +246,26 @@ pub struct AgentMeta {
     /// The catalog role it was started as (`hand_off`), as the role stood then. `None` for an
     /// agent started on a mind alone.
     pub role: Option<RoleMeta>,
+    /// The recipe that handed it the work (an Agent step, design/desk-and-mind-2026-09-23.md
+    /// section 6), when a recipe did: what its row and its approval cards say it works for —
+    /// "Council recipe → Reviewer". An agent a recipe started is a child: it starts no agents.
+    pub recipe: Option<RecipeOrigin>,
+}
+
+/// The recipe run that started an agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeOrigin {
+    /// The run's id in the recipe store (`rcp_…`).
+    pub id: String,
+    /// Its name as the Recipes screen shows it (`Council`).
+    pub name: String,
+}
+
+impl RecipeOrigin {
+    /// "Council recipe".
+    pub fn label(&self) -> String {
+        format!("{} recipe", self.name)
+    }
 }
 
 /// The catalog role an agent was started as, kept with the agent: what its row, its details and
@@ -275,6 +295,19 @@ impl AgentMeta {
             started: 0,
             conversations: false,
             role: None,
+            recipe: None,
+        }
+    }
+
+    /// Who this agent works for, when it is not simply the person's: "Council recipe → Reviewer"
+    /// for a recipe's agent, "Reviewer" for a role the person handed work to, and nothing for an
+    /// agent started on a mind alone.
+    pub fn on_behalf(&self) -> String {
+        match (&self.recipe, &self.role) {
+            (Some(recipe), Some(role)) => format!("{} → {}", recipe.label(), role.name),
+            (Some(recipe), None) => recipe.label(),
+            (None, Some(role)) => role.name.clone(),
+            (None, None) => String::new(),
         }
     }
 }

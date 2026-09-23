@@ -199,6 +199,12 @@ refused. `consume_approval` refuses a grant asked for another agent when the cal
 token. An app's own dispatch spends a grant without one (#116), so a grant is not yet bound to
 its agent on that path.
 
+`shell.run_recipe {recipe, inputs?}` starts a recipe — a formation among them, whose Agent steps
+hand work to catalog roles through `hand_off` (see [harness.md](harness.md), Formations). It is
+**sensitive**: it starts agents. Its run is given the leave for its agents that the companion's own
+`run_recipe` tool, graded standard, is never given. `answer_recipe`, `pause_recipe`,
+`resume_recipe` and `cancel_recipe` are standard.
+
 An agent started from a role in the agent catalog (`shell.hand_off`) is also held to the role's
 **reach** — the surfaces it may touch (`notes`, `shell.agent_run`, `shell.agent_*`) and a grade
 ceiling narrower than the machine's. Every door that lifts a token checks it before any grant is
