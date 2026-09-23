@@ -14,7 +14,7 @@
 
 use yantrik_harness::{Host, Turn};
 
-use super::model::{title_of, AgentId, RoleMeta, State};
+use super::model::{title_of, AgentId, RecipeOrigin, RoleMeta, State};
 
 fn host() -> Result<&'static Host, String> {
     crate::wire::harness::host().ok_or_else(|| "the harness host is not running".to_string())
@@ -58,6 +58,8 @@ pub struct Start<'a> {
     /// published, so there is no moment in which the agent can act unheld. An `Err` ends the start,
     /// and the conversation is let go.
     pub before_first_turn: Option<&'a dyn Fn(&AgentId) -> Result<(), String>>,
+    /// The recipe handing it the work (an Agent step): its row and its cards say so.
+    pub recipe: Option<RecipeOrigin>,
 }
 
 /// [`start_on`], with what a role adds.
@@ -78,7 +80,7 @@ pub fn start_with(host: &Host, mind: &str, prompt: &str, parent: Option<&AgentId
             ));
         }
     }
-    let fresh = how.role.is_some();
+    let fresh = how.role.is_some() || how.recipe.is_some();
     let agent = match host.start_agent(mind) {
         Ok(agent) => agent,
         // One conversation, already open: the agent is that conversation — for the person, who
@@ -120,6 +122,7 @@ pub fn start_with(host: &Host, mind: &str, prompt: &str, parent: Option<&AgentId
     meta.title = title_of(how.title.unwrap_or(prompt));
     meta.parent = parent.cloned();
     meta.role = how.role;
+    meta.recipe = how.recipe;
     super::store().upsert_agent(meta);
     super::store().open_turn(&agent, prompt);
     super::feed::record(agent.clone(), answer, false);
@@ -228,7 +231,29 @@ pub fn stop_on(host: &Host, agent: &AgentId) -> Result<Stopped, String> {
     Ok(stopped)
 }
 
+/// Let an agent go once its work is taken — a recipe has its answer, or no longer wants it: its
+/// conversation ended, its place under the cap freed, its reach released, anything it was waiting
+/// on withdrawn — with `why` in its pane rather than "Stop asked". Its pane stays readable.
+pub fn let_go(host: &Host, agent: &AgentId, why: &str) -> Stopped {
+    let stopped = halt(host, agent);
+    super::store().note(agent, why);
+    stopped
+}
+
 fn stop_one(host: &Host, agent: &AgentId) -> Stopped {
+    let stopped = halt(host, agent);
+    let note = match (stopped.stopped, stopped.commands) {
+        (false, 0) => "Stop asked; nothing was running.".to_string(),
+        (_, 0) => "Stop asked.".to_string(),
+        (_, 1) => "Stop asked, and its one running command killed.".to_string(),
+        (_, n) => format!("Stop asked, and its {n} running commands killed."),
+    };
+    super::store().note(agent, &note);
+    stopped
+}
+
+/// Everything a stop does, but the note.
+fn halt(host: &Host, agent: &AgentId) -> Stopped {
     let killed = crate::control_agent_terminal::jobs().kill_agent(agent);
     let stopped = host.stop_agent(agent);
     // Stopped, it acts no more; its token names nothing now either.
@@ -236,13 +261,6 @@ fn stop_one(host: &Host, agent: &AgentId) -> Stopped {
     // A card for work that is no longer happening is refused, never granted. The approval store's
     // own tick redraws the Lens, and the pane with it.
     let approvals = crate::approvals::withdraw_for_agent(&agent.0).len();
-    let note = match (stopped, killed.len()) {
-        (_, 0) if !stopped => "Stop asked; nothing was running.".to_string(),
-        (_, 0) => "Stop asked.".to_string(),
-        (_, 1) => "Stop asked, and its one running command killed.".to_string(),
-        (_, n) => format!("Stop asked, and its {n} running commands killed."),
-    };
-    super::store().note(agent, &note);
     Stopped { stopped, commands: killed.len(), approvals, children: Vec::new() }
 }
 

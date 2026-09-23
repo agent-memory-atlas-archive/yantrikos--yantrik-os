@@ -57,6 +57,8 @@ pub struct Store {
     dirty: BTreeSet<AgentId>,
     removed: BTreeSet<AgentId>,
     clock: Box<dyn Fn() -> u64 + Send>,
+    /// How many agents it keeps before letting the oldest idle ones go: [`KEEP_AGENTS`].
+    keep: usize,
 }
 
 impl Default for Store {
@@ -72,7 +74,23 @@ impl Store {
 
     /// A store that reads the time from `clock` — for tests, which need "two minutes later".
     pub fn with_clock(clock: Box<dyn Fn() -> u64 + Send>) -> Store {
-        Store { agents: Vec::new(), next_seq: 1, revision: 0, dirty: BTreeSet::new(), removed: BTreeSet::new(), clock }
+        Store {
+            agents: Vec::new(),
+            next_seq: 1,
+            revision: 0,
+            dirty: BTreeSet::new(),
+            removed: BTreeSet::new(),
+            clock,
+            keep: KEEP_AGENTS,
+        }
+    }
+
+    /// Keep `n` agents rather than [`KEEP_AGENTS`]. For the one store a test binary shares: every
+    /// test in it adds agents to it at once, and one test's agents let go to make room for
+    /// another's made both flaky. The bound itself is tested on a store of its own.
+    pub fn keeping(mut self, n: usize) -> Store {
+        self.keep = n;
+        self
     }
 
     fn now(&self) -> u64 {
@@ -127,6 +145,10 @@ impl Store {
                 // A role is set once, when the agent is started as one; nothing takes it away.
                 if meta.role.is_some() {
                     known.role = meta.role;
+                }
+                // So is the recipe that started it.
+                if meta.recipe.is_some() {
+                    known.recipe = meta.recipe;
                 }
                 known.conversations = meta.conversations;
                 self.mark(i);
@@ -567,6 +589,14 @@ impl Store {
     }
 
     /// The agents `parent` started (`shell.new_agent`), oldest first.
+    /// The agents a recipe run started (its Agent steps), oldest first.
+    pub fn agents_of_recipe(&self, recipe_id: &str) -> Vec<AgentId> {
+        let mut theirs: Vec<&Agent> =
+            self.agents.iter().filter(|a| a.meta.recipe.as_ref().is_some_and(|r| r.id == recipe_id)).collect();
+        theirs.sort_by_key(|a| (a.meta.started, a.seq));
+        theirs.into_iter().map(|a| a.meta.id.clone()).collect()
+    }
+
     pub fn children_of(&self, parent: &AgentId) -> Vec<AgentId> {
         let mut children: Vec<&Agent> =
             self.agents.iter().filter(|a| a.meta.parent.as_ref() == Some(parent)).collect();
@@ -711,7 +741,7 @@ impl Store {
     /// Keep the list bounded: past [`KEEP_AGENTS`], the agents untouched longest and doing nothing
     /// are let go, files and all.
     fn let_old_ones_go(&mut self) {
-        while self.agents.len() > KEEP_AGENTS {
+        while self.agents.len() > self.keep {
             let oldest = self
                 .agents
                 .iter()
@@ -1036,6 +1066,8 @@ struct AgentRecord {
     conversations: bool,
     #[serde(default)]
     role: Option<RoleMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recipe: Option<RecipeOrigin>,
     state: State,
     since: u64,
     #[serde(default)]
@@ -1140,6 +1172,7 @@ fn serialize(agent: &Agent) -> String {
         started: meta.started,
         conversations: meta.conversations,
         role: meta.role.clone(),
+        recipe: meta.recipe.clone(),
         state: agent.state,
         since: agent.since,
         status: agent.status.clone(),
@@ -1225,6 +1258,7 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
             started: record.started,
             conversations: record.conversations,
             role: record.role,
+            recipe: record.recipe,
         },
         state: record.state,
         since: record.since,

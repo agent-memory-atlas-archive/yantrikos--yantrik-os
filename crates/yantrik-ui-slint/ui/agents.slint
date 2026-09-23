@@ -31,6 +31,7 @@ export struct AgentRowData {
     since: string,     // "2m" while it works, "21:02" once it is done
     parent: string,    // the agent that started this one, if any
     role: string,      // the catalog role it was started as ("Reviewer"), if any
+    origin: string,    // the recipe that handed it the work ("Council recipe"), if any
 }
 
 // One run of same-looking cells in a command's terminal.
@@ -243,7 +244,9 @@ component AgentRow inherits Rectangle {
             spacing: 1px;
             alignment: center;
             Text {
-                text: (root.data.role == "" ? root.data.mind : root.data.role + " · " + root.data.mind)
+                // "Council recipe → Reviewer · deepseek": a recipe's agent says whose it is.
+                text: (root.data.origin == "" ? "" : root.data.origin + " → ")
+                    + (root.data.role == "" ? root.data.mind : root.data.role + " · " + root.data.mind)
                     + (root.data.parent == "" ? "" : " · started by " + root.data.parent);
                 color: Theme.text-primary;
                 font-size: Theme.fs-caption;

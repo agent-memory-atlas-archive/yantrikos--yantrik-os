@@ -37,6 +37,26 @@
 //! refused whoever the door is. An agent held to a reach cannot start a plain agent (which has
 //! none) and cannot hand work to a role whose ceiling is above its own. With `wait_seconds` the
 //! answer waits for the role's first turn to end, off the UI thread, and hands back what it said.
+//!
+//! # A recipe handing work to a role
+//!
+//! A formation's Agent steps (design section 6) come here too, through [`RecipeHands`] — the hook
+//! the companion's recipe executor is given — and go through the same [`hand_off_as`]. The
+//! hand-off is from the recipe, not from the person: the agent's row and its approval cards say
+//! "Council recipe → Reviewer". It is still started only for a run the person allowed (the Recipes
+//! screen's Start, or `shell.run_recipe`, graded sensitive); it is still held by its role's reach;
+//! and it is a child — an agent a recipe started cannot start agents of its own. A recipe has at
+//! most [`MAX_CHILDREN`] of its agents live at once: past that, the step waits for one to answer.
+//!
+//! What the person agreed to, and nothing else. A run someone started at the desk carries the
+//! digest of each role's definition as it was then ([`catalog::Role::digest`]); a role whose
+//! definition has changed since — a file in ~/.config/yantrik/agents replaced it — or one the run
+//! did not name then is refused, with a sentence. A run nobody started at the desk (a trigger, a
+//! timer) asks the person on a card naming the recipe and the role before any role above `safe`;
+//! a card denied or left to expire fails the step. No place under the desktop's cap, or under the
+//! asking agent's, queues the start rather than racing the person's own hand-offs: the step waits,
+//! needing the person. Every agent a recipe starts without a card of its own is written to the
+//! record of unasked actions, under the recipe's name.
 
 use std::time::{Duration, Instant};
 
@@ -46,9 +66,11 @@ use yantrik_app_runtime::control::{self, Action, App as ControlSurface, Param};
 use yantrik_harness::Host;
 use yantrik_ipc_transport::gate;
 
+use yantrik_companion::recipe_executor::{AgentCall, AgentHook, AgentPoll, AgentRefusal, AgentStarted};
+
 use crate::agents::catalog::{self, Catalog};
-use crate::agents::model::{Item, Turn};
-use crate::agents::{self, launch, reaches, AgentId, Store};
+use crate::agents::model::{Agent, Item, Turn};
+use crate::agents::{self, launch, reaches, AgentId, RecipeOrigin, Store};
 use crate::App;
 
 /// How many live agents one agent may have started (design decision 1).
@@ -77,7 +99,7 @@ pub enum Caller {
 }
 
 /// The caller of the call being dispatched. Read on the handler's thread, inside the dispatch.
-fn caller() -> Result<Caller, String> {
+pub(crate) fn caller() -> Result<Caller, String> {
     match crate::control_agent_terminal::calling_agent() {
         None => Ok(Caller::NoAgent),
         Some(Ok(agent)) => Ok(Caller::Agent(agent)),
@@ -266,6 +288,14 @@ fn wait_arg(args: &Value) -> Result<Option<Duration>, String> {
 /// May `parent` start another agent? Depth one, and at most [`MAX_CHILDREN`] of its own still live
 /// in the host. The global cap is the host's, met when the agent is started.
 pub fn may_start_child(parent: &AgentId, store: &Store, live: &[AgentId]) -> Result<(), String> {
+    // A recipe's agent is a child too: the recipe handed it the work.
+    if let Some(origin) = store.agent(parent).and_then(|a| a.meta.recipe.clone()) {
+        return Err(format!(
+            "`{parent}` was started by the {}, and an agent a recipe started cannot start agents \
+             of its own: one level only. Say in your answer what else needs doing.",
+            origin.label()
+        ));
+    }
     if let Some(grand) = store.agent(parent).and_then(|a| a.meta.parent.clone()) {
         return Err(format!(
             "`{parent}` was started by `{grand}`, and an agent another agent started cannot start \
@@ -454,12 +484,34 @@ pub struct Answered {
     pub ok: bool,
     /// What it said in that turn.
     pub text: String,
+    /// A card it asked for in that turn that nobody answered, that was taken back, or that the
+    /// person refused — said as a sentence. Its answer is then not the work asked for.
+    pub unsettled: Option<String>,
 }
 
 /// Start `role` on `task`, for `caller`: the rules of `new_agent`, then the role's own — its first
 /// attached mind that can give it a conversation of its own, and its reach held on every door
 /// before its first turn is sent.
 pub fn hand_off(host: &Host, caller: &Caller, catalog: &Catalog, role: &str, task: &str, context: &str) -> Result<Handed, String> {
+    let parent = match caller {
+        Caller::NoAgent => None,
+        Caller::Agent(me) => Some(me),
+    };
+    hand_off_as(host, parent, None, catalog, role, task, context)
+}
+
+/// [`hand_off`], for whoever the work is from: `parent`, the agent handing it over — or, for a
+/// recipe, the agent that asked for the run, whose children the recipe's agents are — and
+/// `recipe`, the run whose Agent step it is. Every rule is the same.
+pub fn hand_off_as(
+    host: &Host,
+    parent: Option<&AgentId>,
+    recipe: Option<&RecipeOrigin>,
+    catalog: &Catalog,
+    role: &str,
+    task: &str,
+    context: &str,
+) -> Result<Handed, String> {
     if role.trim().is_empty() {
         return Err(format!("`role` is empty: a role from the catalog — {}.", catalog.listing()));
     }
@@ -481,10 +533,6 @@ pub fn hand_off(host: &Host, caller: &Caller, catalog: &Catalog, role: &str, tas
             CONTEXT_MOST_BYTES / 1024
         ));
     }
-    let parent = match caller {
-        Caller::NoAgent => None,
-        Caller::Agent(me) => Some(me),
-    };
     if let Some(parent) = parent {
         let live: Vec<AgentId> = host.agents().into_iter().map(|a| a.id).collect();
         agents::store().read(|s| may_start_child(parent, s, &live))?;
@@ -501,11 +549,292 @@ pub fn hand_off(host: &Host, caller: &Caller, catalog: &Catalog, role: &str, tas
     }
     let mind = role.pick_mind(&catalog::minds_now(host))?;
     let hold = |agent: &AgentId| reaches::hold(host, agent, role);
-    let how = launch::Start { title: Some(task.trim()), role: Some(role.meta()), before_first_turn: Some(&hold) };
+    let how = launch::Start {
+        title: Some(task.trim()),
+        role: Some(role.meta()),
+        before_first_turn: Some(&hold),
+        recipe: recipe.cloned(),
+    };
     let agent = launch::start_with(host, &mind, &role.first_turn(task, context), parent, how)?;
     watch_budget(host.clone(), agent.clone(), role.name.clone(), role.budget.minutes);
-    tracing::info!(agent = %agent, role = %role.id, mind = %mind, parent = ?parent.map(|p| p.to_string()), "work was handed to a catalog role");
+    tracing::info!(
+        agent = %agent, role = %role.id, mind = %mind, parent = ?parent.map(|p| p.to_string()),
+        recipe = ?recipe.map(|r| r.id.as_str()), "work was handed to a catalog role"
+    );
     Ok(Handed { agent, role: role.clone(), mind })
+}
+
+// ── A recipe's Agent steps ────────────────────────────────────────
+
+/// What the shell gives the companion's recipe executor so a formation's Agent steps reach the
+/// catalog: each one through [`hand_off_as`], never around it. Installed on the companion worker
+/// (`bridge::worker_loop`) before it resumes the recipes a restart left running.
+#[derive(Default)]
+pub struct RecipeHands {
+    /// The cards raised for runs nobody started at the desk, by recipe and step.
+    asks: Asks,
+}
+
+/// Approval requests raised for a recipe's Agent steps: (recipe id, step) → request id.
+pub type Asks = std::collections::HashMap<(String, usize), String>;
+
+impl AgentHook for RecipeHands {
+    fn start(&mut self, call: &AgentCall<'_>) -> Result<AgentStarted, AgentRefusal> {
+        let host = host().map_err(AgentRefusal::Fail)?;
+        start_for_recipe(host, &Catalog::load(), call, &mut self.asks)
+    }
+
+    fn poll(&mut self, recipe_id: &str, agent: &str) -> AgentPoll {
+        poll_for_recipe(crate::wire::harness::host(), recipe_id, &AgentId(agent.to_string()))
+    }
+
+    fn release(&mut self, recipe_id: &str, agent: &str, why: &str) {
+        if let Ok(host) = host() {
+            release_for_recipe(host, recipe_id, &AgentId(agent.to_string()), why);
+        }
+    }
+}
+
+/// Start an Agent step's role for its recipe, held to what the person agreed to:
+///
+/// - a run started at the desk: only a role it named then, with the definition it had then;
+/// - a run nobody started at the desk: a role above `safe` only on the person's Allow, asked on a
+///   card naming the recipe and the role ([`AgentRefusal::Ask`] until it is answered);
+/// - no place for it — the recipe's own three, the asking agent's three, the desktop's six — and
+///   the start queues ([`AgentRefusal::Wait`]) rather than racing the person's own for a place;
+/// - anything `hand_off` refuses — no mind for the role, a rule the asking agent is held to — and
+///   a card denied or left to expire: not at all ([`AgentRefusal::Fail`]).
+///
+/// An agent started without a card of its own is written to the record of unasked actions under
+/// the recipe's name.
+pub fn start_for_recipe(host: &Host, catalog: &Catalog, call: &AgentCall<'_>, asks: &mut Asks) -> Result<AgentStarted, AgentRefusal> {
+    let origin = RecipeOrigin { id: call.recipe_id.to_string(), name: call.recipe_name.to_string() };
+    let Some(role) = catalog.find(call.role) else {
+        return Err(AgentRefusal::Fail(format!(
+            "There is no role `{}` in the catalog; it has {}.",
+            call.role.trim(),
+            catalog.listing()
+        )));
+    };
+    let digest = role.digest();
+    // What the person agreed to when they started the run.
+    if call.attended {
+        match call.consented {
+            None => {
+                return Err(AgentRefusal::Fail(format!(
+                    "the {} was not among the roles the person agreed to when this run started — the \
+                     recipe named it since — so it was not started",
+                    role.name
+                )))
+            }
+            Some(agreed) if agreed != digest => {
+                return Err(AgentRefusal::Fail(format!(
+                    "the {}'s definition has changed since the person started this run (a file in \
+                     ~/.config/yantrik/agents replaced or edited it: its minds, brief or reach are not \
+                     what they agreed to), so it was not started. Start the recipe again to agree to the \
+                     role as it is now",
+                    role.name
+                )))
+            }
+            Some(_) => {}
+        }
+    }
+    // A place for it, before anything is asked of the person: a card allowed now would run out
+    // while the start waited for one.
+    let live: Vec<AgentId> = host.agents().into_iter().map(|a| a.id).collect();
+    let working: Vec<AgentId> =
+        agents::store().read(|s| s.agents_of_recipe(&origin.id)).into_iter().filter(|a| live.contains(a)).collect();
+    if working.len() >= MAX_CHILDREN {
+        return Err(AgentRefusal::Wait(format!(
+            "a place: the {} already has {} agents working ({}), the most one recipe holds at once",
+            origin.label(),
+            working.len(),
+            working.iter().map(|a| a.0.as_str()).collect::<Vec<_>>().join(", ")
+        )));
+    }
+    let asked_by = call.asked_by.map(|a| AgentId(a.to_string()));
+    if let Some(parent) = &asked_by {
+        let theirs: Vec<AgentId> =
+            agents::store().read(|s| s.children_of(parent)).into_iter().filter(|a| live.contains(a)).collect();
+        if theirs.len() >= MAX_CHILDREN {
+            return Err(AgentRefusal::Wait(format!(
+                "a place: `{parent}`, which asked for this run, already has {} agents running, the most one \
+                 agent holds at once — stop one on the Agents screen, or it starts when one finishes",
+                theirs.len()
+            )));
+        }
+    }
+    let most = yantrik_harness::protocol::MAX_LIVE_AGENTS;
+    if live.len() >= most {
+        return Err(AgentRefusal::Wait(format!(
+            "a place: the desktop is running {} agents, the most it runs at once — stop one on the \
+             Agents screen, or it starts when one finishes",
+            live.len()
+        )));
+    }
+    // Nobody started this run at the desk: a role above `safe` waits for the person's Allow.
+    let above_safe = gate::grade(&role.reach.ceiling) > gate::grade("safe");
+    let carded = if !call.attended && above_safe {
+        allowed_on_card(&origin, call, role, &digest, asks)?;
+        true
+    } else {
+        false
+    };
+    let handed = hand_off_as(host, asked_by.as_ref(), Some(&origin), catalog, call.role, call.task, call.context)
+        .map_err(AgentRefusal::Fail)?;
+    if !carded {
+        let mode = crate::mind_mode::current();
+        let verified = crate::approvals::Verified {
+            line: format!("the shell's recipe executor, for the {} ({})", origin.label(), origin.id),
+            agent: asked_by.as_ref().map(|a| a.0.clone()).unwrap_or_default(),
+            ..Default::default()
+        };
+        let args = json!({ "role": role.id, "recipe": origin.id, "agent": handed.agent, "mind": handed.mind });
+        let why = if call.attended { "the person's start of the recipe" } else { "a role at most safe" };
+        crate::mind_mode::record(
+            mode.as_str(),
+            &origin.label(),
+            &verified,
+            "shell",
+            "hand_off",
+            &args,
+            "sensitive",
+            &format!("started {} on {} — {why}", handed.agent, handed.mind),
+        );
+    }
+    Ok(AgentStarted {
+        agent: handed.agent.0.clone(),
+        role: handed.role.id.clone(),
+        role_name: handed.role.name.clone(),
+        mind: handed.mind.clone(),
+        minutes: u64::from(handed.role.budget.minutes),
+    })
+}
+
+/// A run nobody started at the desk asks the person before a role above `safe`: a card naming the
+/// recipe and the role — its reach, its minds — bound to the role's definition, so an Allow for
+/// one definition starts no other. `Ok` once the Allow is spent; [`AgentRefusal::Ask`] while the
+/// card waits; [`AgentRefusal::Fail`] once it is denied or left to expire.
+fn allowed_on_card(origin: &RecipeOrigin, call: &AgentCall<'_>, role: &catalog::Role, digest: &str, asks: &mut Asks) -> Result<(), AgentRefusal> {
+    use crate::approvals::{self, Outcome};
+    let key = (origin.id.clone(), call.step);
+    let task: String = call.task.chars().take(200).collect();
+    let args = json!({ "role": role.id, "recipe": origin.id, "task": task, "definition": digest });
+    let waiting = format!("your Allow on the card: {} → {} (it may touch {})", origin.label(), role.name, role.reach.text());
+    if let Some(id) = asks.get(&key).cloned() {
+        return match approvals::outcome(&id) {
+            None => Err(AgentRefusal::Ask(waiting)),
+            Some((Outcome::Allowed, _)) => {
+                asks.remove(&key);
+                approvals::consume(&id, "shell", "hand_off", &args).map_err(AgentRefusal::Fail)
+            }
+            Some((Outcome::Denied, _)) => {
+                asks.remove(&key);
+                Err(AgentRefusal::Fail(format!("the person denied handing work to the {} on its card", role.name)))
+            }
+            Some((Outcome::Unanswered | Outcome::Withdrawn, _)) => {
+                asks.remove(&key);
+                Err(AgentRefusal::Fail(format!(
+                    "the card asking to hand work to the {} went unanswered and expired, so it was not started",
+                    role.name
+                )))
+            }
+        };
+    }
+    let verified = approvals::Verified {
+        line: format!(
+            "the shell's recipe executor, for the {} ({}), which started with nobody at the desk",
+            origin.label(),
+            origin.id
+        ),
+        ..Default::default()
+    };
+    let purpose = format!(
+        "Hand work to the {} from the agent catalog, for the {} — which started with nobody at the \
+         desk (a trigger or a timer), so nobody has agreed to this yet. The {} may touch {}, for up to \
+         {} minutes, on {}.",
+        role.name,
+        origin.label(),
+        role.name,
+        role.reach.text(),
+        role.budget.minutes,
+        role.mind.join(" or ")
+    );
+    match approvals::request(&origin.label(), verified, "shell", "hand_off", args, "sensitive", &purpose) {
+        Ok(asked) => {
+            asks.insert(key, asked.id);
+            Err(AgentRefusal::Ask(waiting))
+        }
+        // The cards on screen are all the person can take at once: ask again next time.
+        Err(why) if why.contains("already waiting") => Err(AgentRefusal::Ask(format!("{waiting} — {why}"))),
+        Err(why) => Err(AgentRefusal::Fail(why)),
+    }
+}
+
+/// How an agent `recipe_id` started is doing, from its session: its first turn's answer once the
+/// turn has ended — which a restart keeps, the saved session has it — or working while its
+/// conversation is live. An agent the recipe did not start, or one the desktop no longer knows, is
+/// no answer at all.
+pub fn poll_for_recipe(host: Option<&Host>, recipe_id: &str, agent: &AgentId) -> AgentPoll {
+    let seen = agents::store().read(|s| {
+        s.agent(agent).map(|a| (a.meta.recipe.as_ref().is_some_and(|r| r.id == recipe_id), first_answer(a)))
+    });
+    match seen {
+        None => AgentPoll::Failed(format!("the desktop no longer knows `{agent}`")),
+        Some((false, _)) => AgentPoll::Failed(format!("`{agent}` was not started by this recipe")),
+        // A card of its own that nobody answered, or that the person refused: its work is not what
+        // was asked, whatever it said after. Never read as done.
+        Some((true, Some(answered))) if answered.unsettled.is_some() => {
+            AgentPoll::Failed(answered.unsettled.unwrap_or_default())
+        }
+        Some((true, Some(answered))) if answered.ok && !answered.text.trim().is_empty() => AgentPoll::Answered(answered.text),
+        Some((true, Some(answered))) if answered.ok => AgentPoll::Failed("it ended its turn without an answer".to_string()),
+        Some((true, Some(answered))) => AgentPoll::Failed(if answered.text.is_empty() {
+            "its turn ended without an answer".to_string()
+        } else {
+            answered.text
+        }),
+        // Its turn is still open: working while its conversation is live — waiting on the person
+        // when it asked for something in its pane. Once the conversation is gone the answer will
+        // never come. With no host yet — the shell still starting — it cannot be told.
+        Some((true, None)) => match host {
+            Some(host) if !host.agents().iter().any(|a| &a.id == agent) => AgentPoll::Failed(format!(
+                "its conversation is gone (`{agent}` is no longer running), so its answer will not come"
+            )),
+            _ => match agents::store().read(|s| s.agent(agent).and_then(waiting_on_you)) {
+                Some(why) => AgentPoll::NeedsYou(why),
+                None => AgentPoll::Working,
+            },
+        },
+    }
+}
+
+/// What an agent is waiting on the person for in its own pane, if anything: a card it asked for,
+/// or a command of its at a prompt.
+fn waiting_on_you(agent: &Agent) -> Option<String> {
+    let who = match &agent.meta.role {
+        Some(role) => format!("the {} ({})", role.name, agent.meta.id),
+        None => format!("`{}`", agent.meta.id),
+    };
+    let asked = agent.turns.iter().rev().flat_map(|t| t.items.iter().rev()).find_map(|item| match item {
+        Item::Approval(a) if a.outcome == agents::ApprovalOutcome::Pending => Some(a.what.clone()),
+        _ => None,
+    });
+    match asked {
+        Some(what) => Some(format!("{who} is waiting for your Allow on a card in its pane: {what}")),
+        None if !agent.pending_approvals.is_empty() || agent.state == agents::State::WaitingForYou => {
+            Some(format!("{who} is waiting for you in its pane"))
+        }
+        None => None,
+    }
+}
+
+/// Let an agent `recipe_id` started go, saying why in its pane. Any other agent is left alone.
+pub fn release_for_recipe(host: &Host, recipe_id: &str, agent: &AgentId, why: &str) {
+    let ours = agents::store().read(|s| s.agent(agent).and_then(|a| a.meta.recipe.as_ref()).is_some_and(|r| r.id == recipe_id));
+    if ours {
+        launch::let_go(host, agent, why);
+    }
 }
 
 /// The Agents screen's New agent → from the catalog: the person hands `task` to `role`.
@@ -546,18 +875,38 @@ fn watch_budget(host: Host, agent: AgentId, name: String, minutes: u32) {
 pub fn wait_for_answer(agent: &AgentId, wait: Duration) -> Answered {
     let deadline = Instant::now() + wait;
     loop {
-        let seen = agents::store().read(|s| {
-            let first = s.agent(agent)?.turns.iter().find(|t| !t.prompt.is_empty())?;
-            first.ended.map(|_| (first.ok == Some(true), turn_text(first)))
-        });
-        if let Some((ok, text)) = seen {
-            return Answered { done: true, ok, text };
+        if let Some(answered) = agents::store().read(|s| s.agent(agent).and_then(first_answer)) {
+            return answered;
         }
         if Instant::now() >= deadline {
-            return Answered { done: false, ok: false, text: String::new() };
+            return Answered { done: false, ok: false, text: String::new(), unsettled: None };
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// An agent's first turn — the work it was handed — once it has ended: how it came out, what it
+/// said, and any card of its that did not come out as allowed. None while it is still open.
+fn first_answer(agent: &Agent) -> Option<Answered> {
+    let first = agent.turns.iter().find(|t| !t.prompt.is_empty())?;
+    first.ended?;
+    let unsettled = first.items.iter().find_map(|item| match item {
+        Item::Approval(a) => match a.outcome {
+            agents::ApprovalOutcome::Expired => Some(format!(
+                "its card for {} went unanswered and expired, so its work is not what was asked",
+                a.what
+            )),
+            agents::ApprovalOutcome::Withdrawn => {
+                Some(format!("its card for {} was taken back, so its work is not what was asked", a.what))
+            }
+            agents::ApprovalOutcome::Denied => {
+                Some(format!("the person denied its {}, so its work is not what was asked", a.what))
+            }
+            _ => None,
+        },
+        _ => None,
+    });
+    Some(Answered { done: true, ok: first.ok == Some(true), text: turn_text(first), unsettled })
 }
 
 /// What a turn said, in words: its text, and — for a turn that did not end well — the shell's
@@ -854,7 +1203,7 @@ mod tests {
         };
         let answered = wait_for_answer(&handed.agent, Duration::from_secs(10));
         harness.join().unwrap();
-        assert_eq!(answered, Answered { done: true, ok: true, text: "Verdict — ship on Friday.".into() });
+        assert_eq!(answered, Answered { done: true, ok: true, text: "Verdict — ship on Friday.".into(), unsettled: None });
         let answer = handed.answer(Some((Duration::from_secs(10), answered)));
         assert_eq!((answer["done"].clone(), answer["answer"].clone()), (json!(true), json!("Verdict — ship on Friday.")));
         let said = answer["said"].as_str().unwrap();
@@ -1029,6 +1378,362 @@ mod tests {
         assert!(err.contains("not an agent you started"), "{err}");
         assert!(read_agent(&Caller::NoAgent, &me, Some(&json!(21))).unwrap_err().contains("between 1 and 20"));
         assert!(read_agent(&Caller::NoAgent, &id("pi:c-nobody"), None).unwrap_err().contains("no agent"));
+    }
+
+    // ── A recipe's Agent steps ──
+
+    /// The digest of a shipped role's definition, as a run the person started records it.
+    fn agreed(role: &str) -> &'static str {
+        Box::leak(shipped().find(role).unwrap().digest().into_boxed_str())
+    }
+
+    /// An Agent step of a run the person started, agreeing to the role as shipped.
+    fn call<'a>(recipe_id: &'a str, role: &'a str, task: &'a str) -> AgentCall<'a> {
+        AgentCall {
+            recipe_id,
+            recipe_name: "Council",
+            step: 0,
+            attended: true,
+            consented: Some(agreed(role)),
+            asked_by: None,
+            role,
+            task,
+            context: "",
+        }
+    }
+
+    /// Finish an agent's open turn the way its harness would: what it said, and done.
+    fn answer_as_harness(host: &Host, session: &str, said: &str) {
+        let turn = host.handle(protocol::POLL, &json!({ "session": session })).unwrap();
+        let id = turn["turn_id"].clone();
+        host.handle(protocol::CHUNK, &json!({ "session": session, "turn_id": id, "delta": said })).unwrap();
+        host.handle(protocol::COMPLETE, &json!({ "session": session, "turn_id": id })).unwrap();
+    }
+
+    fn answered_poll(host: &Host, recipe: &str, agent: &AgentId) -> AgentPoll {
+        for _ in 0..100 {
+            let heard = poll_for_recipe(Some(host), recipe, agent);
+            if heard != AgentPoll::Working {
+                return heard;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        AgentPoll::Working
+    }
+
+    /// A recipe's Agent step goes through hand_off — the role's first attached mind, its reach
+    /// held — and its agent says whose it is: its row, `describe` and its approval cards say
+    /// "Council recipe → Reviewer". The step hears the answer from the agent's own session once
+    /// the turn ends, and lets the agent go with a line in its pane that says why. Another
+    /// recipe can neither hear it nor let it go.
+    #[test]
+    fn a_recipe_hands_work_through_hand_off_and_hears_its_answer() {
+        let host = Host::new(vec![]);
+        attach(&host, "pi", true);
+        let deepseek = attach(&host, "deepseek", true);
+        let started = start_for_recipe(&host, &shipped(), &call("rcp_council_hand", "reviewer", "review the plan"), &mut Asks::default()).unwrap();
+        assert_eq!(
+            (started.role.as_str(), started.role_name.as_str(), started.mind.as_str(), started.minutes),
+            ("reviewer", "Reviewer", "deepseek", 15)
+        );
+        let agent = AgentId(started.agent.clone());
+        let meta = agents::store().read(|s| s.agent(&agent).map(|a| a.meta.clone())).unwrap();
+        assert_eq!(meta.recipe, Some(RecipeOrigin { id: "rcp_council_hand".into(), name: "Council".into() }));
+        assert_eq!(meta.parent, None, "the person's run: no agent parent");
+        assert_eq!(meta.on_behalf(), "Council recipe → Reviewer", "what its row and its cards say");
+        assert!(reaches::of(&agent).is_some(), "held to the Reviewer's reach like any hand-off");
+        assert_eq!(poll_for_recipe(Some(&host), "rcp_council_hand", &agent), AgentPoll::Working);
+        let err = match poll_for_recipe(Some(&host), "rcp_other", &agent) {
+            AgentPoll::Failed(why) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(err.contains("was not started by this recipe"), "{err}");
+
+        answer_as_harness(&host, &deepseek, "Verdict — ship.");
+        assert_eq!(answered_poll(&host, "rcp_council_hand", &agent), AgentPoll::Answered("Verdict — ship.".into()));
+        release_for_recipe(&host, "rcp_other", &agent, "not yours");
+        assert!(host.agents().iter().any(|a| a.id == agent), "another recipe cannot let it go");
+        release_for_recipe(&host, "rcp_council_hand", &agent, "Its answer went to the Council recipe; it was let go.");
+        assert!(!host.agents().iter().any(|a| a.id == agent), "let go: its place under the cap is free");
+        assert_eq!(reaches::of(&agent), None, "and its reach released");
+        let pane = agents::store().read(|s| s.transcript(&agent, 3)).unwrap_or_default();
+        assert!(pane.contains("Its answer went to the Council recipe; it was let go."), "{pane}");
+        assert!(!pane.contains("Stop asked"), "{pane}");
+        assert_eq!(
+            poll_for_recipe(Some(&host), "rcp_council_hand", &agent),
+            AgentPoll::Answered("Verdict — ship.".into()),
+            "its answer is still its answer once it is let go"
+        );
+    }
+
+    /// Depth one holds: an agent a recipe started cannot hand work on, nor start an agent — and a
+    /// recipe an agent asked for makes its agents that agent's children.
+    #[test]
+    fn an_agent_a_recipe_started_cannot_start_agents_of_its_own() {
+        let host = Host::new(vec![]);
+        attach(&host, "pi", true);
+        let started = start_for_recipe(&host, &shipped(), &call("rcp_depth", "coder", "fix it"), &mut Asks::default()).unwrap();
+        let coder = Caller::Agent(AgentId(started.agent.clone()));
+        let err = hand_off(&host, &coder, &shipped(), "reviewer", "review my fix", "").unwrap_err();
+        assert!(err.contains("was started by the Council recipe") && err.contains("one level only"), "{err}");
+        let live: Vec<AgentId> = host.agents().into_iter().map(|a| a.id).collect();
+        let err = agents::store().read(|s| may_start_child(&AgentId(started.agent.clone()), s, &live)).unwrap_err();
+        assert!(err.contains("an agent a recipe started cannot start agents of its own"), "{err}");
+
+        // A run a top-level agent asked for: its agents are that agent's children.
+        let asker = new_agent(&host, &Caller::NoAgent, "pi", "plan the week").unwrap();
+        let asker = asker["agent"].as_str().unwrap().to_string();
+        let mut asked = call("rcp_asked", "planner", "plan it");
+        asked.asked_by = Some(asker.as_str());
+        let kid = start_for_recipe(&host, &shipped(), &asked, &mut Asks::default()).unwrap();
+        let parent = agents::store().read(|s| s.agent(&AgentId(kid.agent.clone())).and_then(|a| a.meta.parent.clone()));
+        assert_eq!(parent, Some(AgentId(asker.clone())), "held to its asker's rules: a child");
+        // One that is itself a child cannot ask for a run's agents.
+        let mut from_child = call("rcp_from_child", "planner", "plan it");
+        from_child.asked_by = Some(started.agent.as_str());
+        match start_for_recipe(&host, &shipped(), &from_child, &mut Asks::default()) {
+            Err(AgentRefusal::Fail(why)) => assert!(why.contains("one level only"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        for agent in [&started.agent, &kid.agent, &asker] {
+            let _ = stop_agent(&host, &Caller::NoAgent, &AgentId(agent.clone()));
+        }
+    }
+
+    /// The caps. A recipe has at most MAX_CHILDREN agents live: the next waits for a place (its
+    /// step waits, and the executor starts it when one answers). The desktop's own cap is a
+    /// refusal the recipe fails with, in the host's words. And the recipe executor's own count is
+    /// the same number.
+    #[test]
+    fn a_recipe_holds_three_agents_at_most_and_the_desktops_cap_still_applies() {
+        assert_eq!(MAX_CHILDREN, yantrik_companion::recipe_executor::AGENTS_AT_ONCE, "one number for one rule");
+        let host = Host::new(vec![]);
+        attach(&host, "pi", true);
+        let three: Vec<AgentStarted> =
+            ["researcher", "red-team", "planner"].iter().map(|r| start_for_recipe(&host, &shipped(), &call("rcp_cap", r, "q"), &mut Asks::default()).unwrap()).collect();
+        match start_for_recipe(&host, &shipped(), &call("rcp_cap", "chair", "weigh them"), &mut Asks::default()) {
+            Err(AgentRefusal::Wait(why)) => {
+                assert!(why.starts_with("a place: the Council recipe already has 3 agents working"), "{why}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // Another recipe is not held by this one's cap.
+        let other = start_for_recipe(&host, &shipped(), &call("rcp_cap_other", "chair", "weigh"), &mut Asks::default()).unwrap();
+        // One of the three let go: a place is free.
+        release_for_recipe(&host, "rcp_cap", &AgentId(three[0].agent.clone()), "answered");
+        let fourth = start_for_recipe(&host, &shipped(), &call("rcp_cap", "chair", "weigh them"), &mut Asks::default()).unwrap();
+
+        // The desktop's cap: as many live as it runs, and the start fails with its sentence.
+        let mut extra = Vec::new();
+        while host.agents().len() < protocol::MAX_LIVE_AGENTS {
+            extra.push(new_agent(&host, &Caller::NoAgent, "pi", "busy").unwrap()["agent"].as_str().unwrap().to_string());
+        }
+        // Queued, not raced for: the step waits for a place, needing the person, and starts nothing.
+        let before = host.agents().len();
+        match start_for_recipe(&host, &shipped(), &call("rcp_cap_full", "scribe", "sum up"), &mut Asks::default()) {
+            Err(AgentRefusal::Wait(why)) => {
+                assert!(why.contains(&format!("the desktop is running {} agents", protocol::MAX_LIVE_AGENTS)), "{why}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(host.agents().len(), before, "nothing was started");
+        let mut all: Vec<String> = three.iter().map(|s| s.agent.clone()).collect();
+        all.extend([other.agent, fourth.agent]);
+        all.extend(extra);
+        for agent in all {
+            let _ = stop_agent(&host, &Caller::NoAgent, &AgentId(agent));
+        }
+    }
+
+    /// What the person agreed to when they started the run, and nothing else: a role whose
+    /// definition has changed since (a file in ~/.config/yantrik/agents replacing the shipped one,
+    /// here with a wider reach) is refused with a sentence, and so is a role the run did not name
+    /// when it started. Nothing is started either way.
+    #[test]
+    fn a_role_whose_definition_changed_since_the_start_is_refused() {
+        let host = Host::new(vec![]);
+        attach(&host, "pi", true);
+        attach(&host, "deepseek", true);
+        let agreed_to = agreed("reviewer");
+        let wider = Catalog::from_layers(
+            &catalog::SHIPPED,
+            &[],
+        );
+        let mut changed = wider.find("reviewer").unwrap().clone();
+        changed.reach.ceiling = "sensitive".into();
+        changed.reach.surfaces.push("files".into());
+        assert_ne!(changed.digest(), agreed_to, "a wider reach is a different definition");
+        assert_eq!(wider.find("reviewer").unwrap().digest(), agreed_to, "the same file, the same digest");
+
+        let dir = std::env::temp_dir().join(format!("yantrik-roles-changed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("reviewer.toml"),
+            "id = \"reviewer\"\nname = \"Reviewer\"\npurpose = \"Reviews, and now moves files too.\"\n\
+             mind = [\"deepseek\", \"pi\"]\nreturns = \"A verdict.\"\nbrief = \"Review it. Answer in this shape: Verdict.\"\n\
+             [reach]\nsurfaces = [\"files\", \"notes\"]\nceiling = \"sensitive\"\n[budget]\nturns = 4\nminutes = 15\n",
+        )
+        .unwrap();
+        let replaced = Catalog::from_layers(&catalog::SHIPPED, &[(dir.clone(), catalog::Source::Person)]);
+        assert_ne!(replaced.find("reviewer").unwrap().digest(), agreed_to, "the person's file replaced the role");
+        let live_before = host.agents().len();
+        match start_for_recipe(&host, &replaced, &call("rcp_digest", "reviewer", "review it"), &mut Asks::default()) {
+            Err(AgentRefusal::Fail(why)) => {
+                assert!(why.contains("the Reviewer's definition has changed since the person started this run"), "{why}")
+            }
+            other => panic!("a changed role must not start: {other:?}"),
+        }
+        let mut unnamed = call("rcp_digest", "coder", "fix it");
+        unnamed.consented = None;
+        match start_for_recipe(&host, &shipped(), &unnamed, &mut Asks::default()) {
+            Err(AgentRefusal::Fail(why)) => assert!(why.contains("not among the roles the person agreed to"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(host.agents().len(), live_before, "nothing was started");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run nobody started at the desk — a trigger, a timer — asks the person before a role above
+    /// `safe`: a card naming the recipe and the role, bound to its definition. Allowed, the step
+    /// starts it; denied, the step fails. A role at most `safe` starts without a card, and is
+    /// written to the record of unasked actions under the recipe's name.
+    #[test]
+    fn a_run_nobody_started_asks_before_a_role_above_safe() {
+        use crate::approvals;
+        let host = Host::new(vec![]);
+        attach(&host, "pi", true);
+        let unattended = |role: &'static str, step: usize| AgentCall {
+            recipe_id: "rcp_nightly",
+            recipe_name: "Nightly",
+            step,
+            attended: false,
+            consented: None,
+            asked_by: None,
+            role,
+            task: "tidy the build cache",
+            context: "",
+        };
+        let mut asks = Asks::default();
+        let before = host.agents().len();
+        let mut asked = None;
+        for _ in 0..50 {
+            match start_for_recipe(&host, &shipped(), &unattended("coder", 1), &mut asks) {
+                Err(AgentRefusal::Ask(why)) if asks.contains_key(&("rcp_nightly".to_string(), 1)) => {
+                    asked = Some(why);
+                    break;
+                }
+                // The cards on screen are full for a moment: other tests ask too.
+                Err(AgentRefusal::Ask(_)) => std::thread::sleep(Duration::from_millis(100)),
+                other => panic!("an above-safe role must be asked for: {other:?}"),
+            }
+        }
+        let why = asked.expect("a card was raised");
+        assert!(why.starts_with("your Allow on the card: Nightly recipe → Coder"), "{why}");
+        assert_eq!(host.agents().len(), before, "nothing started while it waits");
+        let id = asks[&("rcp_nightly".to_string(), 1)].clone();
+        let card = approvals::card(&id).expect("the card");
+        assert_eq!((card.requester.as_str(), card.app.as_str(), card.action.as_str()), ("Nightly recipe", "shell", "hand_off"));
+        assert!(card.args.iter().any(|a| a.contains("coder")), "{:?}", card.args);
+        assert!(card.purpose.contains("the Coder") && card.purpose.contains("nobody at the desk"), "{}", card.purpose);
+        // Still waiting: asked again, the same card.
+        assert!(matches!(start_for_recipe(&host, &shipped(), &unattended("coder", 1), &mut asks), Err(AgentRefusal::Ask(_))));
+        assert_eq!(asks[&("rcp_nightly".to_string(), 1)], id);
+        approvals::grant(&id).unwrap();
+        let started = start_for_recipe(&host, &shipped(), &unattended("coder", 1), &mut asks).expect("allowed on its card");
+        assert_eq!(started.role, "coder");
+        assert!(asks.is_empty(), "its card is spent");
+
+        // Denied: the step fails, saying so, and nothing starts.
+        let mut asks = Asks::default();
+        for _ in 0..50 {
+            if matches!(start_for_recipe(&host, &shipped(), &unattended("researcher", 2), &mut asks), Err(AgentRefusal::Ask(_)))
+                && !asks.is_empty()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        approvals::deny(&asks[&("rcp_nightly".to_string(), 2)].clone()).unwrap();
+        match start_for_recipe(&host, &shipped(), &unattended("researcher", 2), &mut asks) {
+            Err(AgentRefusal::Fail(why)) => assert!(why.contains("the person denied handing work to the Researcher"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+
+        // At most safe: no card, and on the record under the recipe's name.
+        let chair = start_for_recipe(&host, &shipped(), &unattended("chair", 3), &mut Asks::default()).expect("a safe role starts");
+        let recorded = crate::mind_mode::recent(200)
+            .into_iter()
+            .any(|e| e.requester == "Nightly recipe" && e.action == "hand_off" && e.outcome.contains(&chair.agent));
+        assert!(recorded, "the start is on the record of unasked actions, under the recipe's name");
+        for agent in [started.agent, chair.agent] {
+            let _ = stop_agent(&host, &Caller::NoAgent, &AgentId(agent));
+        }
+    }
+
+    /// An agent waiting on the person in its own pane makes its recipe need the person; a card of
+    /// its that nobody answered is not an answer, whatever it said after.
+    #[test]
+    fn an_agent_waiting_on_you_needs_you_and_an_unanswered_card_is_no_answer() {
+        let agent = AgentId::new("pi", "c-recipe-card");
+        let mut meta = AgentMeta::new(agent.clone(), "pi");
+        meta.recipe = Some(RecipeOrigin { id: "rcp_card".into(), name: "Build".into() });
+        meta.role = shipped().find("coder").map(|r| r.meta());
+        agents::store().upsert_agent(meta);
+        agents::store().open_turn(&agent, "make the change");
+        agents::store().approval_asked(&agent, "appr-recipe-card", "shell.agent_run");
+        match poll_for_recipe(None, "rcp_card", &agent) {
+            AgentPoll::NeedsYou(why) => {
+                assert_eq!(why, "the Coder (pi:c-recipe-card) is waiting for your Allow on a card in its pane: shell.agent_run")
+            }
+            other => panic!("{other:?}"),
+        }
+        agents::store().approval_settled(&agent, "appr-recipe-card", agents::ApprovalOutcome::Expired, "Nobody answered — 21:04");
+        agents::store().text(&agent, "Changed — nothing; the build needed a card nobody answered.");
+        agents::store().close_turn(&agent, true);
+        match poll_for_recipe(None, "rcp_card", &agent) {
+            AgentPoll::Failed(why) => assert!(why.contains("its card for shell.agent_run went unanswered and expired"), "{why}"),
+            other => panic!("an unanswered card is not an answer: {other:?}"),
+        }
+        // And a turn that ended well with nothing said is no answer either.
+        let quiet = AgentId::new("pi", "c-recipe-quiet");
+        let mut meta = AgentMeta::new(quiet.clone(), "pi");
+        meta.recipe = Some(RecipeOrigin { id: "rcp_card".into(), name: "Build".into() });
+        agents::store().upsert_agent(meta);
+        agents::store().open_turn(&quiet, "plan it");
+        agents::store().close_turn(&quiet, true);
+        assert_eq!(poll_for_recipe(None, "rcp_card", &quiet), AgentPoll::Failed("it ended its turn without an answer".into()));
+    }
+
+    /// After a restart the store is what is left: a turn cut off by the shell's stop is an answer
+    /// that will not come, said with the store's own note; an open turn whose conversation the
+    /// host no longer has is gone; an agent the store never had is unknown.
+    #[test]
+    fn a_recipe_hears_honestly_what_a_restart_left() {
+        let host = Host::new(vec![]);
+        let cut = AgentId::new("pi", "c-recipe-cut");
+        let mut meta = AgentMeta::new(cut.clone(), "pi");
+        meta.recipe = Some(RecipeOrigin { id: "rcp_restart".into(), name: "Build".into() });
+        agents::store().upsert_agent(meta.clone());
+        agents::store().open_turn(&cut, "fix it");
+        agents::store().note(&cut, "The shell stopped while this turn was running.");
+        agents::store().close_turn(&cut, false);
+        match poll_for_recipe(Some(&host), "rcp_restart", &cut) {
+            AgentPoll::Failed(why) => assert!(why.contains("The shell stopped while this turn was running."), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        let open = AgentId::new("pi", "c-recipe-open");
+        meta.id = open.clone();
+        agents::store().upsert_agent(meta);
+        agents::store().open_turn(&open, "fix it");
+        match poll_for_recipe(Some(&host), "rcp_restart", &open) {
+            AgentPoll::Failed(why) => assert!(why.contains("its conversation is gone"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(poll_for_recipe(None, "rcp_restart", &open), AgentPoll::Working, "no host yet: it cannot be told");
+        match poll_for_recipe(Some(&host), "rcp_restart", &AgentId::new("pi", "c-never")) {
+            AgentPoll::Failed(why) => assert!(why.contains("no longer knows"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -509,6 +509,7 @@ mod tests {
                 resume: status == "paused",
                 cancel: matches!(status, "running" | "waiting" | "paused"),
             },
+            ..Default::default()
         }
     }
 

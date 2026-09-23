@@ -53,6 +53,9 @@ impl Tool for CreateRecipeTool {
                                 Notify steps need: message (use {{var}} for variables). \
                                 AskUser steps need: question, store_as, choices (optional list). \
                                 Branch steps need: condition (a variable name: set and not empty, false or 0 takes then_steps), then_steps, else_steps (lists of steps). \
+                                Agent steps hand a turn to a role from the agent catalog and keep its answer: role (researcher, planner, coder, reviewer, red-team, writer, chair, scribe), prompt, store_as, context (optional). \
+                                Agent steps that do not read each other's answers work at the same time, and a step that reads one waits for it. \
+                                A recipe with Agent steps runs only when the person starts it: the Recipes screen, or the shell's run_recipe, which asks them. \
                                 A JumpIf back to an earlier step is a loop; one that never waits is stopped after 100 steps.",
                             "items": { "type": "object" }
                         },
@@ -236,9 +239,13 @@ impl Tool for RunRecipeTool {
         // steps to pending, pointer to 0 — so every run of a built-in wrote over the last one.
         // Marked running: the worker starts every running recipe after the turn that ran this
         // tool (`RecipeStore::get_resumable`).
+        //
+        // A formation — a recipe with Agent steps — is refused here: starting agents needs the
+        // person's leave, which this tool, graded standard, does not ask for. The shell's own
+        // `run_recipe` (sensitive) and the Recipes screen do (`recipe_templates::start`).
         let vars = args.get("variables").and_then(|v| v.as_object());
         let conn = ctx.db.conn();
-        match RecipeStore::start_run(&conn, id_or_name, vars) {
+        match crate::recipe_templates::start(&conn, id_or_name, vars, None) {
             Ok((recipe, run)) if run == recipe.id => format!(
                 "Recipe '{}' [{}] queued for execution. It will start processing immediately.",
                 recipe.name, run

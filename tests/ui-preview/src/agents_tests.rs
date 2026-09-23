@@ -36,7 +36,7 @@ fn call(name: &str, target: &str, summary: &str, arguments: &str, status: &str, 
 }
 
 /// What the shell would put in the global for pi, two minutes into tidying a photos folder.
-fn fill(g: &AgentsState, popped: bool) {
+pub(crate) fn fill(g: &AgentsState, popped: bool) {
     const PLAIN: (u8, u8, u8) = (222, 230, 239);
     const GREEN: (u8, u8, u8) = (130, 207, 156);
     let tab = |id: &str, label: &str, count: i32| AgentTabData { id: id.into(), label: label.into(), count };
@@ -55,6 +55,7 @@ fn fill(g: &AgentsState, popped: bool) {
         since: since.into(),
         parent: "".into(),
         role: "".into(),
+        origin: "".into(),
     };
     g.set_rows(ModelRc::new(VecModel::from(vec![
         row("deepseek:main", "DeepSeek", "release notes for 0.4", "waiting_for_you", "waiting for you", "40s"),
@@ -256,6 +257,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     let approval = ApprovalRequest {
         id: "appr-7".into(),
         agent: "pi:main".into(),
+        on_behalf: "".into(),
         requester: "pi 0.87".into(),
         verified: "pi --mode rpc (pid 4242) · the attached mind".into(),
         discrepancies: lines(&[]),
@@ -379,6 +381,7 @@ pub fn run_catalog(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dy
         since: "12s".into(),
         parent: "".into(),
         role: "Reviewer".into(),
+        origin: "".into(),
     };
     let mut rows: Vec<AgentRowData> = slint::Model::iter(&g.get_rows()).collect();
     rows.insert(0, row);

@@ -1196,6 +1196,9 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
         // Which of the person's agents asked — from its token, never its words — so the card
         // names it wherever it is drawn (design decision 4). Empty for a caller that is no agent.
         agent: card.verified.agent.clone().into(),
+        // Filled by whoever draws it, from the agents' store: `publish` for the Lens, the pane
+        // from the agent it draws. Never from anything the request says.
+        on_behalf: slint::SharedString::new(),
         requester: card.requester.into(),
         // Never blank. An empty line where the verified fact should be reads as "nothing to
         // report", which is the opposite of what an unidentifiable caller means — and the card
@@ -1272,7 +1275,14 @@ fn publish(ui: &App, cards: Vec<Card>) {
         if pending && !in_front.is_empty() {
             continue;
         }
-        let row = row_for(card);
+        let mut row = row_for(card);
+        // Who the agent works for — "Council recipe → Reviewer" — from how the shell started it.
+        // Read here, where no other lock is held, never inside `row_for`, which the Agents pane
+        // calls while it holds the agents' store.
+        if !row.agent.is_empty() {
+            let agent = crate::agents::AgentId(row.agent.to_string());
+            row.on_behalf = crate::agents::store().read(|s| s.agent(&agent).map(|a| a.meta.on_behalf())).unwrap_or_default().into();
+        }
         if pending {
             in_front.push(row.clone());
         }

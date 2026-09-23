@@ -1,5 +1,14 @@
-//! A recipe, operable over the shell's surface: answer the question one waits on, pause it,
-//! resume it, cancel it.
+//! A recipe, operable over the shell's surface: start one, answer the question one waits on, pause
+//! it, resume it, cancel it.
+//!
+//! `run_recipe` is the door a mind starts a recipe by — a formation among them (design/desk-and-
+//! mind-2026-09-23.md, section 6), whose Agent steps hand work to roles from the agent catalog.
+//! Graded **sensitive**, because it starts agents and work that runs as the person: in `ask` mode
+//! the person sees a card first. Its run is given the person's leave for its agents
+//! (`RecipeStore::allow_agents`); the companion's own `run_recipe` tool, graded standard, is not
+//! given one and refuses a formation. An agent that another agent or a recipe started cannot start
+//! one (depth one); an agent that may start agents can, and the formation's agents are its
+//! children, held to its rules.
 //!
 //! The same four things the Recipes screen's buttons do, through the same door — the companion
 //! worker applies each with `yantrik_companion::recipe_view::apply`, which answers through the
@@ -11,16 +20,76 @@
 //! is refused at once for a recipe that does not exist or cannot take it; what the worker then
 //! made of it is in `describe shell` and on the Recipes screen.
 
-use yantrik_app_runtime::control::{Action, App as ControlSurface, Param};
+use std::time::Duration;
+
+use yantrik_app_runtime::control::{self, Action, App as ControlSurface, Param};
+use yantrik_companion::recipe::Leave;
 use yantrik_companion::recipe_view::{RecipeOp, RecipeView};
 
+use crate::agents::{self, AgentId};
 use crate::bridge::CompanionHandle;
+use crate::control_agents::Caller;
+
+/// How long `run_recipe` waits for the companion to take the recipe.
+const START_WAIT: Duration = Duration::from_secs(20);
+
+/// `run_recipe`, as published.
+pub(crate) fn run_recipe_spec() -> Action {
+    Action::new(
+        "run_recipe",
+        "Start a recipe with its inputs: a built-in one by its name or id, or one a mind made. A \
+         formation — Council, Red team, Build, Writers' room; `describe shell` → `recipes` → \
+         `formations` lists each with its `inputs` — hands work to roles from the agent \
+         catalog: each works in its own pane on the Agents screen, its row saying which recipe it \
+         works for, and the recipe's stages light on the Recipes screen as they answer; its result \
+         comes as the recipe's completion. Answers with the run's id; `describe shell` → `recipes` \
+         shows how it goes, and `cancel_recipe` stops it and lets its agents go. An agent another \
+         agent or a recipe started cannot start a formation.",
+    )
+    .risk("sensitive")
+    .defers()
+    .arg(Param::text("recipe").describe("The recipe's id from `describe shell` → `recipes`, or its name (Council, Build …)"))
+    .arg(Param::text("inputs").optional().describe(
+        "Its inputs as a JSON object: {\"question\": \"…\"} for the Council, and a seat to change, e.g. \
+         \"seat_2\": \"reviewer\". `describe shell` → `recipes` → `formations` lists what each takes",
+    ))
+}
 
 /// Add the recipe actions to the shell's control surface.
 pub fn actions(surface: ControlSurface, companion: CompanionHandle) -> ControlSurface {
     let recipe = || Param::text("recipe").describe("The recipe's id from `describe shell` → `recipes`, or its name");
-    let (pause, resume, cancel) = (companion.clone(), companion.clone(), companion.clone());
+    let (pause, resume, cancel, start) = (companion.clone(), companion.clone(), companion.clone(), companion.clone());
     surface
+        .action(run_recipe_spec(), move |args| {
+            let want = args["recipe"].as_str().unwrap_or_default().trim().to_string();
+            if want.is_empty() {
+                return Err("`recipe` is empty".into());
+            }
+            let inputs = inputs_arg(args)?;
+            let leave = leave_for(&crate::control_agents::caller()?)?;
+            let handle = start.clone();
+            // The worker may be in the middle of an answer: wait for it off the UI thread.
+            let work = move || {
+                let started = handle.start_recipe_and_wait(want, inputs, Some(leave), START_WAIT)?;
+                let said = if started.formation {
+                    format!(
+                        "Started '{}' as `{}`. Its agents are at work, each in its own pane on the Agents \
+                         screen; `describe shell` → `recipes` shows its stages, and its result comes as \
+                         the recipe's completion.",
+                        started.name, started.run
+                    )
+                } else {
+                    format!("Started '{}' as `{}`; `describe shell` → `recipes` shows how it goes.", started.name, started.run)
+                };
+                Ok(serde_json::json!({
+                    "recipe": started.run,
+                    "name": started.name,
+                    "formation": started.formation,
+                    "said": said,
+                }))
+            };
+            control::answer_later(work).map(|()| serde_json::json!({ "answering": "off the UI thread" })).or_else(|work| work())
+        })
         .action(
             Action::new(
                 "answer_recipe",
@@ -60,6 +129,36 @@ pub fn actions(surface: ControlSurface, companion: CompanionHandle) -> ControlSu
                 .arg(recipe()),
             move |args| request(&cancel, args, RecipeOp::Cancel, |v| v.can.cancel, "has nothing to cancel"),
         )
+}
+
+/// `inputs`: absent, an object, or an object written as JSON text.
+fn inputs_arg(args: &serde_json::Value) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    match args.get("inputs") {
+        None | Some(serde_json::Value::Null) => Ok(Default::default()),
+        Some(serde_json::Value::Object(map)) => Ok(map.clone()),
+        Some(serde_json::Value::String(text)) if text.trim().is_empty() => Ok(Default::default()),
+        Some(serde_json::Value::String(text)) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(serde_json::Value::Object(map)) => Ok(map),
+            _ => Err(format!("`inputs` is a JSON object, like {{\"question\": \"…\"}}; it was `{text}`")),
+        },
+        Some(other) => Err(format!("`inputs` is a JSON object, like {{\"question\": \"…\"}}; it was {other}")),
+    }
+}
+
+/// The leave a run started through `run_recipe` is given for its agents: the person's — who, in
+/// `ask` mode, was shown the card — or, for an agent, that agent's, if it may start agents at all:
+/// not one another agent or a recipe started. Its formation's agents are then its children.
+pub(crate) fn leave_for(caller: &Caller) -> Result<Leave, String> {
+    match caller {
+        Caller::NoAgent => Ok(Leave::new("shell.run_recipe (sensitive), by a caller that runs as no agent", None)),
+        Caller::Agent(me) => {
+            let live: Vec<AgentId> = crate::wire::harness::host()
+                .map(|h| h.agents().into_iter().map(|a| a.id).collect())
+                .unwrap_or_default();
+            agents::store().read(|s| crate::control_agents::may_start_child(me, s, &live))?;
+            Ok(Leave::new(format!("agent `{me}`, through shell.run_recipe (sensitive)"), Some(me.0.clone())))
+        }
+    }
 }
 
 /// Check the request against the recipes as last published, then hand it to the worker.
@@ -129,6 +228,7 @@ mod tests {
             question: None,
             steps: Vec::new(),
             can: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -155,5 +255,64 @@ mod tests {
         }
         let control = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/control.rs")).unwrap();
         assert!(control.contains("crate::control_recipes::actions(surface, ctx.bridge.handle())"), "the shell adds them");
+    }
+
+    /// `run_recipe` starts agents, so it is graded sensitive, and the gate every door meets —
+    /// the one the dispatch runs before any handler — refuses it in ask mode without the person's
+    /// grant, lets it through with one, runs it unasked only where the mode says sensitive runs
+    /// unasked, and never above the ceiling.
+    #[test]
+    fn starting_a_formation_is_sensitive_and_refused_without_a_grant() {
+        use yantrik_ipc_transport::gate::{decide, Authority, Mode};
+        let spec = run_recipe_spec();
+        assert_eq!((spec.name.as_str(), spec.permission, spec.deferred), ("run_recipe", "sensitive", true));
+        let params: Vec<(&str, bool)> = spec.params.iter().map(|p| (p.name.as_str(), p.required)).collect();
+        assert_eq!(params, [("recipe", true), ("inputs", false)]);
+        let at = |mode: &str, granted: bool, ceiling: &str| Authority { ceiling: ceiling.into(), mode: Mode::named(mode), granted };
+        let err = decide(&at("ask", false, "sensitive"), "shell", "run_recipe", spec.permission, &spec.description).unwrap_err();
+        assert!(err.starts_with("GRANT:") && err.contains("graded `sensitive`"), "{err}");
+        assert!(decide(&at("plan", false, "sensitive"), "shell", "run_recipe", spec.permission, &spec.description).is_err());
+        assert!(decide(&at("ask", true, "sensitive"), "shell", "run_recipe", spec.permission, &spec.description).is_ok(), "the person's Allow");
+        assert!(decide(&at("auto", false, "sensitive"), "shell", "run_recipe", spec.permission, &spec.description).is_ok());
+        assert!(decide(&at("bypass", true, "standard"), "shell", "run_recipe", spec.permission, &spec.description).is_err(), "never above the ceiling");
+
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/control_recipes.rs")).unwrap();
+        let src = src.split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains(".action(run_recipe_spec(), move |args|"), "published on the shell's surface");
+    }
+
+    /// The leave a run gets for its agents: the person's, or a top-level agent's — never one a
+    /// child or a recipe's agent could give.
+    #[test]
+    fn only_the_person_or_an_agent_that_may_start_agents_gives_a_run_its_leave() {
+        use crate::agents::{AgentMeta, RecipeOrigin};
+        let person = leave_for(&Caller::NoAgent).unwrap();
+        assert_eq!((person.by.as_str(), person.agent), ("shell.run_recipe (sensitive), by a caller that runs as no agent", None));
+        let top = AgentId("pi:c-leave-top".into());
+        agents::store().upsert_agent(AgentMeta::new(top.clone(), "pi"));
+        let leave = leave_for(&Caller::Agent(top.clone())).unwrap();
+        assert_eq!(leave.agent.as_deref(), Some("pi:c-leave-top"));
+        let child = AgentId("pi:c-leave-kid".into());
+        let mut meta = AgentMeta::new(child.clone(), "pi");
+        meta.parent = Some(top);
+        agents::store().upsert_agent(meta);
+        assert!(leave_for(&Caller::Agent(child)).unwrap_err().contains("one level only"));
+        let recipes = AgentId("pi:c-leave-recipe".into());
+        let mut meta = AgentMeta::new(recipes.clone(), "pi");
+        meta.recipe = Some(RecipeOrigin { id: "rcp_x".into(), name: "Build".into() });
+        agents::store().upsert_agent(meta);
+        assert!(leave_for(&Caller::Agent(recipes)).unwrap_err().contains("a recipe started cannot start agents"));
+    }
+
+    #[test]
+    fn inputs_come_as_an_object_or_as_json_text() {
+        assert!(inputs_arg(&serde_json::json!({})).unwrap().is_empty());
+        let given = inputs_arg(&serde_json::json!({"inputs": {"question": "Ship Friday?"}})).unwrap();
+        assert_eq!(given["question"], "Ship Friday?");
+        let text = inputs_arg(&serde_json::json!({"inputs": "{\"goal\": \"a flag\"}"})).unwrap();
+        assert_eq!(text["goal"], "a flag");
+        assert!(inputs_arg(&serde_json::json!({"inputs": "  "})).unwrap().is_empty());
+        assert!(inputs_arg(&serde_json::json!({"inputs": "a flag"})).unwrap_err().contains("JSON object"));
+        assert!(inputs_arg(&serde_json::json!({"inputs": [1]})).is_err());
     }
 }

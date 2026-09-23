@@ -1030,8 +1030,17 @@ fn audit() -> &'static Mutex<Vec<AuditEntry>> {
 /// The audit file. `pub(crate)` for the mind panel, which reads it back after a restart has
 /// emptied the in-memory list (see `mind_panel::recent_acts`).
 pub(crate) fn audit_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    format!("{home}/.local/share/yantrik/mind-audit.jsonl")
+    // Under test, a file of the run's own: a test never writes into the person's record.
+    #[cfg(test)]
+    return std::env::temp_dir()
+        .join(format!("yantrik-mind-audit-under-test-{}.jsonl", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(not(test))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        format!("{home}/.local/share/yantrik/mind-audit.jsonl")
+    }
 }
 
 /// Record one unasked action. Nothing here authorises anything; it only writes down what was.

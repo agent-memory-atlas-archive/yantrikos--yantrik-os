@@ -594,6 +594,7 @@ fn row_of(a: &Agent) -> AgentRowData {
         since: since(a).into(),
         parent: a.meta.parent.as_ref().map(|p| p.0.clone()).unwrap_or_default().into(),
         role: a.meta.role.as_ref().map(|r| r.name.clone()).unwrap_or_default().into(),
+        origin: a.meta.recipe.as_ref().map(|r| r.label()).unwrap_or_default().into(),
     }
 }
 
@@ -814,7 +815,7 @@ fn approval_of(a: &Agent, approval: &Approval, key: String, pending: &[crate::ap
         })
         .flatten();
     let card = match live {
-        Some(card) => crate::control_approvals::row_for(card.clone()),
+        Some(card) => crate::ApprovalRequest { on_behalf: a.meta.on_behalf().into(), ..crate::control_approvals::row_for(card.clone()) },
         None => {
             let (app, action) = approval.what.split_once('.').unwrap_or((approval.what.as_str(), ""));
             let (decision, record) = match approval.outcome {

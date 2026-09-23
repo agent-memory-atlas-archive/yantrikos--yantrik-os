@@ -38,7 +38,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-pub use model::{AgentId, AgentMeta, ApprovalOutcome, CallState, Event, Provenance, RoleMeta, State, Stream, Tab};
+pub use model::{AgentId, AgentMeta, ApprovalOutcome, CallState, Event, Provenance, RecipeOrigin, RoleMeta, State, Stream, Tab};
 pub use store::Store;
 
 /// The title every popped-out agent window starts with, so the window list can tell an agent's
@@ -80,6 +80,10 @@ pub fn store() -> &'static Agents {
         #[cfg(test)]
         let dir = std::env::temp_dir().join(format!("yantrik-agents-under-test-{}", std::process::id()));
         let store = Store::load(&dir, Box::new(model::now));
+        // Every test in the binary shares this one store, many at once: under test it keeps them
+        // all, so no test's agents are let go to make room for another's.
+        #[cfg(test)]
+        let store = store.keeping(usize::MAX);
         tracing::info!(agents = store.agents().len(), dir = %dir.display(), "Agents loaded");
         Agents { store: Mutex::new(store), dir, saved: Mutex::new(Instant::now()) }
     })
@@ -250,6 +254,10 @@ pub fn for_describe() -> serde_json::Value {
                         "id": r.id, "name": r.name, "reach": r.reach,
                         "budget": { "turns": r.turns, "minutes": r.minutes },
                     })),
+                    // The recipe that handed it the work (an Agent step), or null.
+                    "recipe": a.meta.recipe.as_ref().map(|r| serde_json::json!({ "id": r.id, "name": r.name })),
+                    // Who it works for, as its row and its approval cards say it.
+                    "on_behalf": a.meta.on_behalf(),
                     "children": s.children_of(&a.meta.id),
                     "turns": d.turns,
                     "calls": d.calls,

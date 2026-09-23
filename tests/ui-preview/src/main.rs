@@ -5,6 +5,7 @@ mod settings_tests;
 mod agents_tests;
 mod mind_panel_tests;
 mod recipes_tests;
+mod formations_tests;
 use slint::{
     platform::{
         software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
@@ -35,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-agents-catalog") { return agents_tests::run_catalog(&window, output); }
     if args.iter().any(|a| a == "verify-mind-panel") { return mind_panel_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-recipes") { return recipes_tests::run(&window, output); }
+    if args.iter().any(|a| a == "verify-formations") { return formations_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-lens-agents") { return agents_tests::run_lens(&window, output); }
     if args.iter().any(|a| a == "verify-idle") {
         let probe = TerminalProbe::new()?;

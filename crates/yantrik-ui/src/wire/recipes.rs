@@ -15,6 +15,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use yantrik_companion::recipe::Leave;
 use yantrik_companion::recipe_view::{self, RecipeOp, RecipeView, StepView};
 
 use crate::app_context::AppContext;
@@ -170,6 +171,34 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let cancel = press(|_| RecipeOp::Cancel);
         g.on_cancel(move |id| cancel(id, String::new()));
     }
+    // Start, on a formation's definition: the person's own press, and so their leave for its
+    // agents. The run is the worker's to make; what came of it comes back as the notice.
+    g.on_start({
+        let (weak, companion) = (weak.clone(), companion.clone());
+        move |id, text| {
+            let Some(ui) = weak.upgrade() else { return };
+            let g = ui.global::<RecipesState>();
+            match start_request(&crate::recipes::snapshot().views, &id, &text) {
+                Ok((recipe, inputs)) => {
+                    let leave = Leave::new("the person, from the Recipes screen", None);
+                    match companion.start_recipe(recipe, inputs, Some(leave)) {
+                        Ok(()) => {
+                            g.set_notice("Starting…".into());
+                            g.set_notice_ok(true);
+                        }
+                        Err(why) => {
+                            g.set_notice(why.into());
+                            g.set_notice_ok(false);
+                        }
+                    }
+                }
+                Err(why) => {
+                    g.set_notice(why.into());
+                    g.set_notice_ok(false);
+                }
+            }
+        }
+    });
     g.on_dismiss_notice({
         let weak = weak.clone();
         move || {
@@ -195,6 +224,33 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     });
     // The timer lives as long as the shell, the idiom every wire module uses.
     std::mem::forget(timer);
+}
+
+/// What the Recipes screen's Start asks the worker for: the formation's definition, and its one
+/// input given as `text`. Refused here for anything the screen cannot start.
+pub fn start_request(
+    views: &[RecipeView],
+    id: &str,
+    text: &str,
+) -> Result<(String, serde_json::Map<String, serde_json::Value>), String> {
+    let view = views.iter().find(|v| v.id == id).ok_or_else(|| format!("no recipe `{id}` any more"))?;
+    if !can_start(view) {
+        return Err(format!("'{}' is not started from here; a mind starts it with run_recipe", view.name));
+    }
+    let input = view.inputs.iter().find(|i| i.default.is_none()).expect("can_start: one input with no default");
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(format!("'{}' needs {} to start", view.name, input.describe.to_lowercase()));
+    }
+    let mut inputs = serde_json::Map::new();
+    inputs.insert(input.name.clone(), serde_json::Value::String(text.to_string()));
+    Ok((view.id.clone(), inputs))
+}
+
+/// A formation's built-in definition with exactly one input a run must be given: the screen asks
+/// for it and starts it.
+fn can_start(v: &RecipeView) -> bool {
+    v.template && v.formation && v.inputs.iter().filter(|i| i.default.is_none()).count() == 1
 }
 
 /// Hand a press to the worker. What it made of it comes back as the notice.
@@ -281,7 +337,11 @@ pub fn row_of(v: &RecipeView, now: f64) -> RecipeRowData {
     let total = v.steps.len();
     let focus = crate::recipes::focus(v);
     let at = focus.map(|s| s.index + 1);
-    let status_label = if v.template {
+    let status_label = if v.needs_you.is_some() {
+        "waiting for you".to_string()
+    } else if v.template && v.formation {
+        "formation, never run".to_string()
+    } else if v.template {
         "built-in, never run".to_string()
     } else {
         match v.status.as_str() {
@@ -342,6 +402,11 @@ pub fn row_of(v: &RecipeView, now: f64) -> RecipeRowData {
         Some(q) => (q.text.clone(), q.choices.iter().map(|c| SharedString::from(c.as_str())).collect()),
         None => (String::new(), Vec::new()),
     };
+    let start_hint = if can_start(v) {
+        v.inputs.iter().find(|i| i.default.is_none()).map(|i| format!("{}…", i.describe)).unwrap_or_default()
+    } else {
+        String::new()
+    };
     RecipeRowData {
         id: v.id.as_str().into(),
         name: v.name.as_str().into(),
@@ -360,6 +425,10 @@ pub fn row_of(v: &RecipeView, now: f64) -> RecipeRowData {
         can_resume: v.can.resume,
         can_cancel: v.can.cancel,
         stages: ModelRc::new(VecModel::from(stages)),
+        formation: v.formation,
+        can_start: can_start(v),
+        start_hint: start_hint.into(),
+        needs_you: v.needs_you.is_some(),
     }
 }
 
@@ -393,6 +462,7 @@ fn state_label(state: &str, kind: &str) -> String {
         "done" => "done",
         "current" => "running now",
         "waiting" if kind == "ask_user" => "waiting for you",
+        "waiting" if kind == "agent" => "working",
         "waiting" => "waiting",
         "failed" => "failed",
         "skipped" => "skipped",
@@ -527,6 +597,112 @@ mod tests {
         let paused = row_of(&fixture(RecipeStatus::Paused, 1, &["done"], None), 0.0);
         assert_eq!(paused.waiting_for, "Paused before step 2.");
         assert!(paused.can_resume && !paused.can_pause);
+    }
+
+    /// A formation mid-flight, as its row draws it: each Agent stage called by its role and mind,
+    /// working ones waiting, the Chair to come; the step opened says who is at work. Its built-in
+    /// definition asks for its one input, and Start hands the worker that input and the id.
+    #[test]
+    fn a_formation_draws_its_agents_and_its_definition_starts_with_its_input() {
+        use yantrik_companion::recipe::{AgentRun, AGENTS_VAR};
+        use yantrik_companion::recipe_templates::{self, formations};
+        let template = recipe_templates::get_template(formations::COUNCIL).unwrap();
+        let steps: Vec<StoredStep> = (template.steps)()
+            .into_iter()
+            .enumerate()
+            .map(|(i, step)| StoredStep { step_index: i, step, status: if i == 0 { "done" } else { "pending" }.into(), result: None })
+            .collect();
+        let run = |role: &str, mind: &str, n: u32, state: &str| AgentRun {
+            role: role.into(),
+            role_name: yantrik_companion::recipe::role_display(role),
+            mind: mind.into(),
+            agent: format!("{mind}:c-00{n}"),
+            store_as: format!("answer_{n}"),
+            since: 0.0,
+            until: 9e9,
+            state: state.into(),
+            needs_you: None,
+        };
+        let agents: serde_json::Map<String, serde_json::Value> = [
+            ("0", run("researcher", "deepseek", 1, "answered")),
+            ("1", run("red-team", "pi", 2, "working")),
+            ("2", run("planner", "deepseek", 3, "working")),
+        ]
+        .into_iter()
+        .map(|(k, r)| (k.to_string(), serde_json::to_value(r).unwrap()))
+        .collect();
+        let vars = std::collections::HashMap::from([
+            ("question".to_string(), json!("Should we ship on Friday?")),
+            ("seat_1".to_string(), json!("researcher")),
+            ("seat_2".to_string(), json!("red-team")),
+            ("seat_3".to_string(), json!("planner")),
+            ("chair".to_string(), json!("chair")),
+            ("answer_1".to_string(), json!("Yes: the tests pass.")),
+            (AGENTS_VAR.to_string(), serde_json::Value::Object(agents)),
+            ("_wait".to_string(), json!({"step": 3, "since": 0.0, "agents": true})),
+        ]);
+        let recipe = Recipe {
+            id: "rcp_council".into(),
+            name: "Council".into(),
+            description: String::new(),
+            status: RecipeStatus::Waiting,
+            current_step: 3,
+            created_at: 1_790_000_000.0,
+            updated_at: 1_790_000_060.0,
+            enabled: true,
+            error_message: None,
+        };
+        let v = recipe_view::view(&recipe, &steps, &vars);
+        let row = row_of(&v, 1_790_000_100.0);
+        let stages: Vec<(String, String)> = row.stages.iter().map(|s| (s.label.to_string(), s.state.to_string())).collect();
+        assert_eq!(
+            stages,
+            [
+                ("Researcher · deepseek".into(), "done".into()),
+                ("Red team · pi".into(), "waiting".into()),
+                ("Planner · deepseek".into(), "waiting".into()),
+                ("Chair".into(), "pending".into())
+            ]
+        );
+        assert!(row.formation && !row.can_start);
+        assert_eq!(row.waiting_for, "Waiting for answers from the Red team (pi) and the Planner (deepseek)");
+        assert_eq!(row.progress, "step 2 of 4", "lit at the first agent still at work");
+        let working = step_of(&v.steps[1]);
+        assert_eq!((working.state_label.as_str(), working.agent.as_str()), ("working", "the Red team on pi (pi:c-002)"));
+        assert_eq!(step_of(&v.steps[0]).result, "Yes: the tests pass.");
+        assert_eq!(step_of(&v.steps[3]).agent, "Chair");
+
+        // The definition: its input asked for, and Start's request.
+        let mut def = recipe.clone();
+        def.id = formations::COUNCIL.into();
+        def.status = RecipeStatus::Pending;
+        def.current_step = 0;
+        let fresh: Vec<StoredStep> = steps.iter().cloned().map(|mut s| { s.status = "pending".into(); s }).collect();
+        let dv = recipe_view::view(&def, &fresh, &Default::default());
+        let drow = row_of(&dv, 0.0);
+        assert!(drow.can_start && drow.template);
+        assert_eq!(drow.status_label, "formation, never run");
+        assert_eq!(drow.start_hint, "The question the council is to answer…");
+        let views = vec![dv.clone(), v.clone()];
+        let (id, inputs) = start_request(&views, formations::COUNCIL, "  Should we ship?  ").unwrap();
+        assert_eq!((id.as_str(), inputs["question"].as_str()), (formations::COUNCIL, Some("Should we ship?")));
+        assert!(start_request(&views, formations::COUNCIL, " ").unwrap_err().contains("needs the question"));
+        assert!(start_request(&views, "rcp_council", "x").unwrap_err().contains("is not started from here"));
+        let recipes_slint = read("../yantrik-ui-slint/ui/recipes.slint");
+        assert!(recipes_slint.contains("RecipesState.start(root.recipe.id, start-input.value);"), "Start sends the input");
+        assert!(recipes_slint.contains("root.kind == \"agent\" ? Icons.people"), "a working agent's stage wears the agents mark");
+
+        // When its agents need the person — a card to answer, a place to free — the row says so,
+        // and so does the mind panel, which counts it among what needs the person.
+        let mut stuck = v.clone();
+        stuck.needs_you = Some("a place: the desktop is running 6 agents, the most it runs at once".into());
+        let row = row_of(&stuck, 1_790_000_100.0);
+        assert!(row.needs_you);
+        assert_eq!((row.status.as_str(), row.status_label.as_str()), ("waiting", "waiting for you"));
+        let line = crate::mind_panel::recipe_line(&stuck);
+        assert!(line.needs_you && line.step.starts_with("needs you: a place: the desktop is running 6 agents"), "{line:?}");
+        assert!(!crate::mind_panel::recipe_line(&v).needs_you);
+        assert_eq!(crate::mind_panel::recipe_line(&v).step, "step 2 of 4 · Red team · pi at work");
     }
 
     #[test]

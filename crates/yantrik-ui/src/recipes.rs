@@ -222,18 +222,40 @@ fn describe(snap: &Snapshot) -> serde_json::Value {
                     "resume": v.can.resume,
                     "cancel": v.can.cancel,
                 },
+                // A formation's agents: each Agent step's, working or answered.
+                "agents": v.agents,
+                // What its agents need the person for, if anything: a card, a place.
+                "needs_you": v.needs_you,
                 "updated_at": v.updated_at as i64,
+            })
+        })
+        .collect();
+    // The formations a run_recipe can start, with what each takes: its one input, and the roles
+    // it seats by default (changed by giving them).
+    let formations: Vec<serde_json::Value> = views
+        .iter()
+        .filter(|v| v.template && v.formation)
+        .map(|v| {
+            serde_json::json!({
+                "id": v.id,
+                "name": v.name,
+                "description": v.description,
+                "stages": v.steps.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(),
+                "inputs": v.inputs,
             })
         })
         .collect();
     serde_json::json!({
         "loaded": snap.loaded,
         "in_flight": count(&|v| recipe_view::is_in_flight(v)),
-        "waiting_for_you": count(&|v| v.can.answer),
+        "waiting_for_you": count(&|v| v.can.answer || v.needs_you.is_some()),
         "templates": count(&|v| v.template),
         "recipes": recipes,
-        "act": "answer_recipe {recipe, text} answers the question one waits on; pause_recipe, \
-                resume_recipe and cancel_recipe {recipe} do what they say. `can` says which apply.",
+        "formations": formations,
+        "act": "run_recipe {recipe, inputs} starts one — a formation among them, whose agents it \
+                hands work to (sensitive); answer_recipe {recipe, text} answers the question one \
+                waits on; pause_recipe, resume_recipe and cancel_recipe {recipe} do what they say. \
+                `can` says which apply.",
     })
 }
 

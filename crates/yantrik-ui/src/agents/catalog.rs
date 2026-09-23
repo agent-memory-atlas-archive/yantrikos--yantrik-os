@@ -320,6 +320,26 @@ impl Role {
         }
     }
 
+    /// The definition's digest (SHA-256, hex) over everything that decides what the role does:
+    /// its name, the minds it runs on, its brief, its reach, what it returns and its budget. A
+    /// recipe's run records it for each role the person agreed to, and starts nothing whose
+    /// definition has changed since: a file in ~/.config/yantrik/agents with the same id replaces
+    /// a role whole — its mind and its reach with it.
+    pub fn digest(&self) -> String {
+        let definition = json!({
+            "id": self.id,
+            "name": self.name,
+            "mind": self.mind,
+            "brief": self.brief,
+            "surfaces": self.reach.surfaces,
+            "ceiling": self.reach.ceiling,
+            "returns": self.returns,
+            "turns": self.budget.turns,
+            "minutes": self.budget.minutes,
+        });
+        reach::token_digest(&definition.to_string())
+    }
+
     /// The reach as a door holds it, for `agent`.
     pub fn reach_for(&self, agent: &str) -> reach::Reach {
         reach::Reach {

@@ -263,6 +263,8 @@ pub struct RecipeLine {
     pub name: String,
     pub step: String,
     pub status: String,
+    /// Its agents need the person: a card to answer, a place to free.
+    pub needs_you: bool,
 }
 
 /// Whether the companion's worker has reached its command loop. The memory count it pushes is
@@ -298,12 +300,13 @@ pub fn recipes_in_flight(views: &[yantrik_companion::recipe_view::RecipeView], c
 /// "step 3 of 7 · running web_search", from the stage the Recipes screen lights.
 pub fn recipe_line(v: &yantrik_companion::recipe_view::RecipeView) -> RecipeLine {
     let total = v.steps.len();
-    let step = match crate::recipes::focus(v) {
-        Some(s) => format!("step {} of {total} · {}", s.index + 1, step_words(v, s)),
-        None if total == 0 => "no steps recorded".to_string(),
-        None => format!("step {} of {total}", (v.current_step + 1).min(total)),
+    let step = match (crate::recipes::focus(v), &v.needs_you) {
+        (_, Some(why)) if v.status != "paused" => format!("needs you: {}", one_line(why, 80)),
+        (Some(s), _) => format!("step {} of {total} · {}", s.index + 1, step_words(v, s)),
+        (None, _) if total == 0 => "no steps recorded".to_string(),
+        (None, _) => format!("step {} of {total}", (v.current_step + 1).min(total)),
     };
-    RecipeLine { id: v.id.clone(), name: v.name.clone(), step, status: v.status.clone() }
+    RecipeLine { id: v.id.clone(), name: v.name.clone(), step, status: v.status.clone(), needs_you: v.needs_you.is_some() }
 }
 
 /// What the lit stage is doing, in a few words.
@@ -326,7 +329,9 @@ pub fn step_words(v: &yantrik_companion::recipe_view::RecipeView, s: &yantrik_co
         "sort" => "sorting".into(),
         "aggregate" => "totalling".into(),
         "extract" => "extracting".into(),
-        // A kind added later (the Agent step) reads by its label until it has words here.
+        // An Agent step: its role at work, on its mind.
+        "agent" if s.state == "waiting" => format!("{} at work", s.label),
+        "agent" => format!("handing to {}", s.label),
         _ => s.label.clone(),
     };
     match (v.status.as_str(), s.state.as_str()) {
@@ -567,7 +572,8 @@ pub fn build(input: &Inputs) -> Panel {
             memory_known,
             minds,
             running: input.working.running,
-            needs_you: input.working.needs_you,
+            // Agents waiting on the person, and recipes whose agents are.
+            needs_you: input.working.needs_you + recipes.iter().filter(|r| r.needs_you).count(),
             more_agents: input.working.more,
             recipes_known: input.recipes.is_some(),
             services,

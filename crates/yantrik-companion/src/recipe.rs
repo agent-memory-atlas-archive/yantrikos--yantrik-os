@@ -151,6 +151,29 @@ pub enum RecipeStep {
         then_steps: Vec<RecipeStep>,
         else_steps: Vec<RecipeStep>,
     },
+
+    // ── Formations (design/desk-and-mind-2026-09-23.md, section 6) ──
+
+    /// Hand a turn to a role from the agent catalog and keep its answer in `store_as`.
+    ///
+    /// The shell starts the role's agent through its own `hand_off` (the executor's
+    /// [`AgentHook`](crate::recipe_executor::AgentHook)); the recipe does not wait for it here.
+    /// It goes on to the next step, and the first step that reads `store_as` — or the end of the
+    /// recipe — waits for the answer. So Agent steps that do not read each other's answers work
+    /// at the same time, and a step that needs one waits for it. `role`, `prompt` and `context`
+    /// take `{{var}}`s. Only in a run the person allowed to start agents
+    /// ([`RecipeStore::allow_agents`]), and only at the top of a recipe, not inside a Branch.
+    Agent {
+        /// A catalog role's id or name: researcher, planner, coder, reviewer, red-team, writer,
+        /// chair, scribe, or the person's own.
+        role: String,
+        /// What it is to do: its task, after the role's own instructions.
+        prompt: String,
+        store_as: String,
+        /// What it should read first: the answers to weigh, the change to review.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
+    },
 }
 
 /// Output format for Render steps.
@@ -402,10 +425,198 @@ pub const SINCE_WAIT_VAR: &str = "_since_wait";
 /// A recipe's own step budget, when it sets one; `recipe_executor::STEP_BUDGET` otherwise.
 pub const STEP_BUDGET_VAR: &str = "_step_budget";
 
+/// The agents a recipe's Agent steps handed work to ([`AgentRun`]), keyed by the step's index:
+/// the ones still working, and — so the Recipes screen can say who answered — the last one each
+/// step had.
+pub const AGENTS_VAR: &str = "_agents";
+
+/// One Agent step's agent, as the executor keeps it in [`AGENTS_VAR`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentRun {
+    /// The role's id in the catalog (`chair`), as the shell resolved it.
+    pub role: String,
+    /// Its name as a person reads it (`Chair`).
+    pub role_name: String,
+    /// The mind it runs on (`deepseek`).
+    pub mind: String,
+    /// The agent, `<mind>:<conversation>`, as the Agents screen lists it.
+    pub agent: String,
+    /// Where its answer goes.
+    pub store_as: String,
+    /// When it was handed the work, and when the recipe stops waiting for it (its role's minutes,
+    /// and a little over).
+    pub since: f64,
+    pub until: f64,
+    /// working | answered | failed | released.
+    pub state: String,
+    /// While it works: it is waiting on the person in its own pane — an approval card, a command
+    /// at a prompt — and what for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_you: Option<String>,
+}
+
+impl AgentRun {
+    pub const WORKING: &'static str = "working";
+    pub const ANSWERED: &'static str = "answered";
+    pub const FAILED: &'static str = "failed";
+    /// Let go before it answered: the recipe failed, or was cancelled.
+    pub const RELEASED: &'static str = "released";
+
+    pub fn working(&self) -> bool {
+        self.state == Self::WORKING
+    }
+
+    /// "Chair · deepseek": what the step's stage is called once it has an agent.
+    pub fn stage(&self) -> String {
+        format!("{} · {}", self.role_name, self.mind)
+    }
+}
+
+/// Every Agent step's agent a recipe's variables hold, by step index. An entry that does not
+/// read as one is left out.
+pub fn agent_runs(vars: &std::collections::HashMap<String, serde_json::Value>) -> std::collections::BTreeMap<usize, AgentRun> {
+    vars.get(AGENTS_VAR)
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.parse::<usize>().ok()?, serde_json::from_value::<AgentRun>(v.clone()).ok()?)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Write them back.
+pub fn save_agent_runs(conn: &Connection, recipe_id: &str, runs: &std::collections::BTreeMap<usize, AgentRun>) {
+    let map: serde_json::Map<String, serde_json::Value> =
+        runs.iter().map(|(k, v)| (k.to_string(), serde_json::to_value(v).unwrap_or_default())).collect();
+    RecipeStore::set_var(conn, recipe_id, AGENTS_VAR, &serde_json::Value::Object(map));
+}
+
+/// Why the step at a recipe's pointer cannot run yet, for its agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentBlock {
+    /// It reads what these steps' agents have not answered yet — or it is the end, and they are
+    /// still working. Step indexes.
+    Answers(Vec<usize>),
+    /// It is an Agent step, and the recipe already has as many agents working as it may
+    /// (`recipe_executor::AGENTS_AT_ONCE`).
+    Place,
+}
+
+/// Whether the step at `at` — `steps.len()` for the end — must wait for the recipe's agents:
+/// it reads an answer still coming (a `{{name}}`, an input variable, a JumpIf's or a Branch's
+/// condition, anything its arms read), or it is the end with answers still out, or it is an Agent
+/// step whose own last agent is still working or for which there is no place. None: it may run.
+pub fn blocked_on_agents(
+    steps: &[StoredStep],
+    at: usize,
+    vars: &std::collections::HashMap<String, serde_json::Value>,
+) -> Option<AgentBlock> {
+    let runs = agent_runs(vars);
+    let working: Vec<(usize, &AgentRun)> = runs.iter().filter(|(_, r)| r.working()).map(|(k, r)| (*k, r)).collect();
+    if working.is_empty() {
+        return None;
+    }
+    let Some(step) = steps.iter().find(|s| s.step_index == at).map(|s| &s.step) else {
+        // The end: every answer is in before the recipe is done.
+        return Some(AgentBlock::Answers(working.iter().map(|(k, _)| *k).collect()));
+    };
+    let is_agent = matches!(step, RecipeStep::Agent { .. });
+    if is_agent && working.iter().any(|(k, _)| *k == at) {
+        // Round again before its last round's agent has answered.
+        return Some(AgentBlock::Answers(vec![at]));
+    }
+    let reads = crate::recipe_view::reads(step);
+    let needed: Vec<usize> = working.iter().filter(|(_, r)| reads.contains(&r.store_as)).map(|(k, _)| *k).collect();
+    if !needed.is_empty() {
+        return Some(AgentBlock::Answers(needed));
+    }
+    if is_agent && working.len() >= crate::recipe_executor::AGENTS_AT_ONCE {
+        return Some(AgentBlock::Place);
+    }
+    None
+}
+
+/// A catalog role's id as a person reads it, before the shell has said its name: `red-team` →
+/// "Red team". The shipped roles' names are exactly this.
+pub fn role_display(role: &str) -> String {
+    let words = role.trim().replace(['-', '_'], " ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Whether a recipe's steps hand work to agents: an Agent step anywhere, a Branch's arms included.
+pub fn hands_off(steps: &[RecipeStep]) -> bool {
+    steps.iter().any(step_hands_off)
+}
+
+/// Whether one step hands work to an agent, or holds one that does.
+pub fn step_hands_off(step: &RecipeStep) -> bool {
+    match step {
+        RecipeStep::Agent { .. } => true,
+        RecipeStep::Branch { then_steps, else_steps, .. } => hands_off(then_steps) || hands_off(else_steps),
+        _ => false,
+    }
+}
+
+/// Who let a run hand work to agents ([`RecipeStore::allow_agents`]), and to which roles.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Leave {
+    /// In words, for the record: "the person, from the Recipes screen".
+    pub by: String,
+    /// The agent that asked for the run (`pi:c-7f3a91`), when an agent did: the run's agents are
+    /// its children, held to its rules. None when the person started it.
+    pub agent: Option<String>,
+    /// The roles agreed to, as the run names them, each with the digest of its definition when
+    /// the person started the run. A role whose definition has changed since — a file in
+    /// ~/.config/yantrik/agents replaced it, with another mind, brief or reach — or one the run
+    /// did not name then is not started on this leave.
+    pub roles: std::collections::BTreeMap<String, String>,
+}
+
+impl Leave {
+    pub fn new(by: impl Into<String>, agent: Option<String>) -> Leave {
+        Leave { by: by.into(), agent, roles: Default::default() }
+    }
+}
+
+/// The roles a recipe's Agent steps name, with `vars` — a run's inputs, with the template's
+/// defaults for what they do not give — filled in: what a person starting it agrees to.
+pub fn roles_named(steps: &[RecipeStep], vars: &std::collections::HashMap<String, serde_json::Value>) -> Vec<String> {
+    fn walk(steps: &[RecipeStep], vars: &std::collections::HashMap<String, serde_json::Value>, out: &mut Vec<String>) {
+        for step in steps {
+            match step {
+                RecipeStep::Agent { role, .. } => {
+                    let named = resolve_vars(role, vars).trim().to_string();
+                    if !out.contains(&named) {
+                        out.push(named);
+                    }
+                }
+                RecipeStep::Branch { then_steps, else_steps, .. } => {
+                    walk(then_steps, vars, out);
+                    walk(else_steps, vars, out);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(steps, vars, &mut out);
+    out
+}
+
 /// Where a recipe waits, as the executor writes it when a WaitFor or an AskUser stops it: the
 /// top-level step it waits at — the wait itself, or the Branch holding it — the arms and indexes
 /// down to the waiting step when it is inside a Branch, when it began, and for a timer when it
 /// wakes. The time is absolute, so a pause does not restart a timer and a restart keeps it.
+///
+/// `agents`: it waits on its agents rather than on a wait step — the step at `step` reads an
+/// answer an Agent step's agent has not given yet, or it is an Agent step and the recipe already
+/// has as many agents working as it may, or it is the end and some are still working. The
+/// pointer stays at that step, and the clock looks every tick whether the answers have come.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitRecord {
     pub step: usize,
@@ -414,6 +625,13 @@ pub struct WaitRecord {
     pub since: f64,
     #[serde(default)]
     pub until: Option<f64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agents: bool,
+    /// An Agent step whose start the shell put off (`AgentRefusal::Wait` or `Ask`), and why: the
+    /// executor asks again each tick, from `since`, and gives up after
+    /// `recipe_executor::PUT_OFF_MOST_SECS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub put_off: Option<String>,
 }
 
 /// What a waiting recipe waits on, read from what the store holds for it ([`waited_on`]).
@@ -429,12 +647,21 @@ pub struct Waited {
     pub since: f64,
     /// When a timer wakes, unix seconds.
     pub until: Option<f64>,
+    /// It waits on its agents' answers ([`WaitRecord::agents`]).
+    pub agents: bool,
+    /// An Agent step's start was put off, and why ([`WaitRecord::put_off`]): the person can
+    /// resolve it — a card to answer, a place to free.
+    pub put_off: Option<String>,
 }
 
 impl Waited {
     /// Whether the wait is over at `now`. A question is over only when it is answered — the
-    /// answer sets the recipe running, so a recipe still waiting on one is never over.
+    /// answer sets the recipe running, so a recipe still waiting on one is never over. A wait on
+    /// agents is for the executor to decide each tick, by asking the shell how they are doing.
     pub fn is_over(&self, now: f64) -> bool {
+        if self.agents {
+            return true;
+        }
         match &self.on {
             Some(RecipeStep::AskUser { .. }) => false,
             Some(RecipeStep::WaitFor { .. }) => self.until.map_or(true, |u| now >= u),
@@ -479,6 +706,8 @@ pub fn waited_on(
             on: at.filter(is_wait).cloned(),
             since: record.since,
             until: record.until,
+            agents: record.agents,
+            put_off: record.put_off,
         });
     }
     let before = recipe.current_step.checked_sub(1);
@@ -493,7 +722,7 @@ pub fn waited_on(
         }
         _ => None,
     };
-    Some(Waited { step: before.unwrap_or(0), inner: Vec::new(), on, since: recipe.updated_at, until })
+    Some(Waited { step: before.unwrap_or(0), inner: Vec::new(), on, since: recipe.updated_at, until, agents: false, put_off: None })
 }
 
 /// When a WaitFor that begins at `from` wakes: after its duration, or at the next time of day
@@ -706,9 +935,61 @@ impl RecipeStore {
                 last_fired  REAL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_recipes_status ON recipes(status);
-            CREATE INDEX IF NOT EXISTS idx_triggers_enabled ON recipe_triggers(enabled);",
+            CREATE INDEX IF NOT EXISTS idx_triggers_enabled ON recipe_triggers(enabled);
+
+            CREATE TABLE IF NOT EXISTS recipe_agent_leave (
+                recipe_id   TEXT PRIMARY KEY REFERENCES recipes(id),
+                by_whom     TEXT NOT NULL,
+                agent       TEXT,
+                roles       TEXT NOT NULL DEFAULT '{}',
+                at          REAL NOT NULL
+            );",
         )
         .expect("failed to create recipe tables");
+    }
+
+    /// Let one run hand work to agents: its Agent steps start catalog roles through the shell.
+    ///
+    /// Kept in a table of its own, not in the run's variables, because a recipe's own steps and a
+    /// caller's `variables` write those: a leave anything could set would be no leave. Only the
+    /// doors that asked first write it — the Recipes screen's Start (the person's own press) and
+    /// the shell's `run_recipe`, which is graded sensitive and so asks the person in `ask` mode.
+    pub fn allow_agents(conn: &Connection, recipe_id: &str, leave: &Leave) {
+        let roles = serde_json::to_string(&leave.roles).unwrap_or_else(|_| "{}".into());
+        conn.execute(
+            "INSERT OR REPLACE INTO recipe_agent_leave (recipe_id, by_whom, agent, roles, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![recipe_id, leave.by, leave.agent, roles, now_ts()],
+        )
+        .ok();
+    }
+
+    /// Who let this run hand work to agents, if anyone did.
+    pub fn agents_allowed(conn: &Connection, recipe_id: &str) -> Option<Leave> {
+        conn.query_row(
+            "SELECT by_whom, agent, roles FROM recipe_agent_leave WHERE recipe_id = ?1",
+            params![recipe_id],
+            |row| {
+                let roles: String = row.get(2)?;
+                Ok(Leave { by: row.get(0)?, agent: row.get(1)?, roles: serde_json::from_str(&roles).unwrap_or_default() })
+            },
+        )
+        .ok()
+    }
+
+    /// Finished recipes that still name an agent as working: failed or cancelled from a door that
+    /// does not run the executor (the chat's "cancel", `cancel_recipe`). The clock lets their
+    /// agents go ([`crate::recipe_executor::step`]).
+    pub fn finished_with_agents_working(conn: &Connection) -> Vec<String> {
+        let mut stmt = match conn.prepare(
+            "SELECT r.id FROM recipes r JOIN recipe_vars v ON v.recipe_id = r.id AND v.key = ?1
+             WHERE r.status IN ('failed', 'done') AND v.value LIKE '%\"state\":\"working\"%'",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![AGENTS_VAR], |row| row.get::<_, String>(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
     }
 
     /// Create a new recipe with steps and optional trigger.
@@ -964,6 +1245,12 @@ impl RecipeStore {
             for (key, value) in Self::get_vars(conn, source_id) {
                 Self::set_var(conn, &id, &key, &value);
             }
+            // A run moved to an id of its own keeps the leave it was given; a new run never
+            // inherits one.
+            if let Some(leave) = Self::agents_allowed(conn, source_id) {
+                Self::allow_agents(conn, &id, &leave);
+                conn.execute("DELETE FROM recipe_agent_leave WHERE recipe_id = ?1", params![source_id]).ok();
+            }
         }
         Some(id)
     }
@@ -999,6 +1286,13 @@ impl RecipeStore {
         };
         for (key, value) in variables.into_iter().flatten() {
             Self::set_var(conn, &run, key, value);
+        }
+        // A template's inputs that have a default and were not given — a formation's seats.
+        let given = |k: &str| variables.is_some_and(|v| v.get(k).is_some_and(|v| !v.is_null()));
+        for (key, value, _) in crate::recipe_templates::defaults(&recipe.id) {
+            if !given(key) {
+                Self::set_var(conn, &run, key, &serde_json::Value::String(value.to_string()));
+            }
         }
         Self::update_status(conn, &run, &RecipeStatus::Running, 0);
         Ok((recipe, run))
@@ -1259,6 +1553,9 @@ impl RecipeStore {
     /// left `waiting` with no wait behind it. Never a question: its answer (the Recipes screen,
     /// `answer_recipe`, or the chat) sets the recipe running. Resuming a question here walked the
     /// recipe on at the next chat message with `{{store_as}}` unbound.
+    ///
+    /// And a recipe with an agent still working, whatever else it waits on: the clock hears the
+    /// answer and lets the agent go even while the recipe waits on a person or a timer.
     pub fn get_expired_waiting_at(conn: &Connection, now: f64) -> Vec<String> {
         Self::list(conn, Some("waiting"), 1_000)
             .into_iter()
@@ -1266,6 +1563,7 @@ impl RecipeStore {
                 let steps = Self::get_steps(conn, &r.id);
                 let vars = Self::get_vars(conn, &r.id);
                 waited_on(r, &steps, &vars).map_or(true, |w| w.is_over(now))
+                    || agent_runs(&vars).values().any(AgentRun::working)
             })
             .map(|r| r.id)
             .collect()

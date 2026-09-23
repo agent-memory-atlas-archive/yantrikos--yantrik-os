@@ -208,6 +208,41 @@ question outside the reach to the person). With `wait_seconds` the call waits fo
 answer and hands it back — which counts as reading private state — so a client allows
 `wait_seconds` more, as for `run_command`.
 
+### Formations
+
+A **formation** is a recipe whose steps are catalog roles (design/desk-and-mind-2026-09-23.md,
+section 6): an `Agent {role, prompt, store_as, context?}` step hands a turn to a role through the
+same `hand_off`, and keeps its answer for the steps after it. Agent steps that do not read each
+other's answers work at the same time — at most three at once; a fourth waits for a place — and a
+step that reads an answer waits for it, without holding up the companion's worker. Four ship as
+built-ins: **Council** (three seats answer one question at once, the Chair weighs them), **Red
+team** (author, attacker, two rounds), **Build** (Planner → Coder → Reviewer, the findings back to
+the Coder once) and **Writers' room** (three writers, one voice each, the Scribe assembles).
+`describe shell` → `recipes` → `formations` lists them with their inputs.
+
+A mind starts one with `os_act shell run_recipe {recipe, inputs}` — **sensitive**, so in `ask`
+mode the person sees the card first — and the person with Start on the Recipes screen. Either is
+the run's leave for its agents, and it records the digest of each role's definition as it is at
+that moment: a role whose definition changes before its step (a file in `~/.config/yantrik/agents`
+replacing it, with another mind, brief or reach), or one the run names only later, is refused with
+a sentence, never run. The companion's own `run_recipe` tool, graded standard, refuses a
+formation. A run nobody started at the desk (a trigger or a timer, once #187 wires them) asks the
+person on a card naming the recipe and the role before any role above `safe`; denied or left to
+expire, the step fails.
+
+The hand-off is from the recipe: each agent's row and its approval cards say "Council recipe →
+Reviewer", and every start without a card of its own is written to the record of unasked actions
+under the recipe's name. It is held to its role's reach, and it is a child — an agent a recipe
+started cannot start agents of its own; an agent another agent or a recipe started cannot start a
+formation. No place under the desktop's cap of six, or under the asking agent's three, queues the
+start rather than racing the person's own: the recipe waits at the step, **needs you** on the
+Recipes screen and in the mind panel with the reason, for at most 30 minutes, then fails saying
+what it waited for. An agent waiting on the person in its own pane makes its recipe need them too;
+a card of its that expires unanswered, or that the person denies, fails the step — never "done"
+with whatever it said after. An agent that fails, runs past its role's minutes, or is gone after a
+restart fails the recipe with the reason; one that answered before a restart is heard from its
+saved session. `cancel_recipe` lets its agents go.
+
 An approval a call with a token asks for is drawn in that agent's pane as well as in the Lens —
 the same card under the same request id, so answering either answers both — and the card names
 the agent. A token that does not check out puts the card in no pane and says so on it.

@@ -10,8 +10,9 @@
 //!
 //! Open on purpose, for section 6 of design/desk-and-mind-2026-09-23.md: a step's `kind` is a
 //! string, not an enum a reader must match in full, and a step can name the catalog agent that
-//! runs it (`agent`). The `Agent { role, prompt, store_as }` step arrives as one more kind, drawn
-//! by the same screen.
+//! runs it (`agent`). The `Agent { role, prompt, store_as }` step is one more kind, `agent`: its
+//! stage is called by its role and, once it has one, the mind it runs on ("Chair · deepseek"); it
+//! is `waiting` while its agent works, and done with the head of the answer.
 
 use std::collections::{HashMap, HashSet};
 
@@ -19,8 +20,9 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::recipe::{
-    clock_text, waited_on, AggregateOp, Condition, ErrorAction, FilterOp, Recipe, RecipeStatus, RecipeStep,
-    RecipeStore, RenderFormat, StoredStep, Trail, WaitCondition, CANCELLED, PAUSED_FROM_VAR, UNREADABLE,
+    agent_runs, blocked_on_agents, clock_text, role_display, waited_on, AgentBlock, AgentRun, AggregateOp, Condition,
+    ErrorAction, FilterOp, Recipe, RecipeStatus, RecipeStep, RecipeStore, RenderFormat, StoredStep, Trail,
+    WaitCondition, CANCELLED, PAUSED_FROM_VAR, UNREADABLE,
 };
 
 /// How many recipes the desk reads. The built-in definitions alone are about fifty.
@@ -38,7 +40,7 @@ const DETAIL_MAX: usize = 600;
 type Vars = HashMap<String, serde_json::Value>;
 
 /// One recipe, as the desk shows it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct RecipeView {
     pub id: String,
     pub name: String,
@@ -63,6 +65,44 @@ pub struct RecipeView {
     pub steps: Vec<StepView>,
     /// What a person may do to it now.
     pub can: Controls,
+    /// Its Agent steps' agents: working now, or the last one each step had.
+    pub agents: Vec<AgentView>,
+    /// It waits on its agents' answers (or for a place for one), standing at the step that needs
+    /// them — not on a wait step behind it.
+    pub waits_on_agents: bool,
+    /// A formation: it hands work to agents from the catalog.
+    pub formation: bool,
+    /// It cannot go on until the person does something about its agents, and what: answer the
+    /// card asking to start one, free a place for one, or answer one waiting in its own pane.
+    /// A question it asks itself is `question`.
+    pub needs_you: Option<String>,
+    /// A built-in's inputs — what a run of it is given — with the default each has, if any.
+    /// Empty for anything but a built-in definition.
+    pub inputs: Vec<InputView>,
+}
+
+/// One Agent step's agent.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AgentView {
+    /// The step, 0-based.
+    pub step: usize,
+    /// The role as a person reads it ("Red team"), the mind it runs on and the agent.
+    pub role: String,
+    pub mind: String,
+    pub agent: String,
+    /// working | answered | failed | released.
+    pub state: String,
+    /// While it works: what it waits on the person for, in its own pane.
+    pub needs_you: Option<String>,
+}
+
+/// One input a built-in takes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InputView {
+    pub name: String,
+    pub describe: String,
+    /// Given when a run is not given it. None: required.
+    pub default: Option<String>,
 }
 
 /// The question an `AskUser` step put, waiting for its answer.
@@ -114,8 +154,9 @@ pub struct StepView {
     /// A placeholder reaches the tool or the model as the literal `{{name}}` (#88).
     pub unbound: Vec<String>,
     pub store_as: Option<String>,
-    /// The catalog agent that runs this step (design/desk-and-mind-2026-09-23.md, section 6).
-    /// None for every kind today.
+    /// The catalog agent that runs this step (design/desk-and-mind-2026-09-23.md, section 6): an
+    /// Agent step's role, and once it has one, the mind and the agent — "the Chair on deepseek
+    /// (deepseek:c-02be44)". None for every other kind.
     pub agent: Option<String>,
     /// The whole definition, a line per field, for the opened step.
     pub detail: Vec<String>,
@@ -125,6 +166,20 @@ pub struct StepView {
 
 /// The view of one recipe, from what the store holds for it.
 pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
+    // A built-in's defaults stand in for the inputs a run of it would be given — a formation's
+    // seats — so its row names its roles rather than calling their placeholders unbound.
+    let with_defaults;
+    let defaults = if recipe.id.starts_with("builtin_") { crate::recipe_templates::defaults(&recipe.id) } else { &[] };
+    let vars = if defaults.is_empty() {
+        vars
+    } else {
+        let mut merged = vars.clone();
+        for (k, v, _) in defaults {
+            merged.entry((*k).to_string()).or_insert_with(|| serde_json::Value::String((*v).to_string()));
+        }
+        with_defaults = merged;
+        &with_defaults
+    };
     let status = match recipe.status {
         RecipeStatus::Failed if recipe.error_message.as_deref() == Some(CANCELLED) => "cancelled".to_string(),
         ref s => s.as_str().to_string(),
@@ -136,10 +191,16 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
 
     // What it waits on: where the executor's `_wait` record says — a wait or a question at the
     // top, or one inside a Branch, drawn at the Branch — or, for a recipe that began to wait
-    // before there was a record, the step just behind the pointer.
-    let waited = if blocked { waited_on(recipe, steps, vars).filter(|w| w.on.is_some()) } else { None };
+    // before there was a record, the step just behind the pointer. Or its agents: then it stands
+    // at the step that needs them, and the agents' own steps are the ones drawn waiting.
+    let waited_any = if blocked { waited_on(recipe, steps, vars) } else { None };
+    let waits_on_agents = waited_any.as_ref().is_some_and(|w| w.agents);
+    // An Agent step whose start the shell put off, and why: drawn waiting, needing the person.
+    let put_off = waited_any.as_ref().filter(|w| w.agents).and_then(|w| w.put_off.clone().map(|why| (w.step, why)));
+    let waited = waited_any.filter(|w| !w.agents && w.on.is_some());
     let waiting_on = waited.as_ref().map(|w| w.step);
     let trail = Trail::read(vars);
+    let runs = agent_runs(vars);
 
     let finished = matches!(recipe.status, RecipeStatus::Done | RecipeStatus::Failed);
     let touched = |s: &StoredStep| s.status != "pending";
@@ -160,7 +221,11 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
         .iter()
         .map(|s| {
             let i = s.step_index;
-            if waiting_on == Some(i) {
+            if waiting_on == Some(i) || put_off.as_ref().is_some_and(|(at, _)| *at == i) {
+                return "waiting";
+            }
+            // Its agent is working on it.
+            if !finished && runs.get(&i).is_some_and(AgentRun::working) {
                 return "waiting";
             }
             // Running here now — even a step marked from a loop's last round.
@@ -205,7 +270,7 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
         if matches!(*state, "pending" | "current" | "paused" | "waiting") {
             to_be_set.extend(produces(&s.step));
         }
-        step_views.push(step_view(s, state, unbound, vars, &trail));
+        step_views.push(step_view(s, state, unbound, vars, &trail, &runs));
     }
 
     let waited_step = waited.as_ref().and_then(|w| w.on.as_ref());
@@ -225,6 +290,8 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
     });
     let waiting_for = if blocked {
         Some(match waited_step {
+            _ if put_off.is_some() => put_off.as_ref().map(|(_, why)| why.clone()).unwrap_or_default(),
+            _ if waits_on_agents => agents_text(steps, cur, vars, &runs),
             Some(RecipeStep::AskUser { .. }) => "your answer".to_string(),
             Some(RecipeStep::WaitFor { condition, timeout_secs }) => {
                 timer_text(condition, *timeout_secs, waited.as_ref().and_then(|w| w.until))
@@ -235,6 +302,25 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
     } else {
         None
     };
+    let agents: Vec<AgentView> = runs
+        .iter()
+        .map(|(step, r)| AgentView {
+            step: *step,
+            role: r.role_name.clone(),
+            mind: r.mind.clone(),
+            agent: r.agent.clone(),
+            state: r.state.clone(),
+            needs_you: r.needs_you.clone().filter(|_| r.working()),
+        })
+        .collect();
+    // What it needs the person for: a start put off, or an agent waiting in its pane.
+    let in_flight = matches!(recipe.status, RecipeStatus::Running | RecipeStatus::Waiting | RecipeStatus::Paused);
+    let needs_you = put_off.as_ref().map(|(_, why)| why.clone()).or_else(|| {
+        runs.values().filter(|r| r.working()).find_map(|r| r.needs_you.clone())
+    }).filter(|_| in_flight);
+    let formation = steps.iter().any(|s| crate::recipe::step_hands_off(&s.step));
+    let template = recipe.id.starts_with("builtin_") && recipe.status == RecipeStatus::Pending && !any_touched;
+    let inputs = if recipe.id.starts_with("builtin_") { inputs_of(&recipe.id) } else { Vec::new() };
 
     let can = Controls {
         answer: recipe.status == RecipeStatus::Waiting && question.is_some(),
@@ -252,18 +338,90 @@ pub fn view(recipe: &Recipe, steps: &[StoredStep], vars: &Vars) -> RecipeView {
         created_at: recipe.created_at,
         updated_at: recipe.updated_at,
         error: recipe.error_message.clone().filter(|e| !e.is_empty()),
-        template: recipe.id.starts_with("builtin_") && recipe.status == RecipeStatus::Pending && !any_touched,
+        template,
         waiting_for,
         question,
         steps: step_views,
         can,
+        agents,
+        waits_on_agents,
+        formation,
+        needs_you,
+        inputs,
     }
 }
 
-fn step_view(s: &StoredStep, state: &str, unbound: Vec<String>, vars: &Vars, trail: &Trail) -> StepView {
-    let (kind, label, summary, detail) = describe_step(&s.step);
+/// A built-in's inputs: the ones it needs, then the ones with a default.
+fn inputs_of(template_id: &str) -> Vec<InputView> {
+    let mut out: Vec<InputView> = crate::recipe_templates::get_template(template_id)
+        .map(|t| {
+            t.required_vars
+                .iter()
+                .map(|(name, describe)| InputView { name: (*name).into(), describe: (*describe).into(), default: None })
+                .collect()
+        })
+        .unwrap_or_default();
+    for (name, value, describe) in crate::recipe_templates::defaults(template_id) {
+        if !out.iter().any(|i| i.name == *name) {
+            out.push(InputView { name: (*name).into(), describe: (*describe).into(), default: Some((*value).into()) });
+        }
+    }
+    out
+}
+
+/// What a recipe waiting on its agents waits for, in a few words: "the Chair's answer
+/// (deepseek)", "answers from the Researcher (deepseek), the Red team (pi) and the Planner
+/// (deepseek)", or a place for its next one.
+fn agents_text(steps: &[StoredStep], at: usize, vars: &Vars, runs: &std::collections::BTreeMap<usize, AgentRun>) -> String {
+    let who = |k: &usize| runs.get(k).map(|r| format!("the {} ({})", r.role_name, r.mind)).unwrap_or_else(|| "an agent".into());
+    match blocked_on_agents(steps, at, vars) {
+        Some(AgentBlock::Answers(ks)) if ks.len() == 1 => {
+            let k = &ks[0];
+            match runs.get(k) {
+                Some(r) => format!("the {}'s answer ({})", r.role_name, r.mind),
+                None => who(k),
+            }
+        }
+        Some(AgentBlock::Answers(ks)) => {
+            let names: Vec<String> = ks.iter().map(who).collect();
+            let (last, rest) = names.split_last().expect("more than one");
+            format!("answers from {} and {last}", rest.join(", "))
+        }
+        Some(AgentBlock::Place) => format!(
+            "a place for its next agent: {} of its agents are working, the most one recipe has at once",
+            runs.values().filter(|r| r.working()).count()
+        ),
+        None => "the clock to move it on: its agents have answered".to_string(),
+    }
+}
+
+fn step_view(
+    s: &StoredStep,
+    state: &str,
+    unbound: Vec<String>,
+    vars: &Vars,
+    trail: &Trail,
+    runs: &std::collections::BTreeMap<usize, AgentRun>,
+) -> StepView {
+    let (kind, mut label, summary, detail) = describe_step(&s.step);
     let store_as = store_as_of(&s.step).map(str::to_string);
     let path = path_of(s, state, trail);
+    // An Agent step is called by its role — the one its variables name — and, once it has an
+    // agent, the mind that agent runs on: "Chair · deepseek".
+    let agent = match (&s.step, runs.get(&s.step_index)) {
+        (RecipeStep::Agent { .. }, Some(run)) => {
+            label = run.stage();
+            Some(format!("the {} on {} ({})", run.role_name, run.mind, run.agent))
+        }
+        (RecipeStep::Agent { role, .. }, None) => {
+            let named = crate::recipe::resolve_vars(role, vars);
+            if !named.contains("{{") && !named.trim().is_empty() {
+                label = role_display(&named);
+            }
+            Some(label.clone())
+        }
+        _ => None,
+    };
 
     // What it produced. The store's `result` column is uneven — the tool's whole output, or a
     // marker ("ok", "done") in older records — so a step that keeps a variable is read from the variable,
@@ -289,7 +447,7 @@ fn step_view(s: &StoredStep, state: &str, unbound: Vec<String>, vars: &Vars, tra
         path,
         unbound,
         store_as,
-        agent: None,
+        agent,
         detail: detail.into_iter().map(|l| clip(&l, DETAIL_MAX)).collect(),
     }
 }
@@ -479,6 +637,15 @@ fn describe_step(step: &RecipeStep) -> (&'static str, String, String, Vec<String
             let what = format!("{pattern} from {input_var}");
             ("extract", "Extract".into(), what.clone(), vec![format!("extracts: {what}"), stores(store_as)])
         }
+        RecipeStep::Agent { role, prompt, store_as, context } => {
+            let label = if role.contains("{{") { "Agent".to_string() } else { role_display(role) };
+            let mut detail = vec![format!("hands to: {role}"), format!("asks: {prompt}")];
+            if let Some(c) = context {
+                detail.push(format!("reads first: {c}"));
+            }
+            detail.push(format!("keeps its answer as: {store_as}"));
+            ("agent", label, prompt.clone(), detail)
+        }
         RecipeStep::Branch { condition, then_steps, else_steps } => {
             let line = |steps: &[RecipeStep]| {
                 if steps.is_empty() {
@@ -538,9 +705,49 @@ fn inputs(step: &RecipeStep) -> Vec<String> {
         RecipeStep::Branch { then_steps, else_steps, .. } => {
             return then_steps.iter().chain(else_steps).flat_map(inputs).collect();
         }
+        RecipeStep::Agent { role, prompt, context, .. } => {
+            texts.push(role);
+            texts.push(prompt);
+            if let Some(c) = context {
+                texts.push(c);
+            }
+        }
         RecipeStep::JumpIf { .. } | RecipeStep::WaitFor { .. } | RecipeStep::Notify { .. } => {}
     }
     texts.iter().flat_map(|t| placeholders(t)).chain(names).collect()
+}
+
+/// Every variable a step reads, to decide with as well as to send: its inputs, a JumpIf's
+/// condition, a Branch's condition and everything its arms read. What an Agent step's answer
+/// waits for ([`crate::recipe::blocked_on_agents`]): a step that reads any of these waits for an
+/// agent that will set it.
+pub fn reads(step: &RecipeStep) -> Vec<String> {
+    fn condition_vars(c: &Condition, out: &mut Vec<String>) {
+        match c {
+            Condition::VarEquals { var, .. }
+            | Condition::VarContains { var, .. }
+            | Condition::VarExists { var }
+            | Condition::VarGt { var, .. }
+            | Condition::VarEmpty { var } => out.push(var.clone()),
+            Condition::TimeAfter { .. } | Condition::TimeBefore { .. } => {}
+            Condition::Not { inner } => condition_vars(inner, out),
+            Condition::And { conditions } | Condition::Or { conditions } => {
+                conditions.iter().for_each(|c| condition_vars(c, out))
+            }
+        }
+    }
+    let mut out = inputs(step);
+    match step {
+        RecipeStep::JumpIf { condition, .. } => condition_vars(condition, &mut out),
+        RecipeStep::Branch { condition, then_steps, else_steps } => {
+            out.push(condition.clone());
+            out.extend(then_steps.iter().chain(else_steps).flat_map(reads));
+        }
+        _ => {}
+    }
+    let mut seen = HashSet::new();
+    out.retain(|name| seen.insert(name.clone()));
+    out
 }
 
 /// The variables a step sets.
@@ -564,7 +771,8 @@ fn store_as_of(step: &RecipeStep) -> Option<&str> {
         | RecipeStep::Filter { store_as, .. }
         | RecipeStep::Sort { store_as, .. }
         | RecipeStep::Aggregate { store_as, .. }
-        | RecipeStep::Extract { store_as, .. } => Some(store_as),
+        | RecipeStep::Extract { store_as, .. }
+        | RecipeStep::Agent { store_as, .. } => Some(store_as),
         RecipeStep::JumpIf { .. } | RecipeStep::WaitFor { .. } | RecipeStep::Notify { .. } | RecipeStep::Branch { .. } => None,
     }
 }
@@ -754,6 +962,9 @@ pub fn sort_for_desk(views: &mut [RecipeView]) {
         if v.template {
             return 6;
         }
+        if v.needs_you.is_some() {
+            return 0;
+        }
         match v.status.as_str() {
             "waiting" if v.question.is_some() => 0,
             "running" => 1,
@@ -788,9 +999,22 @@ pub fn one_line(view: &RecipeView) -> String {
     };
     let name = &view.name;
     match view.status.as_str() {
+        // Its agents need the person: that first, whatever else it is doing.
+        "running" | "waiting" if view.needs_you.is_some() => {
+            format!("{name} — needs you: {}", head(view.needs_you.as_deref().unwrap_or_default(), 100))
+        }
         "running" => format!("{name} — {}", at(view.current_step)),
         "waiting" => match &view.question {
             Some(q) => format!("{name} — waiting for your answer: {}", head(&q.text, 80)),
+            // Standing at the step that needs its agents' answers — or at the end.
+            None if view.waits_on_agents => {
+                let what = view.waiting_for.as_deref().unwrap_or("its agents");
+                if view.current_step >= total {
+                    format!("{name} — waiting for {what}")
+                } else {
+                    format!("{name} — {}, waiting for {what}", at(view.current_step))
+                }
+            }
             None => format!(
                 "{name} — {}, waiting for {}",
                 at(view.current_step.saturating_sub(1)),
@@ -954,7 +1178,13 @@ mod tests {
                 then_steps: vec![RecipeStep::Notify { message: "{{top}}".into() }],
                 else_steps: vec![],
             },
-            RecipeStep::Notify { message: "PARSE ERROR: {\"type\":\"Agent\"}".into() },
+            RecipeStep::Notify { message: "PARSE ERROR: {\"type\":\"Robot\"}".into() },
+            RecipeStep::Agent {
+                role: "red-team".into(),
+                prompt: "Attack the plan for {{folder}}".into(),
+                store_as: "attack".into(),
+                context: Some("{{summary}} and {{sources}}".into()),
+            },
         ];
         let v = view(&recipe(RecipeStatus::Pending, 0), &stored(all, &[]), &Vars::new());
         let got: Vec<(&str, &str)> = v.steps.iter().map(|s| (s.kind.as_str(), s.label.as_str())).collect();
@@ -977,6 +1207,7 @@ mod tests {
                 ("extract", "Extract"),
                 ("branch", "Branch"),
                 ("unreadable", "Unreadable"),
+                ("agent", "Red team"),
             ]
         );
         let line = |i: usize| v.steps[i].summary.as_str();
@@ -993,10 +1224,29 @@ mod tests {
         assert_eq!(line(13), "0.title from sorted");
         assert_eq!(line(14), "if top: 1 step else 0 steps");
         assert_eq!(line(15), "this step's definition could not be read");
+        assert_eq!(line(16), "Attack the plan for {{folder}}");
+        assert_eq!(
+            v.steps[16].detail,
+            ["hands to: red-team", "asks: Attack the plan for {{folder}}", "reads first: {{summary}} and {{sources}}", "keeps its answer as: attack"]
+        );
+        assert_eq!(v.steps[16].store_as.as_deref(), Some("attack"));
+        assert_eq!(v.steps[16].unbound, ["sources"], "its prompt and its context are read; {{folder}} and {{summary}} will be set");
         assert!(v.steps[14].detail.iter().any(|d| d == "then: Notify"), "{:?}", v.steps[14].detail);
         assert!(v.steps[0].detail.iter().any(|d| d == "on error: stop the recipe"));
-        // No kind names an agent yet; the field is there for the Agent step.
-        assert!(v.steps.iter().all(|s| s.agent.is_none()));
+        // Only the Agent step names an agent: its role, until it has one.
+        assert_eq!(v.steps.iter().filter_map(|s| s.agent.as_deref()).collect::<Vec<_>>(), ["Red team"]);
+        // What a step reads, to wait on an agent's answer: a JumpIf's and a Branch's conditions too.
+        let jump = RecipeStep::JumpIf {
+            condition: Condition::Not { inner: Box::new(Condition::VarContains { var: "review".into(), substring: "x".into() }) },
+            target_step: 0,
+        };
+        assert_eq!(reads(&jump), ["review"]);
+        let branch = RecipeStep::Branch {
+            condition: "urgent".into(),
+            then_steps: vec![jump],
+            else_steps: vec![RecipeStep::Notify { message: "{{a}}".into() }],
+        };
+        assert_eq!(reads(&branch), ["a", "urgent", "review"]);
         assert_eq!(v.steps[0].store_as.as_deref(), Some("hits"));
     }
 
@@ -1176,6 +1426,7 @@ mod tests {
             question: question.then(|| QuestionView { step: 0, text: "?".into(), choices: vec![], store_as: "a".into() }),
             steps: vec![],
             can: Controls::default(),
+            ..Default::default()
         };
         let mut all = vec![
             mk("t_b", "pending", false, true, 9.0),

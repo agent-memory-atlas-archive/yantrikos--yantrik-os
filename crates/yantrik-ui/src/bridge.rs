@@ -154,6 +154,16 @@ pub enum CompanionCommand {
         recipe_id: String,
         op: yantrik_companion::recipe_view::RecipeOp,
     },
+    /// Start a run of a recipe with its inputs (`recipe_templates::start`). `leave`: the person's
+    /// leave for its agents — from the Recipes screen's Start or the shell's `run_recipe`, which
+    /// asked them — without which a formation is refused. The outcome goes to `reply_tx` when a
+    /// caller waits on it, and to `crate::recipes` as the screen's notice either way.
+    StartRecipe {
+        recipe: String,
+        variables: serde_json::Map<String, serde_json::Value>,
+        leave: Option<yantrik_companion::recipe::Leave>,
+        reply_tx: Option<Sender<Result<StartedRecipe, String>>>,
+    },
     /// Rename the user (persists to config).
     RenameUser { name: String },
     /// Rename the companion (persists to config).
@@ -414,6 +424,43 @@ impl CompanionHandle {
             .map_err(|_| "companion worker is not running".to_string())
     }
 
+    /// Start a run of a recipe, with its inputs and — for a formation — the person's leave for its
+    /// agents. Returns once it is queued; the outcome lands in `crate::recipes` as a notice. What
+    /// the Recipes screen's Start does, on the UI thread.
+    pub fn start_recipe(
+        &self,
+        recipe: String,
+        variables: serde_json::Map<String, serde_json::Value>,
+        leave: Option<yantrik_companion::recipe::Leave>,
+    ) -> Result<(), String> {
+        self.cmd_tx
+            .send(CompanionCommand::StartRecipe { recipe, variables, leave, reply_tx: None })
+            .map_err(|_| "companion worker is not running".to_string())
+    }
+
+    /// The same, waiting up to `timeout` for the worker to say what it started. Never on the UI
+    /// thread: the worker may be forty seconds into a generation. `shell.run_recipe` waits here,
+    /// off the UI thread (`control::answer_later`).
+    pub fn start_recipe_and_wait(
+        &self,
+        recipe: String,
+        variables: serde_json::Map<String, serde_json::Value>,
+        leave: Option<yantrik_companion::recipe::Leave>,
+        timeout: std::time::Duration,
+    ) -> Result<StartedRecipe, String> {
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        self.cmd_tx
+            .send(CompanionCommand::StartRecipe { recipe, variables, leave, reply_tx: Some(reply_tx) })
+            .map_err(|_| "companion worker is not running".to_string())?;
+        reply_rx.recv_timeout(timeout).map_err(|_| {
+            format!(
+                "the companion did not take the recipe within {} s — it may be in the middle of an answer; \
+                 `describe shell` → `recipes` shows whether it started",
+                timeout.as_secs()
+            )
+        })?
+    }
+
     /// Answer, pause, resume or cancel one recipe. Returns once it is queued: the worker may be
     /// in the middle of a generation, and nothing on the UI thread waits for it. The outcome
     /// lands in `crate::recipes`.
@@ -666,6 +713,54 @@ impl Drop for CompanionBridge {
     }
 }
 
+/// A recipe run the worker started: the run's id and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedRecipe {
+    pub run: String,
+    pub name: String,
+    /// It hands work to agents from the catalog.
+    pub formation: bool,
+}
+
+/// Start a run on the worker's own connection: `recipe_templates::start`, and what to say of it.
+fn start_recipe_run(
+    conn: &rusqlite::Connection,
+    recipe: &str,
+    variables: &serde_json::Map<String, serde_json::Value>,
+    leave: Option<&yantrik_companion::recipe::Leave>,
+) -> Result<StartedRecipe, String> {
+    // What the person agrees to: each role the run names, as the catalog defines it now. A role
+    // whose definition changes before its step is not started on this leave.
+    let leave = match leave {
+        Some(leave) => Some(agreed_roles(conn, recipe, variables, leave)?),
+        None => None,
+    };
+    let (template, run) = yantrik_companion::recipe_templates::start(conn, recipe, Some(variables), leave.as_ref())?;
+    let steps: Vec<yantrik_companion::recipe::RecipeStep> =
+        yantrik_companion::recipe::RecipeStore::get_steps(conn, &run).into_iter().map(|s| s.step).collect();
+    Ok(StartedRecipe { run, name: template.name, formation: yantrik_companion::recipe::hands_off(&steps) })
+}
+
+/// `leave`, with the digest of each role the run will hand work to, as the catalog has it now. A
+/// role the catalog does not have refuses the start, naming it.
+fn agreed_roles(
+    conn: &rusqlite::Connection,
+    recipe: &str,
+    variables: &serde_json::Map<String, serde_json::Value>,
+    leave: &yantrik_companion::recipe::Leave,
+) -> Result<yantrik_companion::recipe::Leave, String> {
+    let roles = yantrik_companion::recipe_templates::roles_for(conn, recipe, Some(variables))?;
+    let catalog = crate::agents::catalog::Catalog::load();
+    let mut agreed = leave.clone();
+    for named in roles {
+        let role = catalog.find(&named).ok_or_else(|| {
+            format!("'{recipe}' hands work to `{named}`, and the catalog has no such role; it has {}.", catalog.listing())
+        })?;
+        agreed.roles.insert(named, role.digest());
+    }
+    Ok(agreed)
+}
+
 /// Signal a recipe's next step — once. A recipe with a signal already queued is not signalled
 /// again: each signal runs a step and sends the next, so a second chain would double the steps
 /// queued ahead of a person's message, and the clock would start one every tick.
@@ -732,6 +827,12 @@ fn worker_loop(
 
     // Attach cognitive event bus for tool execution tracing
     companion.set_event_bus(event_bus.clone());
+
+    // A recipe's Agent steps hand work to the agent catalog through the shell's own hand_off
+    // (design/desk-and-mind-2026-09-23.md, section 6). Installed before the recipes a restart
+    // left running are resumed below, so a recipe waiting on an agent hears it, or hears that it
+    // is gone.
+    companion.set_agent_hook(Box::new(crate::control_agents::RecipeHands::default()));
 
     tracing::info!("Companion worker started");
 
@@ -824,6 +925,31 @@ fn worker_loop(
         }
         match received {
             Ok(CompanionCommand::RefreshRecipes) => recipes_dirty = true,
+            Ok(CompanionCommand::StartRecipe { recipe, variables, leave, reply_tx }) => {
+                let outcome = start_recipe_run(&companion.db.conn(), &recipe, &variables, leave.as_ref());
+                match &outcome {
+                    Ok(started) => {
+                        tracing::info!(recipe = %recipe, run = %started.run, formation = started.formation, "Recipe started");
+                        signal_recipe(&cmd_tx, &mut recipe_signals, started.run.clone());
+                        crate::recipes::record(
+                            &started.run,
+                            Ok(if started.formation {
+                                format!("Started '{}': its agents are at work — each has a row on the Agents screen.", started.name)
+                            } else {
+                                format!("Started '{}'.", started.name)
+                            }),
+                        );
+                    }
+                    Err(why) => {
+                        tracing::info!(recipe = %recipe, why = %why, "Recipe: not started");
+                        crate::recipes::record(&recipe, Err(why.clone()));
+                    }
+                }
+                if let Some(tx) = reply_tx {
+                    let _ = tx.send(outcome);
+                }
+                recipes_dirty = true;
+            }
             Ok(CompanionCommand::Recipe { recipe_id, op }) => {
                 let outcome = yantrik_companion::recipe_view::apply(&companion.db.conn(), &recipe_id, &op);
                 match &outcome {
@@ -2791,6 +2917,23 @@ mod bond_property_tests {
             harness_turn.contains("score_conversation_turn(&text)") && harness_turn.contains("push_bond("),
             "a turn a harness answered is scored on this thread and the property follows. Arm as written:\n{harness_turn}"
         );
+    }
+
+    /// A formation's Agent steps reach the catalog through the shell's hook, installed before the
+    /// worker resumes the recipes a restart left running — so one waiting on an agent hears its
+    /// answer, or that it is gone, rather than failing for want of a hook. And Start goes through
+    /// `recipe_templates::start`, the one door that gives a run its leave for agents.
+    #[test]
+    fn the_worker_hands_agent_steps_to_the_shell_before_it_resumes_recipes() {
+        let src = worker();
+        let hook = src.find("companion.set_agent_hook(Box::new(crate::control_agents::RecipeHands::default()))").expect("the hook is installed");
+        let resume = src.find("Resume the recipes running before shutdown").expect("the resume");
+        assert!(hook < resume, "installed before the recipes resume");
+        let start = arm(&src, "StartRecipe");
+        assert!(start.contains("start_recipe_run(&companion.db.conn()"), "{start}");
+        let run = between(&src, "fn start_recipe_run(", "fn agreed_roles(");
+        assert!(run.find("agreed_roles(").unwrap() < run.find("recipe_templates::start(").unwrap(), "the roles' definitions are recorded with the leave it starts on");
+        assert!(src.contains("yantrik_companion::recipe_templates::start(conn, recipe, Some(variables), leave.as_ref())"));
     }
 
     /// The shell runs the companion's one recipe executor, and the recipes keep time on the
