@@ -3,7 +3,8 @@
 *Normative. The guide, with examples and the reasons behind the rules, is
 [app-control.md](app-control.md). JSON Schemas: [schema/describe.schema.json](schema/describe.schema.json),
 [schema/act.schema.json](schema/act.schema.json). The policy, generated from the code:
-[deploy/yantrik-os/surface-vectors.json](../deploy/yantrik-os/surface-vectors.json).*
+[deploy/yantrik-os/surface-vectors.json](../deploy/yantrik-os/surface-vectors.json). Why it
+exists and what comes after it: [design/surface-sdk-2026-09-23.md](../design/surface-sdk-2026-09-23.md).*
 
 A **surface** is a process that lets a mind find it, read what it shows, and act in it under the
 person's grades. Every app in this repository publishes one; so can anything else. This document
