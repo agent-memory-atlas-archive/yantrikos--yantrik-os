@@ -31,6 +31,17 @@ class TestWhatDescribeShows(support.Case):
         self.assertEqual(described["summary"], "LibreOffice — no python3-uno to reach it with")
         self.assertIn("python3-uno", described["state"]["problem"])
 
+    def test_a_uno_runtime_that_will_not_start_is_said_to_be_so(self):
+        class Broken(support.fake_uno.FakeUno):
+            def getComponentContext(self):
+                raise support.fake_uno.UnoException("no office installation found")
+        from yantrik_libreoffice import Office, build
+        surface = build(Office(uno_module=Broken(self.soffice)),
+                        settings_path=self.machine.settings, mode_path=self.machine.mode_file)
+        described = surface.describe_json()
+        self.assertEqual(described["summary"], "LibreOffice — no UNO runtime to reach it with")
+        self.assertIn("no office installation found", described["state"]["problem"])
+
     def test_running_with_nothing_open(self):
         summary, state, _ = self.view()
         self.assertEqual(summary, "LibreOffice — running, no document open")

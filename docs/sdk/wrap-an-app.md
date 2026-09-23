@@ -144,16 +144,23 @@ see — and this one stops once the process has gone and nothing answers on the 
 
 **Keep the program's API in one file.** `office.py` is the only file that imports `uno`, and it
 turns every UNO failure into a sentence. The connection is made when first needed, and made again
-after LibreOffice quits and comes back:
+after LibreOffice quits and comes back; a LibreOffice that is not there is a sentence too:
 
 <!-- from: adapters/libreoffice/yantrik_libreoffice/office.py -->
 ```python
-        uno = self.uno()
-        local = uno.getComponentContext()
-        resolver = local.ServiceManager.createInstanceWithContext(
-            "com.sun.star.bridge.UnoUrlResolver", local)
         try:
             context = resolver.resolve(self.connect_string())
+        except Exception as e:  # noqa: BLE001 - every UNO failure becomes a sentence
+            if uno_error_name(e) in ("NoConnectException", "ConnectionSetupException"):
+                raise NotReachable(
+                    "LibreOffice is not running, or not listening on the pipe `%s` — open it from "
+                    "the desktop, which starts it listening, or start it with "
+                    "--accept=\"pipe,name=%s;urp;\"" % (self.pipe, self.pipe),
+                    "not running") from None
+            raise NotReachable("LibreOffice would not connect: %s" % uno_message(e),
+                               "would not connect") from None
+        self._desktop = context.ServiceManager.createInstanceWithContext(
+            "com.sun.star.frame.Desktop", context)
 ```
 
 **Read the view once.** Summary and state come from one read of LibreOffice, by overriding

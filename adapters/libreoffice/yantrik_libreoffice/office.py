@@ -195,9 +195,13 @@ class Office:
             except Exception:  # noqa: BLE001 - whatever it was, that bridge is no use
                 self._desktop = None
         uno = self.uno()
-        local = uno.getComponentContext()
-        resolver = local.ServiceManager.createInstanceWithContext(
-            "com.sun.star.bridge.UnoUrlResolver", local)
+        try:
+            local = uno.getComponentContext()
+            resolver = local.ServiceManager.createInstanceWithContext(
+                "com.sun.star.bridge.UnoUrlResolver", local)
+        except Exception as e:  # noqa: BLE001 - a UNO runtime that will not start is a sentence
+            raise NotReachable("this adapter's UNO runtime would not start: %s" % uno_message(e),
+                               "no UNO runtime to reach it with") from None
         try:
             context = resolver.resolve(self.connect_string())
         except Exception as e:  # noqa: BLE001 - every UNO failure becomes a sentence
