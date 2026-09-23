@@ -45,6 +45,7 @@
 //! you choose it. [`Harness::health`] exists so the UI can say *why* before a person commits a
 //! question to it — unreachable, or reachable but not configured, with the reason attached.
 
+pub mod event;
 pub mod host;
 pub mod protocol;
 
