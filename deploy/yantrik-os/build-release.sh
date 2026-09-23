@@ -150,12 +150,12 @@ for b in "${BINS[@]}"; do cp "$TARGET_DIR/$b" "$ROOT/bin/$b"; done
 
 # The agent surface is not compiled, so binary discovery cannot find it. Without these the
 # machine boots a desktop that no agent can see or drive — the exact failure the old ISO had.
-for f in yos yos-mcp; do
+for f in yos yos-mcp release-check; do
   [ -f "$SCRIPT_DIR/$f" ] || fail "missing $SCRIPT_DIR/$f — the agent surface is not optional"
   cp "$SCRIPT_DIR/$f" "$ROOT/bin/$f"
   chmod +x "$ROOT/bin/$f"
 done
-echo "   + yos, yos-mcp"
+echo "   + yos, yos-mcp, release-check"
 
 # The page reader `yos web` evaluates in the browser. It sits beside yos because yos looks for
 # it there. It was referenced from the day `yos web` was written and never committed, so every

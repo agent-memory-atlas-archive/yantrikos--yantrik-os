@@ -84,6 +84,15 @@ for b in "${BINS[@]}"; do printf '%s\n' "$b"; done \
   | rsync -a --info=stats1 --files-from=- -e "$RSYNC_RSH" \
       "$TARGET_DIR/" "$TARGET_HOST:$REMOTE/bin/" 2>&1 | tail -3
 
+# The machine's own record of what is installed. Left alone, it went on naming the last bundle
+# that was installed while these binaries ran, so the About screen and `describe shell` reported a
+# build that was not running. A developer deploy says what it is: this tree's revision, marked
+# -dev. The channel line is kept as it was, because the updater reads its channel from here.
+DEV_VERSION="$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)-dev"
+DEV_GIT="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+"${SSH[@]}" "B=$REMOTE/BUILD; CH=\$(sed -n 's/^channel=//p' \$B 2>/dev/null | head -1); { echo name=dev-deploy; echo version=$DEV_VERSION; echo git=$DEV_GIT; [ -n \"\$CH\" ] && echo channel=\$CH; echo installed=\$(date -u +%Y-%m-%dT%H:%M:%SZ); } | sudo tee \$B >/dev/null"
+echo "   BUILD: $DEV_VERSION"
+
 # rsync does not carry file capabilities; grant perception-service its two on the target the way
 # the ISO does, so a dev deploy watches the same way a shipped machine does.
 "${SSH[@]}" "sudo setcap cap_sys_admin,cap_net_admin=ep $REMOTE/bin/perception-service 2>/dev/null \
@@ -93,7 +102,7 @@ say "Shipping the agent surface"
 # yos is how an agent sees and acts on this desktop; yos-mcp offers the same surface to a
 # mind that speaks MCP. Neither is compiled, so neither appears in the binary discovery
 # above — without this they exist only on machines where someone copied them by hand.
-for f in yos yos-mcp; do
+for f in yos yos-mcp release-check; do
   if [ -f "$SCRIPT_DIR/$f" ]; then
     rsync -a -e "$RSYNC_RSH" "$SCRIPT_DIR/$f" "$TARGET_HOST:$REMOTE/bin/$f"
     "${SSH[@]}" "chmod +x $REMOTE/bin/$f"

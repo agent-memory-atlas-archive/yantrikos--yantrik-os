@@ -175,6 +175,15 @@ wanted = ["app-shell.sock", "a11y.sock", "network.sock", "notifications.sock",
 check("the shell and every autostart service answer on a socket",
       all(w in socks for w in wanted), socks)
 
+# The desktop, asked the way everything else asks it: every app opens and answers, every screen
+# shows, the permission gate refuses on every door, the ceiling holds on a service, nothing
+# crashes, and the shell is idle when idle. docs/releasing.md: this is the nightly's gate.
+rc = ask("XDG_RUNTIME_DIR=/run/user/1000 timeout 900 /opt/yantrik/bin/release-check --tier ci "
+         "--json /tmp/release-check.json > /tmp/release-check.txt 2>&1; echo exit=$?; "
+         "grep -E '^(PASS|FAIL|SKIP)' /tmp/release-check.txt; grep -A1 '^FAIL' /tmp/release-check.txt",
+         timeout=960)
+check("release-check (tier ci) passes inside the booted image", "exit=0" in rc, rc)
+
 shelved = ask("ls /opt/yantrik/bin | grep -c -E 'music-player|spreadsheet'")
 check("no shelved app was packaged", shelved.splitlines()[-1].strip() == "0", shelved)
 
