@@ -54,6 +54,47 @@ ENGINE_KEY = {
 }
 ENGINE_DISPLAY = {"cycles": "Cycles", "eevee": "EEVEE", "workbench": "Workbench"}
 
+# What a Workbench render colours objects by, per `scene.display.shading.color_type` (the
+# render's own shading settings; the viewport has a separate copy). Only MATERIAL reads the
+# material — and then its viewport-display colour, never its node tree. Every other choice
+# ignores materials entirely, so a caller's `set_material` shows nothing under it.
+WORKBENCH_COLOR_SOURCES = {
+    "SINGLE": "one colour for every object",
+    "OBJECT": "each object's own colour",
+    "RANDOM": "a random colour per object",
+    "VERTEX": "vertex colours",
+    "TEXTURE": "image textures",
+}
+
+MATERIAL_NOTE_ENGINE_HINT = "`set_render engine=eevee` (or cycles) shades materials properly"
+
+
+def material_note(engine, color_type):
+    """What this render engine does with a material — the sentence a `set_material` or
+    `render` answer carries, or None when there is nothing to add.
+
+    Cycles and EEVEE shade the material's nodes: nothing to say. Workbench draws flat
+    colour under its own studio light and never reads a node tree. With its colour type at
+    MATERIAL (Blender's default) it draws the material's viewport-display colour, which
+    `set_material` sets alongside the shader, so the colour asked for is the colour drawn —
+    but drawn flat, which a caller expecting a shaded metal should hear. Under any other
+    colour type the material shows nowhere at all, and that is the moment to say so: six
+    accepted `set_material` calls and a uniformly grey render was how this surfaced
+    (#120), on a surface that already knew Workbench "draws flat colour" but only said it
+    when someone tried to set `samples`.
+    """
+    if engine != "workbench":
+        return None
+    if color_type == "MATERIAL":
+        return ("Workbench draws materials as flat colour under its own studio light: "
+                "metallic and roughness only shape the highlight, and the scene's lights do "
+                "not reach it; %s" % MATERIAL_NOTE_ENGINE_HINT)
+    source = WORKBENCH_COLOR_SOURCES.get(color_type, "`%s`" % color_type)
+    return ("Workbench is colouring objects by %s (its colour type is `%s`) and ignores "
+            "materials, so the colours set with `set_material` do not show in its renders; "
+            "%s, or set Workbench's Color back to Material under Render Properties"
+            % (source, color_type, MATERIAL_NOTE_ENGINE_HINT))
+
 
 class Refusal(Exception):
     """The app declining, in a sentence a person can read. Travels over the bridge
@@ -340,6 +381,17 @@ class Scene:
             return None
         return None  # Workbench has no samples to report
 
+    def _workbench_color_type(self):
+        """What a Workbench render colours objects by. Read defensively: a `bpy` without
+        `scene.display.shading` is assumed to be at Blender's default, MATERIAL, rather than
+        refusing an action over a setting that only matters to one engine."""
+        display = getattr(self.bpy.context.scene, "display", None)
+        shading = getattr(display, "shading", None)
+        return str(getattr(shading, "color_type", "MATERIAL"))
+
+    def _material_note(self):
+        return material_note(self._engine_key(), self._workbench_color_type())
+
     # ── act ──────────────────────────────────────────────────────────────────
 
     def run(self, action, args):
@@ -553,15 +605,23 @@ class Scene:
         if (metallic is not None or roughness is not None) and bsdf is None:
             raise Refusal("`%s` has no Principled BSDF node; metallic and roughness "
                           "live on it, and this material has none" % material.name)
+        # Two homes for every value, set together. The Principled BSDF is what Cycles and
+        # EEVEE shade. The material's viewport-display trio (`diffuse_color`, `metallic`,
+        # `roughness`) is what Workbench draws — and what the Solid viewport a person is
+        # looking at draws — and neither ever reads the node tree. Setting only the shader
+        # was how six accepted `set_material` calls rendered a uniformly grey scene (#120):
+        # measured on Blender 4.3.2, a Workbench render of a cube whose BSDF base colour was
+        # red came out (0.60, 0.61, 0.61); with the viewport colour red too, (0.67, 0.22, 0.19).
         if color is not None:
             if bsdf is not None:
                 bsdf.inputs["Base Color"].default_value = color
-            else:
-                material.diffuse_color = color
+            material.diffuse_color = color
         if metallic is not None:
             bsdf.inputs["Metallic"].default_value = metallic
+            material.metallic = metallic
         if roughness is not None:
             bsdf.inputs["Roughness"].default_value = roughness
+            material.roughness = roughness
 
         reported = {"object": obj.name, "material": material.name}
         if bsdf is not None:
@@ -571,6 +631,11 @@ class Scene:
             reported["roughness"] = round(float(bsdf.inputs["Roughness"].default_value), 3)
         elif color is not None:
             reported["color"] = [round(float(v), 3) for v in color]
+        # Said at the moment it matters: a material set on a Workbench scene is drawn flat,
+        # or — under a colour type other than Material — not drawn at all.
+        note = self._material_note()
+        if note is not None:
+            reported["note"] = note
         return reported
 
     def _do_set_camera(self, args):
@@ -740,7 +805,13 @@ class Scene:
         if size == 0:
             raise Refusal("the render wrote an empty file at `%s`" % output)
         self.last_render = {"path": output, "seconds": seconds, "bytes": size}
-        return {"path": output, "seconds": seconds, "bytes": size}
+        reported = {"path": output, "seconds": seconds, "bytes": size}
+        # The same sentence `set_material` carries, so a caller who set colours before
+        # switching to Workbench still hears what this picture did with them.
+        note = self._material_note()
+        if note is not None:
+            reported["note"] = note
+        return reported
 
     def _do_screenshot(self, args):
         output = self._output_path(args.get("output"), "output", ".png")

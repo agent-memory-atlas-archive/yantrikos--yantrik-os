@@ -131,7 +131,8 @@ ACTIONS = [
             ]),
     _action("set_material",
             "Give an object a material: a base colour, how metallic it is, how rough it is. "
-            "Give at least one of the three.",
+            "Give at least one of the three. Cycles and EEVEE shade it; Workbench draws the "
+            "colour flat, and the answer says so.",
             "standard", [
                 Param("name", description="the object's exact name, as describe lists it"),
                 Param("color", description="`#rrggbb`, or `r,g,b` with each from 0 to 1",

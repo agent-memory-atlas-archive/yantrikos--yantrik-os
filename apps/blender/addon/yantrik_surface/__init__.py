@@ -56,6 +56,43 @@ _lock = threading.Lock()
 _running = None  # the _Session that is serving, or None
 
 
+def quiet_first_window(bpy_mod, background):
+    """Keep Blender's splash off the window this surface is about to drive. Returns True
+    when the preference was turned off, False when there was nothing to do.
+
+    Opened from the launcher, a stock Blender puts its splash over the viewport; on a
+    machine whose desktop user has never saved preferences (no `userpref.blend` — every
+    fresh Yantrik install) that splash is the first-run Quick Setup, and none of the
+    surface's actions can dismiss it, so the OS goes on editing the scene behind a dialog
+    the person has not answered (#119). Blender 4.3 checks `show_splash` first of all
+    (`USER_SPLASH_DISABLE` in `wm_init_splash_show_on_startup_check`), and runs `--python`
+    scripts before that check (`ARG_PASS_FINAL` precedes `WM_init_splash_on_startup` in
+    creator.cc), so turning the preference off here is early enough and is the whole fix.
+
+    Nothing is written to disk by this function. Blender marks the preference dirty and,
+    with `use_preferences_save` on (its default), writes `userpref.blend` on a clean quit —
+    which is also what marks first-run done for the person's own later starts. That is
+    Blender's own behaviour for any preference change; the addon does not save preferences
+    itself, because overwriting a person's preference file is not a thing a socket should
+    decide.
+
+    Background Blender has no window, so there is no splash and nothing to touch.
+    """
+    if background:
+        return False
+    preferences = getattr(getattr(bpy_mod, "context", None), "preferences", None)
+    view = getattr(preferences, "view", None)
+    if view is None or not hasattr(view, "show_splash"):
+        return False
+    try:
+        view.show_splash = False
+    except (AttributeError, TypeError):
+        # A read-only or missing preference is a Blender we do not know; the surface still
+        # serves, and a person can close the splash by hand as they always could.
+        return False
+    return True
+
+
 class _Session:
     """One serving Blender: the bridge, the surface, the socket, and how to stop all three."""
 
@@ -66,8 +103,12 @@ class _Session:
         self.surface = Surface(Scene(bpy_mod), self.bridge, app_id=APP_ID)
         self.server = wire.Server(wire.default_socket_path(APP_ID), self.surface)
         self.stopped = False
+        self.splash_quieted = False
 
     def start(self):
+        # Before the socket, so a bind failure (which keeps the window) still leaves it a
+        # window without a splash over it; before the pump, so no action can land behind one.
+        self.splash_quieted = quiet_first_window(self.bpy, self.background)
         self.server.start()
         if self.background:
             return
@@ -119,9 +160,10 @@ def start():
                 return None
             _running = session
     socket_path = session.server.path
-    print("[yantrik] control surface on %s (%d actions, %s)"
+    print("[yantrik] control surface on %s (%d actions, %s%s)"
           % (socket_path, len(session.surface.actions),
-             "background" if background else "windowed"),
+             "background" if background else "windowed",
+             ", splash off" if session.splash_quieted else ""),
           file=sys.stderr)
     if background:
         try:
