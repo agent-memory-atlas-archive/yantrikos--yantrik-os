@@ -128,7 +128,8 @@ refuses anything above the machine ceiling (`tool_permission` in `settings.yaml`
 anything above what the desktop's mind mode allows — `sensitive` in `ask` mode — unless the call
 carries a **grant**: the `request_id` the shell's
 `request_approval` minted and a person's Allow turned into one, which the dispatch spends through
-the shell before the handler runs. The MCP bridge, `yos act` and a raw JSON-RPC client on the
+the shell before the handler runs — and only once the ceiling has passed, so an Allow is never used
+up on an act the ceiling refuses. The MCP bridge, `yos act` and a raw JSON-RPC client on the
 socket meet the same refusal; the first two raise the card on the caller's behalf, and the refusal
 says how the third can. The shell publishes the mode beside `settings.yaml` (`mind-mode.json`) so
 an app can read it the way it reads the ceiling. `describe` needs nothing.
@@ -140,6 +141,13 @@ The dispatch hands it to the handler as `control::agent_token()`, and removes an
 caller put inside `args`. `yos act` sends it from `--agent-token` or `YANTRIK_AGENT_TOKEN`. The
 shell's `agent_run` / `agent_job` / `agent_input` / `agent_kill` resolve it against the kernel's
 account of the caller (see `design/agents-workspace-2026-09-23.md`, decision 3).
+
+The rule lives in `yantrik_ipc_transport::gate` (re-exported as `yantrik_app_runtime::control`),
+so a service that answers `app.act` in its own handler meets it too, without linking Slint.
+System Monitor, Notifications and Weather do: each lifts an agent token off the call
+(`gate::agent_token_of`, so a grant is never bound to one), then calls `gate::permit` before it
+dispatches, with the grade from the same table it publishes in `describe`, and refuses in the same
+words. A new service that answers `app.act` must do the same.
 
 In `plan` mode the shell raises no card, so nothing above `standard` runs on any door. Plan's
 refusal of `standard` itself stays the MCP bridge's: the desktop's own processes make `standard`

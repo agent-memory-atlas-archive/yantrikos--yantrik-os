@@ -14,7 +14,11 @@ mod machine_place;
 use std::sync::Mutex;
 use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
 use yantrik_ipc_contracts::weather::*;
+use yantrik_service_sdk::gate::{self, Authority};
 use yantrik_service_sdk::prelude::*;
+
+/// The id this surface publishes, and the app a grant for one of its actions is bound to.
+const APP: &str = "weather";
 
 fn main() {
     ServiceBuilder::new("weather")
@@ -116,12 +120,10 @@ impl ServiceHandler for WeatherHandler {
             }
             // The agent-facing surface: the weather where the user is, in one line and a small
             // state object, without opening the app.
-            "app.describe" => Ok(describe_json(
-                "weather",
-                &self.describe_view(),
-                &weather_actions(),
-            )),
-            "app.act" => self.act(&params),
+            "app.describe" => Ok(describe_json(APP, &self.describe_view(), &weather_actions())),
+            // The ceiling and the mode as the files say them now, read per call as an app
+            // window's dispatch reads them.
+            "app.act" => self.act(&params, Authority::now()),
             _ => Err(ServiceError {
                 code: -1,
                 message: format!("Unknown method: {method}"),
@@ -201,9 +203,45 @@ impl WeatherHandler {
     }
 
     /// Dispatch `app.act`. The one action changes which place describe reports on.
-    fn act(&self, params: &serde_json::Value) -> Result<serde_json::Value, ServiceError> {
+    ///
+    /// It first meets the rule an app window's dispatch enforces — the machine's ceiling, then
+    /// any grant, then the person's mode (`gate::permit`) — on the grade this surface publishes
+    /// for it. This handler used to dispatch straight away, whatever the ceiling said (#153).
+    /// `set_location` is `standard`, which every mode runs unasked (`SOCKET_FLOOR`), so what this
+    /// changes in practice is the ceiling: a machine set to `safe` refuses it here too.
+    fn act(
+        &self,
+        params: &serde_json::Value,
+        mut authority: Authority,
+    ) -> Result<serde_json::Value, ServiceError> {
         let action = params["action"].as_str().unwrap_or("").trim();
-        let args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let mut args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+        // Lifted off before anything reads `args`, and out of them if a caller put it there: a grant
+        // is spent against the arguments, and an agent token is not one. Nothing here uses it yet.
+        let token = gate::agent_token_of(params, &mut args);
+        if action.is_empty() {
+            return Err(ServiceError {
+                code: -32602,
+                message: "act needs a non-empty `action`".to_string(),
+            });
+        }
+        // An action this service does not have is answered as that, before a grant is looked
+        // at: nothing is spent on a call that could never run.
+        let graded = published_grade(action).ok_or_else(|| unknown_action(action))?;
+        let grant = gate::grant_of(params);
+        gate::permit(&mut authority, APP, action, graded, &args, grant.as_deref())
+            // A refusal is an application answer, not a transport failure: -32602, as the app
+            // runtime answers it, keeps it out of the client's circuit breaker.
+            .map_err(|message| ServiceError { code: -32602, message })?;
+        tracing::info!(
+            action,
+            ceiling = %authority.ceiling,
+            mode = %authority.mode.name,
+            granted = authority.granted,
+            // Whether one came, never the token itself.
+            agent_token = token.is_some(),
+            "app.act"
+        );
         match action {
             "set_location" => {
                 // Either a place name to geocode, or an explicit lat/lon for somewhere without a
@@ -238,22 +276,31 @@ impl WeatherHandler {
                 self.remember(&location, unit);
                 let view = self.describe_view();
                 Ok(act_json(
-                    "weather",
+                    APP,
                     "weather#act",
                     true,
                     serde_json::json!({ "location": location.name, "lat": location.lat, "lon": location.lon }),
                     &view,
                 ))
             }
-            "" => Err(ServiceError {
-                code: -32602,
-                message: "act needs a non-empty `action`".to_string(),
-            }),
-            other => Err(ServiceError {
-                code: -32601,
-                message: format!("unknown action `{other}`; this service offers: set_location"),
-            }),
+            // Published and graded, but no arm here: a mistake in this file, and still not a
+            // dispatch. `every_published_action_has_a_handler` keeps it from shipping.
+            other => Err(unknown_action(other)),
         }
+    }
+}
+
+/// The grade this surface publishes for `action`, from the same table `describe` hands out, so
+/// the grade a caller is shown and the grade that is enforced cannot come apart.
+fn published_grade(action: &str) -> Option<&'static str> {
+    weather_actions().into_iter().find(|a| a.name == action).map(|a| a.permission)
+}
+
+fn unknown_action(action: &str) -> ServiceError {
+    let offered: Vec<String> = weather_actions().into_iter().map(|a| a.name).collect();
+    ServiceError {
+        code: -32601,
+        message: format!("unknown action `{action}`; this service offers: {}", offered.join(", ")),
     }
 }
 
@@ -747,5 +794,159 @@ fn extract_hour(s: &str) -> usize {
             .unwrap_or(0)
     } else {
         0
+    }
+}
+
+/// The rule every `app.act` meets (#153), with the ceiling, the mode and the shell's grant store
+/// pinned per case. None of these reach the network: every call either is refused before the
+/// handler or fails in the handler for want of a place.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(ceiling: &str, mode: &str) -> Authority {
+        Authority { ceiling: ceiling.into(), mode: gate::Mode::named(mode), granted: false }
+    }
+
+    fn pin(grant: Option<&str>) -> serde_json::Value {
+        let mut params = serde_json::json!({
+            "action": "set_location",
+            "args": { "lat": 32.78, "lon": -96.8, "name": "Dallas" },
+        });
+        if let Some(grant) = grant {
+            params["grant"] = grant.into();
+        }
+        params
+    }
+
+    /// Grants the stand-in shell spent. `ok-*` holds, anything else is refused in its words.
+    static SPENT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    /// What each grant was spent against, as the shell would have been handed it.
+    static SPENT_AGAINST: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+    fn spend_through_a_stand_in_shell() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            gate::spend_grants_with(|id, _app, _action, args| {
+                if !id.starts_with("ok-") {
+                    return Err(format!("no approval request `{id}`."));
+                }
+                SPENT.lock().unwrap_or_else(|e| e.into_inner()).push(id.to_string());
+                SPENT_AGAINST.lock().unwrap_or_else(|e| e.into_inner()).push((id.to_string(), args.to_string()));
+                Ok(())
+            });
+        });
+    }
+
+    fn place_is_unset(handler: &WeatherHandler) -> bool {
+        handler.last_place.lock().map(|p| p.is_none()).unwrap_or(false)
+    }
+
+    /// `set_location` is `standard`, and `standard` needs no grant in any mode, plan included.
+    /// Asked with no place at all, it gets past the gate to its own handler in every mode — and
+    /// that handler's own sentence is the proof, without a forecast fetched.
+    #[test]
+    fn set_location_reaches_its_handler_in_every_mode_without_a_grant() {
+        assert_eq!(published_grade("set_location"), Some("standard"));
+        for mode in ["plan", "ask", "auto", "bypass"] {
+            let err = WeatherHandler::default()
+                .act(&serde_json::json!({ "action": "set_location", "args": {} }), at("sensitive", mode))
+                .unwrap_err();
+            assert_eq!(err.message, "`set_location` needs `query`, or `lat` and `lon`", "{mode}");
+        }
+    }
+
+    /// The ceiling binds this door as it binds every app's: a machine set to `safe` refuses
+    /// `set_location` on the grade alone, grant or none, before the place changes — and a grant
+    /// it refused was never offered to the shell (#154).
+    #[test]
+    fn a_ceiling_of_safe_refuses_set_location_whatever_the_grant() {
+        spend_through_a_stand_in_shell();
+        for grant in [None, Some("ok-153-weather")] {
+            let handler = WeatherHandler::default();
+            let err = handler.act(&pin(grant), at("safe", "bypass")).unwrap_err();
+            assert!(
+                err.message.starts_with("CEILING: weather.set_location is graded `standard`"),
+                "grant={grant:?}: {}",
+                err.message
+            );
+            assert_eq!(err.code, -32602);
+            assert!(place_is_unset(&handler), "grant={grant:?}: the place changed anyway");
+        }
+        let spent = SPENT.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!spent.iter().any(|id| id == "ok-153-weather"), "spent above the ceiling: {spent:?}");
+    }
+
+    /// An agent token travels beside `args`, never among them: one a caller put among them is
+    /// taken out before the grant is spent, so the shell is handed the arguments alone. No place
+    /// is given, so the handler refuses in its own words and nothing is fetched.
+    #[test]
+    fn an_agent_token_among_the_arguments_is_not_what_a_grant_is_bound_to() {
+        spend_through_a_stand_in_shell();
+        let params = serde_json::json!({
+            "action": "set_location",
+            "args": { "agent_token": "smuggled" },
+            "agent_token": "tok-7f3a",
+            "grant": "ok-153-token",
+        });
+        let err = WeatherHandler::default().act(&params, at("sensitive", "ask")).unwrap_err();
+        assert_eq!(err.message, "`set_location` needs `query`, or `lat` and `lon`");
+        let against = SPENT_AGAINST.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, args) = against.iter().find(|(id, _)| id == "ok-153-token").expect("the grant was spent");
+        assert_eq!(args, "{}");
+    }
+
+    /// As on a window: a grant that rides on a call is spent past the ceiling, whether or not the
+    /// mode would have asked, and one the shell refuses ends the call in the shell's words.
+    #[test]
+    fn a_grant_that_does_not_hold_ends_the_call() {
+        spend_through_a_stand_in_shell();
+        let handler = WeatherHandler::default();
+        let err = handler.act(&pin(Some("made-up")), at("sensitive", "ask")).unwrap_err();
+        assert!(
+            err.message.starts_with("GRANT: `made-up` does not authorise weather.set_location"),
+            "{}",
+            err.message
+        );
+        assert!(place_is_unset(&handler));
+    }
+
+    /// `describe` takes no authority, and the grades it publishes are the grades `act` enforces.
+    /// `HOME` points at an empty directory, so no place is known and no forecast is fetched.
+    #[test]
+    fn describe_needs_nothing_and_publishes_the_grades_act_enforces() {
+        let home = std::env::temp_dir().join(format!("weather-153-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+
+        let described = WeatherHandler::default()
+            .handle("app.describe", serde_json::json!({}))
+            .expect("describe");
+        let actions = described["actions"].as_array().expect("actions");
+        assert_eq!(actions.len(), weather_actions().len());
+        for a in actions {
+            let name = a["name"].as_str().unwrap();
+            assert_eq!(a["permission"].as_str(), published_grade(name), "{name}");
+        }
+    }
+
+    /// Every action `describe` offers reaches a handler past the gate, and an action it does not
+    /// offer is answered as that before any grant is looked at.
+    #[test]
+    fn every_published_action_has_a_handler() {
+        for spec in weather_actions() {
+            let err = WeatherHandler::default()
+                .act(&serde_json::json!({ "action": spec.name, "args": {} }), at("dangerous", "bypass"))
+                .expect_err("no arguments were given");
+            assert!(!err.message.starts_with("unknown action"), "{}: {}", spec.name, err.message);
+        }
+        let err = WeatherHandler::default()
+            .act(
+                &serde_json::json!({ "action": "set_units", "args": {}, "grant": "made-up" }),
+                at("dangerous", "ask"),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, -32601);
+        assert_eq!(err.message, "unknown action `set_units`; this service offers: set_location");
     }
 }

@@ -10,7 +10,11 @@
 
 use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Param, View};
 use yantrik_ipc_contracts::system_monitor::*;
+use yantrik_service_sdk::gate::{self, Authority};
 use yantrik_service_sdk::prelude::*;
+
+/// The id this surface publishes, and the app a grant for one of its actions is bound to.
+const APP: &str = "system-monitor";
 
 fn main() {
     ServiceBuilder::new("system-monitor")
@@ -51,12 +55,10 @@ impl ServiceHandler for SysMonHandler {
             }
             // The agent-facing surface: one call gives live eyesight of the machine — the same
             // numbers the System app draws — without opening a window or reading a screenshot.
-            "app.describe" => Ok(describe_json(
-                "system-monitor",
-                &describe_view()?,
-                &sysmon_actions(),
-            )),
-            "app.act" => act(&params),
+            "app.describe" => Ok(describe_json(APP, &describe_view()?, &sysmon_actions())),
+            // The ceiling and the mode as the files say them now: read per call, as an app
+            // window's dispatch reads them, because a person can change either while this runs.
+            "app.act" => act(&params, Authority::now()),
             _ => Err(ServiceError {
                 code: -1,
                 message: format!("Unknown method: {method}"),
@@ -165,8 +167,9 @@ fn human_uptime(secs: u64) -> String {
 }
 
 /// What this service can be asked to do. Ending a process is the one mutating thing it offers,
-/// and it destroys work a person cannot get back, so it is graded `dangerous` — the caller's
-/// ceiling decides whether it is allowed, the service only states the risk.
+/// and it destroys work a person cannot get back, so it is graded `dangerous`. This table is
+/// what `describe` publishes and what `act` enforces (`published_grade`): the machine's ceiling
+/// and the person's mode decide whether a grade runs, and this states the grade.
 fn sysmon_actions() -> Vec<Action> {
     vec![
         // `top_processes` is the busiest twenty by CPU. Asked to end `yantrik-notes`, which is
@@ -226,12 +229,61 @@ fn find_processes(needle: &str) -> Vec<serde_json::Value> {
     found
 }
 
+/// The grade this surface publishes for `action`, from the same table `describe` hands out — so
+/// the grade a caller is shown and the grade that is enforced cannot come apart. `None` for an
+/// action this service does not have, which has no grade and gets no default.
+fn published_grade(action: &str) -> Option<&'static str> {
+    sysmon_actions().into_iter().find(|a| a.name == action).map(|a| a.permission)
+}
+
+fn unknown_action(action: &str) -> ServiceError {
+    let offered: Vec<String> = sysmon_actions().into_iter().map(|a| a.name).collect();
+    ServiceError {
+        code: -32601,
+        message: format!("unknown action `{action}`; this service offers: {}", offered.join(", ")),
+    }
+}
+
 /// Dispatch `app.act`. The argument checks mirror the Slint path: an unknown action or a missing
 /// argument is named, not swallowed, because a model reads the error and corrects from it.
-fn act(params: &serde_json::Value) -> Result<serde_json::Value, ServiceError> {
+///
+/// Before any of that, the action meets the rule an app window's dispatch enforces: the machine's
+/// ceiling, then any grant the call carries, then the person's mode (`gate::permit`). This
+/// handler used to dispatch straight away, so `kill_process` — graded `dangerous` just below —
+/// ended a process on any call to this socket, with no ceiling, no mode and no grant: `yos act
+/// system-monitor kill_process` with the window closed, or one raw JSON-RPC line (#153). Now it is
+/// refused above the ceiling (the shipped `sensitive` is below it), and under a raised ceiling in
+/// `ask` mode it is refused with `GRANT:` until a person has pressed Allow for this exact pid.
+fn act(params: &serde_json::Value, mut authority: Authority) -> Result<serde_json::Value, ServiceError> {
     let action = params["action"].as_str().unwrap_or("").trim();
-    let args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let mut args = params.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+    // Lifted off before anything reads `args`, and out of them if a caller put it there: a grant
+    // is spent against the arguments, and an agent token is not one. Nothing here uses it yet.
+    let token = gate::agent_token_of(params, &mut args);
     let action_id = "system-monitor#act";
+    if action.is_empty() {
+        return Err(ServiceError {
+            code: -32602,
+            message: "act needs a non-empty `action`".to_string(),
+        });
+    }
+    // An action this service does not have is answered as that, before a grant is looked at:
+    // nothing is spent on a call that could never run.
+    let graded = published_grade(action).ok_or_else(|| unknown_action(action))?;
+    let grant = gate::grant_of(params);
+    gate::permit(&mut authority, APP, action, graded, &args, grant.as_deref())
+        // A refusal is an application answer, not a transport failure: -32602, as the app
+        // runtime answers it, keeps it out of the client's circuit breaker.
+        .map_err(|message| ServiceError { code: -32602, message })?;
+    tracing::info!(
+        action,
+        ceiling = %authority.ceiling,
+        mode = %authority.mode.name,
+        granted = authority.granted,
+        // Whether one came, never the token itself.
+        agent_token = token.is_some(),
+        "app.act"
+    );
     match action {
         "find_process" => {
             let name = args["name"].as_str().unwrap_or("").trim();
@@ -244,7 +296,7 @@ fn act(params: &serde_json::Value) -> Result<serde_json::Value, ServiceError> {
             let found = find_processes(name);
             let view = describe_view()?;
             Ok(act_json(
-                "system-monitor",
+                APP,
                 action_id,
                 true,
                 serde_json::json!({ "query": name, "count": found.len(), "processes": found }),
@@ -261,21 +313,16 @@ fn act(params: &serde_json::Value) -> Result<serde_json::Value, ServiceError> {
             // second round trip and can confirm the process is gone.
             let view = describe_view()?;
             Ok(act_json(
-                "system-monitor",
+                APP,
                 action_id,
                 true,
                 serde_json::json!({ "killed": pid }),
                 &view,
             ))
         }
-        "" => Err(ServiceError {
-            code: -32602,
-            message: "act needs a non-empty `action`".to_string(),
-        }),
-        other => Err(ServiceError {
-            code: -32601,
-            message: format!("unknown action `{other}`; this service offers: find_process, kill_process"),
-        }),
+        // Published and graded, but no arm here: a mistake in this file, and still not a
+        // dispatch. `every_published_action_has_a_handler` keeps it from shipping.
+        other => Err(unknown_action(other)),
     }
 }
 
@@ -747,4 +794,283 @@ fn read_processes(sort_by: &str, limit: u32) -> Result<Vec<ProcessInfo>, Service
 
 fn kill_process(pid: u32) -> Result<(), ServiceError> {
     platform::kill_process(pid)
+}
+
+/// The door #153 found open, knocked on the way a caller knocks: `app.act` through this service's
+/// handler, with the ceiling and the mode in the files the shell writes. Written against nothing
+/// but `SysMonHandler::handle`, so it says the same thing about a handler that never checked —
+/// which ended the process.
+#[cfg(all(test, unix))]
+mod through_the_handler {
+    use super::*;
+    use std::process::{Child, Command};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// `HOME` is process-wide, and these tests point it at settings of their own.
+    static HOME: Mutex<()> = Mutex::new(());
+
+    /// A home whose settings and mode file say `ceiling` and `mode`, in the shape the shell
+    /// writes them.
+    fn home_with(ceiling: &str, mode: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!("sysmon-153-{}-{ceiling}-{mode}", std::process::id()));
+        let config = home.join(".config/yantrik");
+        std::fs::create_dir_all(&config).expect("a config dir of our own");
+        std::fs::write(config.join("settings.yaml"), format!("tool_permission: {ceiling}\n")).unwrap();
+        std::fs::write(config.join("mind-mode.json"), format!("{{\"mode\":\"{mode}\",\"session_rules\":[]}}")).unwrap();
+        home
+    }
+
+    /// A process of our own to end. Nothing here ever kills what it did not make.
+    fn sleeper() -> Child {
+        Command::new("sleep").arg("120").spawn().expect("a sleep of our own")
+    }
+
+    /// Still running, after the time a SIGTERM that had been sent would take to land.
+    fn still_running(child: &mut Child) -> bool {
+        std::thread::sleep(Duration::from_millis(300));
+        child.try_wait().expect("wait on our own child").is_none()
+    }
+
+    fn reap(mut child: Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn kill_on_the_socket(pid: u32) -> Result<serde_json::Value, ServiceError> {
+        SysMonHandler.handle(
+            "app.act",
+            serde_json::json!({ "action": "kill_process", "args": { "pid": pid } }),
+        )
+    }
+
+    /// A person who raised the ceiling to `dangerous` let a mind *ask* to end a process; in
+    /// `ask` mode that is a card and a person's Allow, not a raw socket line.
+    #[test]
+    fn kill_process_in_ask_mode_without_a_grant_ends_nothing() {
+        let _home = HOME.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("HOME", home_with("dangerous", "ask"));
+        let mut child = sleeper();
+
+        let answer = kill_on_the_socket(child.id());
+        let alive = still_running(&mut child);
+        reap(child);
+
+        let err = answer.expect_err("a dangerous act ran in ask mode with no grant");
+        assert!(
+            err.message.starts_with("GRANT: system-monitor.kill_process is graded `dangerous`")
+                && err.message.contains("ask mode"),
+            "{}",
+            err.message
+        );
+        assert!(alive, "the refusal was reported, and the process was ended anyway");
+    }
+
+    /// Under the shipped ceiling — `sensitive`, VM 520's setting — no mode reaches `dangerous`.
+    #[test]
+    fn kill_process_above_the_ceiling_ends_nothing_even_in_bypass() {
+        let _home = HOME.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("HOME", home_with("sensitive", "bypass"));
+        let mut child = sleeper();
+
+        let answer = kill_on_the_socket(child.id());
+        let alive = still_running(&mut child);
+        reap(child);
+
+        let err = answer.expect_err("a dangerous act ran above a sensitive ceiling");
+        assert!(err.message.starts_with("CEILING:"), "{}", err.message);
+        assert!(alive, "the refusal was reported, and the process was ended anyway");
+    }
+}
+
+/// The same rule with the ceiling, the mode and the shell's grant store pinned per case.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Child, Command};
+    use std::time::Duration;
+
+    fn at(ceiling: &str, mode: &str) -> Authority {
+        Authority { ceiling: ceiling.into(), mode: gate::Mode::named(mode), granted: false }
+    }
+
+    fn kill(pid: u32, grant: Option<&str>) -> serde_json::Value {
+        let mut params = serde_json::json!({ "action": "kill_process", "args": { "pid": pid } });
+        if let Some(grant) = grant {
+            params["grant"] = grant.into();
+        }
+        params
+    }
+
+    fn sleeper() -> Child {
+        Command::new("sleep").arg("120").spawn().expect("a sleep of our own")
+    }
+
+    fn still_running(child: &mut Child) -> bool {
+        std::thread::sleep(Duration::from_millis(300));
+        child.try_wait().expect("wait on our own child").is_none()
+    }
+
+    fn reap(mut child: Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// A stand-in for the shell's store: `ok-kill-<pid>` is a person's Allow for exactly
+    /// `system-monitor.kill_process {"pid": <pid>}`, good once; anything else is refused in the
+    /// shell's words. Installed once, because the spender is process-wide, as the shell's is.
+    fn spend_through_a_stand_in_shell() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
+            gate::spend_grants_with(move |id, app, action, args| {
+                let Some(pid) = id.strip_prefix("ok-kill-").and_then(|p| p.parse::<u64>().ok()) else {
+                    return Err(format!("no approval request `{id}`."));
+                };
+                // The whole arguments, as the shell binds them: `{"pid": <pid>}` and nothing else.
+                if app != APP || action != "kill_process" || *args != serde_json::json!({ "pid": pid }) {
+                    return Err(format!("`{id}` was approved for another call, and this call carries {args}."));
+                }
+                let mut spent = spent.lock().unwrap_or_else(|e| e.into_inner());
+                if !spent.insert(id.to_string()) {
+                    return Err(format!("`{id}` was already used."));
+                }
+                Ok(())
+            });
+        });
+    }
+
+    /// The ceiling is the machine's wall: not bypass, not a grant, not both. And a grant it
+    /// refused is still whole afterwards (#154): with the ceiling raised it ends the process it
+    /// was given for, once.
+    #[test]
+    fn above_the_ceiling_kill_process_is_refused_whatever_the_grant_or_mode() {
+        spend_through_a_stand_in_shell();
+        let mut child = sleeper();
+        let pid = child.id();
+        let grant = format!("ok-kill-{pid}");
+
+        for (mode, carried) in [("bypass", None), ("ask", Some(grant.as_str())), ("bypass", Some(grant.as_str()))] {
+            let err = act(&kill(pid, carried), at("sensitive", mode)).expect_err("above the ceiling");
+            assert!(
+                err.message.starts_with("CEILING: system-monitor.kill_process is graded `dangerous`"),
+                "{mode}, grant={carried:?}: {}",
+                err.message
+            );
+            assert_eq!(err.code, -32602, "a refusal, not a transport failure");
+        }
+        if !still_running(&mut child) {
+            panic!("a process was ended above the ceiling");
+        }
+
+        let answer = act(&kill(pid, Some(&grant)), at("dangerous", "ask")).expect("the grant was never spent");
+        assert_eq!(answer["result"]["killed"], serde_json::json!(pid));
+        assert_eq!(child.wait().expect("reaped").signal(), Some(libc::SIGTERM));
+        let err = act(&kill(pid, Some(&grant)), at("dangerous", "ask")).unwrap_err();
+        assert!(err.message.starts_with("GRANT:") && err.message.contains("already used"), "{}", err.message);
+    }
+
+    /// Under a raised ceiling, `dangerous` is above what every mode but bypass runs unasked, so
+    /// it is refused with `GRANT:` — the refusal `yos act` turns into a card — until a person's
+    /// Allow for this pid rides on the call.
+    #[test]
+    fn in_ask_mode_kill_process_needs_a_grant_and_runs_with_one() {
+        spend_through_a_stand_in_shell();
+        let mut child = sleeper();
+        let pid = child.id();
+
+        let err = act(&kill(pid, None), at("dangerous", "ask")).unwrap_err();
+        assert!(err.message.starts_with("GRANT: system-monitor.kill_process is graded `dangerous`"), "{}", err.message);
+        assert!(err.message.contains("ask mode") && err.message.contains("request_approval"), "{}", err.message);
+        let err = act(&kill(pid, None), at("dangerous", "auto")).unwrap_err();
+        assert!(err.message.starts_with("GRANT:") && err.message.contains("auto mode"), "{}", err.message);
+        let err = act(&kill(pid, None), at("dangerous", "plan")).unwrap_err();
+        assert!(err.message.contains("plan mode") && err.message.contains("raises no card"), "{}", err.message);
+        // A person's Allow for another process is not one for this.
+        let err = act(&kill(pid, Some(&format!("ok-kill-{}", pid + 1))), at("dangerous", "ask")).unwrap_err();
+        assert!(err.message.starts_with("GRANT:") && err.message.contains("does not authorise"), "{}", err.message);
+        if !still_running(&mut child) {
+            panic!("a process was ended without the person's Allow");
+        }
+
+        act(&kill(pid, Some(&format!("ok-kill-{pid}"))), at("dangerous", "ask"))
+            .expect("a person's Allow for this pid ends it");
+        assert_eq!(child.wait().expect("reaped").signal(), Some(libc::SIGTERM));
+    }
+
+    /// An agent token travels beside `args`, never among them. One a caller put among them is
+    /// taken out before the grant is spent, so the person's Allow for `{"pid": <pid>}` is the
+    /// grant for this call — and the token is never part of what a grant is bound to.
+    #[test]
+    fn an_agent_token_among_the_arguments_is_not_what_a_grant_is_bound_to() {
+        spend_through_a_stand_in_shell();
+        let child = sleeper();
+        let pid = child.id();
+        let params = serde_json::json!({
+            "action": "kill_process",
+            "args": { "pid": pid, "agent_token": "smuggled" },
+            "agent_token": "tok-7f3a",
+            "grant": format!("ok-kill-{pid}"),
+        });
+        let answer = act(&params, at("dangerous", "ask"));
+        let mut child = child;
+        if answer.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait().expect("reaped");
+        let answer = answer.unwrap_or_else(|e| panic!("the token was bound into the grant: {}", e.message));
+        assert_eq!(answer["result"]["killed"], serde_json::json!(pid));
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        assert!(!answer.to_string().contains("smuggled"), "{answer}");
+    }
+
+    /// Finding a process is a read, graded `safe`, and asks nobody in any mode.
+    #[test]
+    fn a_read_runs_in_every_mode() {
+        let mut child = sleeper();
+        for mode in ["plan", "ask", "auto", "bypass"] {
+            let answer = act(
+                &serde_json::json!({ "action": "find_process", "args": { "name": "sleep" } }),
+                at("sensitive", mode),
+            )
+            .unwrap_or_else(|e| panic!("{mode}: {}", e.message));
+            assert_eq!(answer["accepted"], serde_json::json!(true), "{mode}");
+        }
+        assert!(still_running(&mut child));
+        reap(child);
+    }
+
+    /// `describe` takes no authority, and the grades it publishes are the grades `act` enforces.
+    #[test]
+    fn describe_needs_nothing_and_publishes_the_grades_act_enforces() {
+        let described = SysMonHandler.handle("app.describe", serde_json::json!({})).expect("describe");
+        let actions = described["actions"].as_array().expect("actions");
+        assert_eq!(actions.len(), sysmon_actions().len());
+        for a in actions {
+            let name = a["name"].as_str().unwrap();
+            assert_eq!(a["permission"].as_str(), published_grade(name), "{name}");
+        }
+        assert_eq!(published_grade("kill_process"), Some("dangerous"));
+        assert_eq!(published_grade("find_process"), Some("safe"));
+    }
+
+    /// Every action `describe` offers reaches a handler past the gate, and an action it does not
+    /// offer is answered as that before any grant is looked at.
+    #[test]
+    fn every_published_action_has_a_handler() {
+        for spec in sysmon_actions() {
+            // No arguments, so no handler can do anything; each has to say what it needs.
+            let err = act(&serde_json::json!({ "action": spec.name, "args": {} }), at("dangerous", "bypass"))
+                .expect_err("no arguments were given");
+            assert!(!err.message.starts_with("unknown action"), "{}: {}", spec.name, err.message);
+        }
+        let err = act(
+            &serde_json::json!({ "action": "reboot", "args": {}, "grant": "ok-kill-1" }),
+            at("dangerous", "ask"),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, -32601);
+        assert_eq!(err.message, "unknown action `reboot`; this service offers: find_process, kill_process");
+    }
 }

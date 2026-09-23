@@ -58,7 +58,11 @@ use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Pa
 use yantrik_ipc_contracts::notifications::*;
 use yantrik_ipc_transport::peer_identity::{self, Program};
 use yantrik_ipc_transport::PeerCred;
+use yantrik_service_sdk::gate::{self, Authority};
 use yantrik_service_sdk::prelude::*;
+
+/// The id this surface publishes, and the app a grant for one of its actions is bound to.
+const APP: &str = "notifications";
 
 fn main() {
     // Before `run_service`, because the bus name is claimed on a thread of its own and the
@@ -214,12 +218,11 @@ impl NotificationsHandler {
 
             // The agent-facing surface: what the machine is trying to tell the person, right
             // now, in one line and a small list — without opening the notification centre.
-            "app.describe" => Ok(describe_json(
-                "notifications",
-                &self.describe_view(),
-                &notification_actions(),
-            )),
-            "app.act" => self.act(&params, peer),
+            "app.describe" => Ok(describe_json(APP, &self.describe_view(), &notification_actions())),
+            // The ceiling and the mode as the files say them now, read per call as an app
+            // window's dispatch reads them. The desktop's own senders do not come this way: they
+            // call `notifications.add` above.
+            "app.act" => self.act(&params, peer, Authority::now()),
 
             other => Err(ServiceError {
                 code: -32601,
@@ -292,16 +295,45 @@ impl NotificationsHandler {
     }
 
     /// Dispatch `app.act`.
+    ///
+    /// Every action first meets the rule an app window's dispatch enforces — the machine's
+    /// ceiling, then any grant, then the person's mode (`gate::permit`) — on the grade this
+    /// surface publishes for it. This handler used to dispatch straight away, whatever the
+    /// ceiling said (#153). Everything here is `standard`, which the mode runs unasked in every
+    /// mode (`SOCKET_FLOOR`), so what this changes in practice is the ceiling: a machine set to
+    /// `safe` refuses `notify` on this door as it refuses every app's `standard` actions.
     fn act(
         &self,
         params: &serde_json::Value,
         peer: Option<PeerCred>,
+        mut authority: Authority,
     ) -> Result<serde_json::Value, ServiceError> {
         let action = params["action"].as_str().unwrap_or("").trim();
-        let args = params
+        let mut args = params
             .get("args")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
+        // Lifted off before anything reads `args`, and out of them if a caller put it there: a grant
+        // is spent against the arguments, and an agent token is not one. Nothing here uses it yet.
+        let token = gate::agent_token_of(params, &mut args);
+        if action.is_empty() {
+            return Err(bad_request("act needs a non-empty `action`".to_string()));
+        }
+        // An action this service does not have is answered as that, before a grant is looked
+        // at: nothing is spent on a call that could never run.
+        let graded = published_grade(action).ok_or_else(|| unknown_action(action))?;
+        let grant = gate::grant_of(params);
+        gate::permit(&mut authority, APP, action, graded, &args, grant.as_deref())
+            .map_err(bad_request)?;
+        tracing::info!(
+            action,
+            ceiling = %authority.ceiling,
+            mode = %authority.mode.name,
+            granted = authority.granted,
+            // Whether one came, never the token itself.
+            agent_token = token.is_some(),
+            "app.act"
+        );
         match action {
             // The one a mind reaches for when it says "I'll tell you when it's done" — and then
             // has to actually tell them.
@@ -329,7 +361,7 @@ impl NotificationsHandler {
                 // The caller is told what it was filed under and what was recorded about it,
                 // so a mind that said `Yantrik` learns on the spot that the row will not.
                 Ok(act_json(
-                    "notifications",
+                    APP,
                     "notifications#act",
                     true,
                     serde_json::json!({ "id": stored.id, "app": stored.app, "sender": stored.sender }),
@@ -346,7 +378,7 @@ impl NotificationsHandler {
                     self.link.closed(&n, freedesktop::CloseReason::DismissedByUser);
                 }
                 Ok(act_json(
-                    "notifications",
+                    APP,
                     "notifications#act",
                     true,
                     serde_json::json!({ "dismissed": id, "already": !changed }),
@@ -360,7 +392,7 @@ impl NotificationsHandler {
                     self.link.closed(n, freedesktop::CloseReason::DismissedByUser);
                 }
                 Ok(act_json(
-                    "notifications",
+                    APP,
                     "notifications#act",
                     true,
                     serde_json::json!({ "dismissed": cleared }),
@@ -371,22 +403,31 @@ impl NotificationsHandler {
                 let id = optional_str(&args, "id")?;
                 let count = self.store.mark_read(id.as_deref());
                 Ok(act_json(
-                    "notifications",
+                    APP,
                     "notifications#act",
                     true,
                     serde_json::json!({ "marked_read": count }),
                     &self.describe_view(),
                 ))
             }
-            "" => Err(bad_request("act needs a non-empty `action`".to_string())),
-            other => Err(ServiceError {
-                code: -32601,
-                message: format!(
-                    "unknown action `{other}`; this service offers: notify, dismiss, \
-                     dismiss_all, mark_read"
-                ),
-            }),
+            // Published and graded, but no arm here: a mistake in this file, and still not a
+            // dispatch. `every_published_action_has_a_handler` keeps it from shipping.
+            other => Err(unknown_action(other)),
         }
+    }
+}
+
+/// The grade this surface publishes for `action`, from the same table `describe` hands out, so
+/// the grade a caller is shown and the grade that is enforced cannot come apart.
+fn published_grade(action: &str) -> Option<&'static str> {
+    notification_actions().into_iter().find(|a| a.name == action).map(|a| a.permission)
+}
+
+fn unknown_action(action: &str) -> ServiceError {
+    let offered: Vec<String> = notification_actions().into_iter().map(|a| a.name).collect();
+    ServiceError {
+        code: -32601,
+        message: format!("unknown action `{action}`; this service offers: {}", offered.join(", ")),
     }
 }
 
@@ -867,5 +908,164 @@ mod tests {
         // And the caller is told the message is on screen by the time the call returns, not
         // queued somewhere it might still be dropped.
         assert_eq!(notify.schema()["settles"], "on return");
+    }
+
+    // ── The rule every `app.act` meets (#153) ──
+
+    /// A handler over a store of its own, with the freedesktop door never opened.
+    fn handler() -> NotificationsHandler {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "yantrik-notifications-153-{}-{}.json",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        NotificationsHandler {
+            store: Arc::new(store::Store::open(path)),
+            link: Arc::new(freedesktop::Link::new()),
+        }
+    }
+
+    fn at(ceiling: &str, mode: &str) -> Authority {
+        Authority { ceiling: ceiling.into(), mode: gate::Mode::named(mode), granted: false }
+    }
+
+    fn notify(grant: Option<&str>) -> serde_json::Value {
+        let mut params = serde_json::json!({ "action": "notify", "args": { "title": "Build finished" } });
+        if let Some(grant) = grant {
+            params["grant"] = grant.into();
+        }
+        params
+    }
+
+    /// Grants the stand-in shell spent. `ok-*` holds, anything else is refused in its words.
+    static SPENT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    /// What each grant was spent against, as the shell would have been handed it.
+    static SPENT_AGAINST: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+    fn spend_through_a_stand_in_shell() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            gate::spend_grants_with(|id, _app, _action, args| {
+                if !id.starts_with("ok-") {
+                    return Err(format!("no approval request `{id}`."));
+                }
+                SPENT.lock().unwrap_or_else(|e| e.into_inner()).push(id.to_string());
+                SPENT_AGAINST.lock().unwrap_or_else(|e| e.into_inner()).push((id.to_string(), args.to_string()));
+                Ok(())
+            });
+        });
+    }
+
+    /// `notify` is how a mind keeps a promise it made out loud, and the desktop's own processes
+    /// cross these sockets with `standard` calls the dispatch cannot yet tell from a mind's (#43).
+    /// So `standard` needs no grant in any mode — plan included — here as on every app's door.
+    #[test]
+    fn notify_needs_no_grant_in_any_mode() {
+        for mode in ["plan", "ask", "auto", "bypass"] {
+            let h = handler();
+            let answer = h
+                .act(&notify(None), None, at("sensitive", mode))
+                .unwrap_or_else(|e| panic!("{mode}: {}", e.message));
+            assert_eq!(answer["accepted"], serde_json::json!(true), "{mode}");
+            assert_eq!(h.store.list().len(), 1, "{mode}: the notification was stored");
+        }
+    }
+
+    /// The ceiling binds this door as it binds every app's: a machine set to `safe` refuses
+    /// `notify` on the grade alone, grant or none, before anything is stored — and a grant it
+    /// refused was never offered to the shell (#154).
+    #[test]
+    fn a_ceiling_of_safe_refuses_notify_whatever_the_grant() {
+        spend_through_a_stand_in_shell();
+        for grant in [None, Some("ok-153-notify")] {
+            let h = handler();
+            let err = h.act(&notify(grant), None, at("safe", "bypass")).unwrap_err();
+            assert!(
+                err.message.starts_with("CEILING: notifications.notify is graded `standard`"),
+                "grant={grant:?}: {}",
+                err.message
+            );
+            assert_eq!(err.code, -32602);
+            assert!(h.store.list().is_empty(), "grant={grant:?}: nothing is stored");
+        }
+        let spent = SPENT.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!spent.iter().any(|id| id == "ok-153-notify"), "spent above the ceiling: {spent:?}");
+    }
+
+    /// An agent token travels beside `args`, never among them: one a caller put among them is
+    /// taken out before the grant is spent, so the shell is handed the arguments alone.
+    #[test]
+    fn an_agent_token_among_the_arguments_is_not_what_a_grant_is_bound_to() {
+        spend_through_a_stand_in_shell();
+        let h = handler();
+        let params = serde_json::json!({
+            "action": "notify",
+            "args": { "title": "Build finished", "agent_token": "smuggled" },
+            "agent_token": "tok-7f3a",
+            "grant": "ok-153-token",
+        });
+        h.act(&params, None, at("sensitive", "ask")).unwrap_or_else(|e| panic!("{}", e.message));
+        let against = SPENT_AGAINST.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, args) = against.iter().find(|(id, _)| id == "ok-153-token").expect("the grant was spent");
+        assert_eq!(args, r#"{"title":"Build finished"}"#);
+        assert_eq!(h.store.list()[0].title, "Build finished");
+    }
+
+    /// As on a window: a grant that rides on a call is spent past the ceiling, whether or not the
+    /// mode would have asked, and one the shell refuses ends the call in the shell's words.
+    #[test]
+    fn a_grant_that_does_not_hold_ends_the_call() {
+        spend_through_a_stand_in_shell();
+        let h = handler();
+        let err = h.act(&notify(Some("made-up")), None, at("sensitive", "ask")).unwrap_err();
+        assert!(
+            err.message.starts_with("GRANT: `made-up` does not authorise notifications.notify"),
+            "{}",
+            err.message
+        );
+        assert!(h.store.list().is_empty());
+    }
+
+    /// `describe` takes no authority, and the grades it publishes are the grades `act` enforces.
+    #[test]
+    fn describe_needs_nothing_and_publishes_the_grades_act_enforces() {
+        let described = handler().dispatch("app.describe", serde_json::json!({}), None).expect("describe");
+        let actions = described["actions"].as_array().expect("actions");
+        assert_eq!(actions.len(), notification_actions().len());
+        for a in actions {
+            let name = a["name"].as_str().unwrap();
+            assert_eq!(a["permission"].as_str(), published_grade(name), "{name}");
+        }
+    }
+
+    /// Every action `describe` offers reaches a handler past the gate, and an action it does not
+    /// offer is answered as that before any grant is looked at.
+    #[test]
+    fn every_published_action_has_a_handler() {
+        for spec in notification_actions() {
+            let reply = handler().act(
+                &serde_json::json!({ "action": spec.name, "args": {} }),
+                None,
+                at("dangerous", "bypass"),
+            );
+            if let Err(e) = reply {
+                assert!(!e.message.starts_with("unknown action"), "{}: {}", spec.name, e.message);
+            }
+        }
+        let err = handler()
+            .act(
+                &serde_json::json!({ "action": "clear_history", "args": {}, "grant": "made-up" }),
+                None,
+                at("dangerous", "ask"),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, -32601);
+        assert_eq!(
+            err.message,
+            "unknown action `clear_history`; this service offers: notify, dismiss, dismiss_all, mark_read"
+        );
     }
 }
