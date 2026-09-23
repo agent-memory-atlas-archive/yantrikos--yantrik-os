@@ -1,9 +1,9 @@
 //! The shell's side of the one notification store.
 //!
-//! Polls `notifications.since(revision)` about once a second, raises a toast for anything new,
-//! keeps the unread badge and the notification centre (screen 9) fed, and sends the shell's own
-//! notifications — an update waiting, a mind waiting for an answer — through the same door every
-//! app uses.
+//! Polls `notifications.since(revision)` about once a second, raises a toast for anything new
+//! and takes one down for anything the store says was dismissed, keeps the unread badge and the
+//! notification centre (screen 9) fed, and sends the shell's own notifications — an update
+//! waiting, a mind waiting for an answer — through the same door every app uses.
 //!
 //! ## Why a poll and not a subscription
 //!
@@ -549,12 +549,20 @@ fn apply_tick(ui: &App, tick: Tick) {
     withdraw_answered_questions(ui);
     match tick {
         Tick::Changed(since) => {
-            let fresh = with_mirror(|m| m.apply(since)).unwrap_or_default();
-            for n in &fresh {
+            let applied = with_mirror(|m| m.apply(since)).unwrap_or_default();
+            // Dismissed somewhere this file did not see — `yos act notifications dismiss_all`,
+            // a mind, a sender closing its own notification — so the toast follows the store
+            // off the screen. The shell's own buttons take the toast down on the click and this
+            // takes it down again a second later, which is a no-op; for a dismissal that did
+            // not start here it is the only way down, and critical toasts have no other.
+            for id in &applied.gone {
+                crate::wire::toast::remove(ui, id);
+            }
+            for n in &applied.fresh {
                 maybe_toast(ui, n);
             }
-            if !fresh.is_empty() {
-                relay_to_features(&fresh);
+            if !applied.fresh.is_empty() {
+                relay_to_features(&applied.fresh);
             }
             resync(ui);
         }
