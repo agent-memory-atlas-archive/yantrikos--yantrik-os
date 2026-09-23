@@ -140,9 +140,18 @@ MARK = "YTEST"
 
 
 def ask(command, timeout=90):
+    """Run `command` on the serial console and return what it printed.
+
+    The markers are printed by printf from two halves, so the text `YTEST-BEGIN` / `YTEST-END`
+    exists only in what the machine prints, never in the command line the terminal echoes back.
+    With `echo YTEST-END` in the line itself, the echo alone satisfied the wait: any command
+    slower than a pump or two (release-check takes minutes) came back empty at once, and every
+    later command was typed into a terminal still busy with it — the nightly of 23 September
+    failed eight checks that way, from one.
+    """
     global buf
     buf = b""
-    send("echo %s-BEGIN; %s; echo %s-END" % (MARK, command, MARK))
+    send("printf '%%s-%%s\\n' %s BEGIN; %s; printf '%%s-%%s\\n' %s END" % (MARK, command, MARK))
     wait_for(("%s-END\r" % MARK).encode(), timeout)
     text = buf.decode(errors="replace")
     return text.split(MARK + "-BEGIN")[-1].split(MARK + "-END")[0].strip()
