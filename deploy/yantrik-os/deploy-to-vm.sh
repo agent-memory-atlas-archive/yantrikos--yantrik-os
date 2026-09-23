@@ -84,6 +84,11 @@ for b in "${BINS[@]}"; do printf '%s\n' "$b"; done \
   | rsync -a --info=stats1 --files-from=- -e "$RSYNC_RSH" \
       "$TARGET_DIR/" "$TARGET_HOST:$REMOTE/bin/" 2>&1 | tail -3
 
+# rsync does not carry file capabilities; grant perception-service its two on the target the way
+# the ISO does, so a dev deploy watches the same way a shipped machine does.
+"${SSH[@]}" "sudo setcap cap_sys_admin,cap_net_admin=ep $REMOTE/bin/perception-service 2>/dev/null \
+    || echo '   (setcap unavailable or refused: perception-service will watch with PSI only)'"
+
 say "Shipping the agent surface"
 # yos is how an agent sees and acts on this desktop; yos-mcp offers the same surface to a
 # mind that speaks MCP. Neither is compiled, so neither appears in the binary discovery

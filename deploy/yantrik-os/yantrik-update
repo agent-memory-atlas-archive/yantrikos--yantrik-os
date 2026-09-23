@@ -529,6 +529,20 @@ safely. Old backups live in $BACKUP_DIR."
   done < <(find "$root/bin" -maxdepth 1 -type f)
   info "installed $installed binaries"
 
+  # The one binary that needs privilege gets it back after the swap. `cp` and `mv` do not carry
+  # file capabilities, so an update that forgot this would silently downgrade perception to PSI
+  # alone - the service says so in its own status, but a person has to look. The ISO and the
+  # dev deploy set the same two, and the service drops them before it serves (see
+  # services/perception-service/src/main.rs).
+  if [ -x "$BIN_DIR/perception-service" ]; then
+    if command -v setcap >/dev/null 2>&1; then
+      setcap cap_sys_admin,cap_net_admin=ep "$BIN_DIR/perception-service" \
+        || warn "could not set file capabilities on perception-service; it will watch with PSI only"
+    else
+      warn "setcap is not installed (libcap2-bin); perception-service will watch with PSI only"
+    fi
+  fi
+
   # ── And everything that is not a binary ──
   #
   # The updater installed bin/ and nothing else, so half of every release since this script

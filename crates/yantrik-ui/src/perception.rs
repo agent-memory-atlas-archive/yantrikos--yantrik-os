@@ -73,7 +73,8 @@ const MEMORIES_PER_MINUTE: usize = 6;
 
 /// Reconnect delay when the service is not there.
 ///
-/// perception-service is optional and often absent: it needs `CAP_SYS_ADMIN` at startup and a
+/// perception-service is optional and often absent: it needs `CAP_SYS_ADMIN` at startup - the
+/// installers grant it as file capabilities on the binary (see build-debian-iso.sh) - and a
 /// kernel with fanotify and Landlock. Its absence is normal and must not become a log flood.
 const RETRY: Duration = Duration::from_secs(20);
 
