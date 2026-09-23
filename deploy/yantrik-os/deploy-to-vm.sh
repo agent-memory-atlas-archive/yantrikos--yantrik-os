@@ -131,19 +131,35 @@ echo "   $(basename "$CONFIG_SRC") -> $REMOTE/config.yaml"
 
 # ── The session ──
 #
-# labwc on the headless wlroots backend: there is no GPU and no monitor, and
-# the point of this deployment is the control surface, not the pixels. The
-# apps are real Slint windows either way — they just render into a buffer
-# nobody looks at, which is enough for `app.describe` to tell the truth about
-# them.
+# labwc on the headless wlroots backend WHEN THE MACHINE HAS NO SCREEN. This
+# deployment was written for test VMs with no GPU and no monitor, where the
+# point is the control surface, not the pixels: the apps are real Slint
+# windows either way, rendering into a buffer nobody looks at, which is enough
+# for `app.describe` to tell the truth about them.
+#
+# It used to force headless unconditionally. Run against a VM that DOES have a
+# display — VM 520, with a virtio screen and a person at the Proxmox console —
+# that wrote a session script that put the whole desktop on an output no screen
+# shows: the console sat on tty1's login banner, `wlr-randr` said HEADLESS-1,
+# nobody held /dev/dri/card0, and every approval card expired unseen, because
+# there was nowhere to see it. The running session survived until the next
+# reboot, so the damage surfaced hours after the deploy that caused it (#96's
+# afternoon, 2026-09-22).
+#
+# So the script the target gets now decides at session start, from the one
+# fact that settles it: whether any DRM connector reports `connected`. A screen
+# means the real backend; none means headless, exactly as before.
 say "Session launcher"
 "${SSH[@]}" "cat > $REMOTE/bin/yantrik-session" <<'SESSION'
 #!/bin/sh
-# Start labwc headless, then the shell inside it.
+# Start labwc, then the shell inside it. Headless only if there is no screen.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR"
-export WLR_BACKENDS=headless
-export WLR_LIBINPUT_NO_DEVICES=1
+if [ "${YANTRIK_HEADLESS:-}" = "1" ] || ! grep -qs '^connected' /sys/class/drm/card*-*/status; then
+  # No connected display (or headless asked for): render into a buffer.
+  export WLR_BACKENDS=headless
+  export WLR_LIBINPUT_NO_DEVICES=1
+fi
 export LIBGL_ALWAYS_SOFTWARE=1
 export PATH="/opt/yantrik/bin:$PATH"
 
