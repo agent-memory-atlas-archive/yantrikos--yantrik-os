@@ -1363,10 +1363,9 @@ impl CompanionService {
         self.conversation_history.push(ChatMessage::user(user_text));
         self.conversation_history.push(ChatMessage::assistant(&final_answer));
         self.compress_history_if_needed();
-        self.last_interaction_ts = now_ts();
         self.session_turn_count += 1;
 
-        // Learning + bond
+        // Learning. The bond is not scored here: see `score_conversation_turn`.
         if !self.incognito {
             let smart = if self.config.memory_evolution.smart_recall_enabled {
                 memory_evolution::smart_recall(&self.db, user_text, &self.config.memory_evolution)
@@ -1381,13 +1380,6 @@ impl CompanionService {
                 &self.db, &*self.llm, user_text, &clean, &self.config.memory_evolution,
             );
             memory_evolution::update_conversation_context(&self.db.conn(), user_text, &memories);
-            if self.config.bond.enabled {
-                let (new_level, level_changed) = BondTracker::score_interaction(
-                    &self.db.conn(), user_text, &final_answer, memories.len(),
-                );
-                self.bond_level = new_level;
-                self.bond_level_changed = level_changed;
-            }
         }
 
         Some(AgentResponse {
@@ -1426,14 +1418,6 @@ impl CompanionService {
             match decision {
                 RouteDecision::Conversation { response } => {
                     tracing::info!(path = "cognitive-router", "Conversation handled without LLM");
-                    // Still record interaction for bond tracking
-                    if self.config.bond.enabled {
-                        let (new_level, level_changed) = BondTracker::score_interaction(
-                            &self.db.conn(), user_text, &response, 0,
-                        );
-                        self.bond_level = new_level;
-                        self.bond_level_changed = level_changed;
-                    }
                     return AgentResponse {
                         message: response,
                         memories_recalled: 0,
@@ -1771,10 +1755,10 @@ impl CompanionService {
             self.conversation_history.push(ChatMessage::user(user_text));
             self.conversation_history.push(ChatMessage::assistant(&response_text));
             self.compress_history_if_needed();
-            self.last_interaction_ts = now_ts();
             self.session_turn_count += 1;
 
-            // Learning + bond (skip in incognito)
+            // Learning (skip in incognito). The bond is not scored here: see
+            // `score_conversation_turn`.
             if !self.incognito {
                 let clean_response = sanitize::clean_response_for_learning(
                     &response_text, &tool_calls_made,
@@ -1784,13 +1768,6 @@ impl CompanionService {
                     &self.config.memory_evolution,
                 );
                 memory_evolution::update_conversation_context(&self.db.conn(), user_text, &memories);
-                if self.config.bond.enabled {
-                    let (new_level, level_changed) = BondTracker::score_interaction(
-                        &self.db.conn(), user_text, &response_text, memories.len(),
-                    );
-                    self.bond_level = new_level;
-                    self.bond_level_changed = level_changed;
-                }
                 // Record tool trace for learning
                 let trace_chain = vec![serde_json::json!({"tool": tool_name, "status": "success"})];
                 ToolTraces::record(
@@ -2211,7 +2188,6 @@ impl CompanionService {
         // Compress conversation history when it grows too long
         self.compress_history_if_needed();
 
-        self.last_interaction_ts = now_ts();
         self.session_turn_count += 1;
 
         // Steps 8-9: Skip all persistence in incognito mode
@@ -2231,24 +2207,14 @@ impl CompanionService {
             // Step 8b: Update conversation context for smart recall (Gap 1)
             memory_evolution::update_conversation_context(&self.db.conn(), user_text, &memories);
 
-            // Step 9: Score bond + tick evolution (always runs — tracks interaction count)
+            // Step 9: Tick evolution + narrative. The bond itself is not scored here: this
+            // handler runs for the startup brief, EXECUTE urges and the companion's own
+            // reflection prompts as well as for the person, and only the person's turn counts.
+            // The shell scores that turn where it ends, through `score_conversation_turn`.
             if self.config.bond.enabled {
-                let (new_level, level_changed) = BondTracker::score_interaction(
-                    &self.db.conn(),
-                    user_text,
-                    &response_text,
-                    memories.len(),
-                );
-                self.bond_level = new_level;
-                self.bond_level_changed = level_changed;
-
-                let bond_state = BondTracker::get_state(&self.db.conn());
-                self.bond_score = bond_state.bond_score;
-
-                // Tick personality evolution
                 Evolution::tick(
                     &self.db.conn(),
-                    new_level,
+                    self.bond_level,
                     self.config.evolution.formality_alpha,
                 );
 
@@ -2267,8 +2233,8 @@ impl CompanionService {
                             &self.db.conn(),
                             &*self.llm,
                             &self.config.user_name,
-                            new_level,
-                            bond_state.bond_score,
+                            self.bond_level,
+                            self.bond_score,
                             &self_texts,
                             self.config.narrative.max_tokens,
                         );
@@ -2342,13 +2308,6 @@ impl CompanionService {
             match decision {
                 RouteDecision::Conversation { response } => {
                     on_token(&response);
-                    if self.config.bond.enabled {
-                        let (new_level, level_changed) = BondTracker::score_interaction(
-                            &self.db.conn(), user_text, &response, 0,
-                        );
-                        self.bond_level = new_level;
-                        self.bond_level_changed = level_changed;
-                    }
                     return AgentResponse {
                         message: response,
                         memories_recalled: 0,
@@ -2606,7 +2565,6 @@ impl CompanionService {
                 self.conversation_history.push(ChatMessage::user(user_text));
                 self.conversation_history.push(ChatMessage::assistant(&response_text));
                 self.compress_history_if_needed();
-                self.last_interaction_ts = now_ts();
                 self.session_turn_count += 1;
 
                 if !self.incognito {
@@ -2619,13 +2577,6 @@ impl CompanionService {
                         &self.config.memory_evolution,
                     );
                     memory_evolution::update_conversation_context(&self.db.conn(), user_text, &memories);
-                    if self.config.bond.enabled {
-                        let (new_level, level_changed) = BondTracker::score_interaction(
-                            &self.db.conn(), user_text, &response_text, memories.len(),
-                        );
-                        self.bond_level = new_level;
-                        self.bond_level_changed = level_changed;
-                    }
                     let trace_chain = vec![serde_json::json!({"tool": &tool_name, "status": "success"})];
                     ToolTraces::record(
                         &self.db.conn(), &self.db, user_text,
@@ -3127,7 +3078,6 @@ impl CompanionService {
         // Compress conversation history when it grows too long
         self.compress_history_if_needed();
 
-        self.last_interaction_ts = now_ts();
         self.session_turn_count += 1;
 
         // Steps 8-9: Skip all persistence in incognito mode
@@ -3147,23 +3097,14 @@ impl CompanionService {
             // Step 8b: Update conversation context for smart recall (Gap 1)
             memory_evolution::update_conversation_context(&self.db.conn(), user_text, &memories);
 
-            // Step 9: Score bond + tick evolution (always runs — tracks interaction count)
+            // Step 9: Tick evolution + narrative. The bond itself is not scored here: this
+            // handler runs for the startup brief, EXECUTE urges and the companion's own
+            // reflection prompts as well as for the person, and only the person's turn counts.
+            // The shell scores that turn where it ends, through `score_conversation_turn`.
             if self.config.bond.enabled {
-                let (new_level, level_changed) = BondTracker::score_interaction(
-                    &self.db.conn(),
-                    user_text,
-                    &response_text,
-                    memories.len(),
-                );
-                self.bond_level = new_level;
-                self.bond_level_changed = level_changed;
-
-                let bond_state = BondTracker::get_state(&self.db.conn());
-                self.bond_score = bond_state.bond_score;
-
                 Evolution::tick(
                     &self.db.conn(),
-                    new_level,
+                    self.bond_level,
                     self.config.evolution.formality_alpha,
                 );
 
@@ -3182,8 +3123,8 @@ impl CompanionService {
                             &self.db.conn(),
                             &*self.llm,
                             &self.config.user_name,
-                            new_level,
-                            bond_state.bond_score,
+                            self.bond_level,
+                            self.bond_score,
                             &self_texts,
                             self.config.narrative.max_tokens,
                         );
@@ -3661,14 +3602,20 @@ impl CompanionService {
         now_ts() - self.last_interaction_ts
     }
 
-    /// Count a conversation turn that another mind answered.
+    /// Count one conversation turn: the person said something and was answered.
     ///
-    /// The built-in scores its own turns from inside its handlers, where it also knows what it
-    /// recalled. A turn an attached harness answered reaches the companion only here, after the
-    /// fact, from the shell — and it has to reach it rather than the store alone, because the
-    /// level and score cached on this struct are what the proactive engine, the voice profile
-    /// and the status bar read. Scoring the store from outside and leaving these stale would
-    /// move the Bond screen and nothing else.
+    /// This is the only place the bond moves and `last_interaction_ts` is bumped, whichever mind
+    /// answered. The built-in used to score inside `handle_message` and
+    /// `handle_message_streaming` — but those handlers run for every prompt the machine sends
+    /// itself (the startup brief, EXECUTE urges, "Reflect naturally") as well as for the person,
+    /// and the store on VM 520 held `interaction` rows of msg_len 281/281/403 at times nobody
+    /// was typing. A prompt the machine sent itself is not a conversation, and must not tell the
+    /// proactive engine the person was just here either. So the shell scores a turn where it
+    /// ends, and only when it began with the person's words: `wire::chat::dispatch`, for the
+    /// built-in and an attached harness alike.
+    ///
+    /// It reaches the companion rather than the store alone because the level and score cached
+    /// on this struct are what the proactive engine, the voice profile and the status bar read.
     pub fn score_conversation_turn(&mut self, user_text: &str) {
         if !self.config.bond.enabled || self.incognito {
             return;
@@ -5014,5 +4961,143 @@ mod identity_fact_tests {
         assert_eq!(fact.why_retrieved, vec!["identity anchor".to_string()]);
         assert_eq!(fact.current_status, yantrikdb_core::types::RecordStatus::Active);
         assert!(fact.superseded_by.is_none() && fact.pack.is_none());
+    }
+}
+
+#[cfg(test)]
+mod bond_scoring_tests {
+    //! The bond is the person's relationship with Yantrik. The startup brief, an EXECUTE urge
+    //! and "Reflect naturally" go through the same handlers as the person's words, and the
+    //! handlers used to score every turn they ran — so the store on VM 520 held `interaction`
+    //! rows of msg_len 281/281/403 at times nobody was typing, and the proactive engine's
+    //! "when was the person last here" clock moved with them. Pure in-memory SQLite: no model,
+    //! no embedder, no files.
+
+    use super::*;
+    use yantrik_ml::LLMResponse;
+
+    /// A mind that answers every prompt the same way and never fails.
+    struct Echo;
+
+    impl LLMBackend for Echo {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _config: &GenerationConfig,
+            _tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            Ok(LLMResponse {
+                text: "Noted.".into(),
+                prompt_tokens: 0,
+                completion_tokens: 1,
+                tool_calls: vec![],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+
+        fn chat_streaming(
+            &self,
+            messages: &[ChatMessage],
+            config: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+            on_token: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            on_token("Noted.");
+            self.chat(messages, config, tools)
+        }
+
+        fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+            Ok(text.len())
+        }
+
+        fn backend_name(&self) -> &str {
+            "echo"
+        }
+    }
+
+    fn companion() -> CompanionService {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        let mut config = CompanionConfig::default();
+        config.tools.enabled = false;
+        let mut c = CompanionService::new(db, std::sync::Arc::new(Echo), config);
+        // Long ago, so a bump of the clock is visible and no session timeout is in play.
+        c.last_interaction_ts = 1.0;
+        c
+    }
+
+    /// What the store says, and when the companion last heard from the person.
+    fn bond_and_clock(c: &CompanionService) -> (f64, i64, f64) {
+        let state = BondTracker::get_state(&c.db.conn());
+        (state.bond_score, state.total_interactions, c.last_interaction_ts)
+    }
+
+    const MACHINE_PROMPTS: [&str; 3] = [
+        "You just started up. Give a short brief of what you remember and what is pending.",
+        "EXECUTE check the open loops and say what needs attention today.",
+        "Reflect naturally on the last hour of events and note anything worth keeping.",
+    ];
+
+    #[test]
+    fn a_prompt_the_machine_sent_itself_does_not_move_the_bond() {
+        let mut c = companion();
+        let before = bond_and_clock(&c);
+        for prompt in MACHINE_PROMPTS {
+            let reply = c.handle_message(prompt);
+            assert!(!reply.message.is_empty(), "the mind answered, as it does on the machine");
+        }
+        assert_eq!(
+            bond_and_clock(&c),
+            before,
+            "three prompts nobody typed: no interaction, no score, and the clock that says \
+             when the person was last around did not move"
+        );
+    }
+
+    #[test]
+    fn the_same_holds_for_the_streaming_handler() {
+        let mut c = companion();
+        let before = bond_and_clock(&c);
+        for prompt in MACHINE_PROMPTS {
+            let mut streamed = String::new();
+            c.handle_message_streaming(prompt, |t| streamed.push_str(t));
+            assert!(!streamed.is_empty(), "the mind answered");
+        }
+        assert_eq!(bond_and_clock(&c), before, "the streaming handler scores nothing either");
+    }
+
+    #[test]
+    fn the_persons_turn_moves_the_bond_and_the_clock() {
+        let mut c = companion();
+        let before = bond_and_clock(&c);
+        let asked = "how is the build going?";
+        c.handle_message(asked);
+        // Where the shell counts it: after the answer, from the person's own words.
+        c.score_conversation_turn(asked);
+        let (score, interactions, clock) = bond_and_clock(&c);
+        assert!(score > before.0, "a person's turn moves the score");
+        assert_eq!(interactions, before.1 + 1, "and is one interaction");
+        assert!(clock > before.2, "and is when the person was last around");
+        assert_eq!(c.bond_score(), score, "the cached score the status bar reads follows the store");
+    }
+
+    /// The property, pinned where it lives: no handler in this file scores. The defect was a
+    /// call in the wrong place, which compiled perfectly and looked like engagement.
+    #[test]
+    fn nothing_in_the_handlers_scores_an_interaction() {
+        let src = include_str!("companion.rs");
+        let handlers = src.split("#[cfg(test)]").next().unwrap_or_default();
+        assert!(
+            !handlers.contains("score_interaction("),
+            "`BondTracker::score_interaction` is called from inside a handler again; every prompt \
+             that handler runs — the startup brief, EXECUTE urges, reflections — will count as \
+             the person talking"
+        );
+        let bumps = handlers.matches("self.last_interaction_ts = now_ts()").count();
+        assert_eq!(
+            bumps, 1,
+            "`last_interaction_ts` may be bumped in one place, `score_conversation_turn`; \
+             found {bumps}"
+        );
     }
 }

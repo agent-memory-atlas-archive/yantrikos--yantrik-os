@@ -67,7 +67,8 @@ export component DesktopScreen inherits Rectangle {
     in property <int> bar-disk-percent: 0;
     in property <string> bar-disk-text: "";
     in property <[ServiceItem]> services: [];
-    in property <string> bond-level: "Stranger";
+    in property <bool> bond-loaded: false;
+    in property <string> bond-level: "";
     in property <float> bond-score: 0.0;
     // Launcher categories
     in property <[CategoryItem]> grid-categories: [];
@@ -913,6 +914,7 @@ export component DesktopScreen inherits Rectangle {
             disk-percent: root.bar-disk-percent;
             disk-text: root.bar-disk-text;
             services: root.services;
+            bond-loaded: root.bond-loaded;
             bond-level: root.bond-level;
             bond-score: root.bond-score;
             companion-online: root.companion-online;

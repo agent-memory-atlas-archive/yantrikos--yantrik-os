@@ -98,7 +98,10 @@ export component MachineRail inherits Rectangle {
     in property <int> disk-percent: 0;
     in property <string> disk-text: "";
     in property <[ServiceItem]> services: [];
-    in property <string> bond-level: "Stranger";
+    // False until the worker has pushed the store's bond. The default level here used to be
+    // "Stranger", and the rail drew it as the relationship while the store was still opening.
+    in property <bool> bond-loaded: false;
+    in property <string> bond-level: "";
     in property <float> bond-score: 0.0;
     in property <bool> companion-online: true;
     in property <string> companion-status: "idle";
@@ -214,7 +217,12 @@ export component MachineRail inherits Rectangle {
                             : "not configured";
                        value-color: (root.mind-detail != "" || root.provider-label != "")
                             ? Theme.text-primary : Theme.text-dim; }
-            KeyValue { key: "Bond";  value: root.bond-level + " · " + Math.round(root.bond-score * 100) + "%"; }
+            // "—" until the store has been read once, never the property's default as a level.
+            KeyValue { key: "Bond";
+                       value: root.bond-loaded
+                            ? root.bond-level + " · " + Math.round(root.bond-score * 100) + "%"
+                            : "—";
+                       value-color: root.bond-loaded ? Theme.text-primary : Theme.text-dim; }
             KeyValue { key: "Memories"; value: "" + root.memory-count; }
             KeyValue { key: "Suggestions"; value: "" + root.whisper-count;
                        value-color: root.whisper-count > 0 ? Theme.accent : Theme.text-primary; }

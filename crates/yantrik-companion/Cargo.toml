@@ -36,3 +36,7 @@ mailparse = { workspace = true }
 ureq = { workspace = true }
 regex = { workspace = true }
 crossbeam-channel = { workspace = true }
+
+[dev-dependencies]
+# Only to spell the `LLMBackend` trait's return type on a stub mind in the bond scoring tests.
+anyhow = "1"
