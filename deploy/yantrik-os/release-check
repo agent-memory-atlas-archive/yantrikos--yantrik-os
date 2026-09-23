@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""release-check — what a Yantrik OS build must pass before it is tagged.
+
+    release-check [--tier ci|rc] [--interactive] [--json FILE] [--only WORD] [--skip WORD]
+
+Runs ON the machine under test, as the person's user, inside their session, and talks to the
+desktop the way everything else does: through the control surfaces, via `yos`.
+
+  ci   needs no network and no minds. It is what the nightly's QEMU boot can run: every app opens
+       and answers, every screen shows, the permission gate refuses on every door, the ceiling
+       holds, nothing crashed, and the shell is idle when idle.
+  rc   a release candidate, on a real machine with its minds attached: adds every mind answering,
+       the browser being drivable, and — with --interactive — the checks a person must take part
+       in (press Allow on a card; watch a mind's command run in its own pane).
+
+Every check says what it saw. PASS and SKIP (with the reason) do not fail a run; FAIL does.
+Exit 0: nothing failed. 1: something failed. The last lines are the manual checklist for rc.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+import http.server
+
+os.environ.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+os.environ["PATH"] = "/opt/yantrik/bin:" + os.environ.get("PATH", "")
+_loader = importlib.machinery.SourceFileLoader("yos", "/opt/yantrik/bin/yos")
+_spec = importlib.util.spec_from_loader("yos", _loader)
+yos = importlib.util.module_from_spec(_spec)
+_loader.exec_module(yos)
+
+GRADES = ("safe", "standard", "sensitive", "dangerous")
+SLOW_APPS = {"blender": 120}          # seconds to wait for a socket; everything else gets 30
+RESULTS = []
+CHECKS = []
+
+
+# ── plumbing ──────────────────────────────────────────────────────────────────────────────
+
+class Failed(Exception):
+    pass
+
+
+class Skipped(Exception):
+    pass
+
+
+def check(name, tier="ci", interactive=False):
+    def wrap(fn):
+        CHECKS.append({"name": name, "tier": tier, "interactive": interactive, "fn": fn})
+        return fn
+    return wrap
+
+
+def rpc(target, method, params=None, timeout=40):
+    """A call that raises with the surface's own words, instead of exiting."""
+    try:
+        return yos.request(target, method, params, timeout)
+    except SystemExit as e:
+        raise RuntimeError("yos exited (%s)" % e) from None
+
+
+def act(target, action, timeout=40, **args):
+    return rpc(target, "app.act", {"action": action, "args": args}, timeout)
+
+
+def shell():
+    return rpc("shell", "app.describe")
+
+
+def state():
+    return shell().get("state", {})
+
+
+def sh(cmd, timeout=180):
+    p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+def wait(cond, timeout, step=1.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            v = cond()
+            if v:
+                return v
+        except Exception:  # noqa: BLE001 — not ready yet
+            pass
+        time.sleep(step)
+    return None
+
+
+def shell_pid():
+    code, out = sh("pidof yantrik-ui")
+    return int(out.split()[0]) if code == 0 and out else None
+
+
+# ── ci: the desktop answers for itself ──────────────────────────────────────────────────────
+
+BASELINE = {}
+
+
+@check("the shell answers, and says which build it is")
+def _shell():
+    d = shell()
+    st = d.get("state", {})
+    if not st.get("version"):
+        raise Failed("describe shell has no version")
+    build = open("/opt/yantrik/BUILD").read() if os.path.exists("/opt/yantrik/BUILD") else ""
+    recorded = next((l.split("=", 1)[1].strip() for l in build.splitlines() if l.startswith("version=")), "")
+    if recorded and recorded != st.get("version"):
+        raise Failed("the shell says %s but this machine's BUILD says %s — the shell read it before the "
+                     "last install and has not restarted, or the install did not record itself"
+                     % (st.get("version"), recorded))
+    BASELINE["windows"] = {w.get("title") for w in st.get("windows", [])}
+    BASELINE["problems"] = {p.get("id") or json.dumps(p) for p in st.get("problems", [])}
+    BASELINE["mind"] = next((m.get("id") for m in st.get("minds", []) if m.get("active")), None)
+    return "version %s, %d actions, screen %s" % (st.get("version"), len(d.get("actions", [])), st.get("screen"))
+
+
+@check("the mind mode is published for every app to read")
+def _mode_file():
+    path = os.path.expanduser("~/.config/yantrik/mind-mode.json")
+    if not os.path.exists(path):
+        raise Failed("%s is missing: apps would all read Ask, whatever the person chose" % path)
+    doc = json.load(open(path))
+    if doc.get("mode") not in ("plan", "ask", "auto", "bypass"):
+        raise Failed("mode %r is not one this OS defines" % doc.get("mode"))
+    BASELINE["mode"] = doc["mode"]
+    return "mode %s" % doc["mode"]
+
+
+@check("every action on every surface declares a grade")
+def _grades():
+    bad, n = [], 0
+    for a in shell().get("actions", []):
+        n += 1
+        if a.get("permission") not in GRADES:
+            bad.append("shell.%s=%r" % (a.get("name"), a.get("permission")))
+    if bad:
+        raise Failed("; ".join(bad[:8]))
+    return "%d shell actions graded" % n
+
+
+@check("every app opens, answers on its surface, and grades its actions")
+def _apps():
+    apps = [a for a in state().get("apps", []) if a.get("opens") == "app" and a.get("describe_as")]
+    only = [a for a in apps if not any(s in a["name"] for s in ARGS.skip)]
+    opened, problems, counts = [], [], []
+    for a in only:
+        surface = a["describe_as"]
+        try:
+            act("shell", "open_app", name=a["name"])
+        except Exception as e:  # noqa: BLE001
+            problems.append("%s: open_app refused: %s" % (a["name"], e))
+            continue
+        d = wait(lambda: rpc(surface, "app.describe", timeout=10), SLOW_APPS.get(a["name"], 30), 2)
+        if not d:
+            problems.append("%s: no answer on `%s` within %ds" % (a["name"], surface, SLOW_APPS.get(a["name"], 30)))
+            continue
+        opened.append(a["name"])
+        acts = d.get("actions", [])
+        ungraded = [x.get("name") for x in acts if x.get("permission") not in GRADES]
+        if ungraded:
+            problems.append("%s: ungraded %s" % (a["name"], ungraded[:5]))
+        counts.append("%s %d" % (a["name"], len(acts)))
+    time.sleep(5)  # past the shell's launch grace, so closing is not read as a failed launch
+    close_test_windows()
+    if problems:
+        raise Failed("; ".join(problems))
+    return "%d apps: %s" % (len(opened), ", ".join(counts))
+
+
+def extra_windows():
+    return [w.get("title") for w in state().get("windows", [])
+            if w.get("title") and w.get("title") not in BASELINE.get("windows", set())]
+
+
+def close_test_windows():
+    """Close what the checks opened, and wait until the window list agrees. The list is read from
+    the compositor at most every nine seconds (COMPOSITOR_TTL), so a window asked to close stays in
+    it for a while; a check that ran straight after would count windows that are already going."""
+    for t in extra_windows():
+        try:
+            act("shell", "close_window", title=t, timeout=10)
+        except Exception:  # noqa: BLE001 — a window that asks to save may stay; that is its right
+            pass
+    wait(lambda: not extra_windows(), 30, 2)
+
+
+@check("every screen of the desktop shows when asked")
+def _screens():
+    entries = [a for a in state().get("apps", [])
+               if a.get("describe_as") == "shell"
+               and (str(a.get("opens", "")).startswith("a screen") or a.get("show_with"))]
+    screens = [a["name"] for a in entries]
+    wrong = []
+    for a in entries:
+        s = a["name"]
+        how = a.get("show_with") or {"screen": s}
+        want = how.get("screen", s)
+        try:
+            act("shell", "show_screen", timeout=15, **{k: v for k, v in how.items() if k != "action"})
+        except Exception as e:  # noqa: BLE001
+            wrong.append("%s refused: %s" % (s, str(e)[:80]))
+            continue
+        seen = wait(lambda: state().get("screen"), 5)
+        if seen != want:
+            wrong.append("%s showed %r" % (s, seen))
+    act("shell", "show_screen", screen="desktop", timeout=15)
+    if wrong:
+        raise Failed("; ".join(wrong))
+    return "%d screens: %s" % (len(screens), ", ".join(screens))
+
+
+@check("no launch failed, and no window is listed twice")
+def _windows():
+    st = state()
+    failed = st.get("failed_launches", [])
+    titles = [w.get("title") for w in st.get("windows", [])]
+    dupes = sorted({t for t in titles if titles.count(t) > 1})
+    msgs = []
+    if failed:
+        msgs.append("failed launches: %s" % json.dumps(failed)[:300])
+    if dupes:
+        msgs.append("listed twice: %s (%s)" % (dupes, [(w.get("app"), w.get("title")[:30]) for w in st.get("windows", []) if w.get("title") in dupes]))
+    if msgs:
+        raise Failed("; ".join(msgs))
+    return "%d windows, none twice, no failed launch" % len(titles)
+
+
+@check("a sensitive act without a grant is refused on every door")
+def _gate():
+    mode = BASELINE.get("mode", "ask")
+    if mode in ("auto", "bypass"):
+        raise Skipped("the machine is in %s mode, where sensitive acts run unasked by design" % mode)
+    act("shell", "open_app", name="studio")
+    if not wait(lambda: rpc("studio", "app.describe", timeout=10), 30, 2):
+        raise Failed("Studio did not open, so there was nothing to test the gate on")
+    seen = []
+    code, out = sh("yos act --no-ask studio set_backend kind=fake")
+    seen.append(("yos --no-ask", "GRANT:" in out, out[:90]))
+    try:
+        rpc("studio", "app.act", {"action": "set_backend", "args": {"kind": "fake"}})
+        seen.append(("raw socket", False, "it ran"))
+    except Exception as e:  # noqa: BLE001
+        seen.append(("raw socket", "GRANT:" in str(e), str(e)[:90]))
+    time.sleep(5)
+    close_test_windows()
+    open_doors = [d for d, refused, _ in seen if not refused]
+    if open_doors:
+        raise Failed("ran without a grant through: %s — %s" % (open_doors, seen))
+    return "refused on %s" % ", ".join(d for d, _, _ in seen)
+
+
+@check("the machine ceiling holds, on a service as well as an app")
+def _ceiling():
+    victim = subprocess.Popen(["sleep", "300"])
+    try:
+        try:
+            r = rpc("system-monitor", "app.act", {"action": "kill_process", "args": {"pid": victim.pid}})
+            answer = json.dumps(r)[:120]
+        except Exception as e:  # noqa: BLE001
+            answer = str(e)[:120]
+        time.sleep(1)
+        alive = victim.poll() is None
+        if not alive:
+            raise Failed("system-monitor.kill_process ended pid %d with no grant: %s" % (victim.pid, answer))
+        return "kill_process refused, the process lives: %s" % answer
+    finally:
+        victim.kill()
+
+
+@check("a notification is filed under who sent it, not under the desktop's name")
+def _notify():
+    code, out = sh("yos notify 'release-check' 'provenance probe'")
+    if code != 0:
+        raise Failed(out[:200])
+    frm = out.split("(from", 1)[-1].split(")", 1)[0].strip() if "(from" in out else ""
+    nid = out.split()[0] if out else ""
+    try:
+        act("notifications", "dismiss", id=nid, timeout=10)
+    except Exception:  # noqa: BLE001
+        pass
+    if not frm or frm.lower() == "yantrik":
+        raise Failed("filed as %r: %s" % (frm, out[:120]))
+    return "filed as %r" % frm
+
+
+@check("the Agents workspace is wired in")
+def _agents_wired():
+    st = state()
+    missing = [k for k in ("agent_jobs",) if k not in st]
+    act("shell", "show_screen", screen="agents", timeout=15)
+    seen = wait(lambda: state().get("screen"), 5)
+    act("shell", "show_screen", screen="desktop", timeout=15)
+    if missing or seen != "agents":
+        raise Failed("describe lacks %s; show_screen agents showed %r" % (missing, seen))
+    return "agents screen shows; agent_jobs published"
+
+
+@check("the build carries its changelog")
+def _changelog():
+    path = "/opt/yantrik/share/CHANGELOG.md"
+    if not os.path.exists(path):
+        build = open("/opt/yantrik/BUILD").read() if os.path.exists("/opt/yantrik/BUILD") else ""
+        if not build or "name=dev-deploy" in build or "-dev" in build:
+            raise Skipped("a developer deploy (BUILD: %s), not a release bundle"
+                          % (build.replace(chr(10), " ")[:80] or "none"))
+        raise Failed("%s is missing from a release bundle" % path)
+    lines = [l for l in open(path, encoding="utf-8") if l.startswith("- ")]
+    return "%d changes listed" % len(lines)
+
+
+@check("the shell is idle when nothing is happening")
+def _idle():
+    close_test_windows()
+    pid = shell_pid()
+    if not pid:
+        raise Failed("no yantrik-ui process")
+    tick = os.sysconf("SC_CLK_TCK")
+
+    def cpu():
+        f = open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()
+        return int(f[11]) + int(f[12])
+    time.sleep(3)
+    a, t0 = cpu(), time.time()
+    time.sleep(10)
+    pct = 100.0 * (cpu() - a) / tick / (time.time() - t0)
+    rss = int(open("/proc/%d/status" % pid).read().split("VmRSS:")[1].split()[0]) // 1024
+    msg = "%.1f%% of one core over 10 s, %d MB resident, %d windows open" % (pct, rss, len(state().get("windows", [])))
+    if pct > 25 or rss > 800:
+        raise Failed(msg)
+    return msg
+
+
+@check("nothing crashed while the checks ran")
+def _problems():
+    now = {p.get("id") or json.dumps(p) for p in state().get("problems", [])}
+    new = now - BASELINE.get("problems", set())
+    if new:
+        raise Failed("new problem records: %s" % sorted(new)[:5])
+    return "no new problem records (%d on file)" % len(now)
+
+
+# ── rc: a real machine, with its minds ──────────────────────────────────────────────────────
+
+@check("every attached mind answers", tier="rc")
+def _minds():
+    minds = [m for m in state().get("minds", []) if m.get("id")]
+    report, dead = [], []
+    base_active = BASELINE.get("mind")
+    for m in minds:
+        mid = m["id"]
+        t0 = time.time()
+        try:
+            act("shell", "use_harness", id=mid, timeout=15)
+            conv = state().get("conversation", [])
+            base = max((c.get("index", -1) for c in conv), default=-1)
+            act("shell", "send_message", text="Release check: reply with exactly one word, READY.")
+
+            def reply():
+                c = [x for x in state().get("conversation", []) if x.get("index", -1) > base and x.get("role") != "user"]
+                return c[-1] if c and not c[-1].get("streaming") else None
+            r = wait(reply, 150, 3)
+            text = (r or {}).get("text", "")
+            secs = time.time() - t0
+            ok = "READY" in text.upper()
+            report.append("%s %s %.0fs" % (mid, "ok" if ok else "BAD", secs))
+            if not ok:
+                dead.append("%s: %r" % (mid, text[:100] or "no answer in 150 s"))
+        except Exception as e:  # noqa: BLE001
+            dead.append("%s: %s" % (mid, str(e)[:100]))
+    if base_active:
+        try:
+            act("shell", "use_harness", id=base_active, timeout=15)
+        except Exception:  # noqa: BLE001
+            pass
+    if dead:
+        raise Failed("; ".join(dead) + " | " + ", ".join(report))
+    return ", ".join(report)
+
+
+@check("the browser can be driven: go to a page and read it back", tier="rc")
+def _browser():
+    phrase = "release-check page %d" % os.getpid()
+
+    class Page(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = ("<html><body><h1>%s</h1><button>Harmless</button></body></html>" % phrase).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        act("shell", "open_app", name="browser")
+        wait(lambda: sh("curl -s -m 2 http://127.0.0.1:9222/json/version")[0] == 0, 30, 2)
+        code, out = sh("yos web go http://127.0.0.1:%d/" % srv.server_address[1])
+        text = wait(lambda: (lambda t: t if phrase in t else None)(sh("yos web text")[1]), 20, 2)
+        if not text:
+            raise Failed("the page did not read back within 20 s: go=%r last text=%r"
+                         % (out[:100], sh("yos web text")[1][:160]))
+        return "went to a local page and read %r back" % phrase
+    finally:
+        srv.shutdown()
+        close_test_windows()
+
+
+@check("a sensitive act through `yos` asks, and runs once a person allows it", tier="rc", interactive=True)
+def _allow():
+    if BASELINE.get("mode") in ("auto", "bypass"):
+        raise Skipped("mode %s runs it unasked" % BASELINE.get("mode"))
+    act("shell", "open_app", name="studio")
+    wait(lambda: rpc("studio", "app.describe", timeout=10), 30, 2)
+    print("\n   >>> A card is going up for studio.set_backend kind=fake. Press ALLOW ONCE on the VM (120 s).",
+          flush=True)
+    code, out = sh("yos act studio set_backend kind=fake", timeout=200)
+    close_test_windows()
+    if "accepted: True" not in out:
+        raise Failed("after asking: %s" % out[-200:])
+    return "asked, was allowed, ran"
+
+
+@check("a mind's command runs in its own pane with its exit code", tier="rc", interactive=True)
+def _agent_command():
+    minds = [m.get("id") for m in state().get("minds", [])]
+    if "pi" not in minds:
+        raise Skipped("pi is not attached; this check drives pi's own bash tool")
+    act("shell", "use_harness", id="pi", timeout=15)
+    print("\n   >>> pi will ask to run a command: press ALLOW ONCE on the card (180 s).", flush=True)
+    act("shell", "send_message",
+        text="Release check: use your bash tool to run exactly this command and nothing else: "
+             "echo release-check-ok; exit 3 — then tell me the exit code.")
+
+    def seen():
+        for a in state().get("agents", []):
+            for job in a.get("jobs", []) + a.get("finished_jobs", []):
+                if "release-check-ok" in json.dumps(job):
+                    return a, job
+        return None
+    found = wait(seen, 180, 3)
+    if not found:
+        raise Failed("no agent ran the command in its own terminal within 180 s "
+                     "(describe shell agents: %s)" % json.dumps(state().get("agents", []))[:300])
+    agent, job = found
+    return "%s ran it: %s" % (agent.get("id"), json.dumps(job)[:160])
+
+
+MANUAL = [
+    "Desktop: the greeting names the person; the wallpaper and theme look as intended in dark and light.",
+    "Lens: ask a question; the reply streams; a tool call shows as a card with its arguments a click away.",
+    "Agents: New agent -> pick a mind -> a prompt; its row, pane and details fill in; Pop out opens a window.",
+    "An approval card names the agent and the verified caller; Deny stops it; Allow runs it once.",
+    "Notifications: a toast appears and fades; the centre lists it; Do Not Disturb holds it.",
+    "Lock the screen and unlock it.",
+    "Settings -> About shows this build's version and What changed.",
+    "Settings -> Updates: Check for updates answers truthfully for this channel.",
+    "Report a problem: the screen lists records and shows exactly what would be sent.",
+    "Reboot the machine: it comes back to the desktop, and the minds reattach.",
+]
+
+
+# ── run ─────────────────────────────────────────────────────────────────────────────────────
+
+def main():
+    started = time.time()
+    tiers = ("ci",) if ARGS.tier == "ci" else ("ci", "rc")
+    print("release-check — tier %s%s" % (ARGS.tier, ", interactive" if ARGS.interactive else ""), flush=True)
+    for c in CHECKS:
+        if c["tier"] not in tiers or (c["interactive"] and not ARGS.interactive):
+            continue
+        if ARGS.only and not any(w in c["name"] for w in ARGS.only):
+            continue
+        t0 = time.time()
+        try:
+            evidence, verdict = c["fn"](), "PASS"
+        except Skipped as e:
+            evidence, verdict = str(e), "SKIP"
+        except Failed as e:
+            evidence, verdict = str(e), "FAIL"
+        except Exception as e:  # noqa: BLE001 — a check that broke is a failure, with its error
+            evidence, verdict = "%s: %s" % (type(e).__name__, e), "FAIL"
+        RESULTS.append({"check": c["name"], "tier": c["tier"], "verdict": verdict,
+                        "evidence": evidence, "seconds": round(time.time() - t0, 1)})
+        print("%-4s %s  (%.0fs)\n     %s" % (verdict, c["name"], time.time() - t0, evidence), flush=True)
+    failed = [r for r in RESULTS if r["verdict"] == "FAIL"]
+    print("\n%d passed, %d skipped, %d failed in %.0f s" % (
+        sum(r["verdict"] == "PASS" for r in RESULTS), sum(r["verdict"] == "SKIP" for r in RESULTS),
+        len(failed), time.time() - started))
+    if ARGS.tier == "rc":
+        print("\nBy hand, before tagging:")
+        for i, m in enumerate(MANUAL, 1):
+            print("  [ ] %d. %s" % (i, m))
+    if ARGS.json:
+        json.dump({"tier": ARGS.tier, "results": RESULTS, "manual": MANUAL if ARGS.tier == "rc" else []},
+                  open(ARGS.json, "w"), indent=1)
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--tier", choices=("ci", "rc"), default="ci")
+    ap.add_argument("--interactive", action="store_true", help="include the checks a person takes part in")
+    ap.add_argument("--json")
+    ap.add_argument("--only", action="append", default=[])
+    ap.add_argument("--skip", action="append", default=[], help="skip apps whose id contains this")
+    ARGS = ap.parse_args()
+    main()

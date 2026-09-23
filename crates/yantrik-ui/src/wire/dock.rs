@@ -325,6 +325,16 @@ pub fn openable() -> Vec<serde_json::Value> {
                     "opens": "the launcher, over the desktop",
                     "describe_as": "shell",
                 }),
+                // A section of Settings, not a screen of its own: `show_screen screen=skills` is
+                // refused, because Settings is the screen and Skills is a section of it. Listed as
+                // what it is, with the exact call that shows it, so a caller does not have to guess
+                // (release-check found this by making the same mistake a mind would).
+                Launch::SettingsSection(_) => serde_json::json!({
+                    "name": name,
+                    "opens": "a section of Settings",
+                    "describe_as": "shell",
+                    "show_with": { "action": "show_screen", "screen": "settings", "section": name },
+                }),
                 _ => serde_json::json!({ "name": name, "opens": "a screen of the desktop itself", "describe_as": "shell" }),
             };
             let id = match launch {
@@ -1554,6 +1564,25 @@ mod tests {
     /// `show_screen screen=launchpad`, was refused with "no screen called launchpad". The listing
     /// is the one place a caller can read what a name opens, so it says that this one opens an
     /// overlay on the desktop, and what is in it.
+    #[test]
+    fn a_settings_section_is_listed_as_a_section_with_the_call_that_shows_it() {
+        // release-check's first run on VM 520 asked `show_screen screen=skills`, as the listing
+        // said to, and was refused: Skills is a section of Settings, not a screen.
+        let apps = openable();
+        let skills = apps.iter().find(|a| a["name"] == "skills").expect("skills is openable");
+        assert_eq!(skills["opens"], "a section of Settings", "listed as {skills}");
+        assert_eq!(skills["show_with"]["screen"], "settings");
+        assert_eq!(skills["show_with"]["section"], "skills");
+        for a in &apps {
+            if a["opens"] == "a screen of the desktop itself" {
+                assert!(
+                    !matches!(route(a["name"].as_str().unwrap_or_default()), Some(Launch::SettingsSection(_))),
+                    "{a} is a settings section listed as a screen"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_launcher_is_listed_as_what_it_is() {
         assert_eq!(route("launchpad"), Some(Launch::Launchpad));
