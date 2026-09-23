@@ -10,6 +10,11 @@
 //! Deleting a game moves it to the freedesktop Trash, where the desktop's Files
 //! app can bring it back. That is why `delete` is graded recoverable-standard
 //! rather than dangerous on the control surface.
+//!
+//! Updating a spec in place keeps the one it replaces (`spec.previous.json`
+//! beside a game, `characters/previous/<slug>.json` for a character) and drops
+//! whatever was compiled from the old one, so the list never shows a build as
+//! current when the spec under it has moved on.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,7 +23,8 @@ use chrono::Local;
 use serde_json::Value;
 
 use crate::compile;
-use crate::spec::{parse_character, parse_game, CharacterSpec, GameSpec, ResolvedGame};
+use crate::spec::{parse_character, parse_game, CharacterRef, CharacterSpec, GameSpec, ResolvedGame};
+use crate::verify;
 
 /// Where the library lives by default: beside every other Yantrik app's data.
 fn default_root() -> PathBuf {
@@ -137,6 +143,53 @@ impl Library {
         })
     }
 
+    /// Replace a saved character's spec. The name is the key: a character whose
+    /// name is not yet in the library is refused, because that is `new_character`'s
+    /// job and a typo in the name should not quietly make a second creature.
+    ///
+    /// Games that cast this character by name were compiled with the old one, so
+    /// their builds are dropped along with their verdicts and screenshots — `build`
+    /// is milliseconds and the specs are untouched — and the slugs of the games
+    /// that need it come back so the caller can say so. A game that inlined a copy
+    /// of the character is not affected: it has its own.
+    pub fn update_character(&self, text: &str) -> Result<(CharacterEntry, Vec<String>), String> {
+        let spec = parse_character(text)?;
+        let slug = slugify(&spec.name);
+        let path = self.characters_dir().join(format!("{slug}.json"));
+        if slug.is_empty() || !path.exists() {
+            return Err(format!(
+                "No character called {:?} is saved to update; `new_character` saves a new one, and `describe` lists the ones that exist.",
+                spec.name
+            ));
+        }
+        let previous_dir = self.characters_dir().join("previous");
+        fs::create_dir_all(&previous_dir).map_err(|e| format!("cannot create {}: {e}", previous_dir.display()))?;
+        fs::copy(&path, previous_dir.join(format!("{slug}.json")))
+            .map_err(|e| format!("cannot keep the previous spec: {e}"))?;
+        let json = serde_json::to_string_pretty(&spec).expect("a parsed spec re-serializes");
+        fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+
+        let mut stale = Vec::new();
+        for game in self.list_games() {
+            if !game.built {
+                continue;
+            }
+            let Ok((_, game_spec)) = self.load_game_spec(&game.slug) else { continue };
+            let casts_by_name = matches!(
+                game_spec.player.as_ref().map(|p| &p.character),
+                Some(CharacterRef::Name(name)) if slugify(name) == slug || name.to_lowercase() == spec.name.to_lowercase()
+            );
+            if casts_by_name {
+                self.drop_build(&game.slug);
+                stale.push(game.slug);
+            }
+        }
+        Ok((
+            CharacterEntry { slug, name: spec.name.clone(), archetype: spec.archetype.as_str().to_string() },
+            stale,
+        ))
+    }
+
     /// Find a saved character by its exact name or by slug, case-insensitively.
     pub fn load_character(&self, name_or_slug: &str) -> Result<CharacterSpec, String> {
         let want = name_or_slug.trim().to_lowercase();
@@ -211,6 +264,57 @@ impl Library {
         fs::write(self.game_spec_path(&slug), json)
             .map_err(|e| format!("cannot write the spec: {e}"))?;
         Ok(self.describe_game(&slug, &spec))
+    }
+
+    /// Replace a saved game's spec. Design is iteration, and the only way to change
+    /// a game used to be `delete` — graded sensitive, so an approval card per try
+    /// (#112). This is graded standard because nothing is lost: the spec it replaces
+    /// stays beside it as `spec.previous.json`, one step back.
+    ///
+    /// `existing` names the game to replace when the new spec carries a different
+    /// title (a rename); otherwise the spec's own title says which game it is. The
+    /// compiled HTML, the verdict and the screenshot go with the old spec, because
+    /// they were made from it: the list says "not built" until `build` runs again.
+    pub fn update_game(&self, text: &str, existing: Option<&str>) -> Result<GameEntry, String> {
+        let spec = parse_game(text)?;
+        let new_slug = slugify(&spec.title);
+        if new_slug.is_empty() {
+            return Err(format!(
+                "`title` ({:?}) leaves nothing usable as a filename; use letters, digits or spaces.",
+                spec.title
+            ));
+        }
+        let key = existing.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&spec.title);
+        let (old_slug, _) = self.load_game_spec(key).map_err(|_| {
+            format!(
+                "No game called {key:?} exists to update; `new_game` saves a new one, and `describe` lists the ones that exist."
+            )
+        })?;
+        if new_slug != old_slug {
+            if self.game_dir(&new_slug).exists() {
+                return Err(format!(
+                    "Retitling {old_slug:?} to {:?} would land on a game that already exists; delete that one first or pick another title.",
+                    spec.title
+                ));
+            }
+            fs::rename(self.game_dir(&old_slug), self.game_dir(&new_slug))
+                .map_err(|e| format!("cannot retitle {old_slug} to {new_slug}: {e}"))?;
+        }
+        let dir = self.game_dir(&new_slug);
+        fs::rename(self.game_spec_path(&new_slug), dir.join("spec.previous.json"))
+            .map_err(|e| format!("cannot keep the previous spec: {e}"))?;
+        let json = serde_json::to_string_pretty(&spec).expect("a parsed spec re-serializes");
+        fs::write(self.game_spec_path(&new_slug), json)
+            .map_err(|e| format!("cannot write the spec: {e}"))?;
+        self.drop_build(&new_slug);
+        Ok(self.describe_game(&new_slug, &spec))
+    }
+
+    /// Everything compiled or measured from a spec that is no longer current.
+    fn drop_build(&self, slug: &str) {
+        let _ = fs::remove_file(self.game_html(slug));
+        let _ = fs::remove_file(self.verify_path(slug));
+        let _ = fs::remove_file(self.screenshot_path(slug));
     }
 
     /// Load a filed spec by title or slug.
@@ -338,30 +442,24 @@ impl Library {
     }
 }
 
-/// One line out of a verify.json report, for the games list and `describe`.
+/// One line out of a verify.json report, for the games list and `describe`. The
+/// words are the verifier's own (`verify::summary_line`), so the row a person
+/// reads days later says the same thing the job said when it landed — including
+/// whether it was the game or the machine that decided it.
 pub fn verify_summary_line(report: &Value) -> String {
     let when = report
         .get("when")
         .and_then(|v| v.as_str())
         .unwrap_or("at an unknown time");
-    let gates = report.get("gates").and_then(|v| v.as_array());
-    match (report.get("passed").and_then(|v| v.as_bool()), gates) {
-        (Some(true), Some(g)) => format!("verified {when}: passed all {} gates", g.len()),
-        (Some(false), Some(g)) => {
-            let first = g
-                .iter()
-                .find(|gate| gate.get("passed").and_then(|v| v.as_bool()) == Some(false));
-            match first {
-                Some(gate) => format!(
-                    "failed {when} at {}: {}",
-                    gate.get("gate").and_then(|v| v.as_str()).unwrap_or("?"),
-                    gate.get("detail").and_then(|v| v.as_str()).unwrap_or("no detail")
-                ),
-                None => format!("failed {when}"),
-            }
-        }
-        _ => format!("verified {when}"),
+    let gates: Vec<verify::Gate> = report
+        .get("gates")
+        .and_then(|v| v.as_array())
+        .map(|g| g.iter().filter_map(verify::Gate::from_value).collect())
+        .unwrap_or_default();
+    if gates.is_empty() {
+        return format!("verified {when}");
     }
+    format!("verified {when}: {}", verify::summary_line(&gates))
 }
 
 /// A filename-safe slug from a title or name: lowercase, runs of anything else
@@ -621,6 +719,7 @@ mod tests {
 
     #[test]
     fn verify_summary_names_the_first_failed_gate() {
+        // A report from before verdicts existed: only `passed` per gate.
         let report = serde_json::json!({
             "passed": false, "when": "2026-09-22 10:00",
             "gates": [
@@ -631,6 +730,133 @@ mod tests {
         let line = verify_summary_line(&report);
         assert!(line.contains("bot_reaches_win"), "{line}");
         assert!(line.contains("3 of 10"), "{line}");
+        assert!(line.contains("failed at"), "{line}");
+    }
+
+    #[test]
+    fn verify_summary_says_when_the_machine_and_not_the_game_decided_it() {
+        let report = serde_json::json!({
+            "passed": false, "correctness": "inconclusive", "performance": "passed", "when": "2026-09-22 19:21",
+            "gates": [
+                { "gate": "boots", "passed": true, "verdict": "passed", "detail": "up" },
+                { "gate": "bot_reaches_win", "passed": false, "verdict": "inconclusive",
+                  "detail": "in 285 s of wall clock this machine simulated only 19 of the 95 s budget" },
+                { "gate": "frame_budget", "passed": true, "verdict": "passed", "detail": "fine" }
+            ]
+        });
+        let line = verify_summary_line(&report);
+        assert!(line.starts_with("verified 2026-09-22 19:21: inconclusive at bot_reaches_win"), "{line}");
+        assert!(line.contains(verify::MACHINE_NOT_GAME), "{line}");
+        assert!(line.contains("19 of the 95 s"), "{line}");
+    }
+
+    #[test]
+    fn a_game_can_be_updated_in_place_and_is_then_not_built() {
+        let (lib, dir) = temp_library();
+        lib.save_game(&meadow_run(PIP)).unwrap();
+        lib.build_game("meadow-run").unwrap();
+        lib.write_verify("meadow-run", &serde_json::json!({ "passed": true, "when": "x", "gates": [] })).unwrap();
+        fs::write(lib.screenshot_path("meadow-run"), b"png").unwrap();
+        assert!(lib.list_games()[0].built);
+
+        let softer = meadow_run(PIP).replace("\"count\": 5", "\"count\": 3");
+        let entry = lib.update_game(&softer, None).unwrap();
+        assert_eq!(entry.slug, "meadow-run");
+        assert!(!entry.built, "an updated spec is not built");
+        assert!(entry.verification.is_none());
+        assert!(!lib.game_html("meadow-run").exists());
+        assert!(!lib.verify_path("meadow-run").exists());
+        assert!(!lib.screenshot_path("meadow-run").exists());
+        // The new spec is what is filed; the old one is one step back.
+        let (_, spec) = lib.load_game_spec("Meadow Run").unwrap();
+        assert_eq!(spec.collectible.count, 3);
+        let previous: GameSpec =
+            serde_json::from_str(&fs::read_to_string(lib.game_dir("meadow-run").join("spec.previous.json")).unwrap()).unwrap();
+        assert_eq!(previous.collectible.count, 5);
+        // Still exactly one game in the list.
+        assert_eq!(lib.list_games().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn updating_a_game_that_does_not_exist_points_at_new_game() {
+        let (lib, dir) = temp_library();
+        let err = lib.update_game(&meadow_run(PIP), None).unwrap_err();
+        assert!(err.contains("Meadow Run"), "{err}");
+        assert!(err.contains("new_game"), "{err}");
+        assert!(!lib.game_dir("meadow-run").exists(), "a refused update creates nothing");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_update_can_retitle_a_game_when_told_which_one() {
+        let (lib, dir) = temp_library();
+        lib.save_game(&meadow_run(PIP)).unwrap();
+        lib.build_game("meadow-run").unwrap();
+        let retitled = meadow_run(PIP).replace("Meadow Run", "Meadow Dusk");
+        // Without naming the game, the new title matches nothing.
+        let err = lib.update_game(&retitled, None).unwrap_err();
+        assert!(err.contains("Meadow Dusk"), "{err}");
+        // Naming it moves the game under its new title.
+        let entry = lib.update_game(&retitled, Some("Meadow Run")).unwrap();
+        assert_eq!(entry.slug, "meadow-dusk");
+        assert_eq!(entry.title, "Meadow Dusk");
+        assert!(!entry.built);
+        assert!(!lib.game_dir("meadow-run").exists());
+        assert!(lib.game_dir("meadow-dusk").join("spec.previous.json").exists());
+        assert_eq!(lib.list_games().len(), 1);
+        // A retitle onto another game's title is refused, and both games stay.
+        lib.save_game(&meadow_run(PIP)).unwrap();
+        let err = lib.update_game(&retitled, Some("Meadow Run")).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(lib.list_games().len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_invalid_update_leaves_the_saved_game_alone() {
+        let (lib, dir) = temp_library();
+        lib.save_game(&meadow_run(PIP)).unwrap();
+        lib.build_game("meadow-run").unwrap();
+        let err = lib.update_game(r##"{ "title": "Meadow Run" }"##, None).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(lib.game_html("meadow-run").exists(), "the build survives a refused update");
+        assert_eq!(lib.load_game_spec("meadow-run").unwrap().1.collectible.count, 5);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn updating_a_character_drops_the_builds_that_cast_it_by_name() {
+        let (lib, dir) = temp_library();
+        lib.save_character(PIP).unwrap();
+        lib.save_character(GRUMBLE).unwrap();
+        // Three games: one casts Pip by name, one inlines Pip, one casts Grumble.
+        lib.save_game(&meadow_run("\"Pip\"")).unwrap();
+        lib.save_game(&meadow_run(PIP).replace("Meadow Run", "Inline Run")).unwrap();
+        lib.save_game(&meadow_run("\"Grumble\"").replace("Meadow Run", "Grumble Run")).unwrap();
+        for g in ["meadow-run", "inline-run", "grumble-run"] {
+            lib.build_game(g).unwrap();
+        }
+        let redder = PIP.replace("#44cc88", "#cc4444");
+        let (entry, stale) = lib.update_character(&redder).unwrap();
+        assert_eq!(entry.name, "Pip");
+        assert_eq!(stale, vec!["meadow-run".to_string()]);
+        assert!(!lib.game_html("meadow-run").exists(), "built with the old Pip, so no longer built");
+        assert!(lib.game_html("inline-run").exists(), "an inlined copy is its own");
+        assert!(lib.game_html("grumble-run").exists());
+        assert_eq!(lib.load_character("Pip").unwrap().palette.unwrap().base, "#cc4444");
+        assert_eq!(lib.list_characters().len(), 2, "the kept previous spec is not a third character");
+        assert!(lib.characters_dir().join("previous/pip.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn updating_a_character_that_does_not_exist_points_at_new_character() {
+        let (lib, dir) = temp_library();
+        let err = lib.update_character(PIP).unwrap_err();
+        assert!(err.contains("Pip"), "{err}");
+        assert!(err.contains("new_character"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

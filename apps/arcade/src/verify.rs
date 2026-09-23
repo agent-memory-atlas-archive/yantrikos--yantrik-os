@@ -21,6 +21,16 @@
 //!  7. frame_budget — average frame time under software rendering stays under a
 //!     generous budget; a game that crawls in swiftshader is a broken game
 //!
+//! A gate answers one of two questions, and the report keeps them apart (#97):
+//! the first six are about the game (`correctness`), the seventh is about speed
+//! on this machine (`performance`). Each gate ends passed, failed, or
+//! inconclusive. Inconclusive means the machine could not settle the question —
+//! a software renderer too slow to run a bot to the end of its budget — and it
+//! never counts as a pass, but it is also not the game's failure, and every
+//! summary line says which of the two it was. The bots are budgeted in the
+//! engine's simulated seconds, not the wall clock, because on a machine with no
+//! GPU the wall clock is a measure of the renderer (#111).
+//!
 //! The session logic is split from Chrome discovery and launching
 //! (`verify_session` takes a websocket URL), so the unit test runs the entire
 //! gate sequence against a fake CDP server — no browser, no display, no luck.
@@ -44,16 +54,127 @@ use tungstenite::WebSocket;
 /// that misses it has a runaway loop or a pathological draw count.
 pub const FRAME_BUDGET_MS: f64 = 250.0;
 
+/// The bots' budgets. Simulated seconds are the engine's own clock and mean the
+/// same on every machine; the wall clock is only there so a machine that cannot
+/// run the simulation at a useful pace ends the check with a sentence about the
+/// machine instead of hanging. When the wall ceiling arrives first the gate is
+/// inconclusive, never a failure of the game.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Limits {
+    /// Simulated seconds the win bot gets: a base, plus this much per item.
+    pub win_sim_secs: (f64, f64),
+    /// Simulated seconds the lose bot gets.
+    pub lose_sim_secs: f64,
+    /// Wall-clock seconds allowed per simulated second of budget. The engine catches
+    /// up in fixed steps while a bot drives, so on anything above 2 fps wall and
+    /// simulated time run level and this is headroom; below that the check is given up.
+    pub wall_per_sim_sec: f64,
+    /// How often the engine's state is polled.
+    pub poll: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits { win_sim_secs: (25.0, 5.0), lose_sim_secs: 60.0, wall_per_sim_sec: 3.0, poll: Duration::from_millis(300) }
+    }
+}
+
+impl Limits {
+    fn win_budget(&self, target: usize) -> f64 {
+        self.win_sim_secs.0 + self.win_sim_secs.1 * target as f64
+    }
+
+    fn wall_ceiling(&self, sim_secs: f64) -> Duration {
+        Duration::from_secs_f64(sim_secs * self.wall_per_sim_sec)
+    }
+}
+
+/// Which question a gate answers. Correctness is about the game: it boots, keeps a
+/// clean console, draws, answers input, can be won and lost. Performance is about
+/// speed on this machine, which is the renderer's and the hardware's as much as the
+/// game's — on a box with no GPU it is mostly theirs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Correctness,
+    Performance,
+}
+
+/// What a gate concluded. `Inconclusive` is the machine failing to settle the
+/// question — too slow to run a bot to the end of its simulated budget, or a
+/// build whose engine predates the clock the check needs. It never satisfies a
+/// gate: a report with one is not `passed`. It is also not the game's failure, and
+/// the summary lines say so, because a person who reads "the bot never won" goes
+/// and softens a game that was fine.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    Passed,
+    Failed,
+    Inconclusive,
+}
+
+impl Verdict {
+    /// The word serde writes, read back off a verify.json.
+    pub fn parse(text: &str) -> Option<Verdict> {
+        match text {
+            "passed" => Some(Verdict::Passed),
+            "failed" => Some(Verdict::Failed),
+            "inconclusive" => Some(Verdict::Inconclusive),
+            _ => None,
+        }
+    }
+
+    /// Fold gates into one answer: any failure is a failure, else any open
+    /// question leaves the whole question open.
+    fn fold<'a>(verdicts: impl Iterator<Item = &'a Verdict>) -> Verdict {
+        let mut out = Verdict::Passed;
+        for v in verdicts {
+            match v {
+                Verdict::Failed => return Verdict::Failed,
+                Verdict::Inconclusive => out = Verdict::Inconclusive,
+                Verdict::Passed => {}
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Gate {
     pub gate: String,
+    pub kind: Kind,
+    pub verdict: Verdict,
+    /// `verdict == Passed`, kept as a plain bool because the CLI's exit code, the
+    /// games list and reports written before verdicts existed all read it.
     pub passed: bool,
     pub detail: String,
+}
+
+impl Gate {
+    /// A gate out of a verify.json written by any version of this verifier: one
+    /// from before verdicts existed has only `passed`, which says the same thing
+    /// in fewer words.
+    pub fn from_value(v: &Value) -> Option<Gate> {
+        let gate = v.get("gate")?.as_str()?.to_string();
+        let passed = v.get("passed").and_then(|p| p.as_bool()).unwrap_or(false);
+        let verdict = v
+            .get("verdict")
+            .and_then(|s| s.as_str())
+            .and_then(Verdict::parse)
+            .unwrap_or(if passed { Verdict::Passed } else { Verdict::Failed });
+        let detail = v.get("detail").and_then(|d| d.as_str()).unwrap_or("no detail").to_string();
+        Some(Gate { kind: gate_kind(&gate), gate, verdict, passed: verdict == Verdict::Passed, detail })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Report {
     pub passed: bool,
+    /// The game's verdict: every correctness gate folded together.
+    pub correctness: Verdict,
+    /// This machine's verdict on the game's speed: the performance gates folded.
+    pub performance: Verdict,
     pub when: String,
     pub browser: String,
     pub frame_budget_ms: f64,
@@ -66,6 +187,8 @@ impl Report {
     fn new(browser: String) -> Report {
         Report {
             passed: false,
+            correctness: Verdict::Inconclusive,
+            performance: Verdict::Inconclusive,
             when: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
             browser,
             frame_budget_ms: FRAME_BUDGET_MS,
@@ -74,22 +197,34 @@ impl Report {
         }
     }
 
-    fn gate(&mut self, name: &str, passed: bool, detail: impl Into<String>) -> bool {
-        self.gates.push(Gate { gate: name.into(), passed, detail: detail.into() });
-        passed
+    fn gate(&mut self, name: &str, verdict: Verdict, detail: impl Into<String>) {
+        self.gates.push(Gate {
+            gate: name.into(),
+            kind: gate_kind(name),
+            verdict,
+            passed: verdict == Verdict::Passed,
+            detail: detail.into(),
+        });
     }
 
     /// Mark every remaining gate as not run, so a report always shows the full
     /// charter list and an early failure explains what never happened.
     fn abandon(&mut self, names: &[&str], reason: &str) {
         for n in names {
-            self.gate(n, false, format!("not run: {reason}"));
+            self.gate(n, Verdict::Failed, format!("not run: {reason}"));
         }
     }
 
     fn finish(mut self) -> Report {
-        self.passed = self.gates.iter().all(|g| g.passed);
+        self.correctness = Verdict::fold(self.gates.iter().filter(|g| g.kind == Kind::Correctness).map(|g| &g.verdict));
+        self.performance = Verdict::fold(self.gates.iter().filter(|g| g.kind == Kind::Performance).map(|g| &g.verdict));
+        self.passed = self.gates.iter().all(|g| g.verdict == Verdict::Passed);
         self
+    }
+
+    /// One line for the job list and the window's banner.
+    pub fn summary_line(&self) -> String {
+        summary_line(&self.gates)
     }
 }
 
@@ -102,6 +237,42 @@ const ALL_GATES: [&str; 7] = [
     "bot_reaches_lose",
     "frame_budget",
 ];
+
+/// Which question each gate answers; only the frame budget is about speed.
+pub fn gate_kind(name: &str) -> Kind {
+    if name == "frame_budget" {
+        Kind::Performance
+    } else {
+        Kind::Correctness
+    }
+}
+
+/// The clause every reader gets when a gate is inconclusive.
+pub const MACHINE_NOT_GAME: &str = "the machine, not the game";
+
+/// The gate that settles a report: none when every gate passed, otherwise the
+/// first failed gate, or — when nothing failed — the first inconclusive one. A
+/// failure outranks an inconclusive because a failure is the game's and answers
+/// the question; an inconclusive only says this machine could not.
+pub fn deciding_gate(gates: &[Gate]) -> Option<&Gate> {
+    gates
+        .iter()
+        .find(|g| g.verdict == Verdict::Failed)
+        .or_else(|| gates.iter().find(|g| g.verdict == Verdict::Inconclusive))
+}
+
+/// The one sentence for a whole report, shared by the job list, the games list
+/// and the banner so a person and a mind read the same words. It names the gate
+/// that settled it and says whether that was the game or the machine.
+pub fn summary_line(gates: &[Gate]) -> String {
+    match deciding_gate(gates) {
+        None => format!("passed all {} gates", gates.len()),
+        Some(g) if g.verdict == Verdict::Inconclusive => {
+            format!("inconclusive at {} ({MACHINE_NOT_GAME}): {}", g.gate, g.detail)
+        }
+        Some(g) => format!("failed at {}: {}", g.gate, g.detail),
+    }
+}
 
 // ── Chrome discovery ───────────────────────────────────────────────
 
@@ -385,7 +556,7 @@ fn event_errors(events: &[Value]) -> Vec<String> {
 
 /// Run the full verification against an already-discovered page target. This is
 /// the half the unit test exercises against a fake CDP server.
-pub fn verify_session(ws_url: &str, browser: &str, screenshot_out: Option<&Path>) -> Result<Report, String> {
+pub fn verify_session(ws_url: &str, browser: &str, screenshot_out: Option<&Path>, limits: &Limits) -> Result<Report, String> {
     let mut report = Report::new(browser.to_string());
     let mut session = Session::connect(ws_url)?;
     let mut page_events: Vec<Value> = Vec::new();
@@ -415,7 +586,7 @@ pub fn verify_session(ws_url: &str, browser: &str, screenshot_out: Option<&Path>
         }
     };
     if !boot_ok {
-        report.gate("boots", false, boot_detail.clone());
+        report.gate("boots", Verdict::Failed, boot_detail.clone());
         report.abandon(&ALL_GATES[1..], "the game did not boot");
         return Ok(report.finish());
     }
@@ -439,62 +610,45 @@ pub fn verify_session(ws_url: &str, browser: &str, screenshot_out: Option<&Path>
         report.screenshot = out.file_name().and_then(|n| n.to_str()).map(String::from);
     }
 
-    // Gate 4: input moves the player. A real dispatched key event, through the
-    // engine's real handler, into the real movement code.
-    let before = session.evaluate("JSON.stringify(window.__arcade.state())").ok();
-    let key_result = dispatch_key(&mut session, "KeyW", "w", 87);
-    std::thread::sleep(Duration::from_millis(1400));
-    let after = key_result
-        .and_then(|()| session.evaluate("JSON.stringify(window.__arcade.state())"))
-        .ok();
-    let (input_ok, input_detail) = match (pos_of(&before), pos_of(&after)) {
-        (Some((x0, z0)), Some((x1, z1))) => {
-            let d = ((x1 - x0).powi(2) + (z1 - z0).powi(2)).sqrt();
-            if d > 0.5 {
-                (true, format!("holding W moved the player {d:.2} m"))
-            } else {
-                (false, format!("holding W for 1.4 s moved the player only {d:.2} m"))
-            }
-        }
-        _ => (false, "the engine stopped answering state queries".into()),
-    };
+    // From here the verifier drives, so the engine keeps its simulated clock level
+    // with the wall clock whatever the frame rate. A build older than the hook has
+    // no setPaced; the guard keeps that from being a thrown exception, and the
+    // gates below then say the build predates the clock they need.
+    session.evaluate("window.__arcade.setPaced && window.__arcade.setPaced(true); 0").ok();
 
-    // Gate 5: the greedy bot reaches WIN through the ordinary input path.
+    // Gate 4: input moves the player. A real dispatched key event, through the
+    // engine's real handler, into the real movement code. Judged in simulated
+    // seconds: 1.4 s of wall clock is a few frames under software rendering, and
+    // this gate used to fail a fine game with "moved only 0.36 m" on a slow host.
+    let before = poll_state(&mut session);
+    let key_result = dispatch_key(&mut session, "KeyW", "w", 87);
+    let hold_started = Instant::now();
+    std::thread::sleep(Duration::from_millis(1400));
+    let after = key_result.ok().and_then(|()| poll_state(&mut session));
+    let (input_verdict, input_detail) = judge_input(before.as_ref(), after.as_ref(), hold_started.elapsed());
+
+    // Gate 5: the greedy bot reaches WIN through the ordinary input path. Budgeted
+    // in the engine's simulated seconds: the wall clock on a GPU-less machine
+    // measures swiftshader, and this gate used to fail fine games with it (#111).
     session.evaluate("window.__arcade.reset(); window.__arcade.setBot('win'); 0").ok();
-    let win_budget = Duration::from_secs(25 + target as u64 * 5);
-    let win = wait_for_state(&mut session, win_budget, &|s| {
+    let win_budget = limits.win_budget(target);
+    let win = run_bot(&mut session, win_budget, limits, &|s| {
         s.get("status").and_then(|v| v.as_str()) == Some("win")
     });
-    let (win_ok, win_detail) = match win {
-        Some(state) => {
-            let c = state.get("collected").and_then(|v| v.as_u64()).unwrap_or(0);
-            (true, format!("the win bot collected all {c} items"))
-        }
-        None => {
-            let last = session.evaluate("JSON.stringify(window.__arcade.state())").unwrap_or(Value::Null);
-            let c = state_str(&last, "collected").unwrap_or_default();
-            (false, format!("the win bot never won (last state: collected {c} of {target})"))
-        }
-    };
+    let (win_verdict, win_detail) = judge_win(&win, target, win_budget);
 
-    // Gate 6: the suicidal bot reaches LOSE.
+    // Gate 6: the suicidal bot reaches LOSE, on the same clock.
     session.evaluate("window.__arcade.reset(); window.__arcade.setBot('lose'); 0").ok();
-    let lose = wait_for_state(&mut session, Duration::from_secs(60), &|s| {
+    let lose = run_bot(&mut session, limits.lose_sim_secs, limits, &|s| {
         s.get("status").and_then(|v| v.as_str()) == Some("lose")
     });
-    let (lose_ok, lose_detail) = match lose {
-        Some(state) => {
-            let lives = state.get("lives").and_then(|v| v.as_i64()).unwrap_or(-1);
-            (true, format!("the lose bot burned every life (lives now {lives})"))
-        }
-        None => {
-            let last = session.evaluate("JSON.stringify(window.__arcade.state())").unwrap_or(Value::Null);
-            (false, format!("the lose bot never lost (last state: {last})"))
-        }
-    };
+    let (lose_verdict, lose_detail) = judge_lose(&lose, limits.lose_sim_secs);
 
-    // Gate 7: frame budget, read after the bots have exercised everything.
-    session.evaluate("window.__arcade.setBot(null); window.__arcade.reset(); 0").ok();
+    // Gate 7: frame budget, read after the bots have exercised everything, with the
+    // engine back on a person's clock so the measurement is of the game as played.
+    session
+        .evaluate("window.__arcade.setBot(null); window.__arcade.setPaced && window.__arcade.setPaced(false); window.__arcade.reset(); 0")
+        .ok();
     std::thread::sleep(Duration::from_millis(2500));
     let final_state = session.evaluate("JSON.stringify(window.__arcade.state())").unwrap_or(Value::Null);
     let frame_ms = state_num(&final_state, "frameMs").unwrap_or(f64::MAX);
@@ -523,21 +677,184 @@ pub fn verify_session(ws_url: &str, browser: &str, screenshot_out: Option<&Path>
     };
 
     // Assemble in the charter's order regardless of execution order.
-    let executed: Vec<(&str, bool, String)> = vec![
-        ("boots", boot_ok, boot_detail),
-        ("no_console_errors", console_ok, console_detail),
-        ("frame_renders", shot_ok, shot_detail),
-        ("input_moves_player", input_ok, input_detail),
-        ("bot_reaches_win", win_ok, win_detail),
-        ("bot_reaches_lose", lose_ok, lose_detail),
-        ("frame_budget", budget_ok, budget_detail),
+    let as_verdict = |ok: bool| if ok { Verdict::Passed } else { Verdict::Failed };
+    let executed: Vec<(&str, Verdict, String)> = vec![
+        ("boots", as_verdict(boot_ok), boot_detail),
+        ("no_console_errors", as_verdict(console_ok), console_detail),
+        ("frame_renders", as_verdict(shot_ok), shot_detail),
+        ("input_moves_player", input_verdict, input_detail),
+        ("bot_reaches_win", win_verdict, win_detail),
+        ("bot_reaches_lose", lose_verdict, lose_detail),
+        ("frame_budget", as_verdict(budget_ok), budget_detail),
     ];
-    for (name, ok, detail) in executed {
-        report.gate(name, ok, detail);
+    for (name, verdict, detail) in executed {
+        report.gate(name, verdict, detail);
     }
     report.gates.sort_by_key(|g| ALL_GATES.iter().position(|n| *n == g.gate).unwrap_or(99));
 
     Ok(report.finish())
+}
+
+// ── The bots, on the engine's clock ────────────────────────────────
+
+/// How a bot's run ended.
+#[derive(Debug, Clone, PartialEq)]
+enum BotRun {
+    /// The engine reached the state the bot was sent for.
+    Reached(Value),
+    /// The engine's clock ran the whole simulated budget and it never did: the game.
+    Exhausted(Value),
+    /// The wall ceiling arrived while the simulation was still short of its
+    /// budget: this machine could not run the check to its end.
+    TooSlow { last: Value, wall: Duration },
+    /// The engine reports no simulated clock — a build from before it had one —
+    /// and the wall ceiling arrived without the state the bot was sent for.
+    NoClock { last: Value },
+    /// The engine stopped answering state queries.
+    Silent,
+}
+
+/// Drive one bot until the predicate holds, the simulated budget is spent, or the
+/// wall ceiling arrives, whichever comes first. The engine's `elapsed` is
+/// simulated seconds of play since the last reset — the bot's own clock, which
+/// runs at the same rate on every machine that can keep 2 fps.
+fn run_bot(session: &mut Session, sim_secs: f64, limits: &Limits, pred: &dyn Fn(&Value) -> bool) -> BotRun {
+    let start = Instant::now();
+    let ceiling = limits.wall_ceiling(sim_secs);
+    let mut last: Option<Value> = None;
+    let mut has_clock = false;
+    loop {
+        if let Some(state) = poll_state(session) {
+            if pred(&state) {
+                return BotRun::Reached(state);
+            }
+            match state.get("elapsed").and_then(|v| v.as_f64()) {
+                Some(elapsed) if elapsed >= sim_secs => return BotRun::Exhausted(state),
+                Some(_) => has_clock = true,
+                None => {}
+            }
+            last = Some(state);
+        }
+        let wall = start.elapsed();
+        if wall >= ceiling {
+            return match last {
+                None => BotRun::Silent,
+                Some(last) if has_clock => BotRun::TooSlow { last, wall },
+                Some(last) => BotRun::NoClock { last },
+            };
+        }
+        std::thread::sleep(limits.poll);
+    }
+}
+
+/// The input gate's verdict and sentence, from the engine's state before and
+/// after the held key. Half a metre is the bar; the slowest legal player (4 m/s)
+/// clears it in a fraction of a simulated second, so a player that did not move
+/// it in a whole one is the game's fault. When the simulation itself did not get
+/// a whole second in the wall time it had, the machine could not settle it.
+fn judge_input(before: Option<&Value>, after: Option<&Value>, wall: Duration) -> (Verdict, String) {
+    let (Some(before), Some(after)) = (before, after) else {
+        return (Verdict::Failed, "the engine stopped answering state queries".to_string());
+    };
+    let pos = |s: &Value| Some((s.get("x")?.as_f64()?, s.get("z")?.as_f64()?));
+    let (Some((x0, z0)), Some((x1, z1))) = (pos(before), pos(after)) else {
+        return (Verdict::Failed, "the engine's state carries no player position".to_string());
+    };
+    let d = ((x1 - x0).powi(2) + (z1 - z0).powi(2)).sqrt();
+    let clock = |s: &Value| s.get("elapsed").and_then(|v| v.as_f64());
+    let sim = match (clock(before), clock(after)) {
+        (Some(t0), Some(t1)) => Some(t1 - t0),
+        _ => None,
+    };
+    match sim {
+        _ if d > 0.5 => (
+            Verdict::Passed,
+            match sim {
+                Some(sim) => format!("holding W for {sim:.1} simulated seconds moved the player {d:.2} m"),
+                None => format!("holding W moved the player {d:.2} m"),
+            },
+        ),
+        Some(sim) if sim >= 1.0 => (
+            Verdict::Failed,
+            format!("holding W for {sim:.1} simulated seconds moved the player only {d:.2} m"),
+        ),
+        Some(sim) => {
+            let frame_ms = after.get("frameMs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            (
+                Verdict::Inconclusive,
+                format!(
+                    "in {:.1} s of wall clock this machine simulated only {sim:.1} s of the held key (average frame {frame_ms:.1} ms under software rendering); the player moved {d:.2} m",
+                    wall.as_secs_f64()
+                ),
+            )
+        }
+        None => (Verdict::Inconclusive, NO_CLOCK.to_string()),
+    }
+}
+
+/// The win gate's verdict and sentence. Pure, so the sentences can be tested
+/// without a browser: the sentence is what a person acts on, and the wrong one
+/// sends them off to soften a game that was fine.
+fn judge_win(run: &BotRun, target: usize, budget: f64) -> (Verdict, String) {
+    let collected = |s: &Value| s.get("collected").and_then(|v| v.as_u64()).unwrap_or(0);
+    let elapsed = |s: &Value| s.get("elapsed").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    match run {
+        BotRun::Reached(s) => (
+            Verdict::Passed,
+            format!("the win bot collected all {} items in {:.0} simulated seconds", collected(s), elapsed(s)),
+        ),
+        BotRun::Exhausted(s) => (
+            Verdict::Failed,
+            format!(
+                "the win bot never won: {} of {target} collected in its whole budget of {budget:.0} simulated seconds of play",
+                collected(s)
+            ),
+        ),
+        BotRun::TooSlow { last, wall } => (Verdict::Inconclusive, too_slow(last, wall, budget, &format!("the win bot had collected {} of {target}", collected(last)))),
+        BotRun::NoClock { .. } => (Verdict::Inconclusive, NO_CLOCK.to_string()),
+        BotRun::Silent => (Verdict::Failed, "the engine stopped answering state queries".to_string()),
+    }
+}
+
+fn judge_lose(run: &BotRun, budget: f64) -> (Verdict, String) {
+    let lives = |s: &Value| s.get("lives").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let elapsed = |s: &Value| s.get("elapsed").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    match run {
+        BotRun::Reached(s) => (
+            Verdict::Passed,
+            format!("the lose bot burned every life in {:.0} simulated seconds (lives now {})", elapsed(s), lives(s)),
+        ),
+        BotRun::Exhausted(s) => (
+            Verdict::Failed,
+            format!(
+                "the lose bot never lost: {} lives left after its whole budget of {budget:.0} simulated seconds of play",
+                lives(s)
+            ),
+        ),
+        BotRun::TooSlow { last, wall } => (Verdict::Inconclusive, too_slow(last, wall, budget, &format!("the lose bot had {} lives left", lives(last)))),
+        BotRun::NoClock { .. } => (Verdict::Inconclusive, NO_CLOCK.to_string()),
+        BotRun::Silent => (Verdict::Failed, "the engine stopped answering state queries".to_string()),
+    }
+}
+
+const NO_CLOCK: &str = "this build's engine reports no simulated clock (it was built before the bots were judged by one); run `build` again and verify the new file";
+
+/// The sentence for a machine that could not run a bot to the end of its budget:
+/// the wall time it had, how little of the simulation that bought, and the
+/// frame time that explains it.
+fn too_slow(last: &Value, wall: &Duration, budget: f64, progress: &str) -> String {
+    let elapsed = last.get("elapsed").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let frame_ms = last.get("frameMs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    format!(
+        "in {:.0} s of wall clock this machine simulated only {elapsed:.0} of the {budget:.0} s budget (average frame {frame_ms:.1} ms under software rendering); {progress}",
+        wall.as_secs_f64()
+    )
+}
+
+/// One poll of the engine's state, parsed.
+fn poll_state(session: &mut Session) -> Option<Value> {
+    let v = session.evaluate("window.__arcade ? JSON.stringify(window.__arcade.state()) : 'null'").ok()?;
+    serde_json::from_str::<Value>(v.as_str()?).ok().filter(|s| s.is_object())
 }
 
 fn engine_error_list(session: &mut Session) -> Vec<String> {
@@ -574,24 +891,9 @@ fn wait_for_state(session: &mut Session, budget: Duration, pred: &dyn Fn(&Value)
 }
 
 /// The evaluate results come back as JSON text; pull a field back out.
-fn parse_state(v: &Option<Value>) -> Option<Value> {
-    let text = v.as_ref()?.as_str()?;
-    serde_json::from_str::<Value>(text).ok()
-}
-
-fn pos_of(v: &Option<Value>) -> Option<(f64, f64)> {
-    let state = parse_state(v)?;
-    Some((state.get("x")?.as_f64()?, state.get("z")?.as_f64()?))
-}
-
 fn state_num(v: &Value, field: &str) -> Option<f64> {
     let state = serde_json::from_str::<Value>(v.as_str()?).ok()?;
     state.get(field)?.as_f64()
-}
-
-fn state_str(v: &Value, field: &str) -> Option<String> {
-    let state = serde_json::from_str::<Value>(v.as_str()?).ok()?;
-    Some(state.get(field)?.to_string())
 }
 
 fn state_num_or_array(v: &Value, field: &str) -> Option<Vec<String>> {
@@ -678,7 +980,7 @@ pub fn png_distinct_colours(bytes: &[u8]) -> Result<usize, String> {
 /// gates, and leave a screenshot beside the game if asked.
 pub fn verify_game(html: &Path, screenshot_out: Option<&Path>) -> Result<Report, String> {
     let headless = launch_headless(html)?;
-    verify_session(&headless.ws_url, &headless.browser, screenshot_out)
+    verify_session(&headless.ws_url, &headless.browser, screenshot_out, &Limits::default())
 }
 
 /// Just take the screenshot — the `screenshot` action and the CLI's one-file mode.
@@ -778,13 +1080,80 @@ mod tests {
     #[test]
     fn slug_of_a_report_lists_every_gate_in_order() {
         let mut report = Report::new("test".into());
-        report.gate("boots", true, "up");
+        report.gate("boots", Verdict::Passed, "up");
         report.abandon(&ALL_GATES[1..], "the game did not boot");
         let report = report.finish();
         assert!(!report.passed);
+        assert_eq!(report.correctness, Verdict::Failed);
         let names: Vec<&str> = report.gates.iter().map(|g| g.gate.as_str()).collect();
         assert_eq!(names, ALL_GATES);
         assert!(report.gates[1].detail.contains("did not boot"));
+    }
+
+    #[test]
+    fn an_inconclusive_gate_never_passes_the_report_and_names_the_machine() {
+        let mut report = Report::new("test".into());
+        for name in &ALL_GATES[..4] {
+            report.gate(name, Verdict::Passed, "fine");
+        }
+        report.gate("bot_reaches_win", Verdict::Inconclusive, "only 12 of 95 s simulated");
+        report.gate("bot_reaches_lose", Verdict::Passed, "fine");
+        report.gate("frame_budget", Verdict::Passed, "fine");
+        let report = report.finish();
+        assert!(!report.passed, "inconclusive must never satisfy a required check");
+        assert_eq!(report.correctness, Verdict::Inconclusive);
+        assert_eq!(report.performance, Verdict::Passed);
+        let line = report.summary_line();
+        assert!(line.starts_with("inconclusive at bot_reaches_win"), "{line}");
+        assert!(line.contains(MACHINE_NOT_GAME), "{line}");
+        assert!(line.contains("12 of 95"), "{line}");
+    }
+
+    #[test]
+    fn a_failure_outranks_an_inconclusive_in_the_summary() {
+        let mut report = Report::new("test".into());
+        report.gate("boots", Verdict::Passed, "up");
+        report.gate("bot_reaches_win", Verdict::Inconclusive, "too slow");
+        report.gate("frame_budget", Verdict::Failed, "average frame 354.2 ms");
+        let report = report.finish();
+        assert_eq!(report.correctness, Verdict::Inconclusive);
+        assert_eq!(report.performance, Verdict::Failed);
+        assert_eq!(report.summary_line(), "failed at frame_budget: average frame 354.2 ms");
+    }
+
+    #[test]
+    fn a_gate_from_an_old_report_gets_its_verdict_from_passed() {
+        let old = Gate::from_value(&json!({ "gate": "bot_reaches_win", "passed": false, "detail": "never won" })).unwrap();
+        assert_eq!(old.verdict, Verdict::Failed);
+        assert_eq!(old.kind, Kind::Correctness);
+        let new = Gate::from_value(&json!({ "gate": "frame_budget", "passed": false, "verdict": "inconclusive", "detail": "x" })).unwrap();
+        assert_eq!(new.verdict, Verdict::Inconclusive);
+        assert_eq!(new.kind, Kind::Performance);
+        assert!(Gate::from_value(&json!({ "passed": true })).is_none(), "a gate without a name is not a gate");
+    }
+
+    #[test]
+    fn the_win_judge_blames_the_game_only_when_the_simulation_ran_its_budget() {
+        let state = json!({ "collected": 5, "target": 14, "elapsed": 95.0, "frameMs": 16.0 });
+        let (v, detail) = judge_win(&BotRun::Exhausted(state.clone()), 14, 95.0);
+        assert_eq!(v, Verdict::Failed);
+        assert!(detail.contains("5 of 14"), "{detail}");
+        assert!(detail.contains("95 simulated seconds"), "{detail}");
+
+        let stalled = json!({ "collected": 5, "target": 14, "elapsed": 19.0, "frameMs": 308.5 });
+        let (v, detail) = judge_win(&BotRun::TooSlow { last: stalled, wall: Duration::from_secs(95) }, 14, 95.0);
+        assert_eq!(v, Verdict::Inconclusive);
+        assert!(detail.contains("this machine"), "{detail}");
+        assert!(detail.contains("19 of the 95 s"), "{detail}");
+        assert!(detail.contains("308.5 ms under software rendering"), "{detail}");
+        assert!(detail.contains("5 of 14"), "{detail}");
+
+        let (v, detail) = judge_win(&BotRun::NoClock { last: json!({}) }, 14, 95.0);
+        assert_eq!(v, Verdict::Inconclusive);
+        assert!(detail.contains("`build`"), "{detail}");
+
+        let (v, _) = judge_win(&BotRun::Reached(json!({ "collected": 14, "elapsed": 40.0 })), 14, 95.0);
+        assert_eq!(v, Verdict::Passed);
     }
 
     // ── The fake CDP server ───────────────────────────────────────
@@ -798,17 +1167,43 @@ mod tests {
         stop: Arc<AtomicBool>,
     }
 
-    fn state_json(status: &str, x: f64, z: f64, collected: u32, lives: u32, frames: u32, frame_ms: f64) -> Value {
-        json!({
+    /// What the fake engine does once the win bot is set.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Script {
+        /// The bot wins; nothing else happens.
+        Clean,
+        /// The bot wins, and one console.error is pushed mid-session, so both
+        /// verdicts of the console gate are covered.
+        PlantError,
+        /// The bot never wins and the engine's clock runs past the whole budget:
+        /// the game's failure.
+        WinExhausted,
+        /// The bot never wins and the engine's clock barely moves per poll: a
+        /// machine too slow to run the check.
+        TooSlow,
+        /// The bot never wins and the engine reports no `elapsed` at all: a build
+        /// from before the clock existed.
+        NoClock,
+        /// The held key barely moves the player because the machine simulated a
+        /// fraction of a second in the time the key was held; the bots then win
+        /// and lose as normal.
+        InputTooSlow,
+    }
+
+    fn state_json(status: &str, x: f64, z: f64, collected: u32, lives: u32, frames: u32, frame_ms: f64, elapsed: Option<f64>) -> Value {
+        let mut s = json!({
             "status": status, "collected": collected, "target": 5, "lives": lives,
             "x": x, "z": z, "frameMs": frame_ms, "frames": frames, "bot": null, "errors": []
-        })
+        });
+        if let Some(e) = elapsed {
+            s["elapsed"] = json!(e);
+        }
+        s
     }
 
     impl Fake {
-        /// `plant_error` decides whether the fake pushes one console.error event
-        /// mid-session, so both verdicts of the console gate are covered.
-        fn start(plant_error: bool) -> Fake {
+        fn start(script: Script) -> Fake {
+            let plant_error = script == Script::PlantError;
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let stop = Arc::new(AtomicBool::new(false));
@@ -826,6 +1221,7 @@ mod tests {
                 // Scripted engine: the fake advances one phase per interesting call.
                 let mut phase = 0u32; // 0 boot, 1 input-before, 2 input-after, 3 win, 4 lose, 5+ final
                 let mut planted = false;
+                let mut win_polls = 0u32;
                 loop {
                     if stop2.load(Ordering::SeqCst) {
                         return;
@@ -880,12 +1276,25 @@ mod tests {
                                 if phase == 0 {
                                     phase = 1;
                                 }
+                                if phase == 3 {
+                                    win_polls += 1;
+                                }
                                 let s = match phase {
-                                    1 => state_json("playing", 0.0, 0.0, 0, 3, 40, 16.0),
-                                    2 => state_json("playing", 0.0, -1.8, 0, 3, 90, 16.0),
-                                    3 => state_json("win", 2.0, -3.0, 5, 3, 400, 17.0),
-                                    4 => state_json("lose", 1.0, 1.0, 2, 0, 700, 18.0),
-                                    _ => state_json("playing", 0.0, 0.0, 0, 3, 900, 16.5),
+                                    1 => state_json("playing", 0.0, 0.0, 0, 3, 40, 16.0, Some(0.0)),
+                                    2 if script == Script::InputTooSlow => state_json("playing", 0.0, -0.36, 0, 3, 43, 512.8, Some(0.15)),
+                                    2 => state_json("playing", 0.0, -1.8, 0, 3, 90, 16.0, Some(1.4)),
+                                    // The win phase is where the scripts differ: a
+                                    // win, a game that runs its whole simulated
+                                    // budget without one, a clock that crawls, or
+                                    // no clock at all.
+                                    3 => match script {
+                                        Script::WinExhausted => state_json("playing", 2.0, -3.0, 3, 3, 400, 17.0, Some(999.0)),
+                                        Script::TooSlow => state_json("playing", 2.0, -3.0, 3, 3, 400, 308.5, Some(win_polls as f64 * 0.5)),
+                                        Script::NoClock => state_json("playing", 2.0, -3.0, 3, 3, 400, 17.0, None),
+                                        _ => state_json("win", 2.0, -3.0, 5, 3, 400, 17.0, Some(31.2)),
+                                    },
+                                    4 => state_json("lose", 1.0, 1.0, 2, 0, 700, 18.0, Some(12.0)),
+                                    _ => state_json("playing", 0.0, 0.0, 0, 3, 900, 16.5, Some(2.5)),
                                 };
                                 json!({ "result": { "type": "string", "value": s.to_string() } })
                             } else {
@@ -926,20 +1335,32 @@ mod tests {
         }
     }
 
+    /// Budgets a test can afford to wait out: the fake's target is 5, so the win
+    /// budget is 50 simulated seconds, and the wall ceiling is one second.
+    fn quick_limits() -> Limits {
+        Limits { wall_per_sim_sec: 0.02, poll: Duration::from_millis(40), ..Limits::default() }
+    }
+
     #[test]
     fn a_clean_session_passes_every_gate() {
-        let fake = Fake::start(false);
+        let fake = Fake::start(Script::Clean);
         let shot_dir = std::env::temp_dir().join(format!("arcade-fake-shot-clean-{}", std::process::id()));
         let shot = shot_dir.join("screenshot.png");
-        let report = verify_session(&fake.ws_url(), "fake-chrome", Some(&shot)).unwrap();
+        let report = verify_session(&fake.ws_url(), "fake-chrome", Some(&shot), &quick_limits()).unwrap();
 
         let names: Vec<&str> = report.gates.iter().map(|g| g.gate.as_str()).collect();
         assert_eq!(names, ALL_GATES, "the report must list the charter's gates in the charter's order");
         for g in &report.gates {
             assert!(g.passed, "gate {} should pass against a clean fake: {}", g.gate, g.detail);
+            assert_eq!(g.verdict, Verdict::Passed);
         }
         assert!(report.passed);
+        assert_eq!(report.correctness, Verdict::Passed);
+        assert_eq!(report.performance, Verdict::Passed);
+        assert_eq!(report.summary_line(), "passed all 7 gates");
         assert_eq!(report.browser, "fake-chrome");
+        let win = report.gates.iter().find(|g| g.gate == "bot_reaches_win").unwrap();
+        assert!(win.detail.contains("31 simulated seconds"), "{}", win.detail);
 
         // The screenshot was written where the caller asked, and it decodes.
         assert!(shot.exists());
@@ -950,17 +1371,132 @@ mod tests {
 
     #[test]
     fn a_planted_console_error_fails_exactly_the_console_gate() {
-        let fake = Fake::start(true);
-        let report = verify_session(&fake.ws_url(), "fake-chrome", None).unwrap();
+        let fake = Fake::start(Script::PlantError);
+        let report = verify_session(&fake.ws_url(), "fake-chrome", None, &quick_limits()).unwrap();
         assert_eq!(report.screenshot, None, "no path asked for, no screenshot recorded");
         for g in &report.gates {
             if g.gate == "no_console_errors" {
                 assert!(!g.passed, "the planted error must sink the console gate");
+                assert_eq!(g.verdict, Verdict::Failed);
                 assert!(g.detail.contains("planted failure"), "{}", g.detail);
             } else {
                 assert!(g.passed, "gate {} should be untouched by the planted error: {}", g.gate, g.detail);
             }
         }
         assert!(!report.passed, "one failed gate fails the run");
+        assert_eq!(report.correctness, Verdict::Failed);
+    }
+
+    /// Every gate but one, checked to have passed, so each script proves it touches
+    /// exactly the gate it is about.
+    fn all_but(report: &Report, gate: &str) {
+        for g in &report.gates {
+            if g.gate != gate {
+                assert_eq!(g.verdict, Verdict::Passed, "gate {} should be untouched: {}", g.gate, g.detail);
+            }
+        }
+    }
+
+    fn all_but_win_passed(report: &Report) {
+        all_but(report, "bot_reaches_win");
+    }
+
+    #[test]
+    fn the_input_judge_blames_the_game_only_when_the_simulation_ran_a_whole_second() {
+        let at = |z: f64, elapsed: Option<f64>, frame_ms: f64| {
+            let mut s = json!({ "x": 0.0, "z": z, "frameMs": frame_ms });
+            if let Some(e) = elapsed {
+                s["elapsed"] = json!(e);
+            }
+            s
+        };
+        let wall = Duration::from_millis(2500);
+        // Moved: passed, on any clock.
+        let (v, d) = judge_input(Some(&at(0.0, Some(0.0), 16.0)), Some(&at(-1.8, Some(1.4), 16.0)), wall);
+        assert_eq!(v, Verdict::Passed);
+        assert!(d.contains("1.4 simulated seconds"), "{d}");
+        // A whole simulated second and still nothing: the game.
+        let (v, d) = judge_input(Some(&at(0.0, Some(0.0), 16.0)), Some(&at(-0.1, Some(2.4), 16.0)), wall);
+        assert_eq!(v, Verdict::Failed);
+        assert!(d.contains("only 0.10 m"), "{d}");
+        // A fraction of a simulated second: this machine (the real numbers from a
+        // 512 ms/frame software renderer, which the old gate called the game's).
+        let (v, d) = judge_input(Some(&at(0.0, Some(0.0), 512.8)), Some(&at(-0.36, Some(0.15), 512.8)), wall);
+        assert_eq!(v, Verdict::Inconclusive);
+        assert!(d.contains("this machine"), "{d}");
+        assert!(d.contains("only 0.1 s"), "{d}");
+        assert!(d.contains("512.8 ms under software rendering"), "{d}");
+        // No clock at all and no movement: rebuild.
+        let (v, d) = judge_input(Some(&at(0.0, None, 16.0)), Some(&at(-0.2, None, 16.0)), wall);
+        assert_eq!(v, Verdict::Inconclusive);
+        assert!(d.contains("`build`"), "{d}");
+        // No clock but it moved: passed, in the old words.
+        let (v, d) = judge_input(Some(&at(0.0, None, 16.0)), Some(&at(-1.2, None, 16.0)), wall);
+        assert_eq!(v, Verdict::Passed);
+        assert_eq!(d, "holding W moved the player 1.20 m");
+        // The engine went quiet.
+        assert_eq!(judge_input(Some(&at(0.0, None, 16.0)), None, wall).0, Verdict::Failed);
+    }
+
+    #[test]
+    fn a_machine_too_slow_to_hold_a_key_is_inconclusive_not_a_bad_game() {
+        let fake = Fake::start(Script::InputTooSlow);
+        let report = verify_session(&fake.ws_url(), "fake-chrome", None, &quick_limits()).unwrap();
+        all_but(&report, "input_moves_player");
+        let input = report.gates.iter().find(|g| g.gate == "input_moves_player").unwrap();
+        assert_eq!(input.verdict, Verdict::Inconclusive);
+        assert!(input.detail.contains("this machine"), "{}", input.detail);
+        assert!(input.detail.contains("0.36 m"), "{}", input.detail);
+        assert!(!report.passed);
+        assert_eq!(report.correctness, Verdict::Inconclusive);
+        assert!(report.summary_line().starts_with("inconclusive at input_moves_player"), "{}", report.summary_line());
+    }
+
+    #[test]
+    fn a_bot_that_runs_its_simulated_budget_without_winning_fails_the_game() {
+        let fake = Fake::start(Script::WinExhausted);
+        let report = verify_session(&fake.ws_url(), "fake-chrome", None, &quick_limits()).unwrap();
+        all_but_win_passed(&report);
+        let win = report.gates.iter().find(|g| g.gate == "bot_reaches_win").unwrap();
+        assert_eq!(win.verdict, Verdict::Failed);
+        assert!(win.detail.contains("3 of 5"), "{}", win.detail);
+        assert!(win.detail.contains("50 simulated seconds"), "{}", win.detail);
+        assert!(!report.passed);
+        assert_eq!(report.correctness, Verdict::Failed);
+        assert_eq!(report.performance, Verdict::Passed);
+        assert!(report.summary_line().starts_with("failed at bot_reaches_win"), "{}", report.summary_line());
+    }
+
+    #[test]
+    fn a_machine_too_slow_to_run_the_bot_is_inconclusive_not_a_bad_game() {
+        // This is #111: the engine's clock creeps because every frame is a
+        // software-rendered 300 ms, the wall ceiling arrives first, and the report
+        // must say the machine could not settle it — not that the bot never won.
+        let fake = Fake::start(Script::TooSlow);
+        let report = verify_session(&fake.ws_url(), "fake-chrome", None, &quick_limits()).unwrap();
+        all_but_win_passed(&report);
+        let win = report.gates.iter().find(|g| g.gate == "bot_reaches_win").unwrap();
+        assert_eq!(win.verdict, Verdict::Inconclusive);
+        assert!(!win.passed);
+        assert!(win.detail.contains("this machine"), "{}", win.detail);
+        assert!(win.detail.contains("of the 50 s budget"), "{}", win.detail);
+        assert!(win.detail.contains("308.5 ms under software rendering"), "{}", win.detail);
+        assert!(!win.detail.contains("never won"), "{}", win.detail);
+        assert!(!report.passed, "inconclusive must never pass the report");
+        assert_eq!(report.correctness, Verdict::Inconclusive);
+        assert_eq!(report.performance, Verdict::Passed);
+        let line = report.summary_line();
+        assert!(line.contains(MACHINE_NOT_GAME), "{line}");
+    }
+
+    #[test]
+    fn a_build_with_no_simulated_clock_is_told_to_rebuild() {
+        let fake = Fake::start(Script::NoClock);
+        let report = verify_session(&fake.ws_url(), "fake-chrome", None, &quick_limits()).unwrap();
+        all_but_win_passed(&report);
+        let win = report.gates.iter().find(|g| g.gate == "bot_reaches_win").unwrap();
+        assert_eq!(win.verdict, Verdict::Inconclusive);
+        assert!(win.detail.contains("`build`"), "{}", win.detail);
+        assert!(!report.passed);
     }
 }
