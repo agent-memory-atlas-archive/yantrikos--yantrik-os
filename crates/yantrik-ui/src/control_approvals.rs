@@ -1795,6 +1795,63 @@ mod control_approvals_tests {
         }
     }
 
+    /// The row the card draws carries the app's whole sentence, and no warning the shell cannot
+    /// stand behind.
+    ///
+    /// The two cards of 22 September, rebuilt from the store outward: `studio.set_backend` with
+    /// `kind: fake` and with `kind: openai-images`. Both showed "…the sentences typed into this
+    /// app will leav… (585 characters in full)" — cut mid-word at the clause that said why the
+    /// grade is `sensitive`, and identical in the direction that stops anything leaving. What
+    /// reaches the Slint row now is the sentence as Studio published it, and the two rows differ
+    /// where they truly differ: in the argument box.
+    #[test]
+    fn approvals_the_row_says_the_whole_purpose_and_differs_by_argument() {
+        use crate::approvals::{Store, Verified};
+        use slint::Model;
+        use std::time::Instant;
+
+        // Verbatim from `yos describe studio`; 585 characters.
+        let purpose = "Choose where pictures are made from now on, and write that choice down in \
+            the configuration file. Graded `sensitive` because it decides where every later \
+            prompt goes: naming a hosted service means the sentences typed into this app will \
+            leave this machine and may cost money. `generate` and `variations` are regraded the \
+            moment this lands, so a caller cannot point Studio at a service and generate in the \
+            same breath under the old, local grade. No key is taken here — only the NAME of an \
+            environment variable that holds one, which is read at call time and never stored, \
+            logged or shown.";
+        assert_eq!(purpose.chars().count(), 585);
+
+        let mut store = Store::new();
+        let now = Instant::now();
+        let mut row = |args: serde_json::Value| {
+            let id = store
+                .request("claude-code 2.1.276", Verified::default(), "studio", "set_backend",
+                    args, "sensitive", purpose, now, "19:32")
+                .unwrap()
+                .id;
+            let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
+            super::row_for(card)
+        };
+        let back = row(serde_json::json!({"kind": "fake"}));
+        let away = row(serde_json::json!({
+            "kind": "openai-images", "model": "gpt-image-1", "api_key_env": "OPENAI_API_KEY"
+        }));
+
+        for shown in [&back, &away] {
+            assert_eq!(shown.purpose.as_str(), purpose, "the sentence, whole");
+            assert!(!shown.purpose.contains("characters in full"), "{}", shown.purpose);
+            // Nothing in red. The shell knows the grade and the app's sentence; it does not know
+            // what `fake` or `openai-images` means to Studio, so a hosted-service warning of its
+            // own would be the OS vouching for something it has not established — in the safe
+            // direction as much as the other one.
+            assert_eq!(shown.warning.as_str(), "");
+        }
+        assert_eq!(back.args.row_count(), 1);
+        assert_eq!(back.args.row_data(0).unwrap().as_str(), "kind: fake");
+        assert_eq!(away.args.row_count(), 3);
+        assert_eq!(away.args.row_data(1).unwrap().as_str(), "kind: openai-images");
+    }
+
     /// The arguments a grant binds to survive both ways they can arrive.
     #[test]
     fn approvals_args_json_is_accepted_as_object_or_string() {

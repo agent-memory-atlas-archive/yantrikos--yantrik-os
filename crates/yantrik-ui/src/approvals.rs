@@ -93,6 +93,12 @@ const RECORD_TAIL: usize = 4;
 // so every element on the card is a known number of lines. An argument is exactly one line,
 // because it is rendered as its own `Text` with `wrap: no-wrap`; a value longer than this is cut
 // with its true length named, so nothing is hidden in silence.
+//
+// The one exception is the purpose. It is the app's own sentence about what the person is being
+// asked to allow, and cutting it to a fixed number of lines turned out to hide the clause that
+// mattered (see `PURPOSE_CHARS`). So it reaches the card whole, and the card bounds its HEIGHT
+// instead — the block wraps, and past a fixed height it scrolls — which keeps the buttons on
+// screen without deciding for the person which part of the sentence they may read.
 
 /// How much of one argument value the card shows before cutting it.
 const ARG_VALUE_CHARS: usize = 60;
@@ -104,11 +110,23 @@ const ARG_VALUE_CHARS: usize = 60;
 /// more to the point, in the grant, which is bound to all of them whatever the card had room for.
 const ARG_ROWS: usize = 8;
 
-/// How much of the action's own description the card shows.
+/// How much of the action's own description the card shows before it stops.
 ///
-/// Every published purpose on this machine is one sentence. This is the bound that keeps a badly
-/// behaved one from pushing the buttons off the screen.
-const PURPOSE_CHARS: usize = 240;
+/// This was 240, on the belief that every published purpose on this machine is one sentence.
+/// It is not: Studio's `set_backend` publishes 585 characters, and the card cut them at
+/// "…naming a hosted service means the sentences typed into this app will leav… (585 characters
+/// in full)" — mid-word, with no way to read on, and at exactly the clause that said why the
+/// grade is what it is. Read that far, the sentence is a flat statement that the prompt leaves
+/// the machine; read whole, it is a condition ("naming a hosted service means…") that the
+/// arguments underneath either meet or do not. The person was shown the same fragment for
+/// `kind: fake`, the direction that stops anything leaving.
+///
+/// So the purpose is no longer cut to fit the card. The card wraps it and, past a height, scrolls
+/// it (see `ApprovalCard` in intent_lens.slint), so the buttons stay on screen however long the
+/// app's sentence is. This bound is only against the absurd — a description the size of a
+/// document — and it is enforced at a word boundary, because a cut that lands mid-word is what
+/// the person hit. Well above the longest description any app on this desktop publishes.
+const PURPOSE_CHARS: usize = 2000;
 
 /// Cut to a length without splitting a character, and say that it was cut.
 ///
@@ -119,6 +137,25 @@ fn clip(text: &str, max: usize) -> String {
         return text.to_string();
     }
     let head: String = text.chars().take(max).collect();
+    format!("{head}… ({} characters in full)", text.chars().count())
+}
+
+/// [`clip`], for prose: the cut lands on the last space before the bound, never inside a word.
+///
+/// An argument value is cut wherever the bound falls, because a path or an id has no words to
+/// respect and the person can see the shape of it from the head. A sentence is different: cut
+/// mid-word it reads as a different sentence, which is the defect [`PURPOSE_CHARS`] describes.
+/// The bound stays a bound — a run of text with no space in its first `max` characters is cut
+/// where [`clip`] would cut it — and the marker still names the true length.
+fn clip_at_word(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    let head = match head.trim_end().rfind(char::is_whitespace) {
+        Some(at) if at > 0 => head[..at].trim_end().to_string(),
+        _ => head,
+    };
     format!("{head}… ({} characters in full)", text.chars().count())
 }
 
@@ -265,9 +302,10 @@ pub struct Card {
     /// A sentence to put in front of the buttons, or empty. See [`warning_for`].
     pub warning: String,
     /// Whether the card may offer "Allow for this session" as a third choice. See
-    /// [`may_offer_session_rule`] — computed from the UNCLIPPED purpose, because the phrase that
-    /// says an action is irreversible can sit past [`PURPOSE_CHARS`] and a card that dropped it
-    /// would offer a standing yes for exactly the action that must not have one.
+    /// [`may_offer_session_rule`] — computed from the purpose as the app published it, not from
+    /// `purpose` above, so that even a description long enough to be cut at [`PURPOSE_CHARS`]
+    /// cannot lose the phrase that says the action is irreversible and end up offering a
+    /// standing yes for exactly the action that must not have one.
     pub can_session: bool,
     pub status: Status,
     /// The one-line transcript record, once this has been decided. Empty while pending.
@@ -670,7 +708,7 @@ impl Store {
                 app: record.app.clone(),
                 action: record.action.clone(),
                 grade: record.grade.clone(),
-                purpose: clip(&record.purpose, PURPOSE_CHARS),
+                purpose: clip_at_word(&record.purpose, PURPOSE_CHARS),
                 args: args_rows(&record.args),
                 warning: warning_for(&record.grade, &record.purpose),
                 can_session: may_offer_session_rule(&record.grade, &record.purpose),
@@ -1231,7 +1269,7 @@ mod approvals_tests {
     /// only conditional children how tall it wanted to be and getting zero — but even with that
     /// fixed, a card whose text can grow without limit runs off the screen and takes its buttons
     /// with it. So every element is bounded here: one line per argument, a fixed number of
-    /// arguments, a bounded purpose.
+    /// arguments. The purpose is the exception, and has its own test below.
     #[test]
     fn approvals_the_card_is_a_bounded_number_of_lines() {
         let long = "x".repeat(400);
@@ -1261,28 +1299,88 @@ mod approvals_tests {
             rows[ARG_ROWS]
         );
 
-        // And the purpose, which is the line that wraps.
+    }
+
+    /// What Studio publishes for `set_backend`, verbatim, as `yos describe studio` prints it.
+    /// 585 characters: the longest description on this desktop, and the one the card cut.
+    const SET_BACKEND_PURPOSE: &str = "Choose where pictures are made from now on, and write that \
+        choice down in the configuration file. Graded `sensitive` because it decides where every \
+        later prompt goes: naming a hosted service means the sentences typed into this app will \
+        leave this machine and may cost money. `generate` and `variations` are regraded the moment \
+        this lands, so a caller cannot point Studio at a service and generate in the same breath \
+        under the old, local grade. No key is taken here — only the NAME of an environment \
+        variable that holds one, which is read at call time and never stored, logged or shown.";
+
+    fn ask_studio(store: &mut Store, now: Instant, args: serde_json::Value) -> Card {
+        let id = store
+            .request("hermes", verified(), "studio", "set_backend", args, "sensitive",
+                SET_BACKEND_PURPOSE, now, "19:32")
+            .unwrap()
+            .id;
+        store.pending(now).into_iter().find(|c| c.id == id).expect("the card")
+    }
+
+    /// The app's sentence reaches the card whole. Cutting it is what hid the clause that mattered.
+    ///
+    /// On 22 September the card for `studio.set_backend` read "…naming a hosted service means the
+    /// sentences typed into this app will leav… (585 characters in full)": cut mid-word at 240,
+    /// with the condition turned into a flat statement and no way to read the rest. The same
+    /// fragment was shown for `kind: fake`, the direction that stops anything leaving.
+    #[test]
+    fn approvals_the_purpose_reaches_the_card_whole() {
+        assert_eq!(SET_BACKEND_PURPOSE.chars().count(), 585, "the fixture is the real sentence");
+
         let mut store = Store::new();
         let now = Instant::now();
-        store
-            .request(
-                "hermes",
-                verified(),
-                "notes",
-                "write",
-                serde_json::json!({"text": "hi"}),
-                "sensitive",
-                &"long ".repeat(200),
-                now,
-                "12:03",
-            )
-            .unwrap();
-        let card = &store.pending(now)[0];
+        let back = ask_studio(&mut store, now, serde_json::json!({"kind": "fake"}));
+        assert_eq!(back.purpose, SET_BACKEND_PURPOSE, "every character, none of them replaced");
+        assert!(!back.purpose.contains("characters in full"));
         assert!(
-            card.purpose.chars().count() < PURPOSE_CHARS + 40,
-            "an unbounded purpose would push the buttons off the screen: {} chars",
-            card.purpose.chars().count()
+            back.purpose.contains("will leave this machine and may cost money."),
+            "the clause the cut fell on is the one that says why to care"
         );
+
+        // The card owes the person the app's words and the arguments; it does not add a
+        // hosted-service warning of its own, in either direction. The shell has no idea what
+        // `kind: fake` means to Studio — that `fake` stays on this machine is Studio's knowledge,
+        // and it is in the sentence above, read whole. What differs between the two cards is the
+        // argument box, and a red line the shell could not stand behind would read as the OS
+        // vouching for a danger it has not established.
+        assert_eq!(back.warning, "", "nothing the shell can vouch for, so nothing in red");
+        let away = ask_studio(
+            &mut store,
+            now,
+            serde_json::json!({"kind": "openai-images", "model": "gpt-image-1"}),
+        );
+        assert_eq!(away.warning, "");
+        assert_eq!(away.purpose, back.purpose, "the same sentence, because it is the app's");
+        assert_ne!(away.args, back.args, "and the arguments are what tell the two apart");
+        assert_eq!(back.args, vec!["kind: fake".to_string()]);
+
+        // The purpose is still bounded — against a description the size of a document, not
+        // against a long sentence — and the bound respects words. 1000 characters, the size of
+        // the longest published sentence with room to spare, arrives whole.
+        let long = ask_studio(&mut store, now, serde_json::json!({"kind": "comfyui"}));
+        assert_eq!(long.purpose.chars().count(), 585);
+        let thousand = "word ".repeat(200);
+        assert_eq!(clip_at_word(&thousand, PURPOSE_CHARS), thousand);
+        assert!(1000 < PURPOSE_CHARS, "the bound is well above any sentence an app publishes");
+
+        // Past the bound the cut lands between words and names the true length; the marker is
+        // the same one an argument value carries, so a person learns one convention.
+        let document = "sentence ".repeat(400);
+        let cut = clip_at_word(&document, PURPOSE_CHARS);
+        assert!(cut.ends_with("… (3600 characters in full)"), "{cut}");
+        let head = cut.split('…').next().unwrap();
+        assert!(head.ends_with("sentence"), "cut at a word boundary, not inside one: {head:?}");
+        assert!(!head.ends_with(' '), "and without a trailing space before the marker");
+        assert!(head.chars().count() <= PURPOSE_CHARS);
+        assert!(head.chars().count() > PURPOSE_CHARS - 20, "close to the bound, not far short of it");
+
+        // A run with no space in it — nothing to respect — is cut where `clip` would cut it,
+        // so the bound is a bound and not a wish.
+        let unbroken = "x".repeat(PURPOSE_CHARS + 5);
+        assert_eq!(clip_at_word(&unbroken, PURPOSE_CHARS), clip(&unbroken, PURPOSE_CHARS));
     }
 
     #[test]

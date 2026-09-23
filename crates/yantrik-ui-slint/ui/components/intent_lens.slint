@@ -100,6 +100,11 @@ export component ApprovalCard inherits Rectangle {
     callback deny();
 
     property <bool> waiting: root.data.decision == "";
+    // How tall the purpose block may grow before it scrolls. 585 characters — the longest
+    // description any app here publishes — wrap to about nine lines at caption size in this
+    // card's width, around 130px, so they are read without scrolling; the cap is what keeps a
+    // card with eight arguments and every optional row up inside an 800px screen.
+    property <length> purpose-max: 160px;
 
     height: body.preferred-height;
     background: transparent;
@@ -257,12 +262,57 @@ export component ApprovalCard inherits Rectangle {
                 wrap: word-wrap;
             }
 
-            // What it does, in the app's own sentence.
-            Text {
-                text: root.data.purpose;
-                color: Theme.text-secondary;
-                font-size: Theme.fs-caption;
-                wrap: word-wrap;
+            // What it does, in the app's own sentence — the whole sentence.
+            //
+            // This used to be a bare wrapping Text fed a purpose cut to 240 characters, and
+            // Studio's `set_backend` publishes 585: the card read "…naming a hosted service means
+            // the sentences typed into this app will leav… (585 characters in full)", cut
+            // mid-word at the clause that said why the grade is what it is, with no way to read
+            // the rest. So the text is no longer cut to fit the card (see `PURPOSE_CHARS` in
+            // approvals.rs). Instead the card bounds the block's HEIGHT: it wraps, grows to fit
+            // the longest sentence any app on this desktop publishes, and past `purpose-max` it
+            // scrolls rather than pushing the buttons off the screen. The cap is what keeps the
+            // whole card inside an 800px screen with eight arguments and every optional row up.
+            //
+            // A fixed-height Rectangle rather than the Flickable straight in the layout: a
+            // Flickable has no preferred height of its own, so the layout would give it nothing.
+            // `purpose-text.preferred-height` is the wrapped height at the width the layout gave
+            // it, which is what the block wants to be until the cap says otherwise.
+            //
+            // The label under it says what kind of thing the sentence is, because the two cards
+            // of 22 September were read as the OS warning about THIS call when the sentence is
+            // the app's description of the ACTION and reads the same for `kind: fake` as for a
+            // hosted service. The arguments underneath are what change; their label says so.
+            // When the sentence is taller than the block, the label says that instead, since a
+            // Flickable gives no other sign that there is more. Same value-over-label pair, with
+            // spacing 0 inside, as the verified row above.
+            VerticalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    height: min(purpose-text.preferred-height, root.purpose-max);
+
+                    Flickable {
+                        viewport-height: purpose-text.preferred-height;
+
+                        purpose-text := Text {
+                            width: parent.width;
+                            text: root.data.purpose;
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                Text {
+                    text: purpose-text.preferred-height > root.purpose-max
+                        ? "says the app about the action · scroll for the rest"
+                        : "says the app about the action · the same for every call of it";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
             }
 
             // The arguments, exactly as the grant is bound to them.
@@ -273,21 +323,32 @@ export component ApprovalCard inherits Rectangle {
             // approvals.rs), each cut one naming its true length, and a list longer than eight
             // arrives with a line saying how many more the grant covers — so the bound is
             // visible in the text rather than being a silent truncation by the layout.
-            Rectangle {
-                border-radius: Theme.r-sm;
-                background: Theme.bg-input;
-                height: args-body.preferred-height;
+            VerticalLayout {
+                spacing: 0px;
 
-                args-body := VerticalLayout {
-                    padding: Theme.sp-2;
+                Rectangle {
+                    border-radius: Theme.r-sm;
+                    background: Theme.bg-input;
+                    height: args-body.preferred-height;
 
-                    for line in root.data.args : Text {
-                        text: line;
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-mono;
-                        wrap: no-wrap;
-                        overflow: elide;
+                    args-body := VerticalLayout {
+                        padding: Theme.sp-2;
+
+                        for line in root.data.args : Text {
+                            text: line;
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-mono;
+                            wrap: no-wrap;
+                            overflow: elide;
+                        }
                     }
+                }
+                Text {
+                    text: "asked for in this call · the grant is bound to exactly these";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    wrap: no-wrap;
+                    overflow: elide;
                 }
             }
 
