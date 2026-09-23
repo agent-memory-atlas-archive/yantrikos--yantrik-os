@@ -1222,6 +1222,18 @@ mod tests {
         assert_eq!(RecipeStatus::from_str("paused"), RecipeStatus::Paused);
     }
 
+    /// A hundred recipes made in one breath each get an id of their own (#173): the id was the
+    /// UUID's clock prefix, the same for about a minute, and the second insert panicked.
+    #[test]
+    fn recipes_made_together_get_ids_of_their_own() {
+        let conn = store();
+        let ids: HashSet<String> = (0..100)
+            .map(|n| RecipeStore::create(&conn, &format!("council seat {n}"), "", &[tool("a", json!({}), "x")], None))
+            .collect();
+        assert_eq!(ids.len(), 100);
+        assert_eq!(RecipeStore::list(&conn, None, 200).len(), 100);
+    }
+
     /// The chat's "pause" holds now: it used to write `waiting`, which the expiry sweep resumed at
     /// the next message.
     #[test]

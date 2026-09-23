@@ -441,7 +441,10 @@ impl RecipeStore {
         steps: &[RecipeStep],
         trigger: Option<&TriggerType>,
     ) -> String {
-        let id = format!("rcp_{}", &uuid7::uuid7().to_string()[..8]);
+        // The UUID's last 12 hex digits: its counter's low bits and its random tail. The first 8
+        // were the millisecond clock's top bits, the same for ~65 s, so a second recipe made in
+        // that minute collided with the first on the primary key and panicked (#173).
+        let id = format!("rcp_{}", &uuid7::uuid7().to_string()[24..]);
         let now = now_ts();
 
         conn.execute(

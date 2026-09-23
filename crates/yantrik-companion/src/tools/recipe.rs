@@ -209,7 +209,7 @@ impl Tool for RunRecipeTool {
                     "properties": {
                         "recipe_id": {
                             "type": "string",
-                            "description": "The recipe ID to run (e.g., 'rcp_abc12345')"
+                            "description": "The recipe ID to run (e.g., 'rcp_7f3a9c01b2d4')"
                         },
                         "variables": {
                             "type": "object",
