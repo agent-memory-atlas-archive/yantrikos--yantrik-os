@@ -127,9 +127,9 @@ def light_note(engine, light_mode):
             "light changes nothing in its renders; %s" % (how, LIGHT_NOTE_ENGINE_HINT))
 
 
-class Refusal(Exception):
-    """The app declining, in a sentence a person can read. Travels over the bridge
-    unchanged and comes out of the dispatch as a -32602 with this message."""
+# The app declining, in a sentence a person can read: the surface SDK's own `Refusal`, so it
+# travels over the bridge unchanged and comes out of the dispatch as a -32602 with this message.
+from yantrik_surface import Refusal  # noqa: E402,F401
 
 
 # ── pure parsing: no bpy, no scene, fully testable ──────────────────────────

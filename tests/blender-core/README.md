@@ -1,7 +1,10 @@
 # blender-core
 
-The Blender control surface's own tests: the addon in `apps/blender/addon/yantrik_surface`,
-driven against a fake `bpy`, with no Blender installed and no display.
+The Blender control surface's own tests: the addon in `apps/blender/addon/yantrik_blender`,
+driven against a fake `bpy`, with no Blender installed and no display. The addon is built on
+the Python surface SDK (`sdk/python/yantrik_surface`), so the wire, the dispatch order, the
+gate and the refusal wording pinned here are the SDK's, met through Blender; the SDK's own
+conformance suite is `sdk/python/tests`.
 
 Unlike the other `tests/*-core` directories this one is Python, not a Rust crate. The code
 under test is Python living inside somebody else's program; the crate shape would have

@@ -287,16 +287,23 @@ echo "   + app icon (svg + 48/128/256) as hicolor 'yantrik'"
 #
 # Blender itself is not built or shipped here — it is a program the machine has, or does
 # not. What the release carries is the half that makes it an app of this desktop:
-# bootstrap.py, which the launcher starts Blender with, and the yantrik_surface package
-# the bootstrap imports, which binds app-blender.sock and answers app.describe / app.act
-# like every app this OS builds. The dock route (Launch::Blender in wire/dock.rs) and the
-# .desktop entry both name this exact path; if this block moves, both move with it.
+# bootstrap.py, which the launcher starts Blender with; the yantrik_blender addon the
+# bootstrap imports, which binds app-blender.sock and answers app.describe / app.act like
+# every app this OS builds; and the surface SDK (sdk/python/yantrik_surface) the addon is
+# built on, vendored beside it. Vendored rather than installed into a site-packages, because
+# a blender.org build runs its own Python that sees no system packages, and so that the addon
+# always runs with the SDK it was released with. The dock route (Launch::Blender in
+# wire/dock.rs) and the .desktop entry both name this exact path; if this block moves, both
+# move with it.
 mkdir -p "$ROOT/share/blender"
 cp "$PROJECT_ROOT/apps/blender/bootstrap.py" "$ROOT/share/blender/bootstrap.py" \
   || fail "apps/blender/bootstrap.py missing — the launcher would open Blender with no way to talk to it"
-cp -r "$PROJECT_ROOT/apps/blender/addon/yantrik_surface" "$ROOT/share/blender/" \
-  || fail "apps/blender/addon/yantrik_surface missing — the bootstrap would import nothing"
-echo "   + blender control-surface addon (bootstrap + yantrik_surface)"
+cp -r "$PROJECT_ROOT/apps/blender/addon/yantrik_blender" "$ROOT/share/blender/" \
+  || fail "apps/blender/addon/yantrik_blender missing — the bootstrap would import nothing"
+cp -r "$PROJECT_ROOT/sdk/python/yantrik_surface" "$ROOT/share/blender/" \
+  || fail "sdk/python/yantrik_surface missing — the Blender addon would have no surface to serve"
+find "$ROOT/share/blender" -name __pycache__ -type d -prune -exec rm -rf {} +
+echo "   + blender control-surface addon (bootstrap + yantrik_blender + yantrik_surface SDK)"
 
 echo "   + labwc theme and $(ls "$ROOT/share/fonts" | wc -l) fonts"
 

@@ -98,8 +98,9 @@ A socket file outlives a crashed process. A client that finds a file nobody is l
     account of the peer (`SO_PEERCRED`, taken at `listen` time) gives its pid, `/proc/<pid>/exe`
     its program, and that program MUST be a `yantrik-ui` binary (the file name is `yantrik-ui`;
     Linux's ` (deleted)` suffix, left by an update that replaced the binary under a running shell,
-    is allowed). The app runtime's grant spending (`gate::spend_grant`), `yos` and, through `yos`,
-    `yos-mcp` do this. The rule is `yantrik_ipc_transport::owner::must_be_the_shell`.
+    is allowed). The app runtime's grant spending (`gate::spend_grant`), the Python surface SDK's
+    (`yantrik_surface.gate.spend_through_shell`), `yos` and, through `yos`, `yos-mcp` do this. The
+    rule is `yantrik_ipc_transport::owner::must_be_the_shell`.
 
   These stop accidents and casual impersonation — a second copy, a stray test server, a script
   that picked the wrong name. Anything already running as the person can build a binary called
@@ -399,13 +400,11 @@ protocol:
   skips them.
 - **Rust dispatch:** a non-string `expect_revision` is ignored (no guard) and a non-object `args`
   is read as no arguments. A client MUST send a string and an object.
-- **Blender's addon** (`apps/blender/addon/yantrik_surface`, a Python port of the dispatch): binds in
-  `/run/user/<uid>/yantrik` when `XDG_RUNTIME_DIR` is unset, which only a client may do; accepts a
-  request with no `id`; turns a non-string `expect_revision` into a string and refuses a non-object
-  `args` (`` `args` must be an object ``); renders small floats as Python does (§6); unlinks
-  whatever is at its socket path instead of pinging it; and does not check the peer behind
-  `app-shell` when it spends a grant. Piece C moves it onto the Python SDK, which keeps this
-  document.
+- **The Python surface SDK** (`sdk/python/yantrik_surface`), and Blender's addon, which is built on
+  it: checks each argument against its published type and refuses a non-object `args`
+  (`` `<action>` takes its arguments as an object of named values, and an array arrived ``), in the
+  words of the Rust `yantrik-surface` crate (piece B of the SDK design) — where the Rust dispatch
+  on `main` checks presence, not type (§4). It replays `surface-vectors.json` in full.
 
 ## Changes
 
