@@ -54,7 +54,7 @@ class Waiting(Handler):
 
     def answer(self, turn):
         self.started.set()
-        turn.cancelled.wait(5)
+        turn.cancelled.wait(20)
 
     def cancel(self, turn):
         self.cancelled_from.append(turn.turn_id)
@@ -359,7 +359,7 @@ class Minds(Handler):
             def answer(self, turn):
                 self.running.set()
                 if turn.text == "slow":
-                    self.release.wait(3)
+                    self.release.wait(20)
                 turn.emit("%s heard %s" % (conversation, turn.text))
 
             def reset(self):

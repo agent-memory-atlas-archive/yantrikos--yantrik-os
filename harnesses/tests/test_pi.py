@@ -229,16 +229,22 @@ class PiEventTests(unittest.TestCase):
         self.assertIn("REFUSED", end["summary"])
 
     def test_each_conversation_is_its_own_pi_process_with_its_agents_token(self):
-        self.start(yantrik_pi.handler(self.config("slow"), log=lambda message: None))
+        gate = os.path.join(self.work, "gate")
+        config = self.config("slow")
+        config.env["FAKE_PI_GATE"] = gate
+        self.start(yantrik_pi.handler(config, log=lambda message: None))
         a = self.desktop.ask("one", conversation="c-aaaaaa", agent_token="a" * 32)
         b = self.desktop.ask("two", conversation="c-bbbbbb", agent_token="b" * 32)
-        for turn in (a, b):
-            self.assertEqual(self.desktop.wait_closed(turn, timeout=8)[1], "complete")
-        # They ran at once: the second prompt reached its pi before the first had answered
-        # (each takes 0.6s), rather than waiting behind it.
+        # They run at once: both prompts reach a pi while neither has answered. One after the
+        # other, the second would never arrive until the gate opened.
+        self.assertTrue(wait_for(lambda: len(self.dump("prompts")) == 2, timeout=15),
+                        "the second conversation waited for the first")
         prompts = {p["message"]: p for p in self.dump("prompts")}
-        self.assertLess(abs(prompts["one"]["at"] - prompts["two"]["at"]), 0.6)
         self.assertNotEqual(prompts["one"]["pid"], prompts["two"]["pid"])
+        self.assertEqual(self.desktop.closes_for(a) + self.desktop.closes_for(b), [])
+        open(gate, "w").close()
+        for turn in (a, b):
+            self.assertEqual(self.desktop.wait_closed(turn, timeout=10)[1], "complete")
 
         started = self.dump("env")
         self.assertEqual(len(started), 2, started)

@@ -7,7 +7,7 @@ argv building is exercised unchanged) or from $FAKE_PI_SCENARIO:
     tool      a tool execution around the text: start, two accumulated updates, end, and the
               assistant message's usage in message_end
     refused   a tool execution whose result is a REFUSED answer
-    slow      waits half a second before answering, so two processes can be seen overlapping
+    slow      answers only once $FAKE_PI_GATE exists, so two processes can be held mid-answer
     dialog    an extension_ui_request confirm, which must come back cancelled
     abort     never finishes on its own; answers `abort` with agent_end + agent_settled
     exit      dies in the middle of the turn
@@ -119,7 +119,12 @@ def handle_prompt(command):
         return
 
     if SCENARIO == "slow":
-        time.sleep(0.6)
+        # Answers once $FAKE_PI_GATE exists (or after 20s), so a test can hold two processes
+        # mid-answer at once and know they overlapped, however slow the machine is.
+        gate = os.environ.get("FAKE_PI_GATE")
+        deadline = time.monotonic() + 20
+        while gate and not os.path.exists(gate) and time.monotonic() < deadline:
+            time.sleep(0.02)
         emit({"type": "message_update",
               "assistantMessageEvent": {"type": "text_delta",
                                         "delta": "answered by %d" % os.getpid()}})
