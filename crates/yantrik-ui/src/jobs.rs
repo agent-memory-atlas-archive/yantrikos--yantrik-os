@@ -578,7 +578,13 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let status = board.wait(&t.ticket, Duration::from_secs(5)).unwrap();
+        let mut status = board.wait(&t.ticket, Duration::from_secs(5)).unwrap();
+        // `wait` wakes on any change, and the worker's `start` is one: on a loaded machine the
+        // waiter can run between `start` and `finish` and see `running`. The next wait wakes on
+        // the finish, just as quickly.
+        if status["state"] == "running" {
+            status = board.wait(&t.ticket, Duration::from_secs(5)).unwrap();
+        }
         assert!(started.elapsed() < Duration::from_secs(2), "should wake on the change");
         assert_eq!(status["state"], "done");
         assert_eq!(status["result"], "the answer");
