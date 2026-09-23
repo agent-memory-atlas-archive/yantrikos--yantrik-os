@@ -96,6 +96,37 @@ def material_note(engine, color_type):
             % (source, color_type, MATERIAL_NOTE_ENGINE_HINT))
 
 
+# How a Workbench render lights objects, per `scene.display.shading.light`. None of the
+# three reads a scene light: STUDIO is the engine's own fixed light rig, MATCAP a baked
+# sphere image, FLAT no lighting at all. A caller's `set_light` shows under none of them.
+WORKBENCH_LIGHTING = {
+    "STUDIO": "under its own studio light",
+    "MATCAP": "with a MatCap, a baked image of a lit sphere",
+    "FLAT": "flat, with no lighting at all",
+}
+
+LIGHT_NOTE_ENGINE_HINT = "`set_render engine=eevee` (or cycles) lights the scene with it"
+
+
+def light_note(engine, light_mode):
+    """What this render engine does with a scene light — the sentence a `set_light` answer
+    carries, or None when there is nothing to add.
+
+    Cycles and EEVEE light the scene with its lights: nothing to say. Workbench never does,
+    whatever its lighting mode — its studio light is a fixed rig of the engine's own, a
+    MatCap is a baked image, and flat is no lighting at all — so a light set on a Workbench
+    scene changes nothing in its render. The light is still set, and a later EEVEE or
+    Cycles render uses it; but the answer has to say, at the moment the light is set, that
+    this engine will not draw it. Found alongside #120 (#128): `set_light` on a Workbench
+    scene answered `accepted: True, settled: True`, and the render was the same picture.
+    """
+    if engine != "workbench":
+        return None
+    how = WORKBENCH_LIGHTING.get(light_mode, "in its `%s` lighting mode" % light_mode)
+    return ("Workbench lights the scene itself, %s, and does not use scene lights, so this "
+            "light changes nothing in its renders; %s" % (how, LIGHT_NOTE_ENGINE_HINT))
+
+
 class Refusal(Exception):
     """The app declining, in a sentence a person can read. Travels over the bridge
     unchanged and comes out of the dispatch as a -32602 with this message."""
@@ -381,16 +412,27 @@ class Scene:
             return None
         return None  # Workbench has no samples to report
 
-    def _workbench_color_type(self):
-        """What a Workbench render colours objects by. Read defensively: a `bpy` without
-        `scene.display.shading` is assumed to be at Blender's default, MATERIAL, rather than
+    def _workbench_shading(self, name, default):
+        """One of a Workbench render's shading settings (`scene.display.shading`). Read
+        defensively: a `bpy` without it is assumed to be at Blender's default rather than
         refusing an action over a setting that only matters to one engine."""
         display = getattr(self.bpy.context.scene, "display", None)
         shading = getattr(display, "shading", None)
-        return str(getattr(shading, "color_type", "MATERIAL"))
+        return str(getattr(shading, name, default))
+
+    def _workbench_color_type(self):
+        """What a Workbench render colours objects by; MATERIAL is Blender's default."""
+        return self._workbench_shading("color_type", "MATERIAL")
+
+    def _workbench_light_mode(self):
+        """How a Workbench render lights objects; STUDIO is Blender's default."""
+        return self._workbench_shading("light", "STUDIO")
 
     def _material_note(self):
         return material_note(self._engine_key(), self._workbench_color_type())
+
+    def _light_note(self):
+        return light_note(self._engine_key(), self._workbench_light_mode())
 
     # ── act ──────────────────────────────────────────────────────────────────
 
@@ -691,12 +733,18 @@ class Scene:
             light_obj.data.energy = energy
         if location is not None:
             light_obj.location = location
-        return {
+        reported = {
             "light": light_obj.name,
             "kind": kind,
             "energy": round(float(light_obj.data.energy), 3),
             "location": _r3(light_obj.location),
         }
+        # Said at the moment it matters: the light is set, and a later EEVEE or Cycles
+        # render uses it, but a Workbench render lights the scene itself and will not draw it.
+        note = self._light_note()
+        if note is not None:
+            reported["note"] = note
+        return reported
 
     def _do_import_model(self, args):
         raw = self._string(args, "path")

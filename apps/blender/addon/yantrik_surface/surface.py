@@ -149,7 +149,9 @@ ACTIONS = [
                       optional=True),
             ]),
     _action("set_light",
-            "Add a light of a kind, or change the scene's existing one of that kind.",
+            "Add a light of a kind, or change the scene's existing one of that kind. Cycles "
+            "and EEVEE light the scene with it; Workbench lights the scene itself, and the "
+            "answer says so.",
             "standard", [
                 Param("kind", description="point, sun, spot or area"),
                 Param("energy", type="number", description="brightness in the engine's own "
