@@ -22,6 +22,7 @@ import fake_bpy  # noqa: E402
 from yantrik_surface.scene import (  # noqa: E402
     Refusal,
     Scene,
+    light_note,
     look_at_quaternion,
     material_note,
     parse_color,
@@ -698,6 +699,82 @@ class TestWhatARenderDoesWithAMaterial(unittest.TestCase):
         scene.run("set_render", {"engine": "workbench"})
         del fake.context.scene.display
         self.assertEqual(scene._workbench_color_type(), "MATERIAL")
+
+
+class TestWhatARenderDoesWithALight(unittest.TestCase):
+    """#128, the light-shaped twin of #120: `set_light` on a Workbench scene answered
+    `accepted: True, settled: True`, and the render was the same picture, because Workbench
+    lights the scene itself and never reads a scene light — whatever its lighting mode.
+
+    Two halves again. The pure decision — engine and Workbench lighting mode in, what the
+    render will do with the light out — and the action that carries it: `set_light` still
+    sets the light (a later EEVEE or Cycles render uses it) and answers with the note on a
+    Workbench scene, without one on Cycles or EEVEE.
+    """
+
+    STUDIO = ("Workbench lights the scene itself, under its own studio light, and does not "
+              "use scene lights, so this light changes nothing in its renders; "
+              "`set_render engine=eevee` (or cycles) lights the scene with it")
+
+    def test_cycles_and_eevee_use_scene_lights_and_there_is_nothing_to_add(self):
+        self.assertIsNone(light_note("cycles", "STUDIO"))
+        self.assertIsNone(light_note("eevee", "STUDIO"))
+        # The lighting mode belongs to Workbench; under another engine it is not consulted.
+        self.assertIsNone(light_note("cycles", "FLAT"))
+
+    def test_workbench_under_its_studio_light_says_the_light_will_not_show(self):
+        self.assertEqual(light_note("workbench", "STUDIO"), self.STUDIO)
+
+    def test_workbench_under_a_matcap_or_flat_says_so_in_the_same_sentence(self):
+        self.assertIn("with a MatCap, a baked image of a lit sphere",
+                      light_note("workbench", "MATCAP"))
+        self.assertIn("flat, with no lighting at all", light_note("workbench", "FLAT"))
+        for light_mode in ("STUDIO", "MATCAP", "FLAT"):
+            self.assertIn("does not use scene lights", light_note("workbench", light_mode),
+                          light_mode)
+
+    def test_a_lighting_mode_this_addon_has_not_heard_of_is_still_named_not_guessed_at(self):
+        note = light_note("workbench", "LASER")
+        self.assertIn("in its `LASER` lighting mode", note)
+        self.assertIn("does not use scene lights", note)
+
+    def test_set_light_on_a_cycles_scene_carries_no_note(self):
+        scene, _ = make_scene()
+        result = scene.run("set_light", {"kind": "sun", "energy": 3})
+        self.assertNotIn("note", result)
+
+    def test_set_light_on_a_workbench_scene_still_sets_the_light_and_says_it_will_not_show(self):
+        scene, fake = make_scene()
+        scene.run("set_render", {"engine": "workbench"})
+        result = scene.run("set_light", {"kind": "sun", "energy": 3, "location": "0,0,10"})
+        self.assertEqual(result["energy"], 3.0, "still accepted, still set")
+        lights = [o for o in fake.context.scene.objects if o.type == "LIGHT"]
+        self.assertEqual(len(lights), 1, "the light is in the scene for a later EEVEE render")
+        self.assertEqual(lights[0].data.energy, 3.0)
+        self.assertEqual(result["note"], self.STUDIO)
+        self.assertEqual(set(result) - {"note"}, {"light", "kind", "energy", "location"},
+                         "the note is added to the answer, not in place of any of it")
+
+    def test_set_light_under_a_workbench_matcap_names_the_mode(self):
+        scene, fake = make_scene()
+        scene.run("set_render", {"engine": "workbench"})
+        fake.context.scene.display.shading.light = "MATCAP"
+        result = scene.run("set_light", {"kind": "point", "energy": 100})
+        self.assertIn("with a MatCap", result["note"])
+
+    def test_switching_to_eevee_after_the_light_drops_the_note(self):
+        scene, _ = make_scene()
+        scene.run("set_render", {"engine": "workbench"})
+        self.assertIn("note", scene.run("set_light", {"kind": "sun", "energy": 3}))
+        scene.run("set_render", {"engine": "eevee"})
+        self.assertNotIn("note", scene.run("set_light", {"kind": "sun", "energy": 5}))
+
+    def test_a_bpy_without_render_shading_settings_is_read_as_blenders_default(self):
+        scene, fake = make_scene()
+        scene.run("set_render", {"engine": "workbench"})
+        del fake.context.scene.display
+        self.assertEqual(scene._workbench_light_mode(), "STUDIO")
+        self.assertEqual(scene.run("set_light", {"kind": "sun"})["note"], self.STUDIO)
 
 
 if __name__ == "__main__":
