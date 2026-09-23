@@ -816,6 +816,7 @@ export component App inherits Window {
     in property <string> about-version: "";
     in property <string> about-build-date: "";
     in property <[ComponentVersionData]> about-components: [];
+    in property <[string]> about-changes: [];
     // Updates. Every one of these is set from what `yantrik-update` reports — see
     // wire/version.rs and control_update.rs. `about-update-count` is gone with the checker that
     // invented it: it counted components whose "latest" version came from a manifest field that
@@ -2353,6 +2354,7 @@ export component App inherits Window {
                 version-text: root.about-version;
                 build-date: root.about-build-date;
                 components: root.about-components;
+                changes: root.about-changes;
                 update-channel: root.about-update-channel;
                 update-host: root.about-update-host;
                 update-installed: root.about-update-installed;

@@ -131,6 +131,43 @@ fn populate_about_info(ui_weak: &slint::Weak<App>) {
     // Build date from build.rs
     let build_date = option_env!("BUILD_DATE").unwrap_or("unknown");
     ui.set_about_build_date(build_date.into());
+
+    // What changed in this build: the CHANGELOG.md the release bundle carries, one line per
+    // change since the build published before it. A machine whose bundle predates the file
+    // shows nothing rather than a heading over an empty list.
+    let changes: Vec<slint::SharedString> =
+        read_changes().into_iter().map(slint::SharedString::from).collect();
+    ui.set_about_changes(slint::ModelRc::new(slint::VecModel::from(changes)));
+}
+
+/// The change lines from the installed bundle's CHANGELOG.md, or from the tree beside a
+/// development binary, or nothing.
+pub(crate) fn read_changes() -> Vec<String> {
+    let mut candidates = vec![std::path::PathBuf::from("/opt/yantrik/share/CHANGELOG.md")];
+    if let Some(root) = std::env::current_exe()
+        .ok()
+        .as_ref()
+        .and_then(|exe| exe.parent())
+        .and_then(|bin| bin.parent())
+    {
+        candidates.push(root.join("share/CHANGELOG.md"));
+    }
+    candidates
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .map(|text| parse_changes(&text))
+        .unwrap_or_default()
+}
+
+/// The `- ` bullets of a changelog, in order, trimmed, capped — the heading and the "since"
+/// line are for a person reading the file, not for the screen.
+pub(crate) fn parse_changes(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.strip_prefix("- "))
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .take(60)
+        .collect()
 }
 
 /// The uptime field: /proc/uptime, formatted for display.
@@ -195,5 +232,44 @@ mod tests {
         // Three days into the same boot, read off the machine again while the
         // System screen was showing "3d 1h" for it from its own formatter.
         assert_eq!(format_uptime(262922), "3d 1h 2m");
+    }
+}
+
+#[cfg(test)]
+mod changelog_tests {
+    use super::parse_changes;
+
+    #[test]
+    fn only_the_bullets_reach_the_screen_and_in_order() {
+        // Built from lines, so the test text cannot pick up the source file's indentation.
+        let text = [
+            "# What changed in v0.1.0-320",
+            "",
+            "_since abc1234; built 2026-09-23._",
+            "",
+            "- The launcher asks its own route before the .desktop catalogue",
+            "- Arcade's grammar is published from the constants the validator enforces",
+            "",
+            "-  spaced bullet  ",
+            "not a bullet",
+        ]
+        .join("
+");
+        let got = parse_changes(&text);
+        assert_eq!(
+            got,
+            vec![
+                "The launcher asks its own route before the .desktop catalogue",
+                "Arcade's grammar is published from the constants the validator enforces",
+                "spaced bullet",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_or_missing_changelog_is_an_empty_list() {
+        assert!(parse_changes("").is_empty());
+        assert!(parse_changes("# heading only
+").is_empty());
     }
 }

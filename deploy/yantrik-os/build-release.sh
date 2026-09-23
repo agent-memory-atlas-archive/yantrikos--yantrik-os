@@ -372,6 +372,39 @@ binaries=${#BINS[@]}
 models=$([ "$WITH_MODELS" = 1 ] && echo included || echo excluded)
 EOF
 
+# ── What changed ──
+#
+# Every build carries its own changelog: the non-merge commit subjects since the build that was
+# published before it. It lands at share/CHANGELOG.md in the payload, so an installed machine
+# has it at /opt/yantrik/share/CHANGELOG.md, where the About screen reads it and a person can
+# `cat` it. The Discord announcement and the workflow summary print the same list.
+#
+# "Since the previous build" is a fact the ISO workflow knows — its `decide` job reads the
+# channel's latest.json and hands the git hash in as YANTRIK_PREVIOUS. A local build has no such
+# fact; it falls back to the last tag, and failing that to the last forty changes, and says which
+# it did in the file rather than presenting a guess as a range.
+PREVIOUS="${YANTRIK_PREVIOUS:-}"
+if [ -z "$PREVIOUS" ]; then
+  PREVIOUS="$(git -C "$PROJECT_ROOT" describe --tags --abbrev=0 HEAD~1 2>/dev/null || true)"
+fi
+if [ -n "$PREVIOUS" ] && git -C "$PROJECT_ROOT" rev-parse -q --verify "$PREVIOUS^{commit}" >/dev/null 2>&1; then
+  CHANGE_RANGE="$PREVIOUS..HEAD"
+  CHANGE_SINCE="since $PREVIOUS"
+else
+  CHANGE_RANGE="-n 40"
+  CHANGE_SINCE="the last 40 changes (no previous build was known when this was built)"
+fi
+mkdir -p "$ROOT/share"
+{
+  echo "# What changed in $VERSION"
+  echo
+  echo "_${CHANGE_SINCE}; built $(date -u +%Y-%m-%d), git $GITREV._"
+  echo
+  # shellcheck disable=SC2086
+  git -C "$PROJECT_ROOT" log --no-merges --format='- %s' $CHANGE_RANGE 2>/dev/null | head -200
+} > "$ROOT/share/CHANGELOG.md"
+echo "   + share/CHANGELOG.md ($(grep -c '^- ' "$ROOT/share/CHANGELOG.md") changes, $CHANGE_SINCE)"
+
 # The same string, one line, no keys: `cat /opt/yantrik/.version` is what a person types, and
 # `.version` existed before BUILD did so scripts and habits still point at it.
 #
