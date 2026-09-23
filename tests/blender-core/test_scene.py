@@ -23,6 +23,7 @@ from yantrik_surface.scene import (  # noqa: E402
     Refusal,
     Scene,
     look_at_quaternion,
+    material_note,
     parse_color,
     parse_resolution,
     parse_vec3,
@@ -597,6 +598,106 @@ class TestRunPython(unittest.TestCase):
         with self.assertRaises(Refusal) as caught:
             scene.run("run_python", {"code": "   "})
         self.assertEqual(str(caught.exception), "`code` must be a non-empty string of Python")
+
+
+class TestWhatARenderDoesWithAMaterial(unittest.TestCase):
+    """#120: six accepted `set_material` calls, a uniformly grey Workbench render, and the
+    sentence that would have explained it said only when someone tried to set `samples`.
+
+    Two halves. The pure decision — engine and Workbench colour type in, what the render
+    will show out — and the actions that carry it: `set_material` and `render` answer with
+    the note on a Workbench scene and without one on Cycles or EEVEE. And the cause itself:
+    Workbench draws a material's viewport-display colour, never its node tree, so the colour
+    is now set in both places (measured on Blender 4.3.2: BSDF-only red rendered grey,
+    (0.60, 0.61, 0.61); with the viewport colour set too it rendered red, (0.67, 0.22, 0.19)).
+    """
+
+    FLAT = ("Workbench draws materials as flat colour under its own studio light: metallic "
+            "and roughness only shape the highlight, and the scene's lights do not reach it; "
+            "`set_render engine=eevee` (or cycles) shades materials properly")
+
+    def test_cycles_and_eevee_shade_materials_and_there_is_nothing_to_add(self):
+        self.assertIsNone(material_note("cycles", "MATERIAL"))
+        self.assertIsNone(material_note("eevee", "MATERIAL"))
+        # The colour type belongs to Workbench; under another engine it is not consulted.
+        self.assertIsNone(material_note("cycles", "OBJECT"))
+
+    def test_workbench_colouring_by_material_draws_it_flat_and_says_so(self):
+        self.assertEqual(material_note("workbench", "MATERIAL"), self.FLAT)
+
+    def test_workbench_colouring_by_anything_else_does_not_draw_it_and_says_how_to(self):
+        note = material_note("workbench", "OBJECT")
+        self.assertEqual(
+            note,
+            "Workbench is colouring objects by each object's own colour (its colour type is "
+            "`OBJECT`) and ignores materials, so the colours set with `set_material` do not "
+            "show in its renders; `set_render engine=eevee` (or cycles) shades materials "
+            "properly, or set Workbench's Color back to Material under Render Properties")
+        for color_type in ("SINGLE", "RANDOM", "VERTEX", "TEXTURE"):
+            self.assertIn("ignores materials", material_note("workbench", color_type),
+                          color_type)
+
+    def test_a_colour_type_this_addon_has_not_heard_of_is_still_named_not_guessed_at(self):
+        note = material_note("workbench", "HOLOGRAM")
+        self.assertIn("colouring objects by `HOLOGRAM`", note)
+        self.assertIn("ignores materials", note)
+
+    def test_set_material_sets_the_viewport_colour_workbench_actually_draws(self):
+        scene, fake = make_scene()
+        scene.run("add_primitive", {"kind": "cube", "name": "Box"})
+        scene.run("set_material", {"name": "Box", "color": "#ff0000",
+                                   "metallic": 0.9, "roughness": 0.1})
+        material = fake.context.scene.objects[0].material_slots[0].material
+        self.assertEqual(tuple(material.diffuse_color), (1.0, 0.0, 0.0, 1.0),
+                         "the shader was set but the colour Workbench draws was left grey")
+        self.assertEqual(material.metallic, 0.9)
+        self.assertEqual(material.roughness, 0.1)
+        # And the shader still has it: Cycles and EEVEE read the node, not the display trio.
+        bsdf = material.node_tree.nodes.get("Principled BSDF")
+        self.assertEqual(tuple(bsdf.inputs["Base Color"].default_value), (1.0, 0.0, 0.0, 1.0))
+
+    def test_set_material_on_a_cycles_scene_carries_no_note(self):
+        scene, _ = make_scene()
+        scene.run("add_primitive", {"kind": "cube", "name": "Box"})
+        result = scene.run("set_material", {"name": "Box", "color": "#ff0000"})
+        self.assertNotIn("note", result)
+
+    def test_set_material_on_a_workbench_scene_says_it_is_drawn_flat(self):
+        scene, _ = make_scene()
+        scene.run("set_render", {"engine": "workbench"})
+        scene.run("add_primitive", {"kind": "cube", "name": "Box"})
+        result = scene.run("set_material", {"name": "Box", "color": "#ff0000"})
+        self.assertEqual(result["color"], [1.0, 0.0, 0.0, 1.0], "still accepted, still set")
+        self.assertEqual(result["note"], self.FLAT)
+
+    def test_set_material_under_a_workbench_colour_type_that_ignores_it_says_so(self):
+        scene, fake = make_scene()
+        scene.run("set_render", {"engine": "workbench"})
+        fake.context.scene.display.shading.color_type = "RANDOM"
+        scene.run("add_primitive", {"kind": "cube", "name": "Box"})
+        result = scene.run("set_material", {"name": "Box", "color": "#ff0000"})
+        self.assertIn("a random colour per object", result["note"])
+        self.assertIn("do not show in its renders", result["note"])
+
+    def test_a_workbench_render_carries_the_same_note_and_a_cycles_render_none(self):
+        scene, fake = make_scene()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = scene.run("render", {"output": os.path.join(tmp, "cycles.png")})
+            self.assertNotIn("note", result)
+            scene.run("set_render", {"engine": "workbench"})
+            result = scene.run("render", {"output": os.path.join(tmp, "flat.png")})
+            self.assertEqual(result["note"], self.FLAT)
+            fake.context.scene.display.shading.color_type = "SINGLE"
+            result = scene.run("render", {"output": os.path.join(tmp, "single.png")})
+            self.assertIn("one colour for every object", result["note"])
+        self.assertEqual(set(result) - {"note"}, {"path", "seconds", "bytes"},
+                         "the note is added to the answer, not in place of any of it")
+
+    def test_a_bpy_without_render_shading_settings_is_read_as_blenders_default(self):
+        scene, fake = make_scene()
+        scene.run("set_render", {"engine": "workbench"})
+        del fake.context.scene.display
+        self.assertEqual(scene._workbench_color_type(), "MATERIAL")
 
 
 if __name__ == "__main__":

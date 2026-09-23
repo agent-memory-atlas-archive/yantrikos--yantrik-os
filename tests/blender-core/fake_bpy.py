@@ -64,7 +64,11 @@ class FakeNodeTree:
 class FakeMaterial:
     def __init__(self, name, with_bsdf=True):
         self.name = name
+        # The viewport-display trio, at Blender's own defaults. Workbench and the Solid
+        # viewport draw these and never read the node tree, which is why they are modelled.
         self.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+        self.metallic = 0.0
+        self.roughness = 0.4
         self._use_nodes = False
         self._with_bsdf = with_bsdf
         self.node_tree = None
@@ -187,12 +191,27 @@ class FakeEevee:
         self.taa_render_samples = 64
 
 
+class FakeShading:
+    """`scene.display.shading`: the shading a Workbench *render* uses (the viewport has its
+    own). `color_type` is what Workbench colours objects by; MATERIAL is Blender's default."""
+
+    def __init__(self):
+        self.color_type = "MATERIAL"
+        self.light = "STUDIO"
+
+
+class FakeDisplay:
+    def __init__(self):
+        self.shading = FakeShading()
+
+
 class FakeScene:
     def __init__(self, name="Scene", engines=("CYCLES", "BLENDER_EEVEE", "BLENDER_WORKBENCH")):
         self.name = name
         self.objects = []
         self.camera = None
         self.render = FakeRenderSettings(engines)
+        self.display = FakeDisplay()
         self.cycles = FakeCycles()
         self.eevee = FakeEevee()
         self.collection = FakeCollection(self)
