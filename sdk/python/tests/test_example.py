@@ -1,4 +1,5 @@
-"""The example, driven by the OS's own client: `examples/hello_surface.py` served on a socket and
+"""The example, driven by the OS's own client: `examples/hello_surface.py` (at the top of the
+repository, beside its Rust twin `examples/hello-surface`) served on a socket and
 `deploy/yantrik-os/yos` run against it exactly as the README tells a person to — describe, act,
 a refusal, and a sensitive act in ask mode, where `yos` raises the card, waits for the person,
 and acts again with the grant, which the surface spends through the shell. The shell here is a
@@ -8,6 +9,7 @@ actions yos and the dispatch call. Everything else is the real thing over real s
 """
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -121,6 +123,20 @@ class TestWithYos(TestTheExample):
         self.assertIn("another instance owns", program.stderr)
         self.assertIn("it answered rpc.ping as `app-hello`", program.stderr)
         self.assertEqual(self.yos("describe", "hello").returncode, 0)
+
+    def test_yos_check_finds_nothing_wrong(self):
+        # The OS's own conformance checker, as an author runs it in their CI: every check it
+        # makes passes, and it never ran a handler to find out.
+        done = self.yos("check", "hello", "--json")
+        report = json.loads(done.stdout)
+        rows = report["surfaces"][0]["checks"]
+        self.assertTrue(report["ok"], [r for r in rows if r["status"] == "fail"])
+        passed = {r["check"] for r in rows if r["status"] == "pass"}
+        for check in ("ping", "describe", "protocol", "schema", "grades", "params", "secrets",
+                      "revision", "steady", "method", "empty", "unknown", "missing",
+                      "undeclared", "types", "stale"):
+            self.assertIn(check, passed, rows)
+        self.assertEqual(self.example.items, [], "yos check ran a handler")
 
     def test_without_a_shell_to_ask_nothing_runs(self):
         self.surface.act({"action": "add", "args": {"text": "milk"}})

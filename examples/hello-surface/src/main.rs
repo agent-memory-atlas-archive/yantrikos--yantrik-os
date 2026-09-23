@@ -5,7 +5,8 @@
 //! that cannot be undone), and set it back to zero (`reset`, graded `sensitive`: it throws away
 //! what was counted, so in `ask` mode the person sees a card and presses Allow before it runs).
 //! Everything here that is not the counter is the entire cost of putting something where a mind
-//! can find it — the Rust twin of `crates/yantrik-harness/examples/echo_harness.rs`.
+//! can find it — the Rust twin of `crates/yantrik-harness/examples/echo_harness.rs`, and of
+//! `examples/hello_surface.py` in Python.
 //!
 //! Note what is absent. No argument parsing, no type checks, no permission code, no revision
 //! bookkeeping, no JSON-RPC: the dispatch refuses `by=two` before the handler runs, answers every
@@ -13,7 +14,7 @@
 //! `reset` for the person's Allow. The handlers only count.
 //!
 //! ```text
-//! cargo run -p yantrik-surface --example hello_surface
+//! cargo run -p hello-surface
 //!
 //! yos ls                               # app-counter is there
 //! yos describe counter                 # "Counter — 0, last changed by nobody yet"
@@ -21,11 +22,12 @@
 //! yos act counter increment            # `by` defaults to 1
 //! yos act counter increment by=two     # refused: `by` must be an integer
 //! yos act counter reset                # sensitive: a card first, in ask mode
+//! yos check counter                    # does it keep the protocol? (it does: tests/yos_check.rs)
 //! ```
 //!
 //! Running, it is found by its socket. To be found while it is not — listed, opened by name — it
-//! would ship a `.desktop` file with `X-Yantrik-Surface=counter` (see the crate docs, "Found while
-//! closed").
+//! would ship a `.desktop` file with `X-Yantrik-Surface=counter`: docs/sdk/found-while-closed.md,
+//! and `templates/rust-surface`, which is this program grown into something to copy.
 
 use std::sync::{Arc, Mutex};
 

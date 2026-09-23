@@ -55,6 +55,9 @@ members = [
     "apps/studio",
     "crates/yantrik-harness",
     "crates/yantrik-agent-terminal",
+    # The surface SDK's example, template and guide samples (docs/sdk): built and tested with
+    # everything else, so what an outside author copies is what CI ran.
+    "examples/hello-surface",
 ]
 
 # ── Shared dependencies ──────────────────────────────────────────────

@@ -26,7 +26,8 @@ whatever Python the host program brings.
 
 ## Five minutes
 
-`examples/hello_surface.py`, the smallest complete surface:
+[`examples/hello_surface.py`](../../examples/hello_surface.py) (at the top of the repository,
+beside its Rust twin), the smallest complete surface:
 
 ```python
 from typing import Annotated
@@ -59,7 +60,7 @@ surface.serve()   # binds app-hello.sock in the session's socket directory
 Run it, then from another terminal on the same session (this transcript is the real one):
 
 ```text
-$ python3 sdk/python/examples/hello_surface.py
+$ python3 examples/hello_surface.py
 [yantrik] hello answering on /run/user/1000/yantrik/app-hello.sock (2 actions)
 
 $ yos describe hello
@@ -268,6 +269,14 @@ the example driven by the real `yos`:
 ```sh
 python3 -m unittest discover -s sdk/python/tests -v
 ```
+
+## The guide
+
+[`docs/sdk/`](../../docs/sdk/README.md) is written for someone who has never seen this OS: a
+quickstart in each language, wrapping a program you did not write (Blender, and the LibreOffice
+adapter in `adapters/libreoffice`, which is built only on this package), choosing a grade,
+designing a `describe` a mind can use, the `.desktop` keys, and `yos check`.
+`templates/python-surface` is a starting point to copy.
 
 ## Where it comes from
 

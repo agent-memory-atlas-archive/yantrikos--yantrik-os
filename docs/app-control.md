@@ -98,7 +98,8 @@ sees a call. Then run `yos check notes` (below) and fix what it says.
 same dispatch without Slint: `yantrik_surface::Surface` (re-exported by `yantrik-service-sdk`).
 `Surface::new(id).describe(…).action(…).serve()` binds `app-<id>.sock`; a service that already
 serves methods of its own keeps its `ServiceHandler` and hands `app.describe` / `app.act` to
-`Surface::answer`. `crates/yantrik-surface/examples/hello_surface.rs` is the smallest complete one.
+`Surface::answer`. `examples/hello-surface` is the smallest complete one, and [`docs/sdk/`](sdk/README.md)
+the guide for writing one.
 Like any app, it is found while closed by the keys in its `.desktop` file (below).
 
 **Parameters are typed, and the type is checked.** `Param::text`, `number`, `integer`, `flag`,

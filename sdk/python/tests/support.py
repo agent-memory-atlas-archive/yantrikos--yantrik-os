@@ -44,7 +44,8 @@ GATE_PLAN = ("Say what you would do and let the person decide; they switch the m
              "in the status bar.")
 GATE_FINAL_WORD = "its own description says it cannot be undone"
 YOS = os.path.join(REPO, "deploy", "yantrik-os", "yos")
-EXAMPLE = os.path.join(PACKAGE_ROOT, "examples", "hello_surface.py")
+# The example lives with the Rust one at the top of the repository (docs/sdk quotes it).
+EXAMPLE = os.path.join(REPO, "examples", "hello_surface.py")
 
 _sources = {}
 
