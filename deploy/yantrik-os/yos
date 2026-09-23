@@ -470,6 +470,11 @@ def cmd_ls(argv):
     screens = [a["name"] for a in openable if a.get("opens", "").startswith("a screen")]
     if screens:
         print("Screens of the desktop itself (also open_app): %s" % ", ".join(screens))
+    # The launcher used to be printed among the screens, and `show_screen screen=launchpad`
+    # was the next thing every reader tried. It opens over the desktop, by either verb.
+    for a in openable:
+        if a.get("opens", "").startswith("the launcher"):
+            print("The launcher (open_app name=%s, or show_screen): %s" % (a["name"], a.get("for", "")))
     if raw and stale:
         print("Closed, socket left behind: %s" % ", ".join(stale))
 

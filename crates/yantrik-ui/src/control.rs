@@ -66,6 +66,44 @@ fn check_launchable(name: &str, installed: &[crate::apps::DesktopEntry]) -> Resu
     }
 }
 
+/// Open the Apps launcher where a person can see it, and answer with what is observed.
+///
+/// The launcher is an overlay on the desktop screen, not a screen of its own, and the dock's
+/// `Launch::Launchpad` arm is what opens it: desktop first, then the grid. That arm did its job
+/// every time — the log shows the catalogue rescan the grid triggers as it opens, right after
+/// "Launching app app=launchpad" — and nobody saw it, because the shell is one toplevel under
+/// labwc and the app window in front stayed in front. The photograph of "nothing" was Studio
+/// in the evening and the Editor in the morning (#71, #118); `open_lens` later brought the
+/// shell forward and the launcher was found standing open underneath, which is how it came to
+/// be reported as living behind the Lens. Same defect `open_lens` had, same fix: ask the
+/// compositor to raise the shell, and report whether it did rather than `accepted: true`.
+///
+/// Both doors end here — `open_app name=launchpad`, because that is what the listing says opens
+/// it, and `show_screen screen=launchpad`, because a listing that called it a screen taught
+/// every caller to try that next.
+fn open_launcher(ui: &crate::App) -> serde_json::Value {
+    // Through the dock's own arm, so there is one account of how the launcher opens.
+    ui.invoke_launch_app("launchpad".into());
+    let mut answer = serde_json::json!({
+        "launcher_open": ui.get_app_grid_open(),
+        "screen": screen_name(ui.get_current_screen()),
+    });
+    match crate::windows::raise_shell() {
+        Ok(()) => answer["raised"] = true.into(),
+        // Not an error: the launcher IS open. What it is not is visible, and a caller that
+        // has just been told "open" is owed that difference — see `show_screen`.
+        Err(why) => {
+            answer["raised"] = false.into();
+            answer["note"] = format!(
+                "the launcher is open, but the shell's own window could not be brought to the \
+                 front, so an app window may still be covering it: {why}"
+            )
+            .into();
+        }
+    }
+    answer
+}
+
 /// Name to `current-screen` id, and the ids are the ones `app.slint` actually renders.
 ///
 /// They were not. `("terminal", 16)` sent a caller to the ABOUT screen: 16 is about, terminal
@@ -498,6 +536,10 @@ pub fn publish(
                         "chat": ui.get_lens_chat_mode(),
                     }),
                 )
+                // The launcher, for the same reason. `open_app name=launchpad` opened it under
+                // whatever window was in front, and nothing a caller could read said it was
+                // open at all: `failed_launches` was empty because nothing had failed.
+                .with("launcher", serde_json::json!({ "open": ui.get_app_grid_open() }))
                 .with("incognito", ui.get_settings_incognito_mode())
                 .with("settings", serde_json::json!({"category":ui.get_settings_category(),"query":ui.get_settings_query().to_string(),"dark":ui.get_settings_dark_mode(),"accent":ui.get_settings_accent_color().to_string(),"wallpaper":ui.get_wallpaper_path().to_string(),"save_error":ui.get_settings_save_error(),"save_status":ui.get_settings_save_status().to_string(),"auto_lock_secs":ui.get_settings_auto_lock_secs()}))
         }
@@ -542,6 +584,17 @@ pub fn publish(
                 // app whose program is not installed used to be answered "launching" as well.
                 let catalogue = installed.get();
                 check_launchable(&name, &catalogue)?;
+                // The launcher is drawn by the shell itself and settles on return, so it is
+                // answered with what is observed — open, on which screen, raised or not —
+                // rather than with "launching" and an empty screen. See `open_launcher`.
+                if matches!(
+                    crate::wire::dock::route(&name),
+                    Some(crate::wire::dock::Launch::Launchpad)
+                ) {
+                    let mut answer = open_launcher(&ui);
+                    answer["launching"] = name.into();
+                    return Ok(answer);
+                }
                 // The launcher's own path: it resolves the binary, enforces one window per app,
                 // and focuses the running one instead of starting a second.
                 ui.invoke_launch_app(name.clone().into());
@@ -836,7 +889,7 @@ pub fn publish(
             Action::new("show_screen", "Switch the shell to one of its screens")
                 .arg(
                     Param::text("screen")
-                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media"),
+                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media — or launchpad, the launcher, which opens over the desktop"),
                 )
                 .arg(
                     Param::text("section")
@@ -846,6 +899,15 @@ pub fn publish(
             move |args| {
                 let ui = screen_ui()?;
                 let want = args["screen"].as_str().unwrap_or_default().trim().to_lowercase();
+
+                // The launcher is not a screen, but `yos ls` listed it among the screens of the
+                // desktop, so this is where a caller who read that arrives — and was refused
+                // with a list the name is not on. Taken here, the same way `open_app` takes it.
+                if want == "launchpad" {
+                    let mut answer = open_launcher(&ui);
+                    answer["showing"] = "launchpad".into();
+                    return Ok(answer);
+                }
 
                 // Sending someone to Settings and leaving them to find the section is a chore,
                 // not a link — for a person following an instruction and for an agent alike.
@@ -1327,11 +1389,16 @@ mod window_action_tests {
     /// live Slint window and a compositor to run, so the property worth pinning — that the handler
     /// asks the right thing of the right module — is pinned against the source. The pure parts it
     /// delegates to are tested for real, in `windows.rs`.
-    fn action(name: &str) -> String {
+    /// This file, without its tests.
+    fn source() -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
         let whole = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-        let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
+        whole.split("#[cfg(test)]").next().unwrap_or_default().to_string()
+    }
+
+    fn action(name: &str) -> String {
+        let src = source();
         let from = src
             .find(&format!("\"{name}\""))
             .unwrap_or_else(|| panic!("the shell no longer publishes `{name}`"));
@@ -1364,6 +1431,60 @@ mod window_action_tests {
             handler.contains("showing[\"note\"]"),
             "when the raise fails, the answer has to say so in words: the screen DID change, so \
              this is not an error, but it is not visible either. Handler as written:\n{handler}"
+        );
+    }
+
+    /// The launcher opened every time, and nobody could see it.
+    ///
+    /// `open_app name=launchpad` answered "launching"; the log showed the grid opening — the
+    /// catalogue rescan it triggers — and the photograph showed Studio, because the grid was
+    /// under it and nothing asked the compositor to bring the shell forward. `show_screen
+    /// screen=launchpad`, the next thing a caller tries, was refused (#71, #118). Both doors go
+    /// through `open_launcher`, which opens the grid by the dock's own arm, raises the shell and
+    /// answers with what it sees; and `describe` says whether the launcher is open, so a caller
+    /// no longer has to photograph the screen to find out.
+    #[test]
+    fn opening_the_launcher_raises_the_shell_and_answers_what_it_sees() {
+        for name in ["open_app", "show_screen"] {
+            let handler = action(name);
+            assert!(
+                handler.contains("open_launcher(&ui)"),
+                "`{name}` must open the launcher through `open_launcher`, which raises the \
+                 shell and reports what it observed. Handler as written:\n{handler}"
+            );
+        }
+
+        let src = source();
+        let from = src.find("fn open_launcher(").expect("the shell no longer has `open_launcher`");
+        let body = &src[from..];
+        let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+        assert!(
+            body.contains("invoke_launch_app("),
+            "`open_launcher` must open the grid through the dock's own arm, so there is one \
+             account of how the launcher opens. As written:\n{body}"
+        );
+        assert!(
+            body.contains("windows::raise_shell()"),
+            "`open_launcher` must ask the compositor to bring the shell forward: the grid \
+             opens underneath whatever app window is in front. As written:\n{body}"
+        );
+        assert!(
+            body.contains("\"launcher_open\"") && body.contains("\"raised\""),
+            "`open_launcher` settles on return, so its answer has to carry whether the \
+             launcher is open and whether the shell came forward. As written:\n{body}"
+        );
+        assert!(
+            body.contains("answer[\"note\"]"),
+            "when the raise fails the answer has to say so in words: the launcher DID open, so \
+             this is not an error, but it is not visible either. As written:\n{body}"
+        );
+
+        // And the state a caller reads between calls says whether the launcher is open.
+        let describe = &src[..src.find("ControlSurface::new(\"shell\")").unwrap_or(src.len())];
+        assert!(
+            describe.contains("\"launcher\""),
+            "`describe shell` must report the launcher, or an open grid nobody can see leaves \
+             no trace a caller can read"
         );
     }
 
