@@ -1060,9 +1060,9 @@ mod tests {
             .unwrap_err();
         assert_eq!((err.code, err.message.as_str()), (-32602, "`notify` has no argument `colour`; it takes: title, body, urgency, app"));
         let err = h
-            .act(&serde_json::json!({ "action": "notify", "args": { "title": "x", "body": 7 } }), None, at("sensitive", "ask"))
+            .act(&serde_json::json!({ "action": "notify", "args": { "title": "x", "body": true } }), None, at("sensitive", "ask"))
             .unwrap_err();
-        assert_eq!(err.message, "`notify` argument `body` must be a string, and a number arrived");
+        assert_eq!(err.message, "`notify` argument `body` must be a string, and a boolean arrived");
         let err = h
             .act(&serde_json::json!({ "action": "notify", "args": {} }), None, at("sensitive", "ask"))
             .unwrap_err();
@@ -1157,6 +1157,13 @@ mod tests {
         let reply = call(serde_json::json!({
             "jsonrpc": "2.0", "id": 3, "method": "app.act",
             "params": { "action": "dismiss", "args": { "id": 67 } },
+        }));
+        // An id sent as the number it spells is the id: the handler reads "67" and says there is
+        // no such notification, in its own words — not a refusal about JSON.
+        assert_eq!(reply["error"]["message"], "no notification with id `67`", "{reply}");
+        let reply = call(serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "app.act",
+            "params": { "action": "dismiss", "args": { "id": 6.7 } },
         }));
         assert_eq!(reply["error"]["message"], "`dismiss` argument `id` must be a string, and a number arrived", "{reply}");
 

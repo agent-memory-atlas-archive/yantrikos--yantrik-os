@@ -969,7 +969,7 @@ mod tests {
         assert_eq!(err.message, "`set_location` has no argument `city`; it takes: query, lat, lon, name, fahrenheit");
 
         let err = handler
-            .act(&serde_json::json!({ "action": "set_location", "args": { "lat": "32.7", "lon": -96.8 } }), at("sensitive", "ask"))
+            .act(&serde_json::json!({ "action": "set_location", "args": { "lat": "north", "lon": -96.8 } }), at("sensitive", "ask"))
             .unwrap_err();
         assert_eq!(err.message, "`set_location` argument `lat` must be a number, and a string arrived");
         assert!(place_is_unset(&handler));

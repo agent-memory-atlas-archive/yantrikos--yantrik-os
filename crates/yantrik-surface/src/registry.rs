@@ -7,7 +7,7 @@ use yantrik_ipc_contracts::control_surface::{act_json, describe_json, Action, Vi
 use yantrik_ipc_transport::gate::{self, decide, Authority, LADDER};
 use yantrik_ipc_transport::reach::{self, Reach};
 
-use crate::args::{check_arguments, declaration_problems, with_defaults};
+use crate::args::{as_declared, check_arguments, declaration_problems};
 
 /// What an app reports about itself, for a surface whose describe closure lives on one thread.
 pub type Describer = dyn Fn() -> View;
@@ -175,6 +175,23 @@ impl<D: ?Sized, H: ?Sized> Registry<D, H> {
         reach::within(reach, &self.app_id, name, self.grade_of(name)?)
     }
 
+    /// Everything about a call that must hold before a person's grant is spent on it: the action
+    /// exists and its arguments are right — present, known, and of the declared type or losslessly
+    /// converted to it. Answers with the grade the surface publishes for the action now, which is
+    /// what the ceiling and the grant are then held to.
+    ///
+    /// A grant is a person's Allow for one call, bound to its arguments as sent. A call that is
+    /// going to be refused for those arguments must be refused before the Allow is used up, or
+    /// the person is asked again for something they already said yes to — so the arguments are
+    /// checked here, ahead of the ceiling and the spend, and again in [`Registry::act`].
+    pub fn check_call(&self, name: &str, args: &Value) -> Result<&'static str, String> {
+        let grade = self.grade_of(name)?;
+        if let Some((spec, _)) = self.actions.iter().find(|(a, _)| a.name == name) {
+            check_arguments(spec, args)?;
+        }
+        Ok(grade)
+    }
+
     fn unknown(&self, name: &str) -> String {
         let known: Vec<&str> = self.actions.iter().map(|(a, _)| a.name.as_str()).collect();
         format!("unknown action `{name}`; this app offers: {}", known.join(", "))
@@ -213,8 +230,15 @@ where
         describe_json(&self.app_id, &view, &self.specs())
     }
 
-    /// Check the ceiling and the mode, check the arguments, check the guard, dispatch, and read
-    /// what came of it — all on the calling thread, with nothing in between.
+    /// Check the arguments, the ceiling and the mode, and the guard; dispatch with the arguments
+    /// as the action declared them; and read what came of it — all on the calling thread, with
+    /// nothing in between.
+    ///
+    /// The order, which every door keeps (docs/surface-protocol.md, §5): the action exists; the
+    /// calling agent's reach, when it carries a token ([`Registry::within_reach`], called just
+    /// before this); the arguments as sent; the ceiling; any grant, spent against the arguments as
+    /// sent (before this, see [`crate::ActCall::spend_grant`]); the mode; the revision guard; and
+    /// only then the arguments converted to their declared types and the handler.
     ///
     /// These steps are one function because they have to be one turn of whatever serialises the
     /// app. Split across calls, the gap between the check and the dispatch is a window in which
@@ -239,17 +263,17 @@ where
             return Err(self.unknown(name));
         };
 
-        // The ceiling and then the mode, before anything else about this call is even looked at
-        // — before the arguments are checked, before the revision guard, and long before the
-        // handler — because "may this caller use this action at all" is a question about the
-        // action. The grade read is the one `describe` is showing now (see `regrade`), or the two
-        // disagree. With the action's own description beside it: an action this app says cannot
-        // be undone is asked about in every mode but bypass, as the shell and the bridge ask.
+        // Present, known, and of the declared type or losslessly converted to it — see `args`.
+        // First, and before any grant is spent: a malformed call is refused for what is wrong with
+        // it, and a person's Allow is not used up on a call that was never going to run.
+        check_arguments(spec, args)?;
+
+        // The ceiling and then the mode. The grade read is the one `describe` is showing now (see
+        // `regrade`), or the two disagree. With the action's own description beside it: an action
+        // this app says cannot be undone is asked about in every mode but bypass, as the shell
+        // and the bridge ask.
         let published = self.effective_grade(name, spec.permission);
         decide(authority, &self.app_id, name, published, &spec.description)?;
-
-        // Present, known, and of the declared type — see `args`.
-        check_arguments(spec, args)?;
 
         // The guard. A caller that read state, decided, and asked for this action gets to say what
         // it was looking at; if the app has moved on, the action does not happen. Refusing is
@@ -266,7 +290,9 @@ where
             }
         }
 
-        let result = run(&with_defaults(spec, args))?;
+        // The handler reads what it declared: every argument of its declared type, converted where
+        // it arrived as something that converts without loss, and every default filled in.
+        let result = run(&as_declared(spec, args))?;
 
         // Read back through the same path a `describe` would take, so a caller never has to make
         // a second round trip to find out what its own action did. `accepted` says the handler
@@ -421,34 +447,38 @@ mod tests {
         assert_eq!(err, "unknown action `nope`; this app offers: open_note", "a wrong guess should be correctable");
     }
 
-    /// The new check, through the dispatch: a wrong type is refused before the handler runs, in
-    /// a sentence that names the argument, what was wanted, and what arrived.
+    /// Through the dispatch: an argument that is neither of its type nor converts to it without
+    /// loss is refused before the handler runs, in a sentence that names the argument, what was
+    /// wanted, and what arrived; one that converts reaches the handler as the declared type.
     #[test]
-    fn an_argument_of_the_wrong_type_is_refused_before_the_handler_runs() {
-        let ran = Rc::new(Cell::new(false));
+    fn an_argument_of_the_wrong_type_is_refused_and_one_that_converts_is_converted() {
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
         let reg = surface(
             "system-monitor",
             None,
             vec![(Action::new("kill_process", "End a process").arg(Param::integer("pid")), {
-                let ran = ran.clone();
-                Box::new(move |_| {
-                    ran.set(true);
+                let seen = seen.clone();
+                Box::new(move |args| {
+                    seen.borrow_mut().push(args["pid"].clone());
                     Ok(Value::Null)
                 })
             })],
         );
-        let err = reg.act("kill_process", &json!({"pid": "4242"}), None, "t#1", &open()).unwrap_err();
+        let err = reg.act("kill_process", &json!({"pid": "42x"}), None, "t#1", &open()).unwrap_err();
         assert_eq!(err, "`kill_process` argument `pid` must be an integer, and a string arrived");
         let err = reg.act("kill_process", &json!({"pid": 42.5}), None, "t#2", &open()).unwrap_err();
         assert_eq!(err, "`kill_process` argument `pid` must be an integer, and a number with a fraction arrived");
-        assert!(!ran.get(), "the handler must not have run");
+        assert!(seen.borrow().is_empty(), "the handler must not have run");
         assert!(reg.act("kill_process", &json!({"pid": 4242}), None, "t#3", &open()).is_ok());
-        assert!(ran.get());
+        assert!(reg.act("kill_process", &json!({"pid": "4242"}), None, "t#4", &open()).is_ok());
+        assert_eq!(*seen.borrow(), vec![json!(4242), json!(4242)], "the handler reads an integer both times");
     }
 
-    /// Types are an argument check: the ceiling and the mode still answer first.
+    /// The arguments are checked first, ahead of the ceiling and the mode: a malformed call is
+    /// refused for what is wrong with it before anything about who may make it — and so before a
+    /// person's grant could be spent on it. With the arguments right, the grade answers.
     #[test]
-    fn the_grade_is_decided_before_the_type_is_looked_at() {
+    fn the_arguments_are_checked_before_the_grade_is_decided() {
         let reg = surface(
             "system-monitor",
             None,
@@ -457,10 +487,36 @@ mod tests {
                 Box::new(|_| Ok(Value::Null)),
             )],
         );
+        let wrong = "`kill_process` argument `pid` must be an integer, and a string arrived";
         let err = reg.act("kill_process", &json!({"pid": "x"}), None, "t#1", &under("sensitive")).unwrap_err();
-        assert!(err.starts_with("CEILING:"), "{err}");
+        assert_eq!(err, wrong);
         let err = reg.act("kill_process", &json!({"pid": "x"}), None, "t#1", &in_mode("ask", false)).unwrap_err();
+        assert_eq!(err, wrong);
+        let err = reg.act("kill_process", &json!({"pid": 7}), None, "t#1", &under("sensitive")).unwrap_err();
+        assert!(err.starts_with("CEILING:"), "{err}");
+        let err = reg.act("kill_process", &json!({"pid": 7}), None, "t#1", &in_mode("ask", false)).unwrap_err();
         assert!(err.starts_with("GRANT:"), "{err}");
+    }
+
+    /// What must hold before a grant is spent: the action exists and its arguments are right.
+    #[test]
+    fn a_call_is_checked_before_a_grant_is_spent_on_it() {
+        let reg = surface(
+            "blender",
+            None,
+            vec![(
+                Action::new("render", "Render").risk("sensitive").arg(Param::integer("samples")),
+                Box::new(|_| Ok(Value::Null)),
+            )],
+        );
+        assert_eq!(reg.check_call("render", &json!({"samples": 4})), Ok("sensitive"));
+        assert_eq!(reg.check_call("render", &json!({"samples": "4"})), Ok("sensitive"), "converts");
+        assert_eq!(
+            reg.check_call("render", &json!({"samples": "four"})),
+            Err("`render` argument `samples` must be an integer, and a string arrived".into())
+        );
+        assert_eq!(reg.check_call("render", &json!({})), Err("`render` needs argument `samples`".into()));
+        assert!(reg.check_call("bake", &json!({})).unwrap_err().starts_with("unknown action `bake`"));
     }
 
     /// A declared default is what the handler reads for an argument the caller left out.
@@ -478,7 +534,9 @@ mod tests {
         assert_eq!(answer["result"]["by"], 1);
         let answer = reg.act("increment", &json!({"by": 5}), None, "c#2", &open()).unwrap();
         assert_eq!(answer["result"]["by"], 5);
-        let err = reg.act("increment", &json!({"by": "5"}), None, "c#3", &open()).unwrap_err();
+        let answer = reg.act("increment", &json!({"by": "5"}), None, "c#3", &open()).unwrap();
+        assert_eq!(answer["result"]["by"], 5, "a string that is exactly an integer is one");
+        let err = reg.act("increment", &json!({"by": "five"}), None, "c#4", &open()).unwrap_err();
         assert!(err.contains("must be an integer"), "{err}");
     }
 
@@ -657,15 +715,18 @@ mod tests {
     }
 
     #[test]
-    fn the_ceiling_refuses_on_the_grade_alone_before_anything_is_checked() {
-        // A caller over the ceiling gets one answer regardless of what else is wrong with its
-        // call — otherwise fixing the smaller mistake looks like progress toward a call that was
-        // never going to run.
+    fn the_ceiling_refuses_a_well_formed_call_on_the_grade_alone() {
+        // The arguments come first (a malformed call is answered for its arguments, and no grant
+        // is spent on it); a well-formed call over the ceiling is refused on the grade, before the
+        // mode, the guard or the handler.
         let reg = delete_surface(Rc::new(Cell::new(false)));
 
         let err = reg.act("files_delete", &json!({}), None, "shell#1", &under("sensitive")).unwrap_err();
-        assert!(err.starts_with("CEILING:"), "not the missing-argument error: {err}");
-        assert!(!err.contains("needs argument"), "{err}");
+        assert_eq!(err, "`files_delete` needs argument `name`");
+        let err = reg
+            .act("files_delete", &json!({"name": "x"}), Some("0000000000000000"), "shell#1", &under("sensitive"))
+            .unwrap_err();
+        assert!(err.starts_with("CEILING:"), "not the guard's refusal: {err}");
     }
 
     #[test]
@@ -828,11 +889,14 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_refuses_before_the_arguments_are_looked_at() {
+    fn the_mode_is_asked_after_the_arguments_and_before_the_guard() {
         let reg = render_surface(Rc::new(Cell::new(false)));
         let err = reg.act("render", &json!({}), None, "blender#1", &in_mode("ask", false)).unwrap_err();
-        assert!(err.starts_with("GRANT:"), "not the missing-argument error: {err}");
-        assert!(!err.contains("needs argument"), "{err}");
+        assert_eq!(err, "`render` needs argument `out`");
+        let err = reg
+            .act("render", &json!({"out": "x.png"}), Some("0000000000000000"), "blender#1", &in_mode("ask", false))
+            .unwrap_err();
+        assert!(err.starts_with("GRANT:"), "not the guard's refusal: {err}");
     }
 
     #[test]
@@ -927,9 +991,10 @@ mod tests {
     /// ceiling, mode, session rule, grant and purpose. This dispatch calls the gate rather than
     /// copying it, and this replays every vector through the dispatch itself — an action graded and
     /// described as the vector says, acted on with no arguments under the vector's authority — so
-    /// the order this crate calls the gate in (before the arguments, with the published grade and
-    /// description) is held to the same table every other implementation replays: allowed means
-    /// the handler ran, refused means the exact sentence.
+    /// the way this crate calls the gate (with the published grade and description, the arguments
+    /// already answered — here, none are declared and none are sent) is held to the same table
+    /// every other implementation replays: allowed means the handler ran, refused means the exact
+    /// sentence. What the dispatch does around the gate is `dispatch-vectors.json` (`vectors.rs`).
     #[test]
     fn every_policy_vector_is_what_this_dispatch_decides() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/yantrik-os/surface-vectors.json");

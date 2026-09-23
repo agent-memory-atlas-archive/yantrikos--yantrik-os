@@ -114,11 +114,12 @@ impl Surface {
     /// the socket is [`Authority::now`] and for a test is whatever it pins.
     ///
     /// The steps a window's dispatch takes, in its order: the call read (and its agent token
-    /// lifted off the arguments, and the reach that token carries read); any grant spent, once
-    /// the reach and the ceiling have passed on the action's grade; then the reach
-    /// ([`Registry::within_reach`]) and [`Registry::act`] — unknown action, ceiling, mode,
-    /// arguments, revision guard, handler, view — with the caller and the token installed for the
-    /// handler; then any answer the handler left for later.
+    /// lifted off the arguments, and the reach that token carries read); any grant spent — once
+    /// the action, the reach, the arguments and the ceiling have passed, and against the
+    /// arguments as sent; then the reach ([`Registry::within_reach`]) and [`Registry::act`] —
+    /// unknown action, arguments, ceiling, mode, revision guard, the arguments converted to their
+    /// declared types, handler, view — with the caller and the token installed for the handler;
+    /// then any answer the handler left for later.
     pub fn act(
         &self,
         params: &Value,
@@ -129,8 +130,12 @@ impl Surface {
         let who = peer.map(Caller::from);
         let reach = call.reach()?;
         let action_id = next_action_id(&self.service_id);
-        call.spend_grant(&mut authority, self.registry.app_id(), reach.as_ref(), |name| {
-            self.registry.grade_of(name).map_err(refusal)
+        // Before a grant is spent: the action, the agent's reach, the arguments as sent.
+        call.spend_grant(&mut authority, self.registry.app_id(), || {
+            self.registry
+                .within_reach(reach.as_ref(), &call.action)
+                .and_then(|()| self.registry.check_call(&call.action, &call.args))
+                .map_err(refusal)
         })?;
         call.log(&action_id, &authority, who);
 

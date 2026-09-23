@@ -103,9 +103,10 @@ Like any app, it is found while closed by the keys in its `.desktop` file (below
 
 **Parameters are typed, and the type is checked.** `Param::text`, `number`, `integer`, `flag`,
 `one_of` (an enum), `array` (of a type) and `object`, each optionally `.default(…)`; `describe`
-publishes them as JSON Schema and the dispatch refuses an argument of another type before your
-handler runs (spec §4, §5 step 9). Declare what the handler reads: an id read with `as_i64` is an
-`integer`, not a `number`. `Action::expected_seconds(n)` tells a caller how long to wait.
+publishes them as JSON Schema, and your handler always reads the declared type: what a caller
+sends that converts without loss is converted (`"12"` for an integer, `67` for text), and anything
+else is refused before your handler runs (spec §4, §5 step 7). Declare what the handler reads: an
+id read with `as_i64` is an `integer`, not a `number`. `Action::expected_seconds(n)` tells a caller how long to wait.
 
 ### Rules that are not optional
 

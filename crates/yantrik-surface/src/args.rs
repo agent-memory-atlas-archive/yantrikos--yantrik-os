@@ -26,6 +26,10 @@
 //!
 //! # The type rules
 //!
+//! A handler always receives the type it declared. A caller is met halfway: a value that is not
+//! of the declared type but converts to it without losing anything is converted (below), and
+//! anything else is refused. The strictness is the handler's, the leniency the caller's.
+//!
 //! * `string` — a JSON string. A number is not text here, even one that spells an id: the
 //!   declaration is what a caller reads before it calls, and a dispatch that quietly accepted
 //!   something else would make the declaration a guess.
@@ -43,6 +47,30 @@
 //!   the wrong type.
 //! * A declaration this dispatch does not understand — a type off [`PARAM_TYPES`] — refuses every
 //!   call, the way an off-ladder grade does: a typo must fail closed, not become "anything goes".
+//!
+//! # What is converted, and what never is
+//!
+//! A model that has just read `"id": 67` in a list sends `"id": 67` back, whatever the parameter
+//! says; a CLI that reads `on=true` sends a string. Refusing those is a refusal about JSON rather
+//! than about the call. So [`coerced`] converts, where nothing is lost and nothing is guessed:
+//!
+//! | declared | arrives as | becomes |
+//! | --- | --- | --- |
+//! | `string` (and an enum) | an integer (`67`, `-3`) | its decimal digits (`"67"`) — then an enum's list is checked on those |
+//! | `integer` | a string that is exactly an integer (`"12"`, `"-4"`) | the integer |
+//! | `number` | a string that is exactly an integer or a decimal (`"12"`, `"1.5"`) | the number |
+//! | `boolean` | `"true"` or `"false"` | `true` or `false` |
+//!
+//! "Exactly" is a grammar, not a best effort: `-?(0|[1-9][0-9]*)`, and for a number an optional
+//! `.` and at least one digit after it. `"12abc"`, `" 12"`, `"+12"`, `"012"`, `"1e3"`, `".5"`,
+//! `"1."` and `"1.5"` for an integer are not numbers here; an integer string outside what JSON
+//! integers hold (`i64` below zero, `u64` above) is not either. A number with a fraction is never
+//! text, because its text is not one thing (`1.5`, `1.50`, `1.5e0`) and two implementations render
+//! it differently; an integer's is. Case is part of an enum's value (`Low` is not `low`), `True`
+//! and `1` are not booleans, and nothing is converted into or inside an array or an object.
+//!
+//! The call as sent is what is checked and what a grant is bound to: conversion happens after
+//! every check and after any grant is spent, just before the handler ([`as_declared`]).
 
 use std::borrow::Cow;
 
@@ -95,12 +123,75 @@ pub fn check_arguments(spec: &Action, args: &Value) -> Result<(), String> {
         if value.is_null() && !p.required {
             continue;
         }
-        check_value(name, p, value)?;
+        check_argument(name, p, value)?;
     }
     Ok(())
 }
 
-/// One argument against its declaration.
+/// One argument a caller sent, against its declaration: of the declared type, or converted to it
+/// without loss ([`coerced`]). When it converts, the converted value is what is checked (an
+/// integer for an enum is checked against the list as its digits); when it does not, the refusal
+/// is the one for the value as it came.
+pub fn check_argument(action: &str, p: &Param, value: &Value) -> Result<(), String> {
+    match check_value(action, p, value) {
+        Ok(()) => Ok(()),
+        Err(refusal) => match coerced(p, value) {
+            Some(converted) => check_value(action, p, &converted),
+            None => Err(refusal),
+        },
+    }
+}
+
+/// What `value` becomes for a parameter declared as `p`, when it is not already of `p`'s type and
+/// converts to it without loss; `None` otherwise — including when it is already of the type, and
+/// for arrays and objects, which are never converted. See the module docs for the table.
+pub fn coerced(p: &Param, value: &Value) -> Option<Value> {
+    match (p.kind, value) {
+        ("string", Value::Number(n)) if n.is_i64() || n.is_u64() => Some(Value::String(n.to_string())),
+        ("integer", Value::String(text)) => exact_integer(text),
+        ("number", Value::String(text)) => exact_integer(text).or_else(|| exact_decimal(text)),
+        ("boolean", Value::String(text)) => match text.as_str() {
+            "true" => Some(Value::Bool(true)),
+            "false" => Some(Value::Bool(false)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `text` is `-?(0|[1-9][0-9]*)`: an integer written the one way JSON writes it.
+fn integer_grammar(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'))
+}
+
+/// `-?(0|[1-9][0-9]*)`, within what a JSON integer holds (`i64` below zero, `u64` from zero).
+fn exact_integer(text: &str) -> Option<Value> {
+    if !integer_grammar(text) {
+        return None;
+    }
+    if text.starts_with('-') {
+        text.parse::<i64>().ok().map(Value::from)
+    } else {
+        text.parse::<u64>().ok().map(Value::from)
+    }
+}
+
+/// `-?(0|[1-9][0-9]*)\.[0-9]+`, as the nearest `f64` — the value a JSON number written the same
+/// way parses to. Not finite is not a number.
+fn exact_decimal(text: &str) -> Option<Value> {
+    let (whole, fraction) = text.split_once('.')?;
+    let fraction_ok = !fraction.is_empty() && fraction.bytes().all(|b| b.is_ascii_digit());
+    if !fraction_ok || !integer_grammar(whole) {
+        return None;
+    }
+    let number: f64 = text.parse().ok()?;
+    serde_json::Number::from_f64(number).map(Value::Number)
+}
+
+/// One value against its declaration, exactly: no conversion. What a declared default is held to.
 pub fn check_value(action: &str, p: &Param, value: &Value) -> Result<(), String> {
     if !PARAM_TYPES.contains(&p.kind) {
         return Err(undefined(action, p, p.kind));
@@ -142,9 +233,38 @@ pub fn check_value(action: &str, p: &Param, value: &Value) -> Result<(), String>
     Ok(())
 }
 
-/// `args` as the handler receives them: what the caller sent, with every declared default filled
-/// in for an argument it left out (or sent as `null`). Borrowed untouched when the action
-/// declares no defaults, which is every action written before defaults existed.
+/// `args` as the handler receives them: every argument converted to its declared type where it
+/// arrived as something that converts ([`coerced`]), and every declared default filled in for an
+/// argument left out or sent as `null`. Borrowed untouched when there is nothing to convert or
+/// fill, which is every call a caller got exactly right to an action without defaults.
+///
+/// Called after [`check_arguments`] has passed, and after any grant has been spent against the
+/// arguments as they were sent.
+pub fn as_declared<'a>(spec: &Action, args: &'a Value) -> Cow<'a, Value> {
+    let converted: Vec<(&str, Value)> = spec
+        .params
+        .iter()
+        .filter_map(|p| {
+            let value = args.get(&p.name)?;
+            if check_value(&spec.name, p, value).is_ok() {
+                return None;
+            }
+            coerced(p, value).map(|c| (p.name.as_str(), c))
+        })
+        .collect();
+    if converted.is_empty() {
+        return with_defaults(spec, args);
+    }
+    let mut args = args.clone();
+    for (name, value) in converted {
+        args[name] = value;
+    }
+    Cow::Owned(with_defaults(spec, &args).into_owned())
+}
+
+/// `args` with every declared default filled in for an argument left out (or sent as `null`), and
+/// nothing converted. Borrowed untouched when the action declares no defaults, which is every
+/// action written before defaults existed.
 pub fn with_defaults<'a>(spec: &Action, args: &'a Value) -> Cow<'a, Value> {
     if spec.params.iter().all(|p| p.default.is_none()) {
         return Cow::Borrowed(args);
@@ -303,12 +423,26 @@ mod tests {
         check_arguments(&one(p), &json!({ "x": value })).is_ok()
     }
 
+    /// What the handler reads for `value`, after the checks passed.
+    fn handed(p: Param, value: Value) -> Value {
+        let spec = one(p);
+        let args = json!({ "x": value });
+        check_arguments(&spec, &args).expect("accepted");
+        as_declared(&spec, &args).into_owned()["x"].clone()
+    }
+
     #[test]
-    fn a_string_is_a_string_and_nothing_else_is() {
+    fn a_string_is_a_string_and_an_integer_is_its_digits() {
         assert!(accepts(Param::text("x"), json!("hello")));
         assert!(accepts(Param::text("x"), json!("")));
+        // `which: 1`, `id: 67`: what a caller that just read a number off a list sends back.
+        assert_eq!(handed(Param::text("x"), json!(67)), json!("67"));
+        assert_eq!(handed(Param::text("x"), json!(-3)), json!("-3"));
+        assert_eq!(handed(Param::text("x"), json!(u64::MAX)), json!(u64::MAX.to_string()));
+        // A fraction's text is not one thing, so it is not guessed at.
+        assert_eq!(refusal(Param::text("x"), json!(1.5)), "`act` argument `x` must be a string, and a number arrived");
         assert_eq!(
-            refusal(Param::text("x"), json!(67)),
+            refusal(Param::text("x"), serde_json::from_str::<Value>("3.0").unwrap()),
             "`act` argument `x` must be a string, and a number arrived"
         );
         assert_eq!(
@@ -319,21 +453,27 @@ mod tests {
     }
 
     #[test]
-    fn a_number_is_any_number() {
+    fn a_number_is_any_number_and_a_string_that_is_exactly_one() {
         assert!(accepts(Param::number("x"), json!(3)));
         assert!(accepts(Param::number("x"), json!(-3.25)));
         assert!(accepts(Param::number("x"), json!(1e3)));
-        assert_eq!(
-            refusal(Param::number("x"), json!("1024")),
-            "`act` argument `x` must be a number, and a string arrived"
-        );
+        assert_eq!(handed(Param::number("x"), json!("1024")), json!(1024));
+        assert_eq!(handed(Param::number("x"), json!("1.5")), json!(1.5));
+        assert_eq!(handed(Param::number("x"), json!("-0.25")), json!(-0.25));
+        for not_exactly in ["1e3", ".5", "1.", "1.5x", " 1.5", "+1.5", "01.5", "NaN", "inf", "", "1,5"] {
+            assert_eq!(
+                refusal(Param::number("x"), json!(not_exactly)),
+                "`act` argument `x` must be a number, and a string arrived",
+                "{not_exactly:?}"
+            );
+        }
     }
 
     /// A number is never quoted back: a caller's number may be a PIN or a year of birth, and a
     /// refusal is logged, shown and handed to a model.
     #[test]
     fn a_refusal_names_the_kind_that_arrived_and_never_the_value() {
-        let err = refusal(Param::text("x"), json!(4921));
+        let err = refusal(Param::text("x"), json!(4921.5));
         assert!(!err.contains("4921"), "{err}");
         let err = refusal(Param::integer("x"), json!(19.84));
         assert!(!err.contains("19.84") && err.ends_with("a number with a fraction arrived"), "{err}");
@@ -354,18 +494,42 @@ mod tests {
         let written_as_float: Value = serde_json::from_str("3.0").unwrap();
         assert!(!accepts(Param::integer("x"), written_as_float.clone()));
         assert!(written_as_float.as_u64().is_none(), "the reason for the rule");
-        assert!(!accepts(Param::integer("x"), json!("42")));
+    }
+
+    /// `"12"` is 12; `"1.5"`, `"12abc"` and `" 12"` are not integers, and neither is anything
+    /// past what a JSON integer holds.
+    #[test]
+    fn an_integer_is_also_a_string_that_is_exactly_one() {
+        assert_eq!(handed(Param::integer("x"), json!("12")), json!(12));
+        assert_eq!(handed(Param::integer("x"), json!("-4")), json!(-4));
+        assert_eq!(handed(Param::integer("x"), json!("0")), json!(0));
+        assert_eq!(handed(Param::integer("x"), json!("18446744073709551615")), json!(u64::MAX));
+        assert_eq!(handed(Param::integer("x"), json!("-9223372036854775808")), json!(i64::MIN));
+        for not_exactly in [
+            "1.5", "12abc", " 12", "12 ", "+12", "012", "", "-", "1e3", "0x10", "18446744073709551616",
+            "-9223372036854775809", "١٢",
+        ] {
+            assert_eq!(
+                refusal(Param::integer("x"), json!(not_exactly)),
+                "`act` argument `x` must be an integer, and a string arrived",
+                "{not_exactly:?}"
+            );
+        }
     }
 
     #[test]
-    fn a_flag_is_true_or_false() {
+    fn a_flag_is_true_or_false_or_the_words_for_them() {
         assert!(accepts(Param::flag("x"), json!(false)));
-        // `"true"` read with `as_bool().unwrap_or(false)` used to be quietly false.
+        // `"true"` read with `as_bool().unwrap_or(false)` used to be quietly false; now it is true.
+        assert_eq!(handed(Param::flag("x"), json!("true")), json!(true));
+        assert_eq!(handed(Param::flag("x"), json!("false")), json!(false));
+        for not_a_flag in [json!("True"), json!("yes"), json!("1"), json!(1), json!(0)] {
+            assert!(!accepts(Param::flag("x"), not_a_flag.clone()), "{not_a_flag}");
+        }
         assert_eq!(
-            refusal(Param::flag("x"), json!("true")),
+            refusal(Param::flag("x"), json!("yes")),
             "`act` argument `x` must be a boolean, and a string arrived"
         );
-        assert!(!accepts(Param::flag("x"), json!(1)));
     }
 
     #[test]
@@ -379,7 +543,13 @@ mod tests {
         // Case is part of the value: `Low` is not `low`.
         assert!(!accepts(urgency(), json!("Low")));
         // Not a string at all is the type's refusal, not the list's.
-        assert_eq!(refusal(urgency(), json!(2)), "`act` argument `x` must be a string, and a number arrived");
+        assert_eq!(refusal(urgency(), json!(2.5)), "`act` argument `x` must be a string, and a number arrived");
+        // An integer is its digits, and the digits are checked against the list.
+        assert_eq!(handed(Param::one_of("x", &["1", "2"]), json!(2)), json!("2"));
+        assert_eq!(
+            refusal(urgency(), json!(2)),
+            "`act` argument `x` must be one of `low`, `normal`, `critical`, and another string arrived"
+        );
         // What the caller sent is never quoted back: it may be anything, including a secret.
         assert!(!refusal(urgency(), json!("hunter2")).contains("hunter2"));
     }
@@ -399,6 +569,13 @@ mod tests {
         );
         assert!(accepts(Param::array("x", "integer"), json!([1, 2, 3])));
         assert!(!accepts(Param::array("x", "integer"), json!([1, 2.5])));
+        // Nothing is converted inside an array, nor into one.
+        assert_eq!(
+            refusal(Param::array("x", "integer"), json!(["1", "2"])),
+            "`act` argument `x` must be an array of integers, and `x[0]` is a string"
+        );
+        assert!(!accepts(Param::array("x", "string"), json!([1])));
+        assert!(!accepts(Param::array("x", "integer"), json!("[1,2]")));
         assert!(accepts(Param::array("x", "object"), json!([{"a": 1}])));
     }
 
@@ -412,6 +589,30 @@ mod tests {
             "`act` argument `x` must be an object, and a string arrived"
         );
         assert!(!accepts(Param::object("x"), json!([1])));
+    }
+
+    /// A handler reads the declared type and a caller's exact call reaches it unchanged.
+    #[test]
+    fn the_handler_reads_the_declared_types_and_an_exact_call_untouched() {
+        let spec = Action::new("move", "Move")
+            .arg(Param::integer("id"))
+            .arg(Param::text("to"))
+            .arg(Param::flag("notify").default(false));
+        let plain = Action::new("move", "Move").arg(Param::integer("id")).arg(Param::text("to"));
+        let exact = json!({"id": 3, "to": "friday"});
+        assert!(matches!(as_declared(&plain, &exact), Cow::Borrowed(_)), "nothing to convert, nothing copied");
+        let loose = json!({"id": "3", "to": 5});
+        check_arguments(&spec, &loose).expect("accepted");
+        assert_eq!(*as_declared(&spec, &loose), json!({"id": 3, "to": "5", "notify": false}));
+        // The call as sent is left as it was: it is what a grant is bound to.
+        assert_eq!(loose, json!({"id": "3", "to": 5}));
+    }
+
+    /// A default is the author's, so it is held to the exact type: no conversion.
+    #[test]
+    fn a_default_is_held_to_the_exact_type() {
+        let problems = declaration_problems(&Action::new("x", "x").arg(Param::integer("n").default("3")));
+        assert!(problems.iter().any(|p| p.contains("the default is wrong")), "{problems:?}");
     }
 
     #[test]

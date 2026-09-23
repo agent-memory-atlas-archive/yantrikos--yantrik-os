@@ -96,26 +96,30 @@ impl ActCall {
         }
     }
 
-    /// Spend this call's grant, if it carries one, for exactly this action and these arguments.
+    /// Spend this call's grant, if it carries one, for exactly this action and these arguments
+    /// as they were sent.
     ///
-    /// A grant is spent only once the ceiling has passed on the action's grade, or a person's
-    /// Allow is used up on an act that is then refused and never runs (#154) — so `graded` is
-    /// asked for the grade first, and an action the surface does not have is answered as that,
-    /// with nothing spent. Outside the calling agent's `reach`, nothing is spent either. `graded`
-    /// is called only when there is a grant: for a window it is a round trip to the UI thread,
-    /// paid only by a call a person has just answered a card for.
+    /// A grant is a person's Allow for one call. It is spent only once everything that could
+    /// still refuse the call without asking anybody has passed, or the Allow is used up on an act
+    /// that never runs and the person is asked again for something they already said yes to:
+    ///
+    /// 1. `checked` — the action exists, the calling agent's reach covers it, and its arguments
+    ///    are right (present, known, of the declared type or losslessly converted to it). It
+    ///    answers with the grade the surface publishes for the action now.
+    /// 2. the ceiling, on that grade (#154) — inside `Authority::spend`.
+    /// 3. the spend, against the arguments as sent: what the person saw on the card is what the
+    ///    grant is bound to, never the converted form the handler will read.
+    ///
+    /// `checked` is called only when there is a grant: for a window it is a round trip to the UI
+    /// thread, paid only by a call a person has just answered a card for.
     pub fn spend_grant(
         &self,
         authority: &mut Authority,
         app_id: &str,
-        reach: Option<&Reach>,
-        graded: impl FnOnce(&str) -> Result<&'static str, ServiceError>,
+        checked: impl FnOnce() -> Result<&'static str, ServiceError>,
     ) -> Result<(), ServiceError> {
         let Some(id) = self.grant.as_deref() else { return Ok(()) };
-        let grade = graded(&self.action)?;
-        if let Some(reach) = reach {
-            reach::within(reach, app_id, &self.action, grade).map_err(refusal)?;
-        }
+        let grade = checked()?;
         authority.spend(id, app_id, &self.action, grade, &self.args).map_err(refusal)
     }
 
@@ -210,7 +214,7 @@ mod tests {
             mode: yantrik_ipc_transport::gate::Mode::named("ask"),
             granted: false,
         };
-        call.spend_grant(&mut authority, "notes", None, |_| panic!("asked for a grade with no grant to spend"))
+        call.spend_grant(&mut authority, "notes", || panic!("asked for a grade with no grant to spend"))
             .unwrap();
         assert!(call.reach().unwrap().is_none(), "no token, no reach, no file read");
         assert!(!authority.granted);

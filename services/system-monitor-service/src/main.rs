@@ -1084,7 +1084,8 @@ mod tests {
         let mut child = sleeper();
         let pid = child.id();
         for (given, why) in [
-            (serde_json::json!(pid.to_string()), "a string arrived"),
+            (serde_json::json!(format!("{pid}x")), "a string arrived"),
+            (serde_json::json!(format!(" {pid}")), "a string arrived"),
             (serde_json::json!(pid as f64 + 0.5), "a number with a fraction arrived"),
             (serde_json::json!(true), "a boolean arrived"),
         ] {
@@ -1108,7 +1109,16 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.message, "`kill_process` argument `pid` must be a process id: a whole number above zero");
         assert!(still_running(&mut child), "a refusal ended the process anyway");
-        reap(child);
+
+        // The pid as the text it is written in converts without loss: the handler reads the
+        // integer, and our own sleeper is ended.
+        let answer = act(
+            &serde_json::json!({ "action": "kill_process", "args": { "pid": pid.to_string() } }),
+            at("dangerous", "bypass"),
+        )
+        .expect("a pid written as text is the pid");
+        assert_eq!(answer["result"]["killed"], serde_json::json!(pid));
+        assert_eq!(child.wait().expect("reaped").signal(), Some(libc::SIGTERM));
     }
 
     /// The pids `kill(2)` reads as a whole process group are never handed to it. Checked on the

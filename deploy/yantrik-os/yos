@@ -1612,9 +1612,11 @@ NO_SUCH_METHOD = "app.yos_check_no_such_method"
 UNDECLARED = "yos_check_undeclared"
 PLACEHOLDER = {"string": "yos-check", "number": 0, "integer": 0, "boolean": False,
                "array": [], "object": {}}
-# One value of the wrong type for each declared type, and how the dispatch names what arrived
-# (`yantrik_surface::check_value`): the `types` probe sends one and expects that sentence.
-MISTYPED = {"string": (0, "a number"), "number": ("yos-check", "a string"),
+# One value of the wrong type for each declared type that no dispatch converts (a number for text
+# and a numeric string for a number are converted, docs/surface-protocol.md §4), and how the
+# dispatch names what arrived (`yantrik_surface::check_value`): the `types` probe sends one and
+# expects that sentence.
+MISTYPED = {"string": (True, "a boolean"), "number": ("yos-check", "a string"),
             "integer": ("yos-check", "a string"), "boolean": ("yos-check", "a string"),
             "array": ("yos-check", "a string"), "object": ("yos-check", "a string")}
 WANTED = {"string": "a string", "number": "a number", "integer": "an integer",
@@ -2158,7 +2160,7 @@ def check_surface(path, label, services_too=False):
             elif got and got[0] == -32602 and str(got[1]).startswith("STALE:"):
                 report.add("types", "warn", "%s with %s=%s was not refused for its type; the "
                            "revision guard stopped it instead. Checking types is a protocol-1 "
-                           "addition (docs/surface-protocol.md §5, step 9)"
+                           "addition (docs/surface-protocol.md §5, step 7)"
                            % (x["name"], name, json.dumps(value)))
             else:
                 report.add("types", "fail", "%s with %s=%s → %s\nthe protocol says: -32602 %s"

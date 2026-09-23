@@ -72,9 +72,12 @@
 //! # Parameters
 //!
 //! [`Param`] declares `text`, `number`, `integer`, `flag`, `one_of` (an enum), `array` (of a
-//! type), `object`, each optionally with a `default`; `describe` publishes them as JSON Schema,
-//! and the dispatch refuses an argument of the wrong type before the handler runs. The rules and
-//! the sentences are in [`args`](crate::check_arguments); the Python port mirrors them.
+//! type), `object`, each optionally with a `default`; `describe` publishes them as JSON Schema.
+//! A handler always reads the type it declared: what a caller sends that converts to it without
+//! loss is converted ([`coerced`]: `67` for text, `"12"` for an integer, `"true"` for a flag), and
+//! anything else is refused before the handler runs — and before any grant is spent on the call.
+//! The rules and the sentences are in [`check_arguments`]; `deploy/yantrik-os/dispatch-vectors.json`
+//! writes them out, and the Python SDK replays it.
 //!
 //! # Codes
 //!
@@ -87,8 +90,13 @@ mod call;
 mod context;
 mod registry;
 mod surface;
+#[cfg(test)]
+mod vectors;
 
-pub use args::{check_arguments, check_value, declaration_problems, with_defaults};
+pub use args::{
+    as_declared, check_argument, check_arguments, check_value, coerced, declaration_problems,
+    with_defaults,
+};
 pub use call::{
     finish_later, next_action_id, refusal, service_id_for, ActCall, NO_SUCH_METHOD, REFUSED,
     UNANSWERED,
@@ -115,6 +123,51 @@ pub use yantrik_ipc_contracts::email::ServiceError;
 pub use yantrik_ipc_transport::gate;
 pub use yantrik_ipc_transport::gate::Authority;
 pub use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
+
+/// A stand-in for the shell's grant store, for every test in this crate: the spender is
+/// process-wide, as the shell's is. A grant holds once, for exactly the call a person was shown
+/// ([`stand_in::allow`]); anything else is refused in words of its own.
+#[cfg(test)]
+pub(crate) mod stand_in {
+    use std::sync::{Mutex, Once};
+
+    use serde_json::Value;
+
+    static ALLOWED: Mutex<Vec<(String, String, String, Value)>> = Mutex::new(Vec::new());
+    static SPENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn install() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            crate::gate::spend_grants_with(|id, app, action, args| {
+                let allowed = ALLOWED.lock().unwrap_or_else(|e| e.into_inner());
+                let Some((_, a, x, bound)) = allowed.iter().find(|(g, ..)| g == id) else {
+                    return Err(format!("no approval request `{id}`."));
+                };
+                if (a.as_str(), x.as_str(), bound) != (app, action, args) {
+                    return Err(format!("`{id}` was approved for {a}.{x} with {bound}, and this call carries {args}."));
+                }
+                let mut spent = SPENT.lock().unwrap_or_else(|e| e.into_inner());
+                if spent.iter().any(|g| g == id) {
+                    return Err(format!("`{id}` was already used."));
+                }
+                spent.push(id.to_string());
+                Ok(())
+            });
+        });
+    }
+
+    /// A person pressed Allow on a card for exactly `app.action(args)`.
+    pub(crate) fn allow(id: &str, app: &str, action: &str, args: Value) {
+        install();
+        ALLOWED.lock().unwrap_or_else(|e| e.into_inner()).push((id.into(), app.into(), action.into(), args));
+    }
+
+    /// Whether the grant has been spent.
+    pub(crate) fn spent(id: &str) -> bool {
+        SPENT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|g| g == id)
+    }
+}
 
 /// A surface served on a real socket and spoken to the way `yos` speaks to one: one JSON-RPC line
 /// out, one back, on a connection of its own.
@@ -143,7 +196,6 @@ mod over_a_socket {
             // Nothing else in this crate's tests reads the files; the socket is the only door that
             // meets `Authority::now()`.
             std::env::set_var("HOME", root.join("home"));
-            spend_through_a_stand_in_shell();
             // One agent with a role: it may count, and read who it is, and nothing above
             // `standard`. Installed as the shell installs its own registry.
             yantrik_ipc_transport::reach::read_reach_with(|token| {
@@ -184,6 +236,17 @@ mod over_a_socket {
                         Ok(json!({ "count": 0 }))
                     }
                 })
+                .action(
+                    Action::new("set", "Set the counter to a number").risk("sensitive").arg(Param::integer("to")),
+                    {
+                        let count = count.clone();
+                        move |args| {
+                            let to = args["to"].as_i64().expect("an integer, converted by the dispatch if need be");
+                            count.store(to, Ordering::SeqCst);
+                            Ok(json!({ "count": to }))
+                        }
+                    },
+                )
                 .action(Action::new("who", "Report who is calling and for which agent").risk("safe"), |_| {
                     Ok(json!({ "pid": caller().map(|c| c.pid), "agent_token": agent_token() }))
                 })
@@ -226,22 +289,7 @@ mod over_a_socket {
         })
     }
 
-    /// A stand-in for the shell's store: `fresh-*` holds once, for exactly `counter.reset {}`.
-    fn spend_through_a_stand_in_shell() {
-        let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
-        gate::spend_grants_with(move |id, app, action, args| {
-            if !id.starts_with("fresh-") {
-                return Err(format!("no approval request `{id}`."));
-            }
-            if app != "counter" || action != "reset" || *args != json!({}) {
-                return Err(format!("`{id}` was approved for counter.reset, and this call carries {args}."));
-            }
-            if !spent.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string()) {
-                return Err(format!("`{id}` was already used."));
-            }
-            Ok(())
-        });
-    }
+    use crate::stand_in;
 
     fn call(method: &str, params: Value) -> Value {
         let mut socket = UnixStream::connect(served()).expect("connect");
@@ -307,7 +355,7 @@ mod over_a_socket {
     fn every_refusal_is_the_apps_refusal_in_the_apps_words() {
         assert_eq!(
             refused(&act("decrement", json!({}))),
-            (-32602, "unknown action `decrement`; this app offers: increment, reset, who, slow".into())
+            (-32602, "unknown action `decrement`; this app offers: increment, reset, set, who, slow".into())
         );
         assert_eq!(
             refused(&act("increment", json!({ "by": "two" }))),
@@ -350,6 +398,7 @@ mod over_a_socket {
         assert!(message.starts_with("GRANT: counter.reset is graded `sensitive`"), "{message}");
         assert!(message.contains("ask mode") && message.contains("request_approval"), "{message}");
 
+        stand_in::allow("fresh-reset", "counter", "reset", json!({}));
         let granted = call("app.act", json!({ "action": "reset", "args": {}, "grant": "fresh-reset" }));
         assert_eq!(granted["result"]["result"]["count"], 0, "{granted}");
 
@@ -358,6 +407,7 @@ mod over_a_socket {
 
         // A grant on a call to an action this surface does not have is never offered to the
         // shell: the answer is the surface's, and the grant is still whole afterwards.
+        stand_in::allow("fresh-kept", "counter", "reset", json!({}));
         let (_, message) = refused(&call("app.act", json!({ "action": "wipe", "args": {}, "grant": "fresh-kept" })));
         assert!(message.starts_with("unknown action `wipe`"), "{message}");
         let kept = call("app.act", json!({ "action": "reset", "args": {}, "grant": "fresh-kept" }));
@@ -398,6 +448,7 @@ mod over_a_socket {
         let reply = with("who", "tok-counter-role", None);
         assert_eq!(reply["result"]["result"]["agent_token"], "tok-counter-role", "{reply}");
 
+        stand_in::allow("fresh-held", "counter", "reset", json!({}));
         let (code, message) = refused(&with("reset", "tok-counter-role", Some("fresh-held")));
         assert_eq!(code, -32602);
         assert!(message.starts_with("REACH: counter.reset is outside the Counter's reach"), "{message}");
@@ -411,6 +462,38 @@ mod over_a_socket {
         // machine is in ask mode).
         let (_, message) = refused(&with("reset", "tok-no-role", None));
         assert!(message.starts_with("GRANT:"), "{message}");
+    }
+
+    /// A person's Allow is not used up on a call its own arguments refuse, on a service's door as
+    /// on a window's: a grant for `set {"to": 5}` carried by a call whose `to` is not an integer,
+    /// or that leaves it out, is refused for the argument and is still whole afterwards; the same
+    /// grant with the arguments right runs, once. A grant is bound to the arguments as sent, so
+    /// `"7"` on the card is `"7"` on the call — and the handler reads 7.
+    #[test]
+    fn a_malformed_call_is_refused_before_its_grant_is_spent_on_the_service_door() {
+        served();
+        stand_in::allow("service-set", "counter", "set", json!({"to": 5}));
+        let with = |args: Value, grant: &str| call("app.act", json!({ "action": "set", "args": args, "grant": grant }));
+
+        assert_eq!(
+            refused(&with(json!({"to": "five"}), "service-set")),
+            (-32602, "`set` argument `to` must be an integer, and a string arrived".into())
+        );
+        assert_eq!(refused(&with(json!({}), "service-set")), (-32602, "`set` needs argument `to`".into()));
+        assert!(!stand_in::spent("service-set"), "refused for its arguments, and the Allow was used up anyway");
+
+        let reply = with(json!({"to": 5}), "service-set");
+        assert_eq!(reply["result"]["result"]["count"], 5, "the same grant, the arguments right: {reply}");
+        assert!(stand_in::spent("service-set"));
+
+        stand_in::allow("service-set-text", "counter", "set", json!({"to": "7"}));
+        let reply = with(json!({"to": "7"}), "service-set-text");
+        assert_eq!(reply["result"]["result"]["count"], 7, "{reply}");
+        assert!(stand_in::spent("service-set-text"));
+
+        // Without a grant, the well-formed call meets the mode (this machine is in ask mode).
+        let (_, message) = refused(&call("app.act", json!({ "action": "set", "args": {"to": 1} })));
+        assert!(message.starts_with("GRANT: counter.set is graded `sensitive`"), "{message}");
     }
 
     /// An answer finished later is the work's own result, and holds up no other caller.

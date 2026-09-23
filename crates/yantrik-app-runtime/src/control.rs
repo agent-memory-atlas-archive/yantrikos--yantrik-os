@@ -521,17 +521,21 @@ impl ControlRpc {
                 // IO, spending a grant is a round trip, and the dispatch closure is a turn of
                 // the event loop.
                 let mut authority = Authority::now();
-                // A grant is spent only once the ceiling has passed on the action's grade (#154).
-                // The grade lives on the UI thread, so ask it first — one extra hop, only for a
-                // call that carries a grant, which is one a person has just answered a card for.
-                // An action this app does not have is answered as that here, and nothing is
-                // spent on it. Should the app regrade the action between this read and the
-                // dispatch, the dispatch still decides on the grade it publishes then; the most
-                // that race can cost is the grant. Outside the agent's reach, a person's Allow is
-                // not used up on it either.
-                call.spend_grant(&mut authority, &self.app_id, reach.as_ref(), |name| {
-                    let name = name.to_string();
-                    on_ui_thread(who, move |reg| reg.grade_of(&name)).map_err(unanswered)?.map_err(refusal)
+                // A grant is spent only once everything that could still refuse the call without
+                // asking anybody has passed: the action exists, the agent's reach covers it, its
+                // arguments are right, and the ceiling allows its grade (#154) — or a person's
+                // Allow is used up on an act that never runs. The declarations and the grades live
+                // on the UI thread, so ask it first — one extra hop, only for a call that carries a
+                // grant, which is one a person has just answered a card for. Should the app
+                // regrade the action between this read and the dispatch, the dispatch still
+                // decides on the grade it publishes then; the most that race can cost is the grant.
+                call.spend_grant(&mut authority, &self.app_id, || {
+                    let (name, args, reach) = (call.action.clone(), call.args.clone(), reach.clone());
+                    on_ui_thread(who, move |reg| {
+                        reg.within_reach(reach.as_ref(), &name).and_then(|()| reg.check_call(&name, &args))
+                    })
+                    .map_err(unanswered)?
+                    .map_err(refusal)
                 })?;
                 call.log(&action_id, &authority, who);
 
@@ -889,9 +893,12 @@ mod tests {
             "`rename` needs argument `to`"
         );
         assert_eq!(
-            reg.act("rename", &serde_json::json!({"to": 7}), None, "app-notes#3", &open()).unwrap_err(),
-            "`rename` argument `to` must be a string, and a number arrived"
+            reg.act("rename", &serde_json::json!({"to": true}), None, "app-notes#3", &open()).unwrap_err(),
+            "`rename` argument `to` must be a string, and a boolean arrived"
         );
+        // An integer for text is its digits: the handler reads the type it declared.
+        let answer = reg.act("rename", &serde_json::json!({"to": 7}), None, "app-notes#5", &open()).unwrap();
+        assert_eq!(answer["result"]["renamed_to"], "7");
         assert_eq!(
             reg.act("nope", &serde_json::json!({}), None, "app-notes#4", &open()).unwrap_err(),
             "unknown action `nope`; this app offers: rename"
@@ -1130,6 +1137,17 @@ mod tests {
         ONCE.call_once(|| {
             let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
             spend_grants_with(move |id, app, action, args| {
+                if let Some((a, x, bound)) = allowed(id) {
+                    if (a.as_str(), x.as_str(), &bound) != (app, action, args) {
+                        return Err(format!("`{id}` was approved for {a}.{x} with {bound}, and this call carries {args}."));
+                    }
+                    let mut spent = spent.lock().unwrap_or_else(|e| e.into_inner());
+                    if !spent.insert(id.to_string()) {
+                        return Err(format!("`{id}` was already used."));
+                    }
+                    SPENT_GRANTS.lock().unwrap_or_else(|e| e.into_inner()).push(id.to_string());
+                    return Ok(());
+                }
                 if !id.starts_with("fresh-") {
                     return Err(format!("no approval request `{id}` — it may have been dropped when the shell restarted. Ask again."));
                 }
@@ -1145,6 +1163,30 @@ mod tests {
                 Ok(())
             });
         });
+    }
+
+    /// Grants a person has allowed on the stand-in shell, beyond its `fresh-*` ones: exactly
+    /// `app.action(args)`, once.
+    static ALLOWED: std::sync::Mutex<Vec<(String, String, String, serde_json::Value)>> =
+        std::sync::Mutex::new(Vec::new());
+    /// The allowed grants the stand-in has spent.
+    static SPENT_GRANTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    fn allow(id: &str, app: &str, action: &str, args: serde_json::Value) {
+        ALLOWED.lock().unwrap_or_else(|e| e.into_inner()).push((id.into(), app.into(), action.into(), args));
+    }
+
+    fn allowed(id: &str) -> Option<(String, String, serde_json::Value)> {
+        ALLOWED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(g, ..)| g == id)
+            .map(|(_, a, x, args)| (a.clone(), x.clone(), args.clone()))
+    }
+
+    fn spent(id: &str) -> bool {
+        SPENT_GRANTS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|g| g == id)
     }
 
     /// Spend `id` for `blender.render`, graded `sensitive`, under `authority`, the way the RPC
@@ -1402,6 +1444,45 @@ mod tests {
             assert_eq!(status(check).as_deref(), Some("pass"), "{check}: {text}");
         }
         assert_eq!(run.status.code(), Some(1), "a failed check is a non-zero exit");
+    }
+
+    /// A person's Allow is not used up on a call its own arguments refuse. Over the real socket, on
+    /// the window's door: a grant for `slow {"ms": 10}` carried by a call whose `ms` is not an
+    /// integer is refused for the argument — before the ceiling, before the spend — and is still
+    /// whole afterwards: the same grant with the arguments right runs, once. A grant bound to the
+    /// arguments as sent holds for a call that sends them so, and the handler reads them converted.
+    #[cfg(unix)]
+    #[test]
+    fn a_malformed_call_is_refused_before_its_grant_is_spent_on_the_window_door() {
+        spend_through_a_stand_in_shell();
+        allow("window-slow", "caller-test", "slow", serde_json::json!({"ms": 10}));
+        let act = |args: serde_json::Value, grant: &str| {
+            call(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "app.act",
+                "params": { "action": "slow", "args": args, "grant": grant },
+            })
+            .to_string())
+        };
+
+        let reply = act(serde_json::json!({"ms": "ten"}), "window-slow");
+        assert_eq!(
+            reply["error"]["message"], "`slow` argument `ms` must be an integer, and a string arrived",
+            "{reply}"
+        );
+        let reply = act(serde_json::json!({"ms": 10, "loud": true}), "window-slow");
+        assert_eq!(reply["error"]["message"], "`slow` has no argument `loud`; it takes: ms, refuse", "{reply}");
+        assert!(!spent("window-slow"), "refused for its arguments, and the Allow was used up anyway");
+
+        let reply = act(serde_json::json!({"ms": 10}), "window-slow");
+        assert_eq!(reply["result"]["result"]["slept_ms"], 10, "the same grant, the arguments right: {reply}");
+        assert!(spent("window-slow"));
+
+        // Bound to the arguments as sent: `"10"` on the card is `"10"` on the call, and the
+        // handler reads 10.
+        allow("window-slow-text", "caller-test", "slow", serde_json::json!({"ms": "10"}));
+        let reply = act(serde_json::json!({"ms": "10"}), "window-slow-text");
+        assert_eq!(reply["result"]["result"]["slept_ms"], 10, "{reply}");
+        assert!(spent("window-slow-text"));
     }
 
     /// Agents catalog: an agent started from a role is held to the role's reach on the real
