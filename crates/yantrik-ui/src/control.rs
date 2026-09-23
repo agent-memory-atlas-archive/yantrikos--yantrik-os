@@ -195,6 +195,39 @@ fn clip(text: &str, max: usize) -> String {
 /// the list, so a caller always knows it is looking at a window onto something larger.
 const FILE_LISTING_CAP: usize = 40;
 
+/// The bond as `describe shell` reports it: the store's, or not loaded yet.
+struct DescribedBond {
+    loaded: bool,
+    level: serde_json::Value,
+    score: serde_json::Value,
+    interactions: serde_json::Value,
+}
+
+/// What `describe shell` says about the bond.
+///
+/// `bond_data` is a Slint property with a default, and until the companion worker pushes the
+/// store into it the default is all there is. That default used to be "Stranger, 0.0", and
+/// `describe` reported it as the relationship — two minutes after a restart, over a store that
+/// said Partner-in-Crime, 155 interactions. A reader can act on "not loaded yet"; on a level
+/// nobody measured it can only be wrong. So before the first push every bond field is null and
+/// `bond_loaded` is false; after it, they are the store's.
+fn describe_bond(bond: &crate::BondData) -> DescribedBond {
+    if !bond.loaded {
+        return DescribedBond {
+            loaded: false,
+            level: serde_json::Value::Null,
+            score: serde_json::Value::Null,
+            interactions: serde_json::Value::Null,
+        };
+    }
+    DescribedBond {
+        loaded: true,
+        level: bond.bond_level.to_string().into(),
+        score: (bond.bond_score as f64).into(),
+        interactions: bond.total_interactions.into(),
+    }
+}
+
 /// Publish the desktop on the service bus. Call from the UI thread before `run()`.
 ///
 /// Takes the service manager because the shell is the only process that owns service lifetimes:
@@ -222,7 +255,7 @@ pub fn publish(
                 return View::new("Yantrik — shutting down");
             };
             let screen = ui.get_current_screen();
-            let bond = ui.get_bond_data();
+            let bond = describe_bond(&ui.get_bond_data());
 
             // From the launch registry, not the Slint window-list model. The model is only
             // refreshed while the desktop screen is showing, so a describe from any other screen
@@ -489,11 +522,14 @@ pub fn publish(
                 .with("thinking", ui.get_is_thinking())
                 .with("pending_suggestions", ui.get_pending_count())
                 .with("memories", ui.get_memory_count())
-                .with("bond", bond.bond_level.to_string())
-                .with("bond_score", bond.bond_score as f64)
+                // Null, all three, until the worker has pushed the store once — see
+                // `describe_bond`. `bond_loaded` says which of the two a reader is looking at.
+                .with("bond_loaded", bond.loaded)
+                .with("bond", bond.level)
+                .with("bond_score", bond.score)
                 // The count as well as the score: the score caps at 5.0, and on a machine
                 // that reached it a reader has no other way to see a turn being counted.
-                .with("bond_interactions", bond.total_interactions)
+                .with("bond_interactions", bond.interactions)
                 .with("active_project", ui.get_active_project().to_string())
                 .with("clock", ui.get_clock_text().to_string())
                 .with("date", ui.get_date_text().to_string())
@@ -1568,5 +1604,81 @@ mod window_action_tests {
                  written:\n{handler}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bond_not_loaded_tests {
+    //! Two minutes after a shell restart, `describe shell` said `bond: "Stranger", bond_score:
+    //! 0.0`; eighteen minutes later, "Partner-in-Crime", 5.0, 155 interactions, with nothing in
+    //! between to explain it. The property is a Slint default until the worker's first push,
+    //! and both `describe` and the machine rail were reading the default as the relationship.
+    use std::path::Path;
+
+    fn slint(rel: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../yantrik-ui-slint/ui").join(rel);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    }
+
+    /// The Slint side: the default the property starts with, and what the rail draws from it.
+    #[test]
+    fn before_the_first_push_the_rail_says_not_loaded_not_stranger() {
+        let app = slint("app.slint");
+        let start = app
+            .find("in property <BondData> bond-data: {")
+            .expect("app.slint declares the bond-data property with a default");
+        let default = &app[start..start + app[start..].find("};").expect("the default literal ends")];
+        assert!(
+            default.contains("loaded: false"),
+            "the property's default must say it is not loaded. As written:\n{default}"
+        );
+        assert!(
+            !default.contains("Stranger"),
+            "the default is not a level anybody measured; it must not name one. As written:\n{default}"
+        );
+
+        let rail = slint("components/machine_rail.slint");
+        let bond_row = rail
+            .find("key: \"Bond\"")
+            .map(|i| &rail[i..i + rail[i..].find('}').unwrap_or(rail.len() - i)])
+            .expect("the machine rail has a Bond row");
+        assert!(
+            bond_row.contains("bond-loaded"),
+            "the rail's Bond row must consult whether the bond is loaded before drawing a level. As written:\n{bond_row}"
+        );
+        for file in ["components/machine_rail.slint", "desktop.slint"] {
+            assert!(
+                !slint(file).contains("bond-level: \"Stranger\""),
+                "{file} still defaults the level to Stranger — the made-up value the rail showed for the window between boot and the first push"
+            );
+        }
+    }
+
+    /// The `describe shell` side.
+    #[test]
+    fn before_the_first_push_describe_says_not_loaded_not_stranger() {
+        // The property as Slint initialises it, before the worker has pushed anything.
+        let unloaded = crate::BondData::default();
+        let d = super::describe_bond(&unloaded);
+        assert!(!d.loaded, "nothing has been pushed, so the bond is not loaded");
+        assert!(
+            d.level.is_null() && d.score.is_null() && d.interactions.is_null(),
+            "and no level, score or count is reported in its place: got {:?} / {:?} / {:?}",
+            d.level, d.score, d.interactions
+        );
+
+        let pushed = crate::BondData {
+            loaded: true,
+            bond_level: "Partner-in-Crime".into(),
+            bond_score: 5.0,
+            total_interactions: 155,
+            ..Default::default()
+        };
+        let d = super::describe_bond(&pushed);
+        assert!(d.loaded);
+        assert_eq!(d.level, "Partner-in-Crime");
+        assert_eq!(d.score, 5.0);
+        assert_eq!(d.interactions, 155);
     }
 }

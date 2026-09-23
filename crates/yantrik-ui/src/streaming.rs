@@ -69,16 +69,6 @@ impl Streams {
     }
 }
 
-/// Start streaming tokens from the companion into the message model.
-pub fn start_ai_stream(
-    ui_weak: slint::Weak<App>,
-    bridge: &Arc<CompanionBridge>,
-    text: &str,
-    streams: &Streams,
-) {
-    stream_into(ui_weak, bridge.send_message(text.to_string()), text, streams);
-}
-
 /// The same thing, from whatever is answering.
 ///
 /// Split out because the body had the builtin companion welded into it: it called

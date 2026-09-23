@@ -8,6 +8,12 @@ import { AppColor } from "components/app_color.slint";
 import { BondRing } from "components/bond_ring.slint";
 
 export struct BondData {
+    // False until the companion worker has pushed the store's bond once. This struct's Slint
+    // default used to read "Stranger, 0.0", and the machine rail and `describe shell` showed
+    // that as the relationship for the window between boot and the first push — two minutes
+    // after a restart, over a store that said Partner-in-Crime. Until this is true there is
+    // no level to show, and nothing below is to be read as one.
+    loaded: bool,
     bond-score: float,
     bond-level: string,
     total-interactions: int,

@@ -33,6 +33,57 @@ pub(crate) fn desktop_context(place: &super::settings::Place) -> String {
     serde_json::json!({ "machine": machine }).to_string()
 }
 
+/// The built-in's turn: relayed to the chat panel, and counted when it ends answered.
+///
+/// The built-in used to score its own turns from inside its handlers — and those handlers also
+/// run for the startup brief, EXECUTE urges and "Reflect naturally", prompts the machine sends
+/// itself, so the store on VM 520 held `interaction` rows at times nobody was typing, each one
+/// telling the proactive engine the person had just been around. The harness branch of
+/// `dispatch` below already counts at the right point: after an answered turn, from the person's
+/// own words. This is the same point for the built-in. Nothing that reaches the companion any
+/// other way — `CompanionHandle::ask`, the proactive stream, the worker's own prompts — counts.
+fn builtin_turn(
+    ui_weak: &slint::Weak<App>,
+    bridge: &Arc<CompanionBridge>,
+    text: &str,
+    streams: &streaming::Streams,
+) {
+    let answer = bridge.send_message(text.to_string());
+    let (tx, rx) = crossbeam_channel::unbounded::<String>();
+    let bridge = bridge.clone();
+    let asked = text.to_string();
+    std::thread::spawn(move || {
+        // Answered means the worker finished the turn (`__DONE__`) without putting its own
+        // failure text in place of an answer. A `__REPLACE__` on its own is ordinary — tool
+        // calls use it to strip raw XML from what was already streamed.
+        let mut done = false;
+        let mut failed = false;
+        let mut replace_next = false;
+        while let Ok(token) = answer.recv() {
+            let end = token == "__DONE__";
+            if token == "__REPLACE__" {
+                replace_next = true;
+            } else if !end {
+                if replace_next && token == crate::bridge::TURN_FAILED_REPLY {
+                    failed = true;
+                }
+                replace_next = false;
+            }
+            if tx.send(token).is_err() {
+                return;
+            }
+            if end {
+                done = true;
+                break;
+            }
+        }
+        if done && !failed {
+            bridge.score_conversation_turn(asked);
+        }
+    });
+    streaming::stream_into(ui_weak.clone(), rx, text, streams);
+}
+
 /// Send what the person typed to whichever mind is actually driving.
 ///
 /// This is the join between the body and the mind, and until now it did not exist. `chat.rs`
@@ -58,14 +109,14 @@ fn dispatch(
 
     let Some(host) = super::harness::host() else {
         // No host yet (very early boot). The builtin is the only thing that could answer.
-        streaming::start_ai_stream(ui_weak.clone(), bridge, text, streams);
+        builtin_turn(ui_weak, bridge, text, streams);
         return;
     };
 
     // The builtin keeps its own path: it carries tool calls, the __REPLACE__ convention and the
     // job board, none of which the harness protocol has or needs.
     if host.active_id() == super::harness::BUILTIN_ID {
-        streaming::start_ai_stream(ui_weak.clone(), bridge, text, streams);
+        builtin_turn(ui_weak, bridge, text, streams);
         return;
     }
 
@@ -103,8 +154,9 @@ fn dispatch(
         // Bond screen and `describe shell` present it as such. But only the built-in ever
         // scored a turn, from inside its own handler, so a machine whose mind was Hermes said
         // "Stranger, 0.0" after forty minutes of talking. This is where a harness's answer
-        // ends, so this is where its turn counts. Acts on the control surface are not scored:
-        // those are the mind working, not the person talking.
+        // ends, so this is where its turn counts — as `builtin_turn` does for the built-in.
+        // Acts on the control surface are not scored: those are the mind working, not the
+        // person talking.
         if answered {
             bridge.score_conversation_turn(asked);
         }
@@ -230,7 +282,7 @@ mod tests {
     fn every_way_of_talking_to_this_desktop_asks_who_is_answering() {
         let body = callbacks();
         assert!(
-            !body.contains("start_ai_stream"),
+            !body.contains("start_ai_stream") && !body.contains("builtin_turn("),
             "a callback sends straight to the builtin companion. Both ways of talking to this desktop — the chat panel and the Lens — must go through `dispatch`, which reads the harness host; otherwise choosing a mind changes a label and nothing else."
         );
         assert_eq!(
@@ -276,6 +328,43 @@ mod tests {
         assert!(
             harness_branch.contains("if answered"),
             "a turn the harness failed is not a conversation and must not count"
+        );
+    }
+
+    /// The built-in's turn counts at the same point, from the same text — not inside its own
+    /// handlers, which also run for the startup brief, EXECUTE urges and "Reflect naturally".
+    /// The store on VM 520 held `interaction` rows at times nobody was typing.
+    #[test]
+    fn a_turn_the_builtin_answered_counts_at_the_same_point() {
+        let above_wiring = SELF_SRC
+            .split_once("/// Wire on_send_message and on_lens_submit callbacks.")
+            .expect("the wiring doc comment marks the end of dispatch")
+            .0;
+        let relay = above_wiring
+            .split_once("fn builtin_turn(")
+            .expect("the built-in's turn has its own relay, `builtin_turn`, beside dispatch")
+            .1;
+        let relay = &relay[..relay.find("fn dispatch(").unwrap_or(relay.len())];
+        assert!(
+            relay.contains("bridge.score_conversation_turn(asked)"),
+            "the built-in's relay must score the turn when it ends, from the text the person typed; the companion's own handlers no longer do, because they also run for prompts the machine sends itself"
+        );
+        assert!(
+            relay.contains("TURN_FAILED_REPLY") && relay.contains("if done && !failed"),
+            "a turn the worker failed is not a conversation and must not count — the rule the harness path applies to `Chunk::Failed`"
+        );
+        let dispatch = above_wiring
+            .split_once("fn dispatch(")
+            .expect("dispatch is below the relay")
+            .1;
+        assert_eq!(
+            dispatch.matches("builtin_turn(").count(),
+            2,
+            "both roads to the built-in — no host yet, and the built-in chosen by id — go through the relay that counts the turn"
+        );
+        assert!(
+            !dispatch.contains("start_ai_stream"),
+            "a road to the built-in that bypasses the relay is a turn that never counts"
         );
     }
 

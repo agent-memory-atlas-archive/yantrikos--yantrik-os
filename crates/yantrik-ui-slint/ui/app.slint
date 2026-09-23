@@ -216,8 +216,9 @@ export component App inherits Window {
 
     // Bond state
     in property <BondData> bond-data: {
+        loaded: false,
         bond-score: 0.0,
-        bond-level: "Stranger",
+        bond-level: "",
         total-interactions: 0,
         days-together: 0,
         current-streak: 0,
@@ -1362,6 +1363,7 @@ export component App inherits Window {
             bar-disk-percent: root.bar-disk-percent;
             bar-disk-text: root.bar-disk-text;
             services: root.services;
+            bond-loaded: root.bond-data.loaded;
             bond-level: root.bond-data.bond-level;
             bond-score: root.bond-data.bond-score;
             grid-categories: root.grid-categories;

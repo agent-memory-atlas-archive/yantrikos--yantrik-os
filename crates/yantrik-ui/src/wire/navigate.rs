@@ -82,6 +82,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                     if let Ok(bond) = reply_rx.try_recv() {
                         if let Some(ui) = weak.upgrade() {
                             ui.set_bond_data(BondData {
+                                loaded: true,
                                 bond_score: bond.bond_score as f32,
                                 bond_level: bond.bond_level.into(),
                                 total_interactions: bond.total_interactions as i32,

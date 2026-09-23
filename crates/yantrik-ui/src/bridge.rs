@@ -24,6 +24,13 @@ use slint::{Model, ModelRc, SharedString, VecModel};
 use crate::ambient::AmbientState;
 use crate::{App, BondData, UrgeCardData};
 
+/// What the worker streams in place of an answer when the built-in panicked mid-turn.
+///
+/// Named so the chat wiring can tell it from an answer: a `__REPLACE__` followed by this text is
+/// a turn the person was not talked to, and `wire::chat` does not count it toward the bond — the
+/// same rule the harness path applies to a `Chunk::Failed`.
+pub const TURN_FAILED_REPLY: &str = "Something went wrong internally. Please try again.";
+
 /// Commands from the UI thread to the companion worker.
 pub enum CompanionCommand {
     /// Send a message and receive streaming tokens.
@@ -38,11 +45,13 @@ pub enum CompanionCommand {
         /// most needs to be right.
         job: Option<String>,
     },
-    /// Count a conversation turn that an attached harness answered.
+    /// Count a conversation turn — one that began with the person's words and was answered.
     ///
-    /// The built-in scores its own turns inside `SendMessage`. A turn Hermes or Pi answered
-    /// never comes through that arm — the shell relays it from the harness host straight to the
-    /// chat panel — so this is how it reaches the bond store, which lives on this thread.
+    /// Whichever mind answered. The `SendMessage` arm scores nothing: it also carries the
+    /// startup brief, EXECUTE urges and the companion's own reflection prompts, and a prompt
+    /// the machine sent itself is not a conversation. `wire::chat::dispatch` sends this when a
+    /// turn it started ends answered, and this is how it reaches the bond store, which lives on
+    /// this thread.
     ScoreConversationTurn { text: String },
     /// Reload the LLM backend from a new provider config.
     /// Used when user adds/edits a provider in settings.
@@ -499,7 +508,7 @@ impl CompanionBridge {
         token_rx
     }
 
-    /// Count a turn another mind answered toward the bond.
+    /// Count an answered turn that began with the person's words toward the bond.
     pub fn score_conversation_turn(&self, text: String) {
         let _ = self.cmd_tx.send(CompanionCommand::ScoreConversationTurn { text });
     }
@@ -939,9 +948,7 @@ fn worker_loop(
                             "Companion panicked during message handling — recovering"
                         );
                         let _ = token_tx.send("__REPLACE__".to_string());
-                        let _ = token_tx.send(
-                            "Something went wrong internally. Please try again.".to_string()
-                        );
+                        let _ = token_tx.send(TURN_FAILED_REPLY.to_string());
                     }
                 }
 
@@ -2722,6 +2729,10 @@ fn push_bond(companion: &CompanionService, ui_weak: &slint::Weak<App>) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_bond_data(BondData {
+                // The one place this becomes true: the store has been read, on the thread that
+                // owns it. Until then the property is the Slint default, and the rail and
+                // `describe shell` say so instead of showing that default as a level.
+                loaded: true,
                 bond_score: bond.bond_score as f32,
                 bond_level: bond.bond_level.into(),
                 total_interactions: bond.total_interactions as i32,
