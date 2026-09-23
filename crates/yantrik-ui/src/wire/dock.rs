@@ -18,7 +18,8 @@ pub enum Launch {
     SettingsSection(i32),
     /// The editor screen, on a blank file.
     Editor,
-    /// The Apps launcher.
+    /// The Apps launcher. Not a screen of its own: it is an overlay drawn over the desktop
+    /// screen, so opening it means going to the desktop and opening the grid there.
     Launchpad,
     /// A program shipped beside the shell, registered as `id` while it runs.
     Program { id: &'static str, bin: &'static str },
@@ -258,6 +259,7 @@ const PURPOSES: &[(&str, &str)] = &[
     ("browser", "the web"),
     ("arcade", "game making: small JSON specs in, one playable HTML game out"),
     ("blender", "3D scenes: model them, light them, render them"),
+    ("launchpad", "every app on this machine, by category, searchable"),
 ];
 
 /// The launcher's id for an app, given any name the app answers to.
@@ -310,6 +312,15 @@ pub fn openable() -> Vec<serde_json::Value> {
                     let surface = control::surface_id("blender").unwrap_or("blender");
                     serde_json::json!({ "name": name, "opens": "app", "describe_as": surface })
                 }
+                // Listed as what it is. It was "a screen of the desktop itself", which is what
+                // `yos ls` printed, so the next thing a caller tried was `show_screen
+                // screen=launchpad` — refused, because the launcher is not a screen but an
+                // overlay on the desktop one. The listing is where a caller learns that.
+                Launch::Launchpad => serde_json::json!({
+                    "name": name,
+                    "opens": "the launcher, over the desktop",
+                    "describe_as": "shell",
+                }),
                 _ => serde_json::json!({ "name": name, "opens": "a screen of the desktop itself", "describe_as": "shell" }),
             };
             let id = match launch {
@@ -700,6 +711,15 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 show(7);
             }
             Launch::Editor => spawn_app("editor", "yantrik-text-editor"),
+            // This does open the launcher: the grid's `changed` handler fires and the
+            // catalogue is rescanned, which is the "Scanned .desktop files count=31" line that
+            // followed every `open_app name=launchpad` in the log. What it does not do is put
+            // the launcher where anyone can see it. The shell is one fullscreen toplevel under
+            // labwc, so with an app window in front the grid opens underneath it — the
+            // photograph of "nothing" is Studio, or the Editor, exactly as before (#71, #118).
+            // Raising the shell is the caller's job, done in `control::open_launcher`, because
+            // that is where the answer is built and the raise can be reported with it; a person
+            // reaching this arm from the desktop's own menu is already looking at the shell.
             Launch::Launchpad => {
                 show(1);
                 if let Some(ui) = ui_weak.upgrade() {
@@ -1499,6 +1519,37 @@ mod tests {
         for app in apps.iter().filter(|a| a["opens"] == "app") {
             assert!(app["for"].as_str().is_some_and(|s| s.len() > 8), "{} does not say what it is for", app["name"]);
         }
+    }
+
+    /// The launcher is listed as the launcher, not as a screen.
+    ///
+    /// `yos ls` put `launchpad` under "Screens of the desktop itself", because the listing
+    /// called everything that was not a program a screen. A caller took it at its word: `open_app
+    /// name=launchpad` opened the grid under the app window in front, and the natural next try,
+    /// `show_screen screen=launchpad`, was refused with "no screen called launchpad". The listing
+    /// is the one place a caller can read what a name opens, so it says that this one opens an
+    /// overlay on the desktop, and what is in it.
+    #[test]
+    fn the_launcher_is_listed_as_what_it_is() {
+        assert_eq!(route("launchpad"), Some(Launch::Launchpad));
+        assert_eq!(availability("launchpad", &[]), Availability::Ready);
+        // Part of the desktop's own surface, which is where `describe` reports it open.
+        assert_eq!(surface_for("launchpad"), Some("shell"));
+
+        let apps = openable();
+        let launcher = apps.iter().find(|a| a["name"] == "launchpad").expect("launchpad is openable");
+        let opens = launcher["opens"].as_str().unwrap_or_default();
+        assert!(
+            opens.contains("launcher"),
+            "`launchpad` is listed as opening `{opens}`, and a caller reading that will ask \
+             show_screen for it"
+        );
+        assert!(!opens.starts_with("a screen"), "the launcher is not a screen: {opens}");
+        assert_eq!(launcher["describe_as"], "shell");
+        assert!(
+            launcher["for"].as_str().is_some_and(|s| s.contains("app")),
+            "the listing does not say what the launcher is for: {launcher}"
+        );
     }
 
     #[test]
