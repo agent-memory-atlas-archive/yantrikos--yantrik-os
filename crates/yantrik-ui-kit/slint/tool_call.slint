@@ -1,0 +1,131 @@
+// One call a mind made — what it called, with what, how it went, and what came back.
+//
+// Its own component, not a branch inside the chat bubble, because the conversation is only the
+// first place a call is shown. A mind's view of its own work (the calls it made, the command
+// output they produced) is the same card with a status and an output filled in, and a host that
+// has something richer than text to show under a call — a live terminal, a picture — puts it in
+// the card's slot:
+//
+//     ToolCallCard { call: c; expanded: true; MyTerminalView { … } }
+//
+// Before #125 a call in the conversation was a line of prose reading
+// `⚙️ mcp_yantrik_os_os_act...`: a name, nothing it touched, not one argument.
+
+import { Theme } from "theme.slint";
+
+export struct ToolCallData {
+    // The tool, as the mind names it: `os_act`, `mcp_yantrik_os_os_act`, `terminal`.
+    name: string,
+    // What it touched, when known: `studio.generate`, `notes`.
+    target: string,
+    // The one line: name, target and `key="value"` for each argument, long values already cut.
+    summary: string,
+    // The arguments in full. Empty means the one line already is everything the mind sent, and
+    // there is nothing to open.
+    arguments: string,
+    // "running", "done" or "failed" when the source says; "" when it does not. The chat trail
+    // does not say, so the conversation leaves it empty rather than guess.
+    status: string,
+    // What the call returned, when the source sent it. Empty otherwise.
+    output: string,
+}
+
+export component ToolCallCard inherits Rectangle {
+    in property <ToolCallData> call;
+    // Open: the arguments and output in full, and the summary wrapped rather than cut. A host
+    // that wants a call open from the start binds this.
+    in-out property <bool> expanded: false;
+    callback toggled(bool);
+
+    property <bool> has-more: root.call.arguments != "" || root.call.output != "";
+
+    height: self.preferred-height;
+    background: Theme.bg-card;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border-subtle;
+
+    VerticalLayout {
+        padding: 6px;
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 4px;
+
+        // The one line. The click that opens the call is here and only here, so whatever a host
+        // puts in the slot below keeps its own clicks.
+        Rectangle {
+            HorizontalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: "⚙";
+                    color: Theme.text-dim;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.call.summary != "" ? root.call.summary : root.call.name;
+                    color: Theme.cyan-light;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-small;
+                    wrap: root.expanded ? TextWrap.word-wrap : TextWrap.no-wrap;
+                    overflow: root.expanded ? TextOverflow.clip : TextOverflow.elide;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                if root.call.status != "" : Text {
+                    text: root.call.status;
+                    color: root.call.status == "failed" ? Theme.color-danger
+                        : root.call.status == "done" ? Theme.color-success
+                        : Theme.amber-light;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                }
+                if root.has-more : Text {
+                    text: root.expanded ? "less" : "show all";
+                    color: Theme.text-dim;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                }
+            }
+
+            TouchArea {
+                mouse-cursor: root.has-more ? MouseCursor.pointer : MouseCursor.default;
+                clicked => {
+                    root.expanded = !root.expanded;
+                    root.toggled(root.expanded);
+                }
+            }
+        }
+
+        if root.expanded && root.call.arguments != "" : Text {
+            text: root.call.arguments;
+            color: Theme.text-secondary;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-small;
+            wrap: word-wrap;
+        }
+
+        if root.expanded && root.call.output != "" : Rectangle {
+            background: Theme.bg-input;
+            border-radius: 4px;
+            height: self.preferred-height;
+
+            HorizontalLayout {
+                padding: 6px;
+
+                Text {
+                    text: root.call.output;
+                    color: Theme.text-primary;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-small;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        // The slot: a host's own view of what the call produced.
+        @children
+    }
+}

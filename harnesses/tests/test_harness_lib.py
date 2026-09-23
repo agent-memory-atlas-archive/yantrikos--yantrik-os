@@ -235,10 +235,20 @@ class TrailTests(unittest.TestCase):
         self.assertEqual(tool_trail("os_act", {"app": "notes", "action": "new_note()"}),
                          "⚙️ os_act notes.new_note")
 
-    def test_arguments_that_could_hold_private_text_are_not_in_the_trail(self):
+    def test_the_arguments_ride_on_the_line_so_the_panel_can_show_them(self):
+        # #125: the panel showed `os_act studio.generate` and nothing of what was generated,
+        # next to an approval card that listed every argument of the same call.
+        line = tool_trail("os_act", {"app": "studio", "action": "generate",
+                                     "args": {"prompt": "a red kite", "count": 1}})
+        self.assertEqual(line, '⚙️ os_act studio.generate {"args":{"prompt":"a red kite","count":1}}')
+        # What the label already says is not said twice.
+        self.assertNotIn('"app"', line)
+
+    def test_the_trail_is_one_line_whatever_the_arguments_hold(self):
         line = tool_trail("os_act", {"app": "notes", "action": "new_note",
-                                     "args": {"body": "my therapist said"}})
-        self.assertNotIn("therapist", line)
+                                     "args": {"body": "first line\nsecond line", "when": object()}})
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertIn("first line\\nsecond line", line)
 
     def test_the_trail_sits_on_its_own_line_with_a_blank_one_after_it(self):
         turn, recorder = recording_turn("hi")

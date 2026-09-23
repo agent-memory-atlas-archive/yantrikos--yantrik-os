@@ -188,6 +188,21 @@ fn clip(text: &str, max: usize) -> String {
     format!("{head}… ({} characters total)", text.chars().count())
 }
 
+/// The tool calls in one message, each with its arguments, as the trail carried them.
+fn calls_of(text: &str) -> Vec<serde_json::Value> {
+    crate::trail::calls_in(text)
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "target": c.target,
+                "summary": c.summary(),
+                "arguments": c.arguments,
+            })
+        })
+        .collect()
+}
+
 /// How many directory entries `describe` will list.
 ///
 /// A glance, not a transcript: a model reading 4,000 filenames has spent its context on
@@ -417,16 +432,33 @@ pub fn publish(
                 let messages = ui.get_messages();
                 let total = messages.row_count();
                 (total.saturating_sub(CONVERSATION_TAIL)..total)
-                    .filter_map(|i| messages.row_data(i))
-                    .map(|m| {
-                        serde_json::json!({
+                    .filter_map(|i| messages.row_data(i).map(|m| (i, m)))
+                    .map(|(i, m)| {
+                        let text = m.content.to_string();
+                        let mut entry = serde_json::json!({
+                            // Good for as long as the transcript is: rows are only ever
+                            // appended. `read_message` takes it.
+                            "index": i,
                             "role": m.role.to_string(),
-                            "text": clip(m.content.as_str(), MESSAGE_CLIP),
+                            "text": clip(&text, MESSAGE_CLIP),
                             // Still arriving. A caller polling for an answer needs to know the
                             // difference between "this is the reply" and "this is the reply so
                             // far", and an empty streaming bubble is the normal first state.
                             "streaming": m.is_streaming,
-                        })
+                        });
+                        // Said outright, so a caller does not have to notice an ellipsis in
+                        // the text to know there is more, and knows where the rest is.
+                        if text.chars().count() > MESSAGE_CLIP {
+                            entry["clipped"] = true.into();
+                        }
+                        // The mind's tool calls, with their arguments — the same reading the
+                        // panel gives them, so what the person sees and what a caller reads
+                        // are one thing.
+                        let calls = calls_of(&text);
+                        if !calls.is_empty() {
+                            entry["calls"] = serde_json::Value::Array(calls);
+                        }
+                        entry
                     })
                     .collect()
             };
@@ -600,6 +632,7 @@ pub fn publish(
     let lens_ui = ui_for.clone();
     let pin_ui = ui_for.clone();
     let pin_catalogue = ctx.installed_apps.clone();
+    let read_ui = ui_for.clone();
     let lock_ui = ui_for;
 
     let surface = ControlSurface::new("shell")
@@ -799,6 +832,46 @@ pub fn publish(
                     "mind": crate::wire::harness::host()
                         .map(|h| h.active_id())
                         .unwrap_or_else(|| crate::wire::harness::BUILTIN_ID.to_string()),
+                }))
+            },
+        )
+        .action(
+            // The rest of a long answer.
+            //
+            // `describe` clips every message to MESSAGE_CLIP characters, which is right for a
+            // glance and wrong as the only way to read: a mind's two-thousand-character reply
+            // came back as six hundred and "(2017 characters total)", and nothing on this
+            // surface returned the rest (#125). This does. `safe`: it reads the transcript the
+            // person is already looking at, and changes nothing.
+            Action::new(
+                "read_message",
+                "Read one message of the conversation in full. `describe` clips each to 600 characters and marks the cut ones `clipped`; this returns the whole text, and every tool call in it with its arguments",
+            )
+            .risk("safe")
+            .arg(Param::number("index").describe("The message's `index` from describe's `conversation`")),
+            move |args| {
+                let ui = read_ui()?;
+                let index = args["index"]
+                    .as_u64()
+                    .or_else(|| args["index"].as_f64().map(|f| f as u64))
+                    .ok_or("`index` must be a number")? as usize;
+                use slint::Model;
+                let messages = ui.get_messages();
+                let m = messages.row_data(index).ok_or_else(|| {
+                    format!(
+                        "no message {index}: the conversation has {} (indexes 0 to {})",
+                        messages.row_count(),
+                        messages.row_count().saturating_sub(1)
+                    )
+                })?;
+                let text = m.content.to_string();
+                Ok(serde_json::json!({
+                    "index": index,
+                    "role": m.role.to_string(),
+                    "text": text,
+                    "characters": text.chars().count(),
+                    "streaming": m.is_streaming,
+                    "calls": calls_of(&text),
                 }))
             },
         )
@@ -1680,5 +1753,80 @@ mod bond_not_loaded_tests {
         assert_eq!(d.level, "Partner-in-Crime");
         assert_eq!(d.score, 5.0);
         assert_eq!(d.interactions, 155);
+    }
+}
+
+#[cfg(test)]
+mod conversation_tests {
+    use std::path::Path;
+
+    /// This file, without its tests.
+    fn source() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        whole.split("#[cfg(test)]").next().unwrap_or_default().to_string()
+    }
+
+    /// `describe` is a window onto the transcript, and a window is fine as long as the surface
+    /// also offers the rest. It did not: a 2,017-character reply came back as 600 and a count,
+    /// and there was no verb that returned the other 1,417 (#125).
+    #[test]
+    fn a_message_describe_clipped_can_be_read_in_full() {
+        let src = source();
+        let from = src.find("\"read_message\"").expect(
+            "the shell publishes `read_message`; without it a reply longer than the clip has no way back to the caller",
+        );
+        let rest = &src[from..];
+        let handler = &rest[..rest.find(".action(").unwrap_or(rest.len())];
+        assert!(
+            handler.contains("row_data(index)"),
+            "read_message reads the one message the caller named:\n{handler}"
+        );
+        assert!(
+            !handler.contains("clip("),
+            "the whole point of read_message is the whole text; it must not clip:\n{handler}"
+        );
+        assert!(
+            handler.contains("calls_of("),
+            "the calls in the message travel with it, with their arguments:\n{handler}"
+        );
+    }
+
+    /// A caller has to be able to tell a cut message from a short one without parsing an
+    /// ellipsis, and has to have the number `read_message` takes.
+    #[test]
+    fn describe_names_each_message_and_says_which_ones_it_cut() {
+        let src = source();
+        let describe = src
+            .split("ControlSurface::new(\"shell\")")
+            .next()
+            .expect("describe is built before the surface");
+        let conversation = describe
+            .split(".with(\"conversation\"")
+            .next()
+            .expect("describe reports the conversation");
+        assert!(conversation.contains("\"index\": i"), "each entry carries its row index");
+        assert!(conversation.contains("\"clipped\""), "a cut entry says so");
+        assert!(conversation.contains("\"calls\""), "a message's tool calls are read out with it");
+    }
+
+    #[test]
+    fn clipping_keeps_the_count_so_a_caller_knows_what_it_is_missing() {
+        let long = "x".repeat(700);
+        assert!(super::clip(&long, 600).ends_with("… (700 characters total)"));
+        assert_eq!(super::clip("short", 600), "short");
+    }
+
+    #[test]
+    fn the_calls_read_out_of_a_message_carry_their_arguments() {
+        let calls = super::calls_of(
+            "On it.\n⚙️ os_act studio.generate {\"args\":{\"prompt\":\"a red kite\"}}\n\nDone.",
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "os_act");
+        assert_eq!(calls[0]["target"], "studio.generate");
+        assert_eq!(calls[0]["arguments"]["args"]["prompt"], "a red kite");
+        assert_eq!(calls[0]["summary"], "os_act studio.generate prompt=\"a red kite\"");
     }
 }

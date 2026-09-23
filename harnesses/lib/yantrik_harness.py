@@ -129,11 +129,15 @@ def tool_trail(name: str, arguments: Optional[Dict[str, Any]] = None) -> str:
     Every harness shows tool use the same way the panel already shows it for Hermes, because the
     person reading it should not have to learn a second vocabulary when they switch minds.
 
-    Arguments are deliberately left out, with one exception. A tool call's arguments routinely
-    hold the thing the person would least like repeated back on screen — the body of the note,
-    the text of the message, the search that was run. `app` and `action` are the two that name
-    what was touched rather than what was said, and they are the two that make the line useful:
-    `os_act` alone says nothing, `os_act calendar.add_event` says what happened.
+    `app` and `action` name what was touched, and they go in the label: `os_act` alone says
+    nothing, `os_act calendar.add_event` says what happened. The rest of the arguments follow as
+    one JSON object on the same line, so the panel can show `studio.generate prompt="a red kite"`
+    under the call the way the approval card for the same call already does (#125). This line
+    used to leave them out on the grounds that a note's body or a message's text is private —
+    but the person reading the panel is the person whose desktop this is, the card two lines up
+    shows every argument, and a mind whose calls cannot be read is a mind that cannot be watched.
+    The shell keeps the line to one line and opens the arguments in full on a click, so a long
+    body does not take over the conversation.
     """
     label = str(name or "tool")
     args = arguments if isinstance(arguments, dict) else {}
@@ -145,6 +149,12 @@ def tool_trail(name: str, arguments: Optional[Dict[str, Any]] = None) -> str:
         label = "%s %s.%s" % (label, app, action)
     elif app:
         label = "%s %s" % (label, app)
+    rest = {k: v for k, v in args.items() if k not in ("app", "action")}
+    if rest:
+        # One line, always: json.dumps escapes newlines, and `default=str` keeps a value the
+        # model sent as something odd from taking the whole trail down with it.
+        label = "%s %s" % (label, json.dumps(rest, ensure_ascii=False, default=str,
+                                              separators=(",", ":")))
     return "⚙️ %s" % label
 
 

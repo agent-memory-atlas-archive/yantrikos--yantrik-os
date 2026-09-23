@@ -119,6 +119,17 @@ script that only acts never needs to attach.
   is left waiting on an answer that is not coming.
 - **Nothing waiting is an ordinary reply**, not an error. You will poll far more often than a
   person types.
+- **A tool call is a line of the answer beginning with `⚙️`.** `chunk` carries text and nothing
+  else, so a call goes into the text: `⚙️ os_act studio.generate {"args":{"prompt":"a red
+  kite"}}` — the tool's name, what it touched, and the rest of its arguments as one JSON object
+  on the same line, which is what `harnesses/lib/yantrik_harness.py`'s `tool_trail` writes. The
+  shell renders that line as the call — name, target, `key="value"` — cut to the panel's width,
+  with the whole arguments a click away, and reads the same calls out under `calls` in
+  `describe shell`'s `conversation`. It also understands Hermes' own progress lines
+  (`⚙️ name...`, `⚙️ name: "preview"`, and the verbose `⚙️ name([...])` with the arguments on the
+  line after), so a harness that already writes its calls down does not need this form. Anything
+  a line carries is what the panel can show: Hermes in its default mode sends the name alone
+  for an MCP tool, and the panel shows the name alone.
 
 ## Five harnesses exist
 
