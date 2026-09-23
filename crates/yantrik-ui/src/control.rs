@@ -130,6 +130,7 @@ const SCREENS: &[(&str, i32)] = &[
     ("packages", 21),
     ("devices", 27),
     ("permissions", 28),
+    ("problems", 33),
 ];
 
 /// What `describe` calls the screen the shell is on.
@@ -412,6 +413,9 @@ pub fn publish(
                 // test, can tell "the machine is waiting for someone to press a button" from
                 // "the machine is hung" — the two look identical from outside otherwise.
                 .with("pending_approvals", crate::control_approvals::pending_for_describe())
+                // What went wrong on this machine, newest first: the local records a person
+                // or a mind can choose to send with `report_problem`. Reading them sends nothing.
+                .with("problems", crate::wire::problem_report::for_describe())
                 // The owner's standing policy for callers on the socket, so a bridge can read
                 // it instead of provoking a `CEILING:` refusal to find out. An approval cannot
                 // exceed this, and a question the machine will refuse to answer should never
@@ -552,6 +556,7 @@ pub fn publish(
     let ui_for = move || weak.upgrade().ok_or_else(|| "the shell is gone".to_string());
 
     let open_ui = ui_for.clone();
+    let report_ui = ui_for.clone();
     let screen_ui = ui_for.clone();
     let focus_ui = ui_for.clone();
     let dnd_ui = ui_for.clone();
@@ -563,6 +568,38 @@ pub fn publish(
 
     let surface = ControlSurface::new("shell")
         .describe(describe)
+        .action(
+            Action::new(
+                "report_problem",
+                "Send one of this machine's problem records - a crash or failure this desktop wrote \
+                 down, listed under `problems` in describe - to the project's report intake, with a \
+                 note. Graded sensitive because the record leaves the machine. It carries no name, \
+                 hostname or address; the bytes sent are exactly the record as the file holds it, \
+                 which is what the Report a problem screen shows. The answer says where it landed.",
+            )
+            .risk("sensitive")
+            .defers()
+            .arg(Param::text("record")
+                .describe("The record's file name from `problems`, e.g. 1790120000-yantrik-studio.json. Left out means the newest.")
+                .optional())
+            .arg(Param::text("note").describe("What was happening, in your words. Optional.").optional()),
+            move |args| {
+                let ui = report_ui()?;
+                let record = args["record"].as_str().unwrap_or("").trim().to_string();
+                let note = args["note"].as_str().unwrap_or("").trim().to_string();
+                let (path, problem) = crate::wire::problem_report::pick(&record).ok_or_else(|| {
+                    "no such problem record; `describe shell` lists the ones there are under `problems`".to_string()
+                })?;
+                let name = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                crate::wire::problem_report::send_from_ui(&ui, path, problem, note);
+                Ok(serde_json::json!({
+                    "record": name,
+                    "sending": true,
+                    "read_back": "the outcome lands on the Report a problem screen's status line; \
+                                  describe shell again for `problems`",
+                }))
+            },
+        )
         .action(
             // Deferred, and the handshake with yantrik-mind is what proved it. This returned
             // `settled: true` while the shell still reported "0 windows open" and no app socket
@@ -892,7 +929,7 @@ pub fn publish(
             Action::new("show_screen", "Switch the shell to one of its screens")
                 .arg(
                     Param::text("screen")
-                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media — or launchpad, the launcher, which opens over the desktop"),
+                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media, problems — or launchpad, the launcher, which opens over the desktop"),
                 )
                 .arg(
                     Param::text("section")

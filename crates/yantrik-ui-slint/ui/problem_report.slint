@@ -1,0 +1,239 @@
+// Report a problem — the records this desktop wrote when something went wrong, and the one act
+// that sends one of them anywhere.
+//
+// Nothing here sends on its own. The screen exists so that the person can see, in full, the
+// bytes a report would carry — the record as the file holds it, already scrubbed of their home
+// directory, their user name and anything shaped like a credential — and then press Send, or
+// not. See design/problem-reports-2026-09-23.md.
+import { Theme } from "theme.slint";
+import { Icon, Icons } from "components/icon.slint";
+
+export struct ProblemRow {
+    id: string,        // the file name, which is what `report_problem` takes
+    title: string,     // "yantrik-studio panicked" / "yantrik-arcade crashed" / "…failed"
+    when: string,      // "19:43" or "Mon 21 Sep"
+    kind: string,      // panic | crash | failure
+}
+
+component FlatButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 32px;
+    width: label-text.preferred-width + Theme.sp-5;
+    border-radius: 8px;
+    background: root.primary ? Theme.accent : Theme.hover-fill;
+    border-width: root.primary ? 0px : 1px;
+    border-color: Theme.border-strong;
+    opacity: root.enabled ? 1.0 : 0.45;
+    label-text := Text {
+        text: root.label;
+        color: root.primary ? Theme.text-on-accent : Theme.text-primary;
+        font-size: Theme.fs-caption;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component ProblemReportScreen inherits Rectangle {
+    in property <[ProblemRow]> rows: [];
+    in property <int> selected: -1;
+    in property <string> json: "";
+    in-out property <string> note: "";
+    in property <string> status: "";
+    in property <bool> sending: false;
+    callback select(int);
+    callback send();
+    callback delete-record();
+    callback refresh();
+
+    background: Theme.bg-surface;
+
+    HorizontalLayout {
+        padding: Theme.sp-4;
+        spacing: Theme.sp-4;
+
+        // ── The records ──
+        Rectangle {
+            width: 300px;
+            border-radius: 12px;
+            background: Theme.bg-card;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            VerticalLayout {
+                padding: Theme.sp-3;
+                spacing: Theme.sp-2;
+                HorizontalLayout {
+                    Text {
+                        text: "WHAT WENT WRONG";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-micro;
+                        letter-spacing: 2px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    FlatButton { label: "Refresh"; clicked => { root.refresh(); } }
+                }
+                if root.rows.length == 0 : Text {
+                    text: "Nothing that this desktop noticed. When an app crashes or fails, its record appears here — a local file, sent nowhere unless you send it.";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+                Flickable {
+                    vertical-stretch: 1;
+                    viewport-height: list.preferred-height;
+                    list := VerticalLayout {
+                        spacing: 4px;
+                        for row[i] in root.rows : Rectangle {
+                            height: 52px;
+                            border-radius: 8px;
+                            background: i == root.selected ? Theme.accent-glow : transparent;
+                            border-width: i == root.selected ? 1px : 0px;
+                            border-color: Theme.accent;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+                                Rectangle {
+                                    width: 8px;
+                                    height: 8px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 4px;
+                                    background: row.kind == "failure" ? Theme.amber : Theme.color-emotional;
+                                }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    alignment: center;
+                                    Text {
+                                        text: row.title;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.fs-caption;
+                                        wrap: no-wrap;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: row.when + " · " + row.kind;
+                                        color: Theme.text-dim;
+                                        font-size: Theme.fs-micro;
+                                        wrap: no-wrap;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                            TouchArea { clicked => { root.select(i); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── One record, in full, and the act ──
+        Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 12px;
+            background: Theme.bg-card;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            VerticalLayout {
+                padding: Theme.sp-4;
+                spacing: Theme.sp-3;
+
+                if root.selected < 0 : Text {
+                    text: "Pick a record on the left to see exactly what a report would carry.";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                }
+
+                if root.selected >= 0 : Text {
+                    text: "This is the whole report. Every byte of it, before you decide.";
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-body-strong;
+                    wrap: word-wrap;
+                }
+                if root.selected >= 0 : Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 8px;
+                    background: Theme.bg-deep;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    Flickable {
+                        x: Theme.sp-3; y: Theme.sp-3;
+                        width: parent.width - 2 * Theme.sp-3;
+                        height: parent.height - 2 * Theme.sp-3;
+                        viewport-height: json-text.preferred-height;
+                        json-text := Text {
+                            width: parent.width;
+                            text: root.json;
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-mono;
+                            font-family: "monospace";
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                if root.selected >= 0 : Text {
+                    text: "What were you doing? (optional — it goes with the report, and nothing else does)";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+                if root.selected >= 0 : Rectangle {
+                    height: 72px;
+                    border-radius: 8px;
+                    background: Theme.bg-deep;
+                    border-width: 1px;
+                    border-color: note-input.has-focus ? Theme.accent : Theme.border-subtle;
+                    note-input := TextInput {
+                        x: Theme.sp-3; y: Theme.sp-2;
+                        width: parent.width - 2 * Theme.sp-3;
+                        height: parent.height - 2 * Theme.sp-2;
+                        text <=> root.note;
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-caption;
+                        single-line: false;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if root.selected >= 0 : Text {
+                    text: "Sent to report.yantrikos.com, which files it as a GitHub issue on the project. It carries no name, no hostname and no address. Nothing is sent unless you press Send.";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    wrap: word-wrap;
+                }
+
+                if root.selected >= 0 : HorizontalLayout {
+                    spacing: Theme.sp-2;
+                    FlatButton {
+                        label: root.sending ? "Sending…" : "Send this report";
+                        primary: true;
+                        enabled: !root.sending;
+                        clicked => { root.send(); }
+                    }
+                    FlatButton {
+                        label: "Delete this record";
+                        enabled: !root.sending;
+                        clicked => { root.delete-record(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                if root.status != "" : Text {
+                    text: root.status;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

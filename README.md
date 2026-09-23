@@ -391,7 +391,10 @@ yantrik-os/
   an endpoint baked into a public image is an endpoint every copy of it talks to. The two
   places it does reach out are ones you asked for: the update check against
   `releases.yantrikos.com`, and whatever your weather, mail and calendar are configured
-  against.
+  against — and a problem report you chose to send. When an app crashes, the desktop writes a
+  record locally, scrubbed of your home directory, your user name and anything shaped like a
+  key; *Report a problem* shows you that exact file, and only pressing Send moves it, to
+  `report.yantrikos.com`, with no name, hostname or address attached.
 - **The mind is a separate question, and it is yours to answer.** This OS is built to be
   driven by any mind, cloud models included; that is the point of the harness protocol, and
   the token-efficiency comparison this project publishes was itself measured against a cloud

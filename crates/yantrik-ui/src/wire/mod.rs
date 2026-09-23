@@ -34,6 +34,7 @@ pub mod package_manager;
 pub mod skill_store;
 pub mod device_dashboard;
 pub mod permission_dashboard;
+pub mod problem_report;
 pub mod version;
 pub mod ai_assist;
 pub mod ai_onboarding;
@@ -84,6 +85,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     skill_store::wire(ui, ctx);
     device_dashboard::wire(ui, ctx);
     permission_dashboard::wire(ui, ctx);
+    problem_report::wire(ui, ctx);
     about::wire(ui, ctx);
     version::wire(ui, ctx);
     morning_brief::wire(ui, ctx);

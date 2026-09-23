@@ -1,0 +1,37 @@
+# The problem-report intake, on the project VPS beside iso. and releases.
+#
+#   sudo install -m 755 yantrik-report /usr/local/bin/yantrik-report
+#   sudo install -m 644 yantrik-report.service /etc/systemd/system/
+#   sudo install -d -o yantrik-report -g yantrik-report /var/lib/yantrik-report
+#   printf 'GITHUB_TOKEN=%s\n' "$TOKEN" | sudo install -m 600 /dev/stdin /etc/yantrik-report.env
+#   sudo systemctl enable --now yantrik-report
+#
+# The token file is root-only and read by systemd, so the service process never has the token
+# in a file it can read — only in its environment. The service runs as its own user with no
+# home, no shell and one writable directory: the state file that maps a crash signature to the
+# issue it opened.
+[Unit]
+Description=Yantrik OS problem-report intake (report.yantrikos.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=yantrik-report
+Group=yantrik-report
+DynamicUser=no
+EnvironmentFile=/etc/yantrik-report.env
+Environment=REPORT_REPO=yantrikos/yantrik-os
+Environment=REPORT_STATE=/var/lib/yantrik-report/issues.json
+Environment=REPORT_BIND=127.0.0.1:8471
+ExecStart=/usr/bin/python3 /usr/local/bin/yantrik-report
+Restart=on-failure
+RestartSec=5
+# Nothing but the state directory is writable; nothing but GitHub is needed.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/yantrik-report
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

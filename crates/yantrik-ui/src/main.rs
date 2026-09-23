@@ -107,6 +107,10 @@ fn main() {
         )
         .init();
 
+    // The shell does not go through the runtime's `init_tracing`, so it installs the same
+    // panic hook itself: a panic here becomes a problem record before it becomes a stack trace.
+    yantrik_app_runtime::problems::install_panic_hook("yantrik-ui");
+
     // Load config
     let config_path = std::env::args().nth(1).map(PathBuf::from);
     let config = load_config(config_path.clone());
