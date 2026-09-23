@@ -27,7 +27,7 @@ use yantrik_ipc_contracts::email::{
     EmailSummary, OAuthBeginResult, OAuthStatus, TestAccountResult,
 };
 
-use state::{Draft, FolderCounts, GoogleOutcome, MailState, MessageRow, Triage};
+use state::{Counted, Draft, FolderCounts, GoogleOutcome, MailState, MessageRow, Triage};
 
 slint::include_modules!();
 
@@ -489,11 +489,16 @@ fn folder_to_ui(f: &EmailFolder, selected: bool) -> EmailFolderData {
         s if s.contains("archive") || s.contains("all mail") => "archive",
         _ => "custom",
     };
+    // A folder the server did not count has no numbers, not two zeros: the row keeps the fact
+    // and the reason, so the sidebar can show a mark and the header can say why (#131).
+    let counts = f.counts.unwrap_or_default();
     EmailFolderData {
         name: f.name.clone().into(),
         icon: icon.into(),
-        unread_count: f.unread_count,
-        total_count: f.total_count,
+        unread_count: counts.unread,
+        total_count: counts.total,
+        counts_known: f.counts.is_some(),
+        counts_reason: f.reason.clone().unwrap_or_default().into(),
         is_selected: selected,
         folder_type: folder_type.into(),
     }
@@ -722,28 +727,65 @@ fn show_folder_counts(ui: &EmailApp, mail: &Rc<Mail>) {
     let folder = mail.folder.borrow().clone();
     let all = mail.all_rows.borrow();
     let loaded_unread = all.iter().filter(|(_, it)| !it.is_read).count();
-    let counts = FolderCounts::of(&folder_records(ui), &folder, loaded_unread, all.len());
-    ui.set_email_folder_unread(counts.unread);
-    ui.set_email_folder_total(counts.total);
+    match Counted::of(&folder_records(ui), &folder, loaded_unread, all.len()) {
+        Counted::Known(counts) => {
+            ui.set_email_folder_unread(counts.unread);
+            ui.set_email_folder_total(counts.total);
+            ui.set_email_folder_counts_known(true);
+            ui.set_email_folder_counts_reason(SharedString::default());
+        }
+        Counted::Unavailable { reason } => {
+            // The two numbers mean nothing with `known` false; zero is what they hold, not
+            // what they say, and nothing reads them without the flag.
+            ui.set_email_folder_unread(0);
+            ui.set_email_folder_total(0);
+            ui.set_email_folder_counts_known(false);
+            ui.set_email_folder_counts_reason(reason.into());
+        }
+    }
+}
+
+/// What the header holds about the open folder, read back off its properties.
+fn header_counts(ui: &EmailApp) -> Counted {
+    if ui.get_email_folder_counts_known() {
+        Counted::Known(FolderCounts {
+            unread: ui.get_email_folder_unread(),
+            total: ui.get_email_folder_total(),
+        })
+    } else {
+        Counted::Unavailable { reason: ui.get_email_folder_counts_reason().to_string() }
+    }
 }
 
 /// The folder list as the wire had it, read back off the sidebar's model.
 fn folder_records(ui: &EmailApp) -> Vec<EmailFolder> {
     let folders = ui.get_folders();
-    (0..folders.row_count())
-        .filter_map(|i| folders.row_data(i))
-        .map(|f| EmailFolder {
-            name: f.name.to_string(),
-            unread_count: f.unread_count,
-            total_count: f.total_count,
-        })
-        .collect()
+    (0..folders.row_count()).filter_map(|i| folders.row_data(i)).map(folder_record).collect()
+}
+
+/// One row of the sidebar as the wire had it.
+fn folder_record(f: EmailFolderData) -> EmailFolder {
+    if f.counts_known {
+        EmailFolder::counted(f.name.to_string(), f.unread_count, f.total_count)
+    } else {
+        EmailFolder::uncounted(f.name.to_string(), f.counts_reason.to_string())
+    }
+}
+
+/// A folder's counts as `describe` prints them: the two numbers, or `null` — never `0/0` for
+/// a folder that was not counted, because that is what an empty folder prints.
+fn counts_json(counts: &Counted) -> serde_json::Value {
+    match counts.known() {
+        Some(c) => serde_json::json!({ "unread": c.unread, "total": c.total }),
+        None => serde_json::Value::Null,
+    }
 }
 
 /// Change one folder's entry in the list, for the cases where the mail server has already agreed
 /// — a message read, deleted or moved — and put the header right afterwards. The next sync
 /// replaces the whole list with the server's count; until then this is what is known. A folder
-/// that is not listed is left alone, and the header counts what is in hand.
+/// that is not listed is left alone, and the header counts what is in hand. A folder that is
+/// listed without counts stays without them: there is no number to take one from.
 fn change_counts_of(
     ui: &EmailApp,
     mail: &Rc<Mail>,
@@ -754,11 +796,17 @@ fn change_counts_of(
     let at = (0..folders.row_count()).find(|i| {
         folders.row_data(*i).map(|f| f.name.eq_ignore_ascii_case(folder)).unwrap_or(false)
     });
-    if let Some(mut row) = at.and_then(|i| folders.row_data(i).map(|row| (i, row))) {
-        let counts = change(FolderCounts { unread: row.1.unread_count, total: row.1.total_count });
-        row.1.unread_count = counts.unread;
-        row.1.total_count = counts.total;
-        folders.set_row_data(row.0, row.1);
+    if let Some((i, mut row)) = at.and_then(|i| folders.row_data(i).map(|row| (i, row))) {
+        let before = if row.counts_known {
+            Counted::Known(FolderCounts { unread: row.unread_count, total: row.total_count })
+        } else {
+            Counted::Unavailable { reason: row.counts_reason.to_string() }
+        };
+        if let Counted::Known(counts) = before.after(change) {
+            row.unread_count = counts.unread;
+            row.total_count = counts.total;
+            folders.set_row_data(i, row);
+        }
     }
     show_folder_counts(ui, mail);
 }
@@ -1285,16 +1333,14 @@ fn publish_control(app: &EmailApp, mail: &Rc<Mail>) {
                 )
             } else {
                 // The same two numbers as the folder's entry in `folders` below, by
-                // construction: `show_folder_counts` reads them off that list.
-                let counts = FolderCounts {
-                    unread: ui.get_email_folder_unread(),
-                    total: ui.get_email_folder_total(),
-                };
+                // construction: `show_folder_counts` reads them off that list — and when that
+                // entry has none, this says so rather than "0 unread of 0".
+                let counts = header_counts(&ui);
                 let query = ui.get_email_search_query().to_string();
                 let search = ui
                     .get_email_search_active()
                     .then(|| (query.as_str(), ui.get_email_list().row_count()));
-                state::folder_summary(&folder, counts, search)
+                state::folder_summary(&folder, &counts, search)
             };
 
             let list = ui.get_email_list();
@@ -1316,13 +1362,21 @@ fn publish_control(app: &EmailApp, mail: &Rc<Mail>) {
                 })
                 .collect();
 
+            // `counts` is `{unread, total}` as the mail server counted the folder, or `null`
+            // when it did not count it this time — with `reason` saying why. Never `0/0` for
+            // that: an empty folder is `{"unread": 0, "total": 0}`, and a refused STATUS is
+            // not an empty folder (#131).
             let folder_rows: Vec<serde_json::Value> = (0..folders.row_count())
                 .filter_map(|i| folders.row_data(i))
+                .map(folder_record)
                 .map(|f| {
                     serde_json::json!({
-                        "name": f.name.to_string(),
-                        "unread": f.unread_count,
-                        "total": f.total_count,
+                        "name": f.name,
+                        "counts": f.counts.map(|c| serde_json::json!({
+                            "unread": c.unread,
+                            "total": c.total,
+                        })),
+                        "reason": f.reason,
                     })
                 })
                 .collect();
@@ -1343,15 +1397,23 @@ fn publish_control(app: &EmailApp, mail: &Rc<Mail>) {
                 serde_json::Value::Null
             };
 
+            let header = header_counts(&ui);
             let mut view = base
                 .with("account", ui.get_account_name().to_string())
                 .with("folder", folder)
                 .with("triage", mail.triage.get().label())
-                // `unread` and `total` are the folder's, as the mail server counts them —
-                // the same numbers as its entry in `folders`. `listed` is how many of them are
-                // in hand: the newest page, which is what `messages` is drawn from.
-                .with("unread", ui.get_email_folder_unread())
-                .with("total", ui.get_email_folder_total())
+                // `counts` is the open folder's `{unread, total}`, as the mail server counts
+                // them — the same numbers as its entry in `folders` — or `null` when the server
+                // did not count it, with `counts_reason` saying why. `listed` is how many
+                // messages are in hand: the newest page, which is what `messages` is drawn from.
+                .with("counts", counts_json(&header))
+                .with(
+                    "counts_reason",
+                    match &header {
+                        Counted::Unavailable { reason } => serde_json::Value::from(reason.as_str()),
+                        Counted::Known(_) => serde_json::Value::Null,
+                    },
+                )
                 .with("listed", list.row_count())
                 .with("composing", ui.get_is_composing())
                 .with("search_query", ui.get_email_search_query().to_string())
@@ -1465,7 +1527,7 @@ fn publish_control(app: &EmailApp, mail: &Rc<Mail>) {
                 Ok(serde_json::json!({
                     "folder": name,
                     "messages": count,
-                    "unread": ui.get_email_folder_unread(),
+                    "counts": counts_json(&header_counts(&ui)),
                 }))
             },
         )
@@ -2375,13 +2437,22 @@ mod demo {
     fn color(r: u8, g: u8, b: u8) -> slint::Color { slint::Color::from_rgb_u8(r, g, b) }
 
     pub fn populate(app: &EmailApp) {
+        // `Some` counts are the server's; `None` is a folder it did not count, which the
+        // sidebar marks rather than badges with zero.
         let folders = [
-            ("Inbox", "inbox", 3, 128), ("Starred", "starred", 0, 9), ("Sent", "sent", 0, 341),
-            ("Drafts", "drafts", 0, 2), ("Archive", "archive", 0, 2210), ("Spam", "spam", 12, 12),
-            ("Trash", "trash", 0, 40), ("Receipts", "custom", 0, 77),
+            ("Inbox", "inbox", Some((3, 128))), ("Starred", "starred", Some((0, 9))),
+            ("Sent", "sent", Some((0, 341))), ("Drafts", "drafts", Some((0, 2))),
+            ("Archive", "archive", Some((0, 2210))), ("Spam", "spam", Some((12, 12))),
+            ("Trash", "trash", Some((0, 40))), ("Receipts", "custom", None),
         ];
-        let folders: Vec<EmailFolderData> = folders.iter().enumerate().map(|(i, (n, t, u, c))| EmailFolderData {
-            name: (*n).into(), icon: SharedString::default(), unread_count: *u, total_count: *c,
+        let folders: Vec<EmailFolderData> = folders.iter().enumerate().map(|(i, (n, t, counts))| EmailFolderData {
+            name: (*n).into(), icon: SharedString::default(),
+            unread_count: counts.map(|(u, _)| u).unwrap_or(0),
+            total_count: counts.map(|(_, c)| c).unwrap_or(0),
+            counts_known: counts.is_some(),
+            counts_reason: if counts.is_some() { SharedString::default() } else {
+                "the mail server did not report it: No Response: STATUS timed out".into()
+            },
             is_selected: i == 0, folder_type: (*t).into(),
         }).collect();
         app.set_folders(ModelRc::new(VecModel::from(folders)));
@@ -2447,6 +2518,7 @@ Small thing: the world model's epistemic states read well. \"Believed\" vs \"obs
         app.set_account_name("you@example.com".into());
         app.set_email_folder_total(128);
         app.set_email_folder_unread(3);
+        app.set_email_folder_counts_known(true);
         app.set_email_sync_status("Synced 2 min ago".into());
         app.set_has_account(true);
     }

@@ -267,12 +267,42 @@ pub struct EmailThreadEntry {
     pub snippet: String,
 }
 
+/// A folder's size and how much of it is unread, as the mail server counts them.
+///
+/// A zero here is a zero the server said. A folder whose counts the server would not give this
+/// time has no `FolderCounts` at all — see [`EmailFolder::counts`] — because "0 unread of 0" is
+/// what an empty folder reads as, and a refused STATUS or one that did not answer in time is
+/// not that (#131).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FolderCounts {
+    pub unread: i32,
+    pub total: i32,
+}
+
 /// An email folder (IMAP mailbox).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmailFolder {
     pub name: String,
-    pub unread_count: i32,
-    pub total_count: i32,
+    /// What the server answered when asked, or `None` when it did not answer — a `\Noselect`
+    /// container that cannot hold mail, a STATUS the server refused, a reply that did not come in
+    /// time. `None` is "not read", never "empty"; [`Self::reason`] says which.
+    pub counts: Option<FolderCounts>,
+    /// Why `counts` is `None`, in a sentence a reader can act on: the server's own refusal, or
+    /// what the service tried and could not do. Absent when the counts are there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl EmailFolder {
+    /// A folder the server counted.
+    pub fn counted(name: impl Into<String>, unread: i32, total: i32) -> Self {
+        EmailFolder { name: name.into(), counts: Some(FolderCounts { unread, total }), reason: None }
+    }
+
+    /// A folder the server did not count this time, and why.
+    pub fn uncounted(name: impl Into<String>, reason: impl Into<String>) -> Self {
+        EmailFolder { name: name.into(), counts: None, reason: Some(reason.into()) }
+    }
 }
 
 /// Compose/send request.

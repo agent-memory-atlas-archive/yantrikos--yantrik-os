@@ -18,6 +18,7 @@
 //! check what is made of it.
 
 use imap::types::{StatusAttribute, UnsolicitedResponse};
+use yantrik_ipc_contracts::email::EmailFolder;
 
 /// What is asked of each folder. Both numbers in one round trip, and without an EXAMINE first:
 /// selecting a folder just to read its size was a second command per folder, and RFC 3501 says
@@ -58,6 +59,42 @@ pub fn counts_for(
         found = Some(counts);
     }
     found
+}
+
+/// The folder's entry in the list, from what came of asking the server to count it.
+///
+/// `status` is how the STATUS command went — `Err` carries the server's refusal in its own words,
+/// or the reason the reply never came — and `responses` is what arrived on the unsolicited
+/// channel since. A folder the server did not count goes in the list *uncounted*, with that
+/// reason beside it, and not as `0/0`: that is what an empty folder reads as, and a refusal or a
+/// timeout is a fact about this attempt, not about the mailbox (#131).
+pub fn entry(
+    name: &str,
+    status: Result<(), String>,
+    responses: impl IntoIterator<Item = UnsolicitedResponse>,
+) -> EmailFolder {
+    match status {
+        Err(refusal) => {
+            EmailFolder::uncounted(name, format!("the mail server did not report it: {refusal}"))
+        }
+        Ok(()) => match counts_for(name, responses) {
+            Some(counts) => EmailFolder::counted(name, counts.unread as i32, counts.total as i32),
+            None => EmailFolder::uncounted(
+                name,
+                "the mail server accepted STATUS and sent no count back for this folder",
+            ),
+        },
+    }
+}
+
+/// The entry for a folder LIST marked `\Noselect`: a container of other folders, which holds
+/// no mail and refuses STATUS. Not asked, and not zero either — "0 of 0" would read as an
+/// empty mailbox, and it is not a mailbox.
+pub fn container_entry(name: &str) -> EmailFolder {
+    EmailFolder::uncounted(
+        name,
+        "not a mailbox: a container of other folders (\\Noselect), which holds no mail to count",
+    )
 }
 
 /// The sequence numbers `page` of a folder holding `total` messages covers, newest page first,
@@ -135,6 +172,56 @@ mod tests {
             ],
         );
         assert_eq!(counts, Some(Counts { total: 36, unread: 13 }));
+    }
+
+    // ── The entry in the list, when the count could not be read ──────
+    //
+    // `imap_list_folders` wrote `0/0` for every folder the server would not count, which is
+    // what it writes for an empty one; a reader of the list could not tell a refusal from an
+    // empty mailbox (#131).
+
+    #[test]
+    fn a_counted_folder_carries_the_servers_numbers() {
+        let entry = entry(
+            "INBOX",
+            Ok(()),
+            vec![status("INBOX", vec![StatusAttribute::Messages(35), StatusAttribute::Unseen(12)])],
+        );
+        assert_eq!(entry, EmailFolder::counted("INBOX", 12, 35));
+        assert_eq!(entry.reason, None);
+    }
+
+    #[test]
+    fn a_refused_status_is_not_an_empty_folder() {
+        let entry = entry("Archive", Err("No Response: STATUS failed".into()), Vec::new());
+        assert_eq!(entry.counts, None, "a refusal was written as counts: {:?}", entry.counts);
+        let reason = entry.reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("STATUS failed"), "the server's words are missing from {reason:?}");
+    }
+
+    #[test]
+    fn an_accepted_status_with_no_answer_is_not_an_empty_folder_either() {
+        let entry = entry("Archive", Ok(()), Vec::<UnsolicitedResponse>::new());
+        assert_eq!(entry.counts, None);
+        assert!(entry.reason.is_some());
+    }
+
+    #[test]
+    fn a_container_is_not_a_mailbox_and_says_so() {
+        let entry = container_entry("[Gmail]");
+        assert_eq!(entry.counts, None);
+        assert!(entry.reason.as_deref().unwrap_or_default().contains("Noselect"));
+    }
+
+    #[test]
+    fn a_server_that_said_zero_is_zero() {
+        // The one case where "0 unread of 0" is the truth: the server was asked and said so.
+        let entry = entry(
+            "Drafts",
+            Ok(()),
+            vec![status("Drafts", vec![StatusAttribute::Messages(0), StatusAttribute::Unseen(0)])],
+        );
+        assert_eq!(entry, EmailFolder::counted("Drafts", 0, 0));
     }
 
     #[test]

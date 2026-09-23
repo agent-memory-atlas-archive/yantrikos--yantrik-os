@@ -17,6 +17,11 @@ export struct EmailFolderData {
     icon: string,
     unread-count: int,
     total-count: int,
+    // False when the mail server did not count this folder this time — a refused STATUS, a
+    // reply that never came, a container that is not a mailbox. The two counts above are then
+    // nothing, not zero, and `counts-reason` says why; the row shows a mark instead of a badge.
+    counts-known: bool,
+    counts-reason: string,
     is-selected: bool,
     folder-type: string,    // "inbox", "starred", "sent", "drafts", "archive", "trash", "spam", "custom"
 }
@@ -145,6 +150,10 @@ export component EmailClient inherits Rectangle {
     in property <string> email-sync-status: "Synced";
     in property <int> email-folder-total: 0;
     in property <int> email-folder-unread: 0;
+    // False when the open folder's counts could not be read; the status bar then says so, with
+    // the reason on hover, instead of "0 emails" — which is what an empty folder says.
+    in property <bool> email-folder-counts-known: true;
+    in property <string> email-folder-counts-reason: "";
 
     // Compose state
     in-out property <string> compose-to: "";
@@ -918,8 +927,53 @@ export component EmailClient inherits Rectangle {
                                 horizontal-stretch: 1;
                             }
 
+                            // A folder the server did not count: a mark, not an empty badge,
+                            // with the reason on hover.
+                            if !folder.counts-known : Rectangle {
+                                width: 18px;
+                                height: 18px;
+                                y: (parent.height - 18px) / 2;
+
+                                Text {
+                                    text: "?";
+                                    color: Theme.text-dim;
+                                    font-size: Theme.fs-micro;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                mark-ta := TouchArea {
+                                    // Let the click through to the row.
+                                    clicked => { root.folder-clicked(idx); }
+                                }
+
+                                if mark-ta.has-hover && folder.counts-reason != "" : Rectangle {
+                                    property <length> tw: min(reason-tt.preferred-width + 14px, 320px);
+                                    x: parent.width - self.tw;
+                                    y: -28px;
+                                    width: self.tw;
+                                    height: 22px;
+                                    border-radius: 5px;
+                                    background: Theme.bg-deep.transparentize(12%);
+                                    border-width: 1px;
+                                    border-color: Theme.hover-fill-strong;
+                                    drop-shadow-blur: 6px;
+                                    drop-shadow-color: Theme.overlay-backdrop;
+
+                                    reason-tt := Text {
+                                        text: "Counts unavailable: " + folder.counts-reason;
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.fs-micro;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+
                             // Unread badge
-                            if folder.unread-count > 0 : Rectangle {
+                            if folder.counts-known && folder.unread-count > 0 : Rectangle {
                                 width: max(18px, badge-ct.preferred-width + 10px);
                                 height: 18px;
                                 y: (parent.height - 18px) / 2;
@@ -2115,7 +2169,8 @@ export component EmailClient inherits Rectangle {
                 padding-right: 14px;
                 spacing: 16px;
 
-                // Total emails in folder
+                // Total emails in folder — or that it could not be counted, which is not
+                // "0 emails". The reason is on hover.
                 HorizontalLayout {
                     spacing: 4px;
 
@@ -2125,16 +2180,50 @@ export component EmailClient inherits Rectangle {
                         tint: Theme.text-dim;
                         y: (parent.height - self.height) / 2;
                     }
-                    Text {
-                        text: root.email-folder-total + " emails";
-                        color: Theme.text-dim;
-                        font-size: Theme.fs-micro;
-                        vertical-alignment: center;
+                    Rectangle {
+                        width: total-text.preferred-width;
+
+                        total-text := Text {
+                            text: root.email-folder-counts-known
+                                ? root.email-folder-total + " emails"
+                                : "counts unavailable";
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-micro;
+                            vertical-alignment: center;
+                        }
+
+                        counts-ta := TouchArea {
+                            enabled: !root.email-folder-counts-known;
+                        }
+
+                        if counts-ta.has-hover && !root.email-folder-counts-known
+                            && root.email-folder-counts-reason != "" : Rectangle {
+                            property <length> tw: min(counts-tt.preferred-width + 14px, 480px);
+                            x: 0px;
+                            y: -28px;
+                            width: self.tw;
+                            height: 22px;
+                            border-radius: 5px;
+                            background: Theme.bg-deep.transparentize(12%);
+                            border-width: 1px;
+                            border-color: Theme.hover-fill-strong;
+                            drop-shadow-blur: 6px;
+                            drop-shadow-color: Theme.overlay-backdrop;
+
+                            counts-tt := Text {
+                                text: root.email-folder-counts-reason;
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-micro;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
                     }
                 }
 
                 // Unread count
-                if root.email-folder-unread > 0 : HorizontalLayout {
+                if root.email-folder-counts-known && root.email-folder-unread > 0 : HorizontalLayout {
                     spacing: 4px;
 
                     Rectangle {

@@ -653,25 +653,27 @@ fn imap_list_folders(account: &Account) -> Result<Vec<EmailFolder>, ServiceError
     for folder in folders.iter() {
         let name = folder.name().to_string();
 
+        // A container of other folders — Gmail's `[Gmail]` — holds no mail and refuses STATUS.
+        // Not asked; the list says what it is instead of "0 of 0".
+        if folder.attributes().contains(&imap::types::NameAttribute::NoSelect) {
+            result.push(folders::container_entry(&name));
+            continue;
+        }
+
         // One STATUS per folder, and the answer read from where the `imap` crate puts it: the
         // unsolicited channel, not the `Mailbox` it returns. `status(..).unseen` was read before
         // and was always `None`, which `.unwrap_or(0)` made "unread: 0" for every folder on every
         // machine. `folders.rs` has the whole of it.
         //
-        // A folder the server refuses to report — Gmail's `\Noselect` `[Gmail]` — still goes in
-        // the list, with zeros, because the wire has no way to say "not known". Such a folder
-        // cannot hold messages, so for it the zeros are at least true.
-        let counts = session
+        // A folder the server would not count this time — a refusal, a reply that did not come
+        // — goes in the list with no counts and the reason beside it. It used to go in with
+        // zeros, which is what an empty folder reads as (#131). The server's words are kept, with
+        // every secret this account holds taken out of them first, as everywhere else here.
+        let status = session
             .status(&name, folders::STATUS_ITEMS)
-            .ok()
-            .and_then(|_| folders::counts_for(&name, session.unsolicited_responses.try_iter()))
-            .unwrap_or_default();
-
-        result.push(EmailFolder {
-            name,
-            unread_count: counts.unread as i32,
-            total_count: counts.total as i32,
-        });
+            .map(|_| ())
+            .map_err(|e| without_secrets(&e.to_string(), &account.secrets()));
+        result.push(folders::entry(&name, status, session.unsolicited_responses.try_iter()));
     }
 
     let _ = session.logout();
