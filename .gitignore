@@ -103,6 +103,11 @@ test_*.py
 !tests/blender-core/test_*.py
 # ...nor the Python surface SDK's conformance suite, which CI discovers the same way.
 !sdk/python/tests/test_*.py
+# ...nor the surface SDK's template, adapter and guide-sample suites (docs/sdk), which CI
+# discovers the same way.
+!templates/python-surface/tests/test_*.py
+!adapters/libreoffice/tests/test_*.py
+!docs/sdk/samples/test_*.py
 
 # Brainstorm outputs
 brainstorm_*.py
