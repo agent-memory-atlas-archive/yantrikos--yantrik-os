@@ -135,7 +135,7 @@ fn main() {
     }
     refresh_agent_rail(&app, &state);
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-network-manager");
 }
 
 // ══════════════════════════════════════════════════════════════════════

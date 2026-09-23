@@ -44,7 +44,7 @@ fn main() {
     let _refresh_timer = wire(&app, engine.clone());
     publish_control(&app, engine.clone());
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-download-manager");
 
     // The window has closed but the process is still here. Stop the writers and put the list down:
     // anything that was mid-transfer is recorded as such and reconciled on the way back in.

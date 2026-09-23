@@ -914,6 +914,11 @@ if [ "$(tty)" = "/dev/tty1" ] && [ -z "$WAYLAND_DISPLAY" ]; then
         echo "$EXIT_TIME" > "$CRASH_FILE"
     else
         rm -f "$CRASH_FILE"
+        # A session that ran and then ended (labwc crashed hours in, or was killed) ends the
+        # login, so tty1's autologin starts the desktop again. Left to fall through, it left a
+        # bash prompt on tty1 and no desktop until a reboot. A quick crash still falls through to
+        # the prompt, as it always has.
+        exit 0
     fi
 fi
 PROFILE

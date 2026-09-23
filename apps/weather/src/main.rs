@@ -158,7 +158,7 @@ fn main() {
     }
     refresh_agent_rail(&app);
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-weather");
 }
 
 // ── Shared data ──────────────────────────────────────────────────────

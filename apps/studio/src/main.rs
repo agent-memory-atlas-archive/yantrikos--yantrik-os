@@ -65,7 +65,7 @@ fn main() {
     publish_control(&engine);
 
     ui.invoke_focus_prompt();
-    ui.run().unwrap();
+    run_until_closed(&ui, "yantrik-studio");
     engine.shutdown();
 }
 

@@ -271,7 +271,7 @@ fn main() {
     ui.global::<ThemeMode>().set_dark(saved.dark);
     ui.global::<AccentPreset>().set_index(saved.accent_index);
     let state = wire(&ui, true);
-    ui.run().unwrap();
+    run_until_closed(&ui, "yantrik-terminal");
     for tab in state.borrow_mut().tabs.drain(..) {
         tab.session.shutdown();
     }

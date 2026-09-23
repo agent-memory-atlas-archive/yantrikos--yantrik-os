@@ -101,7 +101,7 @@ fn main() {
     publish_control(&app, state.clone());
     show_current(&app, &state);
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-image-viewer");
 }
 
 /// Put the selected picture on screen, with what its file says about it.

@@ -243,7 +243,10 @@ fn main() {
 
     // Run
     tracing::info!("Starting Yantrik OS desktop shell");
-    ui.run().unwrap();
+    // A logout ends this loop by taking the compositor away, which winit returns as an error. That
+    // is an ending, not a crash: the helper logs it and returns, so the shutdown below runs on
+    // every ending. Unwrapped, every logout filed a crash record and orphaned agents' commands (#196).
+    yantrik_app_runtime::run_until_closed(&ui, "yantrik-ui");
 
     // Clean shutdown
     tracing::info!("Yantrik OS shutting down");

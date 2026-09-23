@@ -66,7 +66,7 @@ fn main() {
     refresh(&app, &core);
     control(&app, core.clone());
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-arcade");
 }
 
 // ── Jobs: the record of slow work ──────────────────────────────────

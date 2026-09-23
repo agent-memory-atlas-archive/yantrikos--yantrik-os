@@ -100,7 +100,7 @@ fn main() {
     if let Some(path) = path {
         open(&ui, &state, path);
     }
-    ui.run().unwrap();
+    run_until_closed(&ui, "yantrik-text-editor");
     // Synchronous final checkpoint only after the window event loop has stopped.
     let mut b = state.borrow_mut();
     b.recovery_timer.stop();

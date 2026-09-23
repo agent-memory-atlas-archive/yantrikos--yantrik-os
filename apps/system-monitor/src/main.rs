@@ -156,7 +156,7 @@ fn main() {
     app.on_agent_context_activated(|_| {});
     refresh_agent_rail(&app);
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-system-monitor");
 }
 
 // ── Service wrappers ─────────────────────────────────────────────────

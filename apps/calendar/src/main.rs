@@ -118,7 +118,7 @@ fn main() {
         );
     }
 
-    app.run().unwrap();
+    run_until_closed(&app, "yantrik-calendar");
 }
 
 /// Where "now" is, and which clock it is on.
