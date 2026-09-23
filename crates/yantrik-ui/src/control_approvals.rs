@@ -63,6 +63,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
     let mode_ui = ui.as_weak();
     let audit_ui = ui.as_weak();
     let audit_view_ui = ui.as_weak();
+    let menu_ui = ui.as_weak();
 
     surface
         .action(
@@ -469,7 +470,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 // approval card and the mode menu use and for the same reason: a list of what
                 // this machine did while nobody was watching is readable by whoever happens to
                 // be standing in front of a locked screen.
-                if [0, 2, 3, 32].contains(&ui.get_current_screen()) {
+                if MENU_NEVER_ON.contains(&ui.get_current_screen()) {
                     return Err(
                         "this machine is locked, so the record of unasked actions was not put on \
                          screen. It is all still there: unlock it and open the mode chip in the \
@@ -484,11 +485,76 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 Ok(serde_json::json!({
                     "showing": "the record of unasked actions",
                     "entries": crate::mind_mode::recent(crate::mind_mode::AUDIT_PUBLISHED).len(),
-                    "note": "it is on the person's screen now; nothing was changed.",
+                    "note": "it is on the person's screen now, over the mode chip; nothing was \
+                             changed. `close_mind_menu` puts it away, and so does going to \
+                             another screen.",
+                }))
+            },
+        )
+        .action(
+            // `safe`: it takes something off the screen that `show_mind_audit` — or the person —
+            // put there, and nothing else. The mode, its rules and the record are untouched; a
+            // bypass confirmation left half-answered is dropped unanswered, which leaves the
+            // mode exactly as it was. Closing is what a caller that opened the menu owes the
+            // person: before this, the only way to close it was a pointer, and a person away
+            // from the desk came back to a menu over their screen (#184).
+            Action::new(
+                "close_mind_menu",
+                "Put away the mode menu — the one `show_mind_audit` opens over the mode chip, with \
+                 the record of unasked actions in it. It changes nothing: the mode, its rules and \
+                 the record stay as they are. `describe shell` says whether it is open under \
+                 `mind_menu`.",
+            )
+            .risk("safe"),
+            move |_args| {
+                let Some(ui) = menu_ui.upgrade() else {
+                    return Err("the shell is gone".to_string());
+                };
+                let was = mind_menu_for_describe(
+                    ui.get_mind_menu_open(),
+                    ui.get_mind_menu_audit_open(),
+                    ui.get_mind_menu_confirming(),
+                    ui.get_current_screen(),
+                );
+                ui.set_mind_menu_open(false);
+                ui.set_mind_menu_confirming(false);
+                ui.set_mind_menu_audit_open(false);
+                Ok(serde_json::json!({
+                    "closed": was["open"] == true,
+                    "was": was,
+                    "note": if was["open"] == true {
+                        "the mode menu is put away; nothing was changed."
+                    } else {
+                        "the mode menu was not open; nothing was changed."
+                    },
                 }))
             },
         )
 }
+
+/// What `describe shell` says under `mind_menu`: whether the mode menu is on the screen, and which
+/// part of it — the modes, the record of unasked actions, or a bypass waiting to be confirmed.
+///
+/// `open` is whether it is drawn, not only whether it was asked for: the menu is never drawn over
+/// the boot, lock, login or onboarding screens, so it is not open there whatever the flag says.
+pub fn mind_menu_for_describe(open: bool, audit: bool, confirming: bool, screen: i32) -> serde_json::Value {
+    let drawn = open && !MENU_NEVER_ON.contains(&screen);
+    let showing = match (drawn, confirming, audit) {
+        (false, _, _) => serde_json::Value::Null,
+        (true, true, _) => "bypass confirmation".into(),
+        (true, false, true) => "the record of unasked actions".into(),
+        (true, false, false) => "the modes".into(),
+    };
+    serde_json::json!({
+        "open": drawn,
+        "showing": showing,
+        "close_with": if drawn { "close_mind_menu" } else { "" },
+    })
+}
+
+/// The screens nothing about the mind's permissions is drawn over: boot, onboarding, lock and
+/// login. The same list `show_mind_audit` refuses on and app.slint's `if` for the menu names.
+const MENU_NEVER_ON: [i32; 4] = [0, 2, 3, 32];
 
 // ── The grade, which the caller also declares ───────────────────────
 //
@@ -1829,6 +1895,68 @@ mod control_approvals_tests {
                 "`{wanted}` is not published any more. Published: {}",
                 names.join(", ")
             );
+        }
+    }
+
+    /// #184: what `show_mind_audit` opens, a caller can put away — `close_mind_menu`, graded
+    /// `safe` like the action that opened it — and read whether it is still there.
+    #[test]
+    fn what_show_mind_audit_opens_a_caller_can_close_and_see() {
+        let names: Vec<String> = published_actions().into_iter().map(|(n, _)| n).collect();
+        assert!(names.iter().any(|n| n == "close_mind_menu"), "close_mind_menu is published: {}", names.join(", "));
+
+        // Its grade is `safe`: the declaration's own `.risk`, before the next action begins.
+        let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control_approvals.rs")).unwrap();
+        let src = src.split("#[cfg(test)]").next().unwrap();
+        let at = src.find("\"close_mind_menu\",").expect("the declaration");
+        let own = &src[at..];
+        // To the next action, or to the end of `actions` when it is the last.
+        let own = &own[..own.find("Action::new(").or_else(|| own.find("\n}\n")).unwrap_or(own.len())];
+        assert!(own.contains(".risk(\"safe\")"), "close_mind_menu is graded safe");
+        // It closes all of it, the two sub-panels with it, and opens nothing.
+        for set in ["set_mind_menu_open(false)", "set_mind_menu_confirming(false)", "set_mind_menu_audit_open(false)"] {
+            assert!(own.contains(set), "close_mind_menu does not {set}");
+        }
+        assert!(!own.contains("(true)"), "close_mind_menu opens nothing");
+
+        // `describe shell` says whether it is open, and which part of it is showing.
+        let control = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs")).unwrap();
+        let control: String = control.split("#[cfg(test)]").next().unwrap().split_whitespace().collect();
+        assert!(
+            control.contains(".with(\"mind_menu\",crate::control_approvals::mind_menu_for_describe("),
+            "describe shell publishes `mind_menu`"
+        );
+    }
+
+    #[test]
+    fn describe_says_whether_the_mode_menu_is_open_and_what_it_shows() {
+        use super::mind_menu_for_describe as menu;
+        // As `show_mind_audit` leaves it, over the desktop.
+        let audit = menu(true, true, false, 1);
+        assert_eq!(audit["open"], true);
+        assert_eq!(audit["showing"], "the record of unasked actions");
+        assert_eq!(audit["close_with"], "close_mind_menu");
+        assert_eq!(menu(true, false, false, 34)["showing"], "the modes");
+        assert_eq!(menu(true, true, true, 7)["showing"], "bypass confirmation");
+        // Put away.
+        let closed = menu(false, false, false, 1);
+        assert_eq!((closed["open"].clone(), closed["showing"].clone()), (serde_json::json!(false), serde_json::Value::Null));
+        // Never drawn over boot, onboarding, lock or login, so never open there.
+        for screen in [0, 2, 3, 32] {
+            assert_eq!(menu(true, true, false, screen)["open"], false, "screen {screen}");
+        }
+    }
+
+    /// The menu belongs to the screen it was opened over: changing screen closes it and its
+    /// sub-panels, whatever moved the screen. The behaviour itself is exercised on the real
+    /// component by tests/ui-preview (`verify-mind-panel`); this pins where it lives.
+    #[test]
+    fn changing_screen_puts_the_mode_menu_away() {
+        let app = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../yantrik-ui-slint/ui/app.slint")).unwrap();
+        let at = app.find("changed current-screen =>").expect("app.slint closes the menu when the screen changes");
+        let body = &app[at..at + app[at..].find('}').unwrap()];
+        for set in ["root.mind-menu-open = false;", "root.mind-menu-confirming = false;", "root.mind-menu-audit-open = false;"] {
+            assert!(body.contains(set), "the screen change does not `{set}`: {body}");
         }
     }
 

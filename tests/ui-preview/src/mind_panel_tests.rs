@@ -143,6 +143,19 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
     save(&settle(), output, width, height)?;
     assert!(ui.global::<MindPanelState>().get_desktop_expanded(), "open on the desktop by default");
 
+    // #184: the mode menu, as `show_mind_audit` leaves it, belongs to the screen it was opened
+    // over — a screen change, whatever made it, puts it away with its sub-panels.
+    ui.set_mind_menu_confirming(false);
+    ui.set_mind_menu_audit_open(true);
+    ui.set_mind_menu_open(true);
+    draw();
+    save(&settle(), &path("mode-menu"), width, height)?;
+    ui.set_current_screen(8);
+    draw();
+    assert!(!ui.get_mind_menu_open() && !ui.get_mind_menu_audit_open(), "a screen change puts the mode menu away");
+    ui.set_current_screen(1);
+    draw();
+
     // An agent's row opens that agent in the Agents screen. Swept down the Working section's rows
     // only, and stopped the moment the shell leaves the desktop.
     let x = 1110.;

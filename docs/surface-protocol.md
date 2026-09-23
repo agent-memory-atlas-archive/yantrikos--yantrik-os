@@ -408,7 +408,8 @@ protocol:
 - **Services that are not surfaces** answer an unknown method in their own ways — the companion's
   socket with `-32602`, the harness host with `-32000` — where the transport's convention is
   `-32601`. They publish no `describe`, so they are outside this protocol; `yos check --all`
-  skips them.
+  skips them, and `yos ls` (a mind's `os_apps`) does not list them — only `yos ls --all` names
+  them, as the desktop's own.
 - **Rust dispatch:** a non-string `expect_revision` is ignored (no guard) and a non-object `args`
   is read as no arguments. A client MUST send a string and an object.
 - **The Python surface SDK** (`sdk/python/yantrik_surface`), and Blender's addon, which is built on

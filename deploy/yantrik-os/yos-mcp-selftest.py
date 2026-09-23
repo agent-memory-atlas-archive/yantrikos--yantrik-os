@@ -50,7 +50,10 @@ What it is actually checking, in one line each:
     act outside it;
   * os_describe names the apps this machine declares in their .desktop files, with what each is
     for, and no list of its own; os_apps says closed apps are listed; and the bridge reads the
-    keys exactly as `yos` does.
+    keys exactly as `yos` does;
+  * and os_apps, run through the real `yos` against sockets, offers no socket that does not
+    answer describe — the harness host a Red team once described (#190) — and os_describe on one
+    anyway says what it is and where to look.
 """
 
 import importlib.util
@@ -58,6 +61,7 @@ import io
 import json
 import os
 import pathlib
+import socket
 import stat
 import sys
 import tempfile
@@ -497,6 +501,40 @@ def check(name, ok, detail=""):
 
 def act(module, app, action, args):
     return module.run_tool(module.BY_NAME["os_act"], {"app": app, "action": action, "args": args})
+
+
+def serve(path, reply):
+    """A unix socket that answers each JSON-RPC line with `reply(request)` — a dict holding
+    `result` or `error` — for the cases that run the real `yos` rather than the fake. A connection
+    that sends nothing is `yos`'s liveness probe, and is dropped."""
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(8)
+
+    def run():
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(2)
+                buf = b""
+                try:
+                    while not buf.endswith(b"\n"):
+                        chunk = conn.recv(1 << 16)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    if buf.strip():
+                        asked = json.loads(buf)
+                        answer = dict(reply(asked), jsonrpc="2.0", id=asked.get("id"))
+                        conn.sendall((json.dumps(answer) + "\n").encode())
+                except (OSError, ValueError):
+                    continue
+
+    threading.Thread(target=run, daemon=True).start()
+    return listener
 
 
 def case(tmp, name, answer="granted", machine_ceiling="sensitive", shell_down=False,
@@ -1774,6 +1812,43 @@ with tempfile.TemporaryDirectory() as d:
     ours = module.declared_surfaces([str(apps_dir)])
     check("the bridge reads the .desktop keys exactly as yos does", ours == theirs and len(ours) == 2,
           (ours, theirs))
+
+    # 26. What os_apps offers a mind to describe answers describe. The first live catalog run's
+    # Red team read `harness` off the services line, called os_describe on it and spent a failed
+    # call learning it was not a surface (#190). Run through the real `yos`, against sockets: the
+    # harness host refusing anything but its own protocol, and a service that is a surface.
+    runtime = tmp / "runtime"
+    (runtime / "yantrik").mkdir(parents=True)
+    listeners = [
+        serve(runtime / "yantrik" / "harness.sock", lambda asked: {"error": {
+            "code": -32000, "message": "unknown method `%s`; this service speaks: harness.attach, "
+                                       "harness.poll, harness.chunk" % asked["method"]}}),
+        serve(runtime / "yantrik" / "weather.sock", lambda asked: {"result": {
+            "app": "weather", "summary": "Weather — 21°C and clear", "state": {}, "actions": []}}),
+    ]
+    saved_env = {k: os.environ.get(k) for k in ("XDG_RUNTIME_DIR", "XDG_DATA_DIRS", "XDG_DATA_HOME")}
+    os.environ.update({"XDG_RUNTIME_DIR": str(runtime), "XDG_DATA_DIRS": str(tmp / "no-apps"),
+                       "XDG_DATA_HOME": str(tmp / "no-apps")})
+    try:
+        module = load_mcp(HERE / "yos", tmp / "real-yos.json")
+        listing, listing_failed = module.run_tool(module.BY_NAME["os_apps"], {})
+        described, describe_failed = module.run_tool(module.BY_NAME["os_describe"], {"app": "harness"})
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        for listener in listeners:
+            listener.close()
+    services = next((l for l in listing.splitlines() if l.startswith("Services answering:")), "")
+    check("os_apps, through the real yos, lists a service that answers describe as answering",
+          not listing_failed and "weather" in services, listing)
+    check("and names no socket that does not: the harness host is not offered to describe",
+          "harness" not in listing, listing)
+    check("os_describe on it anyway says what it is and where to look, not only that it failed",
+          describe_failed and "plumbing, not an app or a service" in described
+          and "yos ls" in described, described)
 
 print()
 if failures:

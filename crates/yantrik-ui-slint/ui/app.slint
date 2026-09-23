@@ -185,6 +185,15 @@ export component App inherits Window {
     /// the menu has to be able to reset them, and the menu lives behind an `if`.
     in-out property <bool> mind-menu-confirming: false;
     in-out property <bool> mind-menu-audit-open: false;
+    /// The menu belongs to the screen it was opened over: going anywhere else puts it away,
+    /// whoever moved — a press, `show_screen`, a lock. `show_mind_audit` opens it from the socket,
+    /// and it used to stay over every screen after, closable by nothing but a pointer (#184).
+    /// `close_mind_menu` is the socket's way to put it away without moving.
+    changed current-screen => {
+        root.mind-menu-open = false;
+        root.mind-menu-confirming = false;
+        root.mind-menu-audit-open = false;
+    }
     /// These three are the only way this desktop becomes MORE permissive. They are callbacks,
     /// reached by a pointer; nothing on the control surface can raise the mode or make a rule.
     callback mind-mode-chosen(string);
