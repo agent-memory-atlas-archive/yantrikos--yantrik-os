@@ -2173,6 +2173,50 @@ mod mind_mode_tests {
         println!("wrote {} vectors to {}", all_vectors().len(), path.display());
     }
 
+    /// This table and the dispatch's agree, on every vector the dispatch's own tests generate.
+    ///
+    /// `deploy/yantrik-os/surface-vectors.json` is `yantrik_ipc_transport::gate::decide` written
+    /// out — what every app's dispatch refuses and why — and each vector carries `door`: what a
+    /// door that raises cards must do with the same inputs. This table is that door (the shell's
+    /// `request_approval` asks it), so it is held to the column. Where the two may differ is
+    /// written into the vector as a `note` rather than excused here: plan mode's `standard` runs
+    /// on a socket (`SOCKET_FLOOR`) and is refused here, and that is the only place.
+    #[test]
+    fn mind_mode_agrees_with_the_dispatch_on_every_surface_vector() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/yantrik-os/surface-vectors.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("surface vectors are json");
+        let vectors = doc["decide"].as_array().expect("a `decide` list");
+        assert!(vectors.len() >= 640, "the file shrank to {} vectors", vectors.len());
+        let now = Instant::now();
+        let mut drifted = Vec::new();
+        for v in vectors {
+            let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+            let (app, action) = (s("app"), s("action"));
+            let rules: Vec<(&str, &str)> =
+                if v["session_rule"] == true { vec![(app.as_str(), action.as_str())] } else { vec![] };
+            let mode = Mode::parse(&s("mode")).expect("a mode");
+            let modes = modes_for(mode, &rules, now);
+            let unrecoverable = v["unrecoverable"] == true;
+            // The published sentence, read the way `request_approval` reads it, must agree with
+            // the fact the vector carries — one reading of the sentence on the machine.
+            assert_eq!(approvals::unrecoverable(&s("purpose")), unrecoverable, "{}", s("id"));
+            let got = match modes.decide(&s("grade"), &app, &action, unrecoverable, &s("ceiling"), now) {
+                Decision::Run { .. } => "run",
+                Decision::Ask => "ask",
+                Decision::Refuse { .. } => "refuse",
+            };
+            if got != s("door") {
+                drifted.push(format!("{}: the dispatch says a door should {}, this table says {got}", s("id"), s("door")));
+            }
+        }
+        assert!(drifted.is_empty(), "{} disagreements:\n{}", drifted.len(), drifted.join("\n"));
+        let floor = vectors.iter().filter(|v| v.get("note").is_some()).count();
+        assert!(floor > 0, "the one documented difference is still in the file, named");
+    }
+
     /// And the checked-in file is what the code produces today.
     ///
     /// This is the half that makes the pair worth having: changing `decide` without

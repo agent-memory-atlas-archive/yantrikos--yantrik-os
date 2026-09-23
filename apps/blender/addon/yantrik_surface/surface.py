@@ -15,7 +15,9 @@ The order of dispatch, exactly as `Registry::act` runs it:
      does not hold) — once the ceiling has passed, never before, as the runtime's RPC thread
      spends it (#154);
   3b. an action above what the desktop's mind mode runs unasked, with no grant and no session
-     rule (a policy, said as GRANT — issue #116);
+     rule (a policy, said as GRANT — issue #116), or one whose own description says it cannot
+     be undone, in any mode but bypass (`gate::decide`; `decide` below replays
+     deploy/yantrik-os/surface-vectors.json in tests/blender-core/test_vectors.py);
   4. a missing required argument;
   5. an argument the action does not take;
   6. STALE — the caller acted on a revision the app has moved past;
@@ -48,6 +50,12 @@ from .scene import Refusal
 
 LADDER = ("safe", "standard", "sensitive", "dangerous")
 DEFAULT_CEILING = "sensitive"
+# The surface protocol this describe speaks (docs/surface-protocol.md), as `control_surface::PROTOCOL`.
+PROTOCOL = 1
+# `gate::UNRECOVERABLE_PHRASES`: the wording that makes an action's own description a promise that
+# it cannot be taken back. Same seven, same order; the vectors carry the list and a test compares.
+UNRECOVERABLE_PHRASES = ("not recoverable", "cannot be undone", "can't be undone", "irreversible",
+                         "permanently", "permanent", "no undo")
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".config", "yantrik", "settings.yaml")
 
 # The mode, as `control::MODES` / `MODE_FILE` / `DEFAULT_MODE` / `SOCKET_FLOOR` have it: what each
@@ -273,6 +281,7 @@ class Surface:
     def describe_json(self):
         summary, state = self._turn(lambda: self.scene.snapshot(), DESCRIBE_TIMEOUT)
         return {
+            "protocol": PROTOCOL,
             "app": self.app_id,
             "summary": summary,
             "state": state,
@@ -305,22 +314,12 @@ class Surface:
             known = ", ".join(a.name for a in self.actions)
             self._refuse("unknown action `%s`; this app offers: %s" % (name, known))
 
-        # 2. A grade off the ladder is this file's bug, said in the runtime's words.
-        if spec.permission not in LADDER:
-            self._refuse(
-                "CEILING: %s.%s is graded `%s`, which is not a level this OS defines "
-                "(safe < standard < sensitive < dangerous), so it was not run."
-                % (self.app_id, name, spec.permission))
-
-        # 3. Above the machine's ceiling: policy, read fresh per call.
+        # 2 + 3. A grade off the ladder (this file's bug) or above the machine's ceiling (policy,
+        # read fresh per call), said in the runtime's words.
         ceiling = self.configured_ceiling()
-        if LADDER.index(spec.permission) > LADDER.index(ceiling):
-            self._refuse(
-                "CEILING: %s.%s is graded `%s`, above this machine's `%s` ceiling "
-                "(`tool_permission` in ~/.config/yantrik/settings.yaml), so it was not run. "
-                "An action at that grade needs a person to authorise it directly — raise "
-                "the ceiling in Settings if that is the intent."
-                % (self.app_id, name, spec.permission, ceiling))
+        refusal = within_ceiling(self.app_id, name, spec.permission, ceiling)
+        if refusal:
+            self._refuse(refusal)
 
         # 3a. A grant, spent once the ceiling has passed and before the main thread is reached
         # — as the runtime's RPC thread spends it (`Authority::spend` in
@@ -338,14 +337,15 @@ class Surface:
                     % (grant, self.app_id, name, why))
             granted = True
 
-        # 3b. Above what the mode runs unasked, with no grant and no session rule: the refusal
-        # that says how to get one. After the ceiling — nothing reaches past that — and before
-        # the arguments, as the ceiling is.
+        # 3b. Above what the mode runs unasked, or said by its own description to be beyond
+        # undoing, with no grant and no session rule that covers it: the refusal that says how to
+        # get one. After the ceiling — nothing reaches past that — and before the arguments, as
+        # the ceiling is.
         mode, rules = self.configured_mode()
-        unasked = max(LADDER.index(MODES[mode]), LADDER.index(SOCKET_FLOOR))
-        if (LADDER.index(spec.permission) > unasked and not granted
-                and (self.app_id, name) not in rules):
-            self._refuse(grant_refusal(self.app_id, name, spec.permission, mode))
+        refusal = decide(self.app_id, name, spec.permission, spec.description, ceiling, mode,
+                         rules, granted)
+        if refusal:
+            self._refuse(refusal)
 
         # 4. Missing required arguments, in schema order.
         for p in spec.params:
@@ -483,20 +483,80 @@ def mode_from(text, now):
     return mode, rules
 
 
-def grant_refusal(app, action, graded, mode):
-    """`control::grant_refusal` in Python, to the punctuation."""
-    if mode == "plan":
+def unrecoverable(purpose):
+    """`gate::unrecoverable` in Python: does the action's own sentence say it cannot be undone?"""
+    lower = (purpose or "").lower()
+    return any(phrase in lower for phrase in UNRECOVERABLE_PHRASES)
+
+
+def within_ceiling(app, action, graded, ceiling):
+    """`gate::within_ceiling` in Python: the CEILING refusal, or None."""
+    if graded not in LADDER:
+        return ("CEILING: %s.%s is graded `%s`, which is not a level this OS defines "
+                "(safe < standard < sensitive < dangerous), so it was not run."
+                % (app, action, graded))
+    cap = ceiling if ceiling in LADDER else DEFAULT_CEILING
+    if LADDER.index(graded) > LADDER.index(cap):
+        return ("CEILING: %s.%s is graded `%s`, above this machine's `%s` ceiling "
+                "(`tool_permission` in ~/.config/yantrik/settings.yaml), so it was not run. "
+                "An action at that grade needs a person to authorise it directly — raise "
+                "the ceiling in Settings if that is the intent."
+                % (app, action, graded, ceiling))
+    return None
+
+
+def decide(app, action, graded, purpose, ceiling, mode, rules, granted):
+    """`gate::decide` in Python: the refusal for this call, or None when it may run.
+
+    The ceiling, then the mode — with the grant, the session rules and the action's own
+    description. Replayed against every vector in deploy/yantrik-os/surface-vectors.json.
+    """
+    refusal = within_ceiling(app, action, graded, ceiling)
+    if refusal:
+        return refusal
+    if granted:
+        return None
+    level = LADDER.index(graded)
+    irreversible = level > 0 and unrecoverable(purpose)
+    allows = LADDER.index(MODES.get(mode, "standard"))
+    asks = allows < len(LADDER) - 1 and (
+        irreversible or level > max(allows, LADDER.index(SOCKET_FLOOR)))
+    if not asks:
+        return None
+    # A session rule covers its own action — never one that cannot be undone, and nothing in
+    # plan mode, which raises no card and so has no standing answers.
+    if allows > 0 and not irreversible and (app, action) in rules:
+        return None
+    return grant_refusal(app, action, graded, mode, irreversible)
+
+
+_HOW = ("Ask the shell for approval first (`request_approval` with this app, action and these "
+        "exact arguments, poll `approval_status`, then send the granted request_id as `grant` on "
+        "app.act — `yos act` does all of that for you), or have the person at the machine press "
+        "Allow when the card appears.")
+_PLAN = ("Say what you would do and let the person decide; they switch the mode from the chip in "
+         "the status bar.")
+_FINAL = "its own description says it cannot be undone"
+
+
+def grant_refusal(app, action, graded, mode, irreversible=False):
+    """`gate::grant_refusal` in Python, to the punctuation."""
+    if mode == "plan" and not irreversible:
         return ("GRANT: %s.%s is graded `%s` and this machine is in plan mode, which raises no "
-                "card for anything above `%s` — so it was not run. Say what you would do and let "
-                "the person decide; they switch the mode from the chip in the status bar."
-                % (app, action, graded, SOCKET_FLOOR))
-    allowed = LADDER[max(LADDER.index(MODES[mode]), LADDER.index(SOCKET_FLOOR))]
+                "card for anything above `%s` — so it was not run. %s"
+                % (app, action, graded, SOCKET_FLOOR, _PLAN))
+    if mode == "plan":
+        return ("GRANT: %s.%s is graded `%s` and %s, and this machine is in plan mode, which "
+                "raises no card for that — so it was not run. %s"
+                % (app, action, graded, _FINAL, _PLAN))
+    if irreversible:
+        return ("GRANT: %s.%s is graded `%s` and %s, and this machine is in %s mode, which asks "
+                "before anything that cannot be undone — so it was not run. %s"
+                % (app, action, graded, _FINAL, mode, _HOW))
+    allowed = LADDER[max(LADDER.index(MODES.get(mode, "standard")), LADDER.index(SOCKET_FLOOR))]
     return ("GRANT: %s.%s is graded `%s` and this machine is in %s mode, which runs nothing "
-            "above `%s` without asking — so it was not run. Ask the shell for approval first "
-            "(`request_approval` with this app, action and these exact arguments, poll "
-            "`approval_status`, then send the granted request_id as `grant` on app.act — "
-            "`yos act` does all of that for you), or have the person at the machine press Allow "
-            "when the card appears." % (app, action, graded, mode, allowed))
+            "above `%s` without asking — so it was not run. %s"
+            % (app, action, graded, mode, allowed, _HOW))
 
 
 def spend_through_shell(grant, app, action, args):

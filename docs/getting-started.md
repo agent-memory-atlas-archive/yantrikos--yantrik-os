@@ -343,6 +343,7 @@ writes. Quote it in a bug report.
   numbers that were actually measured
 - **[harness.md](harness.md)** — attaching a different mind
 - **[app-control.md](app-control.md)** — how apps publish state and accept actions
+- **[surface-protocol.md](surface-protocol.md)** — the protocol a surface keeps, and `yos check`
 - **[architecture.md](architecture.md)** — the system design
 - **[footprint.md](footprint.md)** — what it costs to run, measured
 - **Issues**: <https://github.com/yantrikos/yantrik-os/issues>

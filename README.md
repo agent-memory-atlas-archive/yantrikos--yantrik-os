@@ -378,7 +378,8 @@ yantrik-os/
     ├── hardware-requirements.md  what it has actually been run on, and what is unmeasured
     ├── architecture.md        system design
     ├── app-sdk.md             how to write an app, and why the frame is not yours
-    ├── app-control.md         how apps publish state and accept actions
+    ├── app-control.md         how apps publish state and accept actions (the guide)
+    ├── surface-protocol.md    the protocol itself, normative; schema/ beside it
     ├── harness.md             attaching a different mind
     ├── footprint.md           what it costs to run, and where that goes
     └── CONTRIBUTING.md        contributor guide

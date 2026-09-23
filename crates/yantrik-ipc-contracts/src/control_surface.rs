@@ -196,6 +196,13 @@ impl Action {
     }
 }
 
+/// The version of the surface protocol this envelope speaks: `docs/surface-protocol.md`.
+///
+/// Published in every `describe` so a client can tell what it is talking to. A describe with no
+/// `protocol` is from before the protocol was written down; version 1 is what every surface on
+/// this OS already did when it was, plus this key.
+pub const PROTOCOL: u32 = 1;
+
 /// Build the reply to `app.describe` for a service that serves its own socket.
 ///
 /// The Slint path answers describe from a registry on the UI thread; a standalone service
@@ -205,6 +212,7 @@ impl Action {
 /// service action exactly as it grades a window's.
 pub fn describe_json(app_id: &str, view: &View, actions: &[Action]) -> serde_json::Value {
     serde_json::json!({
+        "protocol": PROTOCOL,
         "app": app_id,
         "summary": view.summary,
         "state": view.state,
@@ -313,6 +321,7 @@ mod tests {
         let view = View::new("Weather — 21°C in Dallas").with("temp", 21);
         let actions = [Action::new("refresh", "refetch")];
         let out = describe_json("weather", &view, &actions);
+        assert_eq!(out["protocol"], 1, "a client can tell which protocol it is reading");
         assert_eq!(out["app"], "weather");
         assert_eq!(out["summary"], "Weather — 21°C in Dallas");
         assert_eq!(out["state"]["temp"], 21);

@@ -10,6 +10,7 @@ pub mod protocol;
 pub mod server;
 pub mod client;
 pub mod gate;
+pub mod owner;
 pub mod peer_identity;
 pub mod service;
 pub mod sync_client;

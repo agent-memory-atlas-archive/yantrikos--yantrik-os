@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yantrikos.com/schema/surface/1/describe.schema.json",
+  "title": "app.describe result, surface protocol 1",
+  "description": "What a control surface answers to app.describe. Normative text: docs/surface-protocol.md. Unknown keys are allowed so a later protocol can add them; a version-1 client ignores what it does not know.",
+  "type": "object",
+  "required": ["protocol", "app", "summary", "state", "revision", "actions"],
+  "properties": {
+    "protocol": {
+      "description": "The surface protocol version this describe speaks.",
+      "const": 1
+    },
+    "app": {
+      "description": "The id the surface publishes under: the <id> of app-<id>.sock.",
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "description": "One line a person could read.",
+      "type": "string"
+    },
+    "state": {
+      "description": "The view-model, in the app's own vocabulary.",
+      "type": "object"
+    },
+    "revision": {
+      "description": "FNV-1a 64 over summary, a zero byte, and state rendered compact with sorted keys; 16 lowercase hex digits.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/action" }
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "object",
+      "required": ["name", "description", "permission", "settles", "parameters"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": {
+          "description": "What the action does, in the app's own words. The dispatch reads it for wording that says it cannot be undone.",
+          "type": "string"
+        },
+        "permission": {
+          "description": "The grade, on the ladder safe < standard < sensitive < dangerous.",
+          "enum": ["safe", "standard", "sensitive", "dangerous"]
+        },
+        "settles": {
+          "description": "Whether the work is finished when the act answers (on return) or only started (later).",
+          "enum": ["on return", "later"]
+        },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "required": ["type", "properties", "required"],
+      "properties": {
+        "type": { "const": "object" },
+        "properties": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/parameter" }
+        },
+        "required": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "required": ["type", "description"],
+      "properties": {
+        "type": {
+          "description": "A JSON Schema primitive. Version 1 checks presence, not type: the dispatch refuses a missing required argument and an undeclared one, and hands the value to the handler as it came.",
+          "enum": ["string", "number", "integer", "boolean"]
+        },
+        "description": { "type": "string" }
+      }
+    }
+  }
+}
