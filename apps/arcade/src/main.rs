@@ -4,8 +4,9 @@
 //! deterministic compiler turns them into one self-contained HTML file with the game
 //! loop, juice, sound and a chunky stylised creature already inside it. The window is
 //! the workbench — library on the left, spec editor on the right — and the control
-//! surface publishes the same seven commands the buttons call, so a mind can drive the
-//! whole kit without a synthetic mouse.
+//! surface publishes the same seven commands the buttons call, plus `update_game` and
+//! `update_character` for iterating on a spec in place, so a mind can drive the whole
+//! kit without a synthetic mouse.
 //!
 //! Three rules shaped the code:
 //!
@@ -214,6 +215,38 @@ fn run_action(
                 "slug": entry.slug, "title": entry.title, "built": entry.built,
             }))
         }
+        "update_game" => {
+            let spec = arg_str(args, "spec", "the game JSON that replaces the saved one")?;
+            let existing = args.get("game").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+            let entry = Library::open().update_game(&spec, existing).map_err(|e| refuse(ui, e))?;
+            ui.set_game_name(entry.slug.clone().into());
+            refresh(ui, core);
+            Ok(serde_json::json!({
+                "summary": format!("updated game {:?}; its old build is gone, build it next", entry.title),
+                "saved": format!("updated game {:?}", entry.title),
+                "slug": entry.slug, "title": entry.title, "built": entry.built,
+            }))
+        }
+        "update_character" => {
+            let spec = arg_str(args, "spec", "the character JSON that replaces the saved one")?;
+            let (entry, stale) = Library::open().update_character(&spec).map_err(|e| refuse(ui, e))?;
+            refresh(ui, core);
+            let summary = if stale.is_empty() {
+                format!("updated character {:?}", entry.name)
+            } else {
+                format!(
+                    "updated character {:?}; built with the old one and needing `build` again: {}",
+                    entry.name,
+                    stale.join(", ")
+                )
+            };
+            Ok(serde_json::json!({
+                "summary": summary,
+                "saved": format!("updated character {:?}", entry.name),
+                "slug": entry.slug, "name": entry.name, "archetype": entry.archetype,
+                "needs_build": stale,
+            }))
+        }
         "build" => {
             let game = game_arg(ui, args)?;
             let (slug, path) = Library::open().build_game(&game).map_err(|e| refuse(ui, e))?;
@@ -251,7 +284,7 @@ fn run_action(
             Ok(serde_json::json!({ "summary": message.clone(), "deleted": message }))
         }
         other => Err(format!(
-            "Arcade has no action `{other}`; it knows new_character, new_game, build, play, verify, screenshot and delete"
+            "Arcade has no action `{other}`; it knows new_character, update_character, new_game, update_game, build, play, verify, screenshot and delete"
         )),
     }
 }
@@ -323,14 +356,14 @@ fn spawn_verify(ui: &ArcadeApp, core: &Core, game: &str) -> Result<u64, String> 
             let result = verify::verify_game(&html, Some(&shot)).and_then(|report| {
                 let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
                 lib.write_verify(&slug, &value)?;
+                // The verifier's own sentence, so the job, the games list and the
+                // banner agree — and so an inconclusive run says it was the machine
+                // rather than reading as a verdict on the game. It is still not a
+                // pass: the job lands as failed until a machine settles it.
                 if report.passed {
-                    Ok(format!("{slug}: passed all {} gates", report.gates.len()))
+                    Ok(format!("{slug}: {}", report.summary_line()))
                 } else {
-                    let first = report.gates.iter().find(|g| !g.passed);
-                    Err(match first {
-                        Some(g) => format!("{slug} failed verification at {}: {}", g.gate, g.detail),
-                        None => format!("{slug} failed verification"),
-                    })
+                    Err(format!("{slug}: verification {}", report.summary_line()))
                 }
             });
             core2.finish_job(id, result.clone());
@@ -559,10 +592,12 @@ fn control(ui: &ArcadeApp, core: Core) {
 
 type Handler = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
 
-/// The seven commands, with the grades from the charter. `new_character`, `new_game`
-/// and `build` are plain file writes (standard). `play`, `verify` and `screenshot`
-/// reach a browser and defer to workers. `delete` goes to the Trash and is
-/// recoverable from Files, which keeps it standard rather than dangerous.
+/// The nine commands, with the grades from the charter. `new_character`, `new_game`,
+/// `update_character`, `update_game` and `build` are plain file writes (standard;
+/// an update keeps the spec it replaces one step back, and a build is milliseconds
+/// to redo). `play`, `verify` and `screenshot` reach a browser and defer to
+/// workers. `delete` goes to the Trash and is recoverable from Files, which keeps
+/// it standard rather than dangerous.
 fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
     fn handler(
         ui: &ArcadeApp,
@@ -598,6 +633,26 @@ fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
             handler(ui, &core, "new_game"),
         ),
         (
+            // Standard, not sensitive like `delete`: iterating on a design is the
+            // ordinary use of a kit, the spec it replaces is kept one step back, and
+            // the build it drops is milliseconds to redo (#112).
+            Action::new("update_game", "Replace a saved game's spec; the old build, verdict and screenshot go with the old spec, and `build` runs again")
+                .arg(Param::text("spec").describe(
+                    "The whole game JSON, same grammar as new_game; its title says which saved game it replaces. The spec it replaces is kept beside it as spec.previous.json.",
+                ))
+                .arg(Param::text("game").describe(
+                    "Optional: title or slug of the saved game to replace, for when the new spec changes the title",
+                )),
+            handler(ui, &core, "update_game"),
+        ),
+        (
+            Action::new("update_character", "Replace a saved character's spec; games that cast it by name lose their builds and need `build` again")
+                .arg(Param::text("spec").describe(
+                    "The whole character JSON, same grammar as new_character; its name says which saved character it replaces. Games that inline a copy are untouched.",
+                )),
+            handler(ui, &core, "update_character"),
+        ),
+        (
             Action::new("build", "Compile a saved game into its one HTML file")
                 .arg(Param::text("game").describe("Title or slug of a saved game")),
             handler(ui, &core, "build"),
@@ -609,7 +664,7 @@ fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
             handler(ui, &core, "play"),
         ),
         (
-            Action::new("verify", "Run the headless gates: boots, clean console, frame renders, input moves, bot wins, bot loses, frame budget")
+            Action::new("verify", "Run the headless gates: boots, clean console, frame renders, input moves, bot wins, bot loses, frame budget. Each gate ends passed, failed or inconclusive; inconclusive means this machine could not settle it (too slow to run a bot to the end of its simulated budget) and is not a verdict on the game, though it is not a pass either")
                 .defers()
                 .arg(Param::text("game").describe("Title or slug of a built game")),
             handler(ui, &core, "verify"),

@@ -999,16 +999,36 @@
   var frameWindow = [];
   var last = null;
   var fpsProbe = null;
+  // The verifier's clock. A person's game takes one variable step per frame, capped
+  // at 50 ms, so a slow renderer slows the game rather than making it jump. The
+  // verifier judges input and the bots in simulated seconds, and under software
+  // rendering a frame takes 300 ms: that cap would dilate its game five-fold, and a
+  // fine game "never won" (#111). While the verifier drives (setPaced, or a bot),
+  // the loop catches up in fixed steps instead — the same update(), the same
+  // physics, just enough of it per frame to keep pace with the wall clock. Half a
+  // second per frame at most, so a tab that stalls for a minute does not simulate a
+  // minute in one go; that covers a renderer down to 2 fps.
+  var STEP = 1 / 60;
+  var lag = 0;
+  var paced = false;
 
   function frame(now) {
     requestAnimationFrame(frame);
     if (last === null) last = now;
     var dtms = now - last;
     last = now;
-    var dt = Math.min(0.05, dtms / 1000);
     frameWindow.push(dtms);
     if (frameWindow.length > 90) frameWindow.shift();
-    update(dt);
+    if (paced || botMode) {
+      lag += Math.min(0.5, dtms / 1000);
+      while (lag >= STEP) {
+        update(STEP);
+        lag -= STEP;
+      }
+    } else {
+      lag = 0;
+      update(Math.min(0.05, dtms / 1000));
+    }
     if (renderer) renderer.render(scene, camera);
     frames++;
     if (frames === 1) {
@@ -1037,9 +1057,12 @@
 
   // ── The test hook ────────────────────────────────────────────────
   // What the headless verifier reads and drives. `state` is a snapshot, not a stream;
-  // the verifier polls it. Numbers are rounded so a report is diffable.
+  // the verifier polls it. Numbers are rounded so a report is diffable. Version 2
+  // added `elapsed` — simulated seconds of play since the last reset, the engine's
+  // own clock, which is what the verifier budgets input and the bots in — and
+  // setPaced, which keeps that clock level with the wall clock while it drives.
   window.__arcade = {
-    version: 1,
+    version: 2,
     title: GAME.title,
     state: function () {
       return {
@@ -1052,6 +1075,7 @@
         frameMs: Math.round(avgFrameMs() * 10) / 10,
         frames: frames,
         webgl: !!renderer,
+        elapsed: Math.round(elapsed * 10) / 10,
         bot: botMode,
         errors: errors.slice(0, 10)
       };
@@ -1059,6 +1083,10 @@
     setBot: function (mode) {
       botMode = mode === "win" || mode === "lose" ? mode : null;
       return botMode;
+    },
+    setPaced: function (on) {
+      paced = !!on;
+      return paced;
     },
     reset: function () { reset(); return status; },
     spec: GAME
