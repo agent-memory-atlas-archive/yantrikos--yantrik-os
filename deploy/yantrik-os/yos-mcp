@@ -16,6 +16,11 @@ to obey, and the mind on the other end has to treat it the same way.
 Config for the mind (YM_MCP_CONFIG, default /etc/yantrik-mind/mcp.json):
 
     {"mcpServers": {"yantrik-os": {"command": "/opt/yantrik/bin/yos-mcp"}}}
+
+Started with YANTRIK_AGENT_TOKEN — by a harness, for one of the person's agents — every act
+carries that agent's token, a command runs in the agent's own terminal rather than the person's,
+and `run_command` / `command_status` / `command_input` / `command_kill` are offered as well. See
+"Which agent this bridge acts for" below.
 """
 
 import json
@@ -60,6 +65,15 @@ OS_ACT_MAX_SECONDS = (2 * SHELL_CALL_TIMEOUT      # action_detail, shell_state
                       + APPROVAL_WAIT
                       + ACT_TIMEOUT)
 
+
+def agent_call_max_seconds(wait=None):
+    """The same, for a call that waits for a command (`run_command`, `command_status`, or os_act
+    on `agent_run` / `agent_job`): the act is given its `wait` and a margin instead of a flat
+    minute. A client has to allow this much, or `wait_seconds: 600` is cut off by the client that
+    asked for it. `agent_timeout` is defined with the command tools below."""
+    return OS_ACT_MAX_SECONDS - ACT_TIMEOUT + agent_timeout(wait)
+
+
 # ── The name a caller gives itself ──────────────────────────────────────────────────────
 #
 # The first cards read "the mind on this desktop is asking to use this machine", which is true
@@ -88,6 +102,56 @@ REQUESTER_OVERRIDE = os.environ.get("YOS_MCP_REQUESTER", "").strip()
 _CLIENT = {}
 
 
+# ── Which agent this bridge acts for ────────────────────────────────────────────────────
+#
+# A harness that runs one of the person's agents starts this bridge with that agent's token in
+# `YANTRIK_AGENT_TOKEN` (design/agents-workspace-2026-09-23.md, decision 3). Every `yos act` from
+# here then carries it BESIDE the arguments — `yos` reads the same variable and sends it as the
+# top-level `agent_token` of `app.act` — and the shell resolves it to the agent, checking that the
+# calling process descends from that agent's harness. Three rules about it, and all three are
+# about where a secret must not end up:
+#
+#   * It goes to `yos` through the ENVIRONMENT, never the command line. Any user on the machine
+#     can read another process's command line (/proc/<pid>/cmdline); only the same user can read
+#     its environment.
+#   * It is never an argument. `args` is what the approval card draws, what
+#     `record_unasked_action` writes to `mind-audit.jsonl` and what a grant is bound to; a token
+#     in any of them is a token anyone reading the screen or the log can replay. An `agent_token`
+#     a model puts into `args` is dropped (see `act_pairs`) rather than sent.
+#   * It is never shown. Nothing this bridge returns or logs repeats it (`scrub`).
+#
+# With a token, a command runs in the agent's own terminal in its pane — `shell.agent_run` —
+# rather than being typed into the person's Terminal, and the first-class command tools below are
+# offered. Without one, nothing here changes.
+AGENT_TOKEN_ENV = "YANTRIK_AGENT_TOKEN"
+AGENT_TOKEN = os.environ.get(AGENT_TOKEN_ENV, "").strip()
+
+
+def scrub(text):
+    """`text` with this bridge's agent token taken out, wherever it appears."""
+    if not AGENT_TOKEN or not isinstance(text, str) or AGENT_TOKEN not in text:
+        return text
+    return text.replace(AGENT_TOKEN, "[agent token]")
+
+
+def yos_env():
+    """The environment every `yos` this bridge runs gets.
+
+    yos reaches the compositor's session bus and the audio server, and without those it sees an
+    empty desktop and reports that as fact. The agent token is set from what this bridge was
+    started with, and removed when it was started with none, so an empty variable is never sent
+    as a token.
+    """
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+    if AGENT_TOKEN:
+        env[AGENT_TOKEN_ENV] = AGENT_TOKEN
+    else:
+        env.pop(AGENT_TOKEN_ENV, None)
+    return env
+
+
 def log(message):
     """One line to stderr, for a person reading afterwards to find out why.
 
@@ -97,7 +161,7 @@ def log(message):
     that fails is the first of them: the person is looking at a card, the shell logs the polls it
     RECEIVES, and until now a poll that never arrived left no trace anywhere.
     """
-    sys.stderr.write("yos-mcp: %s\n" % message)
+    sys.stderr.write("yos-mcp: %s\n" % scrub(str(message)))
     sys.stderr.flush()
 
 
@@ -369,6 +433,278 @@ TOOLS = [
 BY_NAME = {t["name"]: t for t in TOOLS}
 
 
+# ── The agent's own terminal, as tools ──────────────────────────────────────────────────
+#
+# Offered only to a bridge started with an agent token, because only an agent has a terminal of
+# its own: each command gets a fresh PTY the shell owns, drawn in the agent's pane, with its exit
+# code, the directory it ended in and its output. They are the shell's `agent_run`, `agent_job`,
+# `agent_input` and `agent_kill`, made with `os_act` underneath — so the grades, the mode, the
+# approval card and the audit are exactly `os_act`'s: `agent_run` and `agent_input` are
+# `sensitive`, and in `ask` mode the person sees a card first.
+#
+# Clearer than `os_act terminal.run` for a mind, and not only by name: the answer comes back when
+# the command has ENDED, rather than whatever a terminal showed in the next 900 ms.
+AGENT_WAIT_DEFAULT = 120     # the shell's own default for `wait`
+AGENT_WAIT_MOST = 600        # the shell's bound on one wait
+# `yos` gives an act that waits `wait + 20` s before it gives up on the answer; this gives `yos`
+# that, and ten seconds more to start, read the action's types and print.
+AGENT_WAIT_MARGIN = 30
+
+_WAIT_SECONDS = {
+    "type": "number",
+    "description": "Seconds to wait for it to end before answering that it is still running. "
+                   "Default 120, at most 600.",
+}
+_JOB = {"type": "string", "description": "The job id run_command answered with."}
+
+AGENT_TOOLS = [
+    {
+        "name": "run_command",
+        "agent_action": "agent_run",
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True},
+        "description": "Run one shell command line (bash) in a terminal of your own, shown in your "
+                       "pane on the desktop — not in the person's Terminal. Answers when the "
+                       "command has ended: its exit code, the directory it ended in and the end of "
+                       "its output. The working directory carries to your next command; exported "
+                       "variables, functions and activated environments do not. The environment "
+                       "is HOME, USER, PATH, LANG and TERM only. If it is still going after "
+                       "`wait_seconds` it answers that it is still running, with a `job` id: "
+                       "command_status waits for it again, command_input types into it, "
+                       "command_kill stops it; if it finishes later you are told at the start of "
+                       "your next turn. It runs as the person, so it is graded sensitive: in `ask` "
+                       "mode the person sees a card with the command and allows it first.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string",
+                            "description": "One command line, as it would be typed. Pipes, "
+                                           "redirection, `&&` and `cd` work."},
+                "cwd": {"type": "string",
+                        "description": "Where to run it, absolute or relative to where your last "
+                                       "command ended. Left out: where your last command ended."},
+                "wait_seconds": _WAIT_SECONDS,
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "command_status",
+        "agent_action": "agent_job",
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "description": "Wait for one of your commands that run_command said is still running, and "
+                       "say where it stands: its exit code and output once it has ended. "
+                       "`wait_seconds: 0` only looks. Answers early if the command starts waiting "
+                       "for input.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"job": _JOB, "wait_seconds": _WAIT_SECONDS},
+            "required": ["job"],
+        },
+    },
+    {
+        "name": "command_input",
+        "agent_action": "agent_input",
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
+        "description": "Type into one of your running commands — a prompt it is waiting on — "
+                       "exactly the characters given. No newline is added: end with \\n to press "
+                       "Return; \\u0003 is Ctrl-C. Graded sensitive, because a program at a prompt "
+                       "cannot tell this from the person typing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"job": _JOB,
+                           "text": {"type": "string", "description": "The exact characters to send."}},
+            "required": ["job", "text"],
+        },
+    },
+    {
+        "name": "command_kill",
+        "agent_action": "agent_kill",
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+        "description": "Stop one of your running commands: its whole process group gets SIGTERM, "
+                       "and SIGKILL two seconds later if anything is left. Answers once it has "
+                       "ended, with how.",
+        "inputSchema": {"type": "object", "properties": {"job": _JOB}, "required": ["job"]},
+    },
+]
+
+AGENT_BY_NAME = {t["name"]: t for t in AGENT_TOOLS}
+
+# What `os_act` says in addition when this bridge has a token, so a mind that reaches for the
+# Terminal is not surprised by where its command went.
+OS_ACT_WITH_AGENT = (" As one of the person's agents, `terminal`'s `run` runs your command in a "
+                     "terminal of your own in your pane (the same as run_command), not in the "
+                     "person's Terminal, and answers with its exit code.")
+
+# The shell's two actions that wait for a command, as `os_act` names them.
+AGENT_WAITING = {"agent_run", "agent_job"}
+
+
+def offered():
+    """The tools this bridge offers: the desktop's, and an agent's own when it runs as one."""
+    return TOOLS + (AGENT_TOOLS if AGENT_TOKEN else [])
+
+
+def listing(tool):
+    """One tool as `tools/list` publishes it."""
+    entry = {k: tool[k] for k in ("name", "description", "inputSchema", "annotations") if k in tool}
+    if AGENT_TOKEN and tool["name"] == "os_act":
+        entry["description"] = entry["description"] + OS_ACT_WITH_AGENT
+    return entry
+
+
+def agent_timeout(wait):
+    """How long a `yos act` that waits `wait` seconds for a command is given before giving up."""
+    try:
+        wait = AGENT_WAIT_DEFAULT if wait is None else float(wait)
+    except (TypeError, ValueError):
+        wait = AGENT_WAIT_DEFAULT
+    wait = min(max(wait, 0.0), float(AGENT_WAIT_MOST))
+    return max(ACT_TIMEOUT, int(wait + AGENT_WAIT_MARGIN))
+
+
+def agent_route(args):
+    """`os_act terminal.run`, as the agent's own terminal would take it — or None to leave it be.
+
+    Only with a token. The person's Terminal stays the person's: a command an agent runs gets a
+    terminal of its own, and nobody's window is opened or raised for it. The arguments keep their
+    meaning — `command`, and `cwd` and `wait` if a mind sent them — and a bare string is the
+    command, as the Terminal's one-parameter `run` would have read it.
+    """
+    if not AGENT_TOKEN:
+        return None
+    app = str(args.get("app") or "").strip()
+    if app not in ("terminal", "app-terminal") or args.get("action") != "run":
+        return None
+    given = args.get("args")
+    if isinstance(given, str):
+        try:
+            parsed = json.loads(given)
+        except ValueError:
+            parsed = None
+        given = parsed if isinstance(parsed, dict) else {"command": given}
+    given = given if isinstance(given, dict) else {}
+    routed = {k: given[k] for k in ("command", "cwd", "wait") if given.get(k) not in (None, "")}
+    return {"app": "shell", "action": "agent_run", "args": routed}
+
+
+def agent_args(name, args):
+    """A command tool's arguments, as the shell's action names them."""
+    out = {}
+    if name == "run_command":
+        out["command"] = args.get("command")
+        if args.get("cwd") not in (None, ""):
+            out["cwd"] = args.get("cwd")
+    else:
+        out["job"] = args.get("job")
+    if name == "command_input":
+        out["text"] = args.get("text")
+    if name in ("run_command", "command_status") and args.get("wait_seconds") is not None:
+        out["wait"] = args.get("wait_seconds")
+    return out
+
+
+def seconds(ms):
+    """`1.2 s`, `47 s`, `2m 14s` — how long a command ran, for a sentence."""
+    try:
+        secs = float(ms) / 1000.0
+    except (TypeError, ValueError):
+        return "a while"
+    if secs < 10:
+        return "%.1f s" % secs
+    if secs < 60:
+        return "%d s" % secs
+    if secs < 3600:
+        return "%dm %02ds" % (secs // 60, secs % 60)
+    return "%dh %02dm" % (secs // 3600, (secs % 3600) // 60)
+
+
+def command_text(result, names):
+    """The shell's answer about a command, as a mind reads it: one line on how it stands, then
+    what the terminal showed.
+
+    `names` is what to call the follow-up tools — the command tools' names, or `os_act shell`
+    actions for a mind that came through `os_act`.
+    """
+    job = result.get("job")
+    if result.get("running"):
+        if result.get("waiting_for_input"):
+            head = ("still running after %s, and it looks like it is waiting for input (job %s). "
+                    "The person can answer in its card on the desktop; %s sends it text (end with "
+                    "\\n to press Return); %s stops it."
+                    % (seconds(result.get("elapsed_ms")), job, names["input"], names["kill"]))
+        else:
+            head = ("still running after %s (job %s). %s waits for it again; %s stops it; if it "
+                    "ends before you ask, you are told at the start of your next turn."
+                    % (seconds(result.get("elapsed_ms")), job, names["status"], names["kill"]))
+    else:
+        if "exit_code" in result:
+            how = "exit code %s" % result["exit_code"]
+        elif "signal" in result:
+            how = "ended by %s" % (result.get("signal_name") or "signal %s" % result["signal"])
+        else:
+            how = "ended"
+        if result.get("killed"):
+            how += " (it was stopped)"
+        head = "%s after %s, in %s." % (how, seconds(result.get("elapsed_ms")),
+                                        result.get("cwd_after") or result.get("cwd"))
+        if result.get("note"):
+            head += " " + str(result["note"]) + "."
+    tail = str(result.get("tail") or "").rstrip("\n")
+    body = tail if tail else "(no output)"
+    if result.get("tail_clipped"):
+        body = ("[the whole output is in your pane on the desktop; these are its last lines]\n"
+                + body)
+    return head + "\n\n" + body
+
+
+COMMAND_TOOL_NAMES = {"status": "command_status", "input": "command_input",
+                      "kill": "command_kill"}
+OS_ACT_NAMES = {"status": "os_act shell agent_job", "input": "os_act shell agent_input",
+                "kill": "os_act shell agent_kill"}
+
+
+def routed_text(out):
+    """What an `os_act terminal.run` that went to the agent's own terminal answers: where it ran,
+    then the command's end — named for a mind that knows `os_act`."""
+    result = result_object(out)
+    said = (command_text(result, OS_ACT_NAMES)
+            if isinstance(result, dict) and "job" in result else out)
+    return ("(ran in a terminal of your own, in your pane on the desktop — shell.agent_run — not "
+            "in the person's Terminal)\n\n" + said)
+
+
+def run_agent_tool(tool, args):
+    """One of the command tools, as an `os_act` on the shell. Returns (text, is_error, meta).
+
+    `meta` is the shell's answer as it came, for a client that wants the exit code as a number
+    rather than a sentence — pi's `bash`, which is made from `run_command`.
+    """
+    missing = [k for k in tool["inputSchema"].get("required", [])
+               if args.get(k) is None or (k != "text" and args.get(k) == "")]
+    if missing:
+        return "%s needs %s." % (tool["name"], " and ".join(repr(k) for k in missing)), True, None
+    seen = {}
+
+    def present(out):
+        result = result_object(out)
+        if not isinstance(result, dict) or "job" not in result:
+            return out
+        seen["result"] = result
+        return command_text(result, COMMAND_TOOL_NAMES)
+
+    act = {"app": "shell", "action": tool["agent_action"], "args": agent_args(tool["name"], args)}
+    text, is_error = run_tool(BY_NAME["os_act"], act, present=present)
+    return text, is_error, seen.get("result")
+
+
+def call_tool(tool, args):
+    """Any tool this bridge offers. Returns (text, is_error, meta)."""
+    if tool["name"] in AGENT_BY_NAME:
+        return run_agent_tool(tool, args)
+    text, is_error = run_tool(tool, args)
+    return text, is_error, None
+
+
 # The OS grades every action it publishes: safe < standard < sensitive < dangerous. Of the
 # 46 actions on this desktop, 40 are `standard` — open a note, save, append, search — and
 # six are not: killing a process, removing a container, locking the session.
@@ -417,26 +753,28 @@ def act_pairs(a):
 
     # Values are stringified rather than json-dumped so a plain string arrives as
     # `text=hello`, not `text="hello"` with the quotes becoming part of the note.
-    return ["%s=%s" % (k, v if isinstance(v, str) else json.dumps(v)) for k, v in args.items()]
+    #
+    # An `agent_token` among the arguments is dropped, never sent: which agent a call is for rides
+    # beside the arguments, from this bridge's own environment (see AGENT_TOKEN), and `yos` would
+    # otherwise lift an `agent_token=` pair out and use it in place of the real one.
+    return ["%s=%s" % (k, v if isinstance(v, str) else json.dumps(v)) for k, v in args.items()
+            if k != "agent_token"]
 
 
 def yos(args, timeout):
     """Run `yos` and hand back the completed process, or None if it could not run at all.
 
-    One place, because five callers now need the same environment: yos reaches the compositor's
-    session bus and the audio server, and without those it sees an empty desktop and reports
-    that as fact.
+    One place, because five callers now need the same environment (`yos_env`): yos reaches the
+    compositor's session bus and the audio server, and without those it sees an empty desktop and
+    reports that as fact — and an act for one of the person's agents carries its token.
     """
-    env = dict(os.environ)
-    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
-    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
     try:
         # stdin is closed to the child on purpose. This process's own stdin is the client's
         # JSON-RPC stream, and a `yos` that inherited it could read a request meant for the
         # bridge — bytes that are then simply gone. Nothing `yos` does today reads stdin; this
         # is so that nothing it does later can.
         return subprocess.run([YOS] + list(args), capture_output=True, text=True,
-                              timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+                              timeout=timeout, env=yos_env(), stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
 
@@ -1330,8 +1668,12 @@ def report_unasked(audit, outcome):
             "record of that: %s. Tell the person what you did.)" % err)
 
 
-def run_tool(tool, args):
+def run_tool(tool, args, present=None):
     """Invoke yos and return (text, is_error), whatever the outcome.
+
+    `present`, when given, turns a successful act's printed output into the text a mind reads —
+    the command tools use it to say "exit code 0 after 1.2 s" rather than print the shell's JSON.
+    What the person decided, and any audit warning, still go in front of it.
 
     A tool that raises loses the detail the mind needs to recover, so a failure comes
     back as content that says what failed. The distinction that matters downstream is
@@ -1373,6 +1715,8 @@ def run_tool(tool, args):
     # Set when the person was asked and allowed it: the request id, carried on the call for the
     # app's dispatch to spend.
     grant = None
+    # Set when a command is going to the agent's own terminal: no window is raised for it.
+    agent_call = False
 
     if tool["name"] == "os_act":
         # os_describe lists actions as `act: new_note()`, and a model copying that sends
@@ -1380,6 +1724,14 @@ def run_tool(tool, args):
         # punctuation cost a whole confirmed turn on the third live drive.
         args = dict(args)
         args["action"] = str(args["action"]).strip().split("(", 1)[0].strip()
+        # With an agent token, the Terminal's `run` is the agent's own terminal instead — graded,
+        # asked about and recorded as `shell.agent_run`, which is what will actually run.
+        routed = agent_route(args)
+        if routed is not None:
+            args, agent_call = routed, True
+            present = present or routed_text
+        agent_call = agent_call or (str(args.get("app")) in ("shell", "app-shell")
+                                    and args.get("action", "").startswith("agent_"))
         refusal, note, audit, grant = guard_act(args)
         if refusal is not None:
             return policy_answer(refusal), False
@@ -1411,17 +1763,17 @@ def run_tool(tool, args):
     timeout = tool["timeout"]
     if callable(timeout):
         timeout = timeout(args)
-
-    env = dict(os.environ)
-    # yos reaches the compositor's session bus and the audio server; without these it
-    # sees an empty desktop and reports that as fact, which is worse than an error.
-    env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
-    env.setdefault("WAYLAND_DISPLAY", "wayland-0")
+    if agent_call and args.get("action") in AGENT_WAITING:
+        # The shell answers these when the command ends or its `wait` runs out, so the act is
+        # given that long and a margin, not a flat minute: `yos` itself allows `wait + 20`.
+        given = args.get("args") if isinstance(args.get("args"), dict) else {}
+        timeout = agent_timeout(given.get("wait"))
 
     try:
         # stdin closed to the child, for the reason in `yos`: this process's stdin belongs to
-        # the client's JSON-RPC stream and nothing else may read from it.
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,
+        # the client's JSON-RPC stream and nothing else may read from it. The environment is
+        # `yos_env`'s: the desktop's session, and the agent token when this bridge has one.
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=yos_env(),
                            stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         note = join(note, report_unasked(audit, "timed out"))
@@ -1466,7 +1818,9 @@ def run_tool(tool, args):
             ("\n" + out) if out else "",
             ("\n" + err) if err else "",
         )), True
-    if tool["name"] == "os_act" and p.returncode == 0:
+    if tool["name"] == "os_act" and p.returncode == 0 and not agent_call:
+        # Not for a command in the agent's own terminal: it is drawn in the agent's pane, and
+        # raising a window for it — the Terminal's, or anyone's — is what that pane replaces.
         follow(app)
     if tool["name"] in PRIVATE_READS and p.returncode == 0:
         # Recorded after the call, not before: a read that failed saw nothing.
@@ -1475,6 +1829,8 @@ def run_tool(tool, args):
     if not out:
         return prefix(note, "(the command succeeded and printed nothing)"
                       + (("\n" + err) if err else "")), False
+    if present is not None:
+        return prefix(note, present(out) + (("\n" + err) if err else "")), False
     if (tool["name"] == "os_describe" and app and app != "shell"
             and not re.search(r"^\s*act:\s", out, re.M)):
         # The service answered for a window that is shut (see `action_detail`). What it says is
@@ -1542,12 +1898,22 @@ def reply(msg_id, result=None, error=None):
 
 
 def serve_call(msg_id, tool, arguments):
-    """Run one tools/call and answer it. The body of a worker thread; must not raise."""
+    """Run one tools/call and answer it. The body of a worker thread; must not raise.
+
+    A command tool's answer also carries the shell's own account of the command under `_meta`
+    (`yantrik/command`: exit code, signal, job, tail…), which MCP lets a result carry for a
+    client that knows to look — pi's `bash` reads the exit code from it rather than from prose.
+    Nothing this returns, in either place, repeats the agent token.
+    """
+    meta = None
     try:
-        text, is_error = run_tool(tool, arguments)
+        text, is_error, meta = call_tool(tool, arguments)
     except Exception as e:  # a malformed argument must not take the server down
         text, is_error = "could not run %s: %s" % (tool["name"], e), True
-    reply(msg_id, {"content": [{"type": "text", "text": text}], "isError": is_error})
+    result = {"content": [{"type": "text", "text": scrub(text)}], "isError": is_error}
+    if meta is not None:
+        result["_meta"] = {"yantrik/command": json.loads(scrub(json.dumps(meta)))}
+    reply(msg_id, result)
 
 
 # ── Reading the next request while the last one is still working ───────────────────────
@@ -1609,14 +1975,13 @@ def main():
             # annotations tell a client what a tool does to the world, so it can run reads
             # freely and gate the rest. A client that has to guess from the name gets it
             # wrong: "os_apps" looks like a mutation to every heuristic worth writing.
-            reply(msg_id, {"tools": [
-                {k: t[k] for k in ("name", "description", "inputSchema", "annotations")
-                 if k in t}
-                for t in TOOLS
-            ]})
+            #
+            # The command tools are listed only to a bridge that runs as one of the person's
+            # agents: without a token there is no terminal of one's own to offer.
+            reply(msg_id, {"tools": [listing(t) for t in offered()]})
         elif method == "tools/call":
             params = msg.get("params") or {}
-            tool = BY_NAME.get(params.get("name"))
+            tool = {t["name"]: t for t in offered()}.get(params.get("name"))
             if tool is None:
                 reply(msg_id, error={"code": -32602,
                                      "message": "no such tool: %s" % params.get("name")})

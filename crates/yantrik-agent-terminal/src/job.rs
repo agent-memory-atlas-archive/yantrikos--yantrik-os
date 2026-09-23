@@ -571,9 +571,12 @@ fn worker(
                         dirs.insert(job.agent.clone(), (cwd_after, job.seq));
                     }
                 }
-                let sink = shared.on_finish.read().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Some(sink) = sink {
-                    sink(&job.answer(&limits));
+                let sinks = shared.on_finish.read().unwrap_or_else(|e| e.into_inner()).clone();
+                if !sinks.is_empty() {
+                    let answer = job.answer(&limits);
+                    for sink in sinks {
+                        sink(&answer);
+                    }
                 }
                 continue;
             }

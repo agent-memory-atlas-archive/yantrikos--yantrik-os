@@ -262,6 +262,35 @@ class Turn:
         self._tail = ""          # the last delta, so the trail knows whether a newline is owed
         self._lock = threading.Lock()
 
+    @property
+    def notes(self) -> List[str]:
+        """What the desktop has to tell this agent since its last turn, if anything.
+
+        The `notes` of the turn's `context` (crates/yantrik-harness protocol.rs,
+        `Assignment::context`): a command that finished after the call that started it had
+        returned, with its exit code and last lines. Each is a sentence meant for the model and
+        arrives once. A harness that shows its model nothing else of the context should show it
+        these — `notes_before` puts them in front of the person's message.
+        """
+        if not self.context:
+            return []
+        try:
+            context = json.loads(self.context)
+        except ValueError:
+            return []
+        notes = context.get("notes") if isinstance(context, dict) else None
+        if not isinstance(notes, list):
+            return []
+        return [str(note).strip() for note in notes if str(note).strip()]
+
+    def notes_before(self, text: str) -> str:
+        """`text` with this turn's notes in front of it, or `text` alone when there are none."""
+        notes = self.notes
+        if not notes:
+            return text
+        said = "\n".join("- " + note.replace("\n", "\n  ") for note in notes)
+        return "[From the desktop, since your last turn:\n%s]\n\n%s" % (said, text)
+
     # The two calls a handler makes.
 
     def emit(self, delta: str) -> bool:
@@ -855,6 +884,25 @@ def _readable(exc: BaseException) -> str:
 MCP_TIMEOUT = 300.0
 MCP_COMMAND = os.environ.get("YOS_MCP_BIN", "/opt/yantrik/bin/yos-mcp")
 MCP_PROTOCOL_VERSION = "2024-11-05"
+# The bridge's command tools, offered to a conversation's bridge when it carries the agent's
+# token, wait for the command itself as well: `wait_seconds`, 120 by default and at most 600, on
+# top of everything an os_act can wait for. A client that allowed only MCP_TIMEOUT would cut off
+# the command it asked to wait for.
+MCP_WAITING_TOOLS = {"run_command": 120.0, "command_status": 120.0}
+MCP_WAIT_MOST = 600.0
+
+
+def mcp_timeout(name: str, arguments: Optional[Dict[str, Any]] = None,
+                base: float = MCP_TIMEOUT) -> float:
+    """How long to give one tool call: `base`, and as long again as the command it waits for."""
+    if name not in MCP_WAITING_TOOLS:
+        return base
+    wait = (arguments or {}).get("wait_seconds", MCP_WAITING_TOOLS[name])
+    try:
+        wait = float(wait)
+    except (TypeError, ValueError):
+        wait = MCP_WAITING_TOOLS[name]
+    return base + min(max(wait, 0.0), MCP_WAIT_MOST)
 
 
 class McpTools:
@@ -913,7 +961,8 @@ class McpTools:
         try:
             self._ensure()
             result = self._rpc("tools/call", {"name": name, "arguments": arguments or {}},
-                               timeout=self.timeout if timeout is None else timeout)
+                               timeout=(mcp_timeout(name, arguments, self.timeout)
+                                        if timeout is None else timeout))
         except McpError as exc:
             return (str(exc), True)
         parts = result.get("content") or []

@@ -274,6 +274,20 @@ class PiEventTests(unittest.TestCase):
         self.assertIsNone(b.poll(), "the other conversation's pi was stopped too")
         self.assertEqual(handler.held(), ["c-bbbbbb"])
 
+    def test_what_the_desktop_has_to_tell_the_agent_goes_in_front_of_its_prompt_once(self):
+        # Pi is shown nothing else of a turn's context, so a note about a command that finished
+        # after its call returned would otherwise never reach the model.
+        self.start(PiMind(self.config("text"), log=lambda message: None))
+        note = "Your command `make` (job job-1) finished after the call that started it had returned: exit code 0."
+        first = self.desktop.ask("what now?", context=json.dumps(
+            {"machine": {"timezone": "UTC"}, "notes": [note]}))
+        self.desktop.wait_closed(first, timeout=8)
+        second = self.desktop.ask("and then?", context=json.dumps({"machine": {"timezone": "UTC"}}))
+        self.desktop.wait_closed(second, timeout=8)
+        prompts = [p["message"] for p in self.dump("prompts")]
+        self.assertEqual(prompts, ["[From the desktop, since your last turn:\n- %s]\n\nwhat now?" % note,
+                                   "and then?"])
+
     def test_the_token_is_never_inherited_from_the_harness_itself(self):
         os.environ["YANTRIK_AGENT_TOKEN"] = "f" * 32
         self.addCleanup(os.environ.pop, "YANTRIK_AGENT_TOKEN", None)

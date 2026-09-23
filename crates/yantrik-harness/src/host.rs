@@ -26,6 +26,10 @@
 //! starts for that conversation can say which agent is asking. [`Host::agent_for_token`] reads it
 //! back, with the pid of the process that attached, which the shell learned from the kernel.
 //!
+//! The desktop can also leave an agent a note for its next turn ([`Host::note_for`]) — a command
+//! it ran that finished after the call that started it had returned. The note rides in that
+//! turn's `context`, once.
+//!
 //! # What the host enforces
 //!
 //! - **One turn at a time per conversation**, first in first out. The next turn for an agent waits
@@ -186,13 +190,50 @@ struct Agent {
     started: SystemTime,
     turns: u32,
     last: Option<TurnEnd>,
+    /// What the desktop has to tell this agent at the start of its next turn, oldest first. See
+    /// [`Host::note_for`].
+    notes: VecDeque<String>,
+    /// Notes pushed out by newer ones since the last turn took them, so that turn can say so.
+    notes_dropped: usize,
 }
 
 impl Agent {
     fn new(token: String) -> Agent {
-        Agent { token, started: SystemTime::now(), turns: 0, last: None }
+        Agent {
+            token,
+            started: SystemTime::now(),
+            turns: 0,
+            last: None,
+            notes: VecDeque::new(),
+            notes_dropped: 0,
+        }
+    }
+
+    /// Every note it is owed, once: after this they are gone.
+    fn take_notes(&mut self) -> Vec<String> {
+        let mut notes = Vec::with_capacity(self.notes.len() + 1);
+        if self.notes_dropped > 0 {
+            notes.push(format!(
+                "{} earlier note{} from the desktop {} dropped: only the latest {MAX_NOTES} are \
+                 kept between turns.",
+                self.notes_dropped,
+                if self.notes_dropped == 1 { "" } else { "s" },
+                if self.notes_dropped == 1 { "was" } else { "were" },
+            ));
+            self.notes_dropped = 0;
+        }
+        notes.extend(self.notes.drain(..));
+        notes
     }
 }
+
+/// The most notes an agent holds for its next turn. Past it the oldest go, and the turn says how
+/// many did, so a harness that never polls cannot make the desktop hold an unbounded pile of text.
+pub const MAX_NOTES: usize = 8;
+
+/// The longest one note may be, in bytes. A note is a sentence and a few lines of output, not a
+/// log; a longer one is cut, and says so.
+pub const MAX_NOTE_BYTES: usize = 1024;
 
 /// One harness that has attached.
 struct Attached {
@@ -625,6 +666,40 @@ impl Host {
         None
     }
 
+    /// Leave a note for an agent's next turn: something the desktop has to tell it that no call
+    /// of its own carried — a command it ran that finished after the call that started it had
+    /// returned.
+    ///
+    /// The note travels in the `context` of the next turn handed to that agent, under `notes`
+    /// (see [`protocol::Assignment::context`]), and is delivered once. Not on `/stop` or `/new`,
+    /// which a harness answers itself without asking the mind; the turn after them carries it.
+    /// An agent holds at most [`MAX_NOTES`], each at most [`MAX_NOTE_BYTES`], and its notes end
+    /// with it: stopped, its harness restarted or gone, they are dropped.
+    ///
+    /// Returns whether the note was kept — `false` for an agent that is not live, or a note with
+    /// nothing in it.
+    pub fn note_for(&self, agent: &AgentId, note: String) -> bool {
+        let note = clip_note(note.trim());
+        if note.is_empty() {
+            return false;
+        }
+        let mut state = self.lock();
+        Self::reap(&mut state);
+        let Some(live) = state
+            .attached
+            .get_mut(agent.harness())
+            .and_then(|harness| harness.agents.get_mut(agent.conversation()))
+        else {
+            return false;
+        };
+        live.notes.push_back(note);
+        while live.notes.len() > MAX_NOTES {
+            live.notes.pop_front();
+            live.notes_dropped += 1;
+        }
+        true
+    }
+
     /// Stop an agent: the turns waiting for it are failed, the one in flight is settled for the
     /// reader — open calls interrupted, then [`STOPPED`] — and the harness is told on its next
     /// poll to stop working on it and, for a harness with conversations, to let the conversation
@@ -818,7 +893,15 @@ impl Host {
             .position(|w| !busy.contains(&w.assignment.conversation) || interrupts(&w.assignment.text));
 
         let mut reply = match next.and_then(|i| harness.queued.remove(i)) {
-            Some(Waiting { assignment, tx }) => {
+            Some(Waiting { mut assignment, tx }) => {
+                // What the desktop has to tell this agent rides on the turn that reaches its mind,
+                // taken here rather than when the turn was queued, so a note that arrived while
+                // the turn waited still goes with it.
+                if !answered_by_the_harness(&assignment.text) {
+                    if let Some(agent) = harness.agents.get_mut(&assignment.conversation) {
+                        assignment.context = with_notes(assignment.context.take(), agent.take_notes());
+                    }
+                }
                 harness
                     .in_flight
                     .insert(assignment.turn_id, Flight::new(assignment.conversation.clone(), tx));
@@ -987,6 +1070,59 @@ fn refused(why: String) -> serde_json::Value {
 /// Whether a turn is the one message that interrupts the turn in flight instead of waiting for it.
 fn interrupts(text: &str) -> bool {
     text.split_whitespace().next().is_some_and(|word| word.eq_ignore_ascii_case("/stop"))
+}
+
+/// Whether a harness answers this turn itself rather than handing it to its mind: `/stop` and
+/// `/new` (`harnesses/lib/yantrik_harness.py`, `_command`). A note put on one would never reach
+/// the model, so notes wait for the turn after it.
+fn answered_by_the_harness(text: &str) -> bool {
+    text.split_whitespace()
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("/stop") || word.eq_ignore_ascii_case("/new"))
+}
+
+/// A note, cut to [`MAX_NOTE_BYTES`] on a character boundary, saying so when it was.
+fn clip_note(note: &str) -> String {
+    if note.len() <= MAX_NOTE_BYTES {
+        return note.to_string();
+    }
+    const MARK: &str = " … (cut)";
+    let mut end = MAX_NOTE_BYTES - MARK.len();
+    while !note.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{MARK}", &note[..end])
+}
+
+/// A turn's `context` with `notes` added to it.
+///
+/// The context is a JSON object in a string (`{"machine": …}`), so the notes go in as its
+/// `notes` array, after any already there. A context that is not an object — something a caller
+/// wrote as prose — is kept whole under `framing` rather than thrown away. No notes, no change.
+fn with_notes(context: Option<String>, notes: Vec<String>) -> Option<String> {
+    use serde_json::Value;
+    if notes.is_empty() {
+        return context;
+    }
+    let mut object = match context.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        None => serde_json::Map::new(),
+        Some(text) => match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(map)) => map,
+            _ => {
+                let mut map = serde_json::Map::new();
+                map.insert("framing".to_string(), Value::String(text.to_string()));
+                map
+            }
+        },
+    };
+    let mut all: Vec<Value> = match object.remove("notes") {
+        Some(Value::Array(earlier)) => earlier,
+        Some(Value::Null) | None => Vec::new(),
+        Some(other) => vec![other],
+    };
+    all.extend(notes.into_iter().map(Value::String));
+    object.insert("notes".to_string(), Value::Array(all));
+    Some(Value::Object(object).to_string())
 }
 
 /// An agent token: 128 random bits, as 32 lowercase hex digits.
@@ -1867,5 +2003,141 @@ mod tests {
         attach_many(&host, "pi");
         let err = host.start_agent("openclaw").unwrap_err();
         assert!(err.contains("openclaw") && err.contains("pi"), "{err}");
+    }
+
+    // ── Notes for an agent's next turn ──────────────────────────────
+
+    /// The `notes` a handed-out turn carries in its context, if any.
+    fn notes_in(assignment: &serde_json::Value) -> Vec<String> {
+        let Some(context) = assignment["context"].as_str() else { return Vec::new() };
+        let context: serde_json::Value = serde_json::from_str(context).expect("the context is JSON");
+        context["notes"]
+            .as_array()
+            .map(|notes| notes.iter().map(|n| n.as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    /// One turn for `agent`, handed out and closed: what the harness was given.
+    fn next_turn(host: &Host, session: &str, agent: &AgentId, text: &str) -> serde_json::Value {
+        let _answer = host.send_to(agent, Turn::new(text)).unwrap();
+        let handed = poll(host, session);
+        assert_eq!(handed["text"], text, "{handed}");
+        complete(host, session, handed["turn_id"].as_u64().unwrap());
+        handed
+    }
+
+    #[test]
+    fn a_note_reaches_the_agent_in_its_next_turn_once_beside_what_the_context_already_said() {
+        let host = host_with_nothing();
+        let session = attach_many(&host, "pi");
+        let agent = host.start_agent("pi").unwrap();
+        let bystander = host.start_agent("pi").unwrap();
+
+        assert!(host.note_for(&agent, "Your command `make` finished: exit code 0.".into()));
+        // The machine facts the Lens sends stay; the note goes in beside them.
+        let machine = json!({ "machine": { "timezone": "Asia/Kolkata" } }).to_string();
+        let _answer = host.send_to(&agent, Turn::new("and now?").with_context(machine)).unwrap();
+        let handed = poll(&host, &session);
+        let context: serde_json::Value = serde_json::from_str(handed["context"].as_str().unwrap()).unwrap();
+        assert_eq!(context["machine"]["timezone"], "Asia/Kolkata", "{context}");
+        assert_eq!(notes_in(&handed), ["Your command `make` finished: exit code 0."]);
+        complete(&host, &session, handed["turn_id"].as_u64().unwrap());
+
+        // Once: the turn after it carries nothing, and a turn with no note has no `notes` at all.
+        let again = next_turn(&host, &session, &agent, "anything else?");
+        assert!(again["context"].is_null(), "{again}");
+        // Another agent's turn never carries this agent's note.
+        assert!(host.note_for(&agent, "second".into()));
+        let theirs = next_turn(&host, &session, &bystander, "unrelated");
+        assert!(notes_in(&theirs).is_empty(), "{theirs}");
+        assert_eq!(notes_in(&next_turn(&host, &session, &agent, "mine")), ["second"]);
+    }
+
+    #[test]
+    fn a_note_left_while_the_turn_waits_goes_with_that_turn() {
+        let host = host_with_nothing();
+        let (session, agent, turn_id, _answer) = turn_in_flight(&host);
+        // Queued behind the turn in flight, then the command finishes.
+        let _waiting = host.send_to(&agent, Turn::new("next question")).unwrap();
+        assert!(host.note_for(&agent, "the build finished".into()));
+        complete(&host, &session, turn_id);
+        let handed = poll(&host, &session);
+        assert_eq!(handed["text"], "next question");
+        assert_eq!(notes_in(&handed), ["the build finished"]);
+    }
+
+    #[test]
+    fn stop_and_new_do_not_take_the_notes_the_harness_would_never_show_its_mind() {
+        let host = host_with_nothing();
+        let (session, agent, turn_id, _answer) = turn_in_flight(&host);
+        assert!(host.note_for(&agent, "late finish".into()));
+        let _stop = host.send_to(&agent, Turn::new("/stop")).unwrap();
+        let stop = poll(&host, &session);
+        assert_eq!(stop["text"], "/stop");
+        assert!(notes_in(&stop).is_empty(), "{stop}");
+        complete(&host, &session, stop["turn_id"].as_u64().unwrap());
+        complete(&host, &session, turn_id);
+        let new = next_turn(&host, &session, &agent, "/new");
+        assert!(notes_in(&new).is_empty(), "{new}");
+        assert_eq!(notes_in(&next_turn(&host, &session, &agent, "go on")), ["late finish"]);
+    }
+
+    #[test]
+    fn notes_are_capped_in_number_and_length_and_the_turn_says_what_was_dropped() {
+        let host = host_with_nothing();
+        let session = attach_many(&host, "pi");
+        let agent = host.start_agent("pi").unwrap();
+        for n in 0..MAX_NOTES + 3 {
+            assert!(host.note_for(&agent, format!("note {n}")));
+        }
+        let long = "é".repeat(MAX_NOTE_BYTES);
+        assert!(host.note_for(&agent, long));
+        // Nothing to say is not a note.
+        assert!(!host.note_for(&agent, "   ".into()));
+
+        let notes = notes_in(&next_turn(&host, &session, &agent, "hi"));
+        assert_eq!(notes.len(), MAX_NOTES + 1, "{notes:?}");
+        assert!(notes[0].starts_with("4 earlier notes from the desktop were dropped"), "{notes:?}");
+        // The oldest went; the newest stayed, in order.
+        assert_eq!(notes[1], "note 4");
+        assert_eq!(notes[MAX_NOTES - 1], format!("note {}", MAX_NOTES + 2));
+        let cut = notes.last().unwrap();
+        assert!(cut.len() <= MAX_NOTE_BYTES && cut.ends_with("(cut)"), "{} bytes", cut.len());
+        assert!(cut.starts_with('é'));
+    }
+
+    #[test]
+    fn notes_end_with_their_agent() {
+        let host = host_with_nothing();
+        let session = attach_many(&host, "pi");
+        let agent = host.start_agent("pi").unwrap();
+        assert!(host.note_for(&agent, "for the stopped one".into()));
+        host.stop_agent(&agent);
+        assert!(!host.note_for(&agent, "too late".into()), "a stopped agent takes no notes");
+
+        // A conversation that no longer exists cannot be given one either, and a new agent does
+        // not inherit the old one's.
+        let fresh = host.start_agent("pi").unwrap();
+        assert!(notes_in(&next_turn(&host, &session, &fresh, "hello")).is_empty());
+
+        // A harness that restarts takes its agents' notes with it.
+        assert!(host.note_for(&fresh, "before the restart".into()));
+        let session = attach_many(&host, "pi");
+        assert!(!host.note_for(&fresh, "after".into()));
+        let newest = host.start_agent("pi").unwrap();
+        assert!(notes_in(&next_turn(&host, &session, &newest, "hi")).is_empty());
+
+        // And nothing is noted for a harness that is not attached, or a built-in.
+        assert!(!host.note_for(&AgentId::new("openclaw", "main"), "x".into()));
+    }
+
+    #[test]
+    fn a_context_that_is_not_an_object_is_kept_under_framing() {
+        let merged = with_notes(Some("you are on the desktop".into()), vec!["n".into()]).unwrap();
+        let merged: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(merged, json!({ "framing": "you are on the desktop", "notes": ["n"] }));
+        let merged = with_notes(Some(json!({ "notes": ["a"] }).to_string()), vec!["b".into()]).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&merged).unwrap(), json!({ "notes": ["a", "b"] }));
+        assert_eq!(with_notes(Some("{}".into()), vec![]), Some("{}".into()), "no notes, no change");
     }
 }

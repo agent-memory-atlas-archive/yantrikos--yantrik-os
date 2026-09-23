@@ -80,7 +80,7 @@ mod jobs;
 mod proc;
 mod retained;
 
-pub use identity::{descends_from, AgentResolver, Lookup, NoAgents, TokenTable, NO_AGENT};
+pub use identity::{descends_from, AgentResolver, HostTokens, Lookup, NoAgents, TokenTable, NO_AGENT};
 pub use jobs::{
     Environment, FinishSink, JobId, JobState, JobSummary, Jobs, Limits, OutputSink, RunAnswer,
     DEFAULT_WAIT,

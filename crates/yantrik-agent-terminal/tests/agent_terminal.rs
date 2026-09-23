@@ -323,6 +323,12 @@ fn the_view_gets_the_raw_bytes_the_screen_and_the_end() {
         let ended = ended.clone();
         move |answer| ended.lock().unwrap().push((answer.job.clone(), answer.exit_code()))
     });
+    // A second listener — the view's and the glue's are both wired — is added, not swapped in.
+    let also = Arc::new(Mutex::new(Vec::new()));
+    jobs.on_finish({
+        let also = also.clone();
+        move |answer| also.lock().unwrap().push(answer.job.clone())
+    });
 
     let done = jobs.run(&pi(), "printf '\\033[31mred\\033[0m\\n'", None, LONG).unwrap();
     let raw = bytes.lock().unwrap().clone();
@@ -335,6 +341,8 @@ fn the_view_gets_the_raw_bytes_the_screen_and_the_end() {
     assert_eq!(red, Some(yantrik_agent_terminal::vt100::Color::Idx(1)), "the screen keeps the colour");
     eventually("the finish to be reported", || !ended.lock().unwrap().is_empty());
     assert_eq!(ended.lock().unwrap()[0], (done.job.clone(), Some(0)));
+    eventually("the second listener to hear it too", || !also.lock().unwrap().is_empty());
+    assert_eq!(*also.lock().unwrap(), [done.job.clone()]);
     assert_eq!(jobs.owner(&done.job), Some(pi()));
 }
 

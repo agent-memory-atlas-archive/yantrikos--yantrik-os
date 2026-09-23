@@ -295,7 +295,8 @@ pub(crate) struct Shared {
     /// Each agent's directory, and the start order of the command that reported it.
     pub dirs: Mutex<HashMap<AgentId, (PathBuf, u64)>>,
     pub on_output: RwLock<Option<OutputSink>>,
-    pub on_finish: RwLock<Option<FinishSink>>,
+    /// Every listener for a job's end, in the order they were added.
+    pub on_finish: RwLock<Vec<FinishSink>>,
 }
 
 struct Inner {
@@ -333,7 +334,7 @@ impl Jobs {
                     limits,
                     dirs: Mutex::new(HashMap::new()),
                     on_output: RwLock::new(None),
-                    on_finish: RwLock::new(None),
+                    on_finish: RwLock::new(Vec::new()),
                 }),
                 env,
                 jobs: Mutex::new(HashMap::new()),
@@ -351,9 +352,14 @@ impl Jobs {
         *self.inner.shared.on_output.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(sink));
     }
 
-    /// Tell `sink` whenever a job ends. Replaces any earlier sink.
+    /// Tell `sink` whenever a job ends, as well as every sink added before it.
+    ///
+    /// Added to, not replaced, because more than one part of the shell has to hear of an end: the
+    /// Agents view settles the command's card, and the bridge glue tells the agent, in its next
+    /// turn, about a command that finished after its call had returned. Either one replacing the
+    /// other would be a silent loss depending on which was wired first.
     pub fn on_finish(&self, sink: impl Fn(&RunAnswer) + Send + Sync + 'static) {
-        *self.inner.shared.on_finish.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(sink));
+        self.inner.shared.on_finish.write().unwrap_or_else(|e| e.into_inner()).push(Arc::new(sink));
     }
 
     /// The directory `agent`'s next command starts in: where its latest command ended, or home.

@@ -140,7 +140,18 @@ never an argument, because `args` is what the approval card shows and `mind-audi
 The dispatch hands it to the handler as `control::agent_token()`, and removes any `agent_token` a
 caller put inside `args`. `yos act` sends it from `--agent-token` or `YANTRIK_AGENT_TOKEN`. The
 shell's `agent_run` / `agent_job` / `agent_input` / `agent_kill` resolve it against the kernel's
-account of the caller (see `design/agents-workspace-2026-09-23.md`, decision 3).
+account of the caller (see `design/agents-workspace-2026-09-23.md`, decision 3): the harness host
+says which agent the token names and which process attached for it, and the caller has to be
+that process or run under it. A harness the host has no pid for vouches for nobody.
+
+The MCP bridge started with `YANTRIK_AGENT_TOKEN` passes it to `yos` through the environment —
+never on the command line, which any user can read — so every act it makes carries the token
+beside `args`; it drops an `agent_token` a model put among the arguments. It also sends
+`os_act terminal.run` to `shell.agent_run` (no Terminal window is opened or raised) and offers
+the agent's terminal as `run_command`, `command_status`, `command_input` and `command_kill`, which
+are these four actions with their grades unchanged. See [harness.md](harness.md), "What the
+bridge does with it". A command that finishes after its `agent_run` returned `running: true` is
+told to its agent at the start of its next turn.
 
 The rule lives in `yantrik_ipc_transport::gate` (re-exported as `yantrik_app_runtime::control`),
 so a service that answers `app.act` in its own handler meets it too, without linking Slint.
