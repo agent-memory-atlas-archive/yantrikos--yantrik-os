@@ -1,0 +1,14 @@
+[package]
+name = "hello-window"
+version = "0.1.0"
+edition = "2021"
+description = "The counter of hello-surface on a window: a Slint app publishing its surface, its event loop ended through run_until_closed"
+publish = false
+
+# Run it with `cargo run -p hello-window` in a graphical session. CI builds it; it needs a display
+# to run, so the dispatch it shares with hello-surface is what CI runs (examples/hello-surface).
+
+[dependencies]
+yantrik-app-runtime = { path = "../../crates/yantrik-app-runtime" }
+slint = { workspace = true }
+serde_json = { workspace = true }
