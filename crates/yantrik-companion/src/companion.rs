@@ -3618,9 +3618,13 @@ impl CompanionService {
         );
     }
 
-    /// Seconds since last interaction.
-    pub fn idle_seconds(&self) -> f64 {
-        now_ts() - self.last_interaction_ts
+    /// Seconds since the person was last here — or `None` if they have never been.
+    ///
+    /// The bond clock stays unset until the first scored turn (#156); `None` is
+    /// the only honest reading of that. Callers must neither report the decades
+    /// since 1970 nor mistake "never met" for "just here".
+    pub fn idle_seconds(&self) -> Option<f64> {
+        crate::types::absence_seconds(self.last_interaction_ts, now_ts())
     }
 
     /// Count one conversation turn: the person said something and was answered.
@@ -3694,7 +3698,12 @@ impl CompanionService {
     }
 
     fn check_session_timeout(&mut self) {
-        let idle = self.idle_seconds();
+        // No absence known (#156): the clock is unset until a turn is scored, so
+        // a session whose turns never scored (incognito, bond off) or a fresh
+        // install has nothing to time out against — the history stays.
+        let Some(idle) = self.idle_seconds() else {
+            return;
+        };
         let timeout = self.config.conversation.session_timeout_minutes as f64 * 60.0;
 
         if idle > timeout && self.session_turn_count > 0 {
@@ -5131,7 +5140,9 @@ mod bond_scoring_tests {
         // just been around, whether they had or not.
         let two_days = 2.0 * 86400.0;
         let c = companion_over_store(Some(two_days));
-        let idle = c.idle_seconds();
+        let idle = c
+            .idle_seconds()
+            .expect("the store holds the person's turn, so there is an absence to measure");
         assert!(
             (idle - two_days).abs() < 60.0,
             "a person away for two days reads as two days after a restart, got {idle:.0}s"
@@ -5146,6 +5157,10 @@ mod bond_scoring_tests {
         assert_eq!(
             c.last_interaction_ts, 0.0,
             "no interaction event means no last-interaction time"
+        );
+        assert!(
+            c.idle_seconds().is_none(),
+            "and the idle clock reports no absence to measure, not the decades since 1970"
         );
     }
 
