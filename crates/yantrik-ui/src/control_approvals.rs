@@ -1188,8 +1188,8 @@ thread_local! {
     static SHOWN: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-fn fingerprint(cards: &[Card]) -> String {
-    cards
+fn fingerprint(cards: &[Card], pane: &str) -> String {
+    let cards = cards
         .iter()
         .map(|c| {
             // The age only moves on a card that is still waiting, so a screen with nothing
@@ -1198,12 +1198,66 @@ fn fingerprint(cards: &[Card]) -> String {
             format!("{}:{}:{age}", c.id, c.status.as_str())
         })
         .collect::<Vec<_>>()
-        .join("|")
+        .join("|");
+    // The pane is part of what is shown: walking to the Agents screen, or to another agent
+    // there, moves a waiting card between the popup and the pane (#212).
+    format!("{cards}|pane:{pane}")
+}
+
+/// The agent whose pane is on screen right now, or "" when no pane is: the Agents screen, in
+/// its list view, with an agent selected. That pane is where the agent's own card is answered,
+/// so the popup must not draw it a second time (#212).
+fn pane_agent(ui: &App) -> String {
+    if ui.get_current_screen() != crate::wire::agents::SCREEN {
+        return String::new();
+    }
+    let g = ui.global::<crate::AgentsState>();
+    if g.get_view() != "list" {
+        return String::new();
+    }
+    g.get_selected().to_string()
+}
+
+/// Whether a card is answered in the pane on screen. The pane draws live buttons for exactly
+/// the pending cards of the agent it shows (`approval_of` in wire/agents.rs), so this is the
+/// same predicate: the verified agent, never anything the request says. A card with no agent
+/// — a caller that is no agent, or a token that was not believed — is in no pane and stays on
+/// screen.
+fn in_the_pane(card: &Card, pane: &str) -> bool {
+    !pane.is_empty() && card.verified.agent == pane
+}
+
+/// What the screen draws: every decided record, and the oldest pending card that is not being
+/// answered in the pane on screen. `cards()` returns the records first and then the pending in
+/// order, so the first pending row kept here is the oldest — one card at a time, as before.
+fn cards_for_screen<'a>(cards: &'a [Card], pane: &str) -> Vec<&'a Card> {
+    let mut out: Vec<&Card> = Vec::new();
+    let mut front = false;
+    for card in cards {
+        if card.status != Status::Pending {
+            out.push(card);
+        } else if !front && !in_the_pane(card, pane) {
+            front = true;
+            out.push(card);
+        }
+    }
+    out
+}
+
+/// The pane to leave the card to, asked only while something is waiting: with nothing pending
+/// there is no card to place, and moving about the desktop must not repaint the records.
+fn pane_now(ui: &App, cards: &[Card]) -> String {
+    if cards.iter().any(|c| c.status == Status::Pending) {
+        pane_agent(ui)
+    } else {
+        String::new()
+    }
 }
 
 fn sync_if_changed(ui: &App) {
     let cards = approvals::cards();
-    let now = fingerprint(&cards);
+    let pane = pane_now(ui, &cards);
+    let now = fingerprint(&cards, &pane);
     let changed = SHOWN.with(|shown| {
         if *shown.borrow() == now {
             false
@@ -1213,14 +1267,15 @@ fn sync_if_changed(ui: &App) {
         }
     });
     if changed {
-        publish(ui, cards);
+        publish(ui, cards, &pane);
     }
 }
 
 fn sync(ui: &App) {
     let cards = approvals::cards();
-    SHOWN.with(|shown| *shown.borrow_mut() = fingerprint(&cards));
-    publish(ui, cards);
+    let pane = pane_now(ui, &cards);
+    SHOWN.with(|shown| *shown.borrow_mut() = fingerprint(&cards, &pane));
+    publish(ui, cards, &pane);
 }
 
 pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
@@ -1290,7 +1345,7 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
     }
 }
 
-fn publish(ui: &App, cards: Vec<Card>) {
+fn publish(ui: &App, cards: Vec<Card>, pane: &str) {
     let waiting = cards.iter().filter(|c| c.status == Status::Pending).count();
 
     // The same answers, in the pane of the agent each request was for: one request id, so
@@ -1298,22 +1353,21 @@ fn publish(ui: &App, cards: Vec<Card>) {
     // the same turn it reaches the Lens.
     crate::agents::settle_approvals(settled_as);
 
-    // One card at a time, even though up to three requests can be waiting.
+    // One card at a time, even though up to three requests can be waiting — and never the one
+    // the pane on screen is answering: that card the person reads beside the session it belongs
+    // to, with the same buttons, and seeing it twice is seeing it nowhere (#212). The card was
+    // drawn in one place or the other, never neither: the pane shows buttons for exactly the
+    // cards `cards_for_screen` leaves out.
     //
     // Three cards stacked is 780px on an 800px screen: the third one's buttons land under the
     // taskbar, unreachable. It is also the wrong thing to show — a person facing a stack reads
     // none of them properly, which is the approval-fatigue failure the whole design is trying to
-    // avoid. So the oldest is the one on screen and the rest wait behind a count. `cards()`
-    // returns the decided records first and then the pending ones in order, so the first pending
-    // row here is the oldest.
+    // avoid. So the oldest is the one on screen and the rest wait behind a count.
     let mut shown: Vec<crate::ApprovalRequest> = Vec::new();
     let mut in_front: Vec<crate::ApprovalRequest> = Vec::new();
-    for card in cards {
+    for card in cards_for_screen(&cards, pane) {
         let pending = card.status == Status::Pending;
-        if pending && !in_front.is_empty() {
-            continue;
-        }
-        let mut row = row_for(card);
+        let mut row = row_for(card.clone());
         // Who the agent works for — "Council recipe → Reviewer" — from how the shell started it.
         // Read here, where no other lock is held, never inside `row_for`, which the Agents pane
         // calls while it holds the agents' store.
@@ -2248,6 +2302,75 @@ mod control_approvals_tests {
         assert!(grant_belongs("appr-2", "", &child).is_err(), "nor one the person asked for");
         assert!(grant_belongs("appr-1", "pi:c-parent", &Some(Err("no".into()))).is_err(), "a token not believed spends nothing");
         assert!(grant_belongs("appr-1", "pi:c-parent", &None).is_ok(), "an app's own dispatch, as before");
+    }
+
+    /// #212: a card shown twice — once in the pane, once in the floating popup — was a card
+    /// nobody could tell was one question or two. One place answers it now: the pane when the
+    /// agent's own pane is on screen, the popup otherwise, and never neither.
+    #[test]
+    fn approvals_a_card_the_pane_answers_is_not_in_the_popup_too() {
+        use crate::approvals::{Card, Status, Verified};
+
+        fn card(id: &str, status: Status, agent: &str) -> Card {
+            Card {
+                id: id.into(),
+                requester: "pi 0.87".into(),
+                verified: Verified { agent: agent.into(), ..Verified::default() },
+                app: "files".into(),
+                action: "delete".into(),
+                grade: "sensitive".into(),
+                purpose: "Delete a file. It is not recoverable.".into(),
+                args: vec![],
+                warning: String::new(),
+                can_session: false,
+                status,
+                record: String::new(),
+                age_secs: 3,
+            }
+        }
+        // As `cards()` returns them: the decided records first, then the pending, oldest first.
+        let cards = vec![
+            card("appr-0", Status::Granted, "pi:c-1"),
+            card("appr-1", Status::Pending, "pi:c-1"),
+            card("appr-2", Status::Pending, "deepseek:c-2"),
+        ];
+        let ids = |pane: &str| {
+            super::cards_for_screen(&cards, pane).into_iter().map(|c| c.id.as_str()).collect::<Vec<_>>()
+        };
+
+        // No pane on screen: the oldest pending is in front, exactly as before.
+        assert_eq!(ids(""), ["appr-0", "appr-1"]);
+        // The pane is pi's agent: its own card is answered there, and the popup takes the next
+        // one — a second request is never left without a place on screen.
+        assert_eq!(ids("pi:c-1"), ["appr-0", "appr-2"]);
+        // A pane for another agent changes nothing about pi's card.
+        assert_eq!(ids("deepseek:c-2"), ["appr-0", "appr-1"]);
+        // The only card waiting is the pane's own: the popup keeps the records and no card.
+        let alone = vec![card("appr-9", Status::Pending, "pi:c-1")];
+        assert!(super::cards_for_screen(&alone, "pi:c-1").is_empty());
+        assert_eq!(super::cards_for_screen(&alone, "").len(), 1);
+        // A card with no verified agent is in no pane, whatever is on screen.
+        let nobody = vec![card("appr-8", Status::Pending, "")];
+        assert_eq!(super::cards_for_screen(&nobody, "pi:c-1").len(), 1);
+
+        // Walking to or from the pane is a change the once-a-second tick has to republish.
+        assert_ne!(
+            super::fingerprint(&cards, ""),
+            super::fingerprint(&cards, "pi:c-1"),
+            "the same cards with a different pane must not look unchanged"
+        );
+        assert_eq!(super::fingerprint(&cards, "pi:c-1"), super::fingerprint(&cards, "pi:c-1"));
+
+        // And the two halves stay in step: the popup leaves out exactly the cards the pane draws
+        // live buttons for, so a request is never hidden from both places at once.
+        let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control_approvals.rs")).unwrap();
+        let src = src.split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("!pane.is_empty() && card.verified.agent == pane"), "the popup matches the pane by the verified agent alone");
+        assert!(src.contains("ui.get_current_screen() != crate::wire::agents::SCREEN"), "only the Agents screen has a pane");
+        assert!(src.contains("g.get_view() != \"list\""), "the map is not a pane: the session is not on screen");
+        let wire = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/wire/agents.rs")).unwrap();
+        let wire = wire.split("#[cfg(test)]").next().unwrap();
+        assert!(wire.contains("c.verified.agent == a.meta.id.0"), "the pane's live buttons are the same predicate");
     }
 }
 
