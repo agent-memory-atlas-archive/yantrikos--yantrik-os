@@ -111,6 +111,16 @@ export component AppHeader inherits Rectangle {
     callback toggle-maximize();
     callback close-window();
 
+    // ── Moving the window by its bar ──
+    //
+    // On when this header IS the window's title bar — `AppWindow`, where the compositor draws no
+    // bar of its own (#256). Pressing on the bar and moving asks for a move, which the window
+    // hands to the compositor; double-clicking maximises or restores, as every desktop's title
+    // bar does. Buttons, the search field and the actions sit above the area that listens, so
+    // only the bar's empty space and its title move the window.
+    in property <bool> draggable: false;
+    callback drag();
+
     callback back();
     callback action(string);
     callback search-edited(string);
@@ -146,6 +156,25 @@ export component AppHeader inherits Rectangle {
         viewport-width: self.width;
         viewport-height: self.height;
         interactive: false;
+
+        // Behind the row, so anything in the row that takes a press takes it first. The move
+        // starts once the pointer has travelled a few pixels, not on the press itself: a press
+        // handed to the compositor at once would never arrive here as the second half of a
+        // double-click.
+        bar-drag := TouchArea {
+            enabled: root.draggable;
+            width: parent.width;
+            height: parent.height;
+            moved => {
+                if (self.pressed
+                    && (abs(self.mouse-x - self.pressed-x) > 4px
+                        || abs(self.mouse-y - self.pressed-y) > 4px)) {
+                    root.drag();
+                }
+            }
+            double-clicked => { root.toggle-maximize(); }
+        }
+
         HorizontalLayout {
             padding-left: root.show-back ? Theme.sp-2 : Theme.sp-4;
             padding-right: root.show-window-controls ? 0px : Theme.sp-3;

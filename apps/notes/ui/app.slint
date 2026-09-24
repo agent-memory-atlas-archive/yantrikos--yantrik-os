@@ -1,6 +1,7 @@
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
 import { AppIdentity } from "app_color.slint";
-import { AppHeader } from "app_header.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { YButton, YIconButton } from "y_button.slint";
 import { YInput } from "y_input.slint";
 import { Icon, Icons } from "icon.slint";
@@ -9,10 +10,13 @@ export { ThemeMode, AccentPreset }
 export struct NoteRow { id:string, title:string, preview:string, date:string, pinned:bool, selected:bool }
 export struct BookRow { name:string, count:int, selected:bool }
 export struct PreviewBlock { text:string, kind:int }
-export component NotesApp inherits Window {
+export component NotesApp inherits AppWindow {
  title:"Notes";preferred-width:1120px;preferred-height:760px;min-width:680px;min-height:460px;
- default-font-family:Theme.font-ui;background:Theme.bg-deep;
  init=>{AppIdentity.id="notes";}
+ app-id:"notes";header-icon:Icons.notes;header-subtitle:root.status;
+ header-leading-actions:[{id:"focus",icon:Icons.list,label:root.focus-mode?"Library":"Focus",active:root.focus-mode}];
+ header-actions:[{id:"reload",icon:Icons.refresh,label:"Refresh"},{id:"import",icon:Icons.import,label:"Import"},{id:"new",icon:Icons.plus,label:"New note",emphasis:2}];
+ header-action(id)=>{root.action(id);}
  in property <[NoteRow]> notes;
  in property <[BookRow]> books;
  in property <[PreviewBlock]> blocks;
@@ -62,15 +66,9 @@ export component NotesApp inherits Window {
   return reject;
  }
  changed dialog=>{if(root.dialog!=0){path-field.focus();}}
- keys:=FocusScope {width:root.width;height:root.height;key-pressed(event)=>{return root.shortcut(event);}
- Flickable { width:root.width;height:root.height;interactive:false;viewport-width:self.width;viewport-height:self.height;
+ keys:=FocusScope {key-pressed(event)=>{return root.shortcut(event);}
+ Flickable { width:parent.width;height:parent.height;interactive:false;viewport-width:self.width;viewport-height:self.height;
  VerticalLayout {spacing:0px;
-  AppHeader {
-   app-id:"notes";icon:Icons.notes;title:"Notes";subtitle:root.status;
-   leading-actions:[{id:"focus",icon:Icons.list,label:root.focus-mode?"Library":"Focus",active:root.focus-mode}];
-   actions:[{id:"reload",icon:Icons.refresh,label:"Refresh"},{id:"import",icon:Icons.import,label:"Import"},{id:"new",icon:Icons.plus,label:"New note",emphasis:2}];
-   action(id)=>{root.action(id);}
-  }
   if root.notice!="" : Rectangle {height:message.preferred-height+20px;background:Theme.bg-elevated;
    message:=Text{x:20px;y:10px;width:parent.width - 40px;text:root.notice;color:Theme.amber;font-size:13px;wrap:word-wrap;}
   }

@@ -117,7 +117,8 @@ crossbeam-channel = "0.5"
 # Both renderers are compiled in; SLINT_BACKEND picks at runtime.
 # femtovg draws on the GPU (WSLg reaches the real adapter via GALLIUM_DRIVER=d3d12);
 # software is the fallback for hosts with no usable GL.
-slint = { version = "1.17", features = ["renderer-femtovg", "renderer-software"] }
+# unstable-winit-030: the window a title bar moves (`yantrik_app_runtime::chrome`, #256).
+slint = { version = "1.17", features = ["renderer-femtovg", "renderer-software", "unstable-winit-030"] }
 
 # System
 sysinfo = "0.33"

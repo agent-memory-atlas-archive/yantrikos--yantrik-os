@@ -1,11 +1,12 @@
 // Yantrik UI Kit — reusable Slint components.
 // Consuming crates access .slint files via DEP_YANTRIK_UI_KIT_SLINT_PATH env var.
 //
-// Components: AppHeader, YButton, YIconButton, YInput, YDialog, YTabs,
+// Components: AppWindow, AppHeader, YButton, YIconButton, YInput, YDialog, YTabs,
 // YSidebar, YListItem, YContextMenu, YEmptyState, LineChart, RadarChart,
 // ToastBanner, MessageBubble, Icon.
 //
-// AppHeader is the one every app is required to use; see docs/app-sdk.md. YToolbar and
+// AppWindow is the window every app is (#256): it draws AppHeader as the app's one title bar.
+// AppHeader is the one every screen is required to use; see docs/app-sdk.md. YToolbar and
 // AppShell used to sit here and were instantiated by nothing, because each spent Slint's
 // single `@children` on a region no app needed. They are gone.
 
@@ -596,6 +597,72 @@ mod an_idle_window_stops_drawing {
              `real_window_shell_tabs_search_clipboard_resize_and_idle` asserts exactly that for \
              one app, by counting the frames the renderer requests.",
             never_still.join("\n  ")
+        );
+    }
+}
+
+#[cfg(test)]
+mod every_app_is_an_app_window {
+    use std::path::Path;
+
+    /// The apps still drawn inside a plain `Window`, with labwc's title bar over their own
+    /// header. This list only ever gets shorter: an app converted to `AppWindow` has to come off
+    /// it, and a new app cannot go on it.
+    const NOT_YET: &[&str] = &[
+        "arcade", "calendar", "container-manager", "document-editor", "download-manager", "email",
+        "image-viewer", "music-player", "network-manager", "presentation", "snippet-manager",
+        "spreadsheet", "studio", "system-monitor", "terminal", "weather",
+    ];
+
+    /// Every app's window is the base app window (#256).
+    ///
+    /// The ask was one base shell that every app extends, the way every app on macOS is an
+    /// NSWindow and every GNOME app an AdwApplicationWindow: the same bar, the same buttons, the
+    /// same drag and double-click, because there is only one place any of it is written. An app
+    /// that inherits a bare `Window` instead gets labwc's bar over its own header — the two bars
+    /// this replaced.
+    #[test]
+    fn every_app_inherits_the_base_app_window() {
+        let apps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps");
+        let mut wrong = Vec::new();
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&apps).expect("the apps directory") {
+            let dir = entry.expect("an app directory").path();
+            let ui = dir.join("ui/app.slint");
+            let Ok(src) = std::fs::read_to_string(&ui) else { continue };
+            let app = dir.file_name().unwrap().to_string_lossy().to_string();
+            seen += 1;
+            let base_window = src.contains(" inherits AppWindow {");
+            let plain_window = src.contains(" inherits Window {");
+            // A bar nobody connected draws its buttons and does nothing when they are pressed.
+            let main = std::fs::read_to_string(dir.join("src/main.rs")).unwrap_or_default();
+            if base_window && !main.contains("window_chrome!(") {
+                wrong.push(format!(
+                    "{app}: inherits AppWindow, but main never calls window_chrome!, so its \
+                     minimise, maximise, close and drag do nothing"
+                ));
+            }
+            match (NOT_YET.contains(&app.as_str()), base_window, plain_window) {
+                (false, true, _) | (true, false, true) => {}
+                (false, false, _) => wrong.push(format!("{app}: its window does not inherit AppWindow")),
+                (true, true, _) => wrong.push(format!(
+                    "{app}: inherits AppWindow now, so take it off NOT_YET"
+                )),
+                (true, false, false) => wrong.push(format!(
+                    "{app}: is on NOT_YET but its window inherits neither AppWindow nor Window"
+                )),
+            }
+        }
+        assert!(seen >= 10, "read only {seen} apps from {}; the path is wrong", apps.display());
+        assert!(
+            wrong.is_empty(),
+            "every app's window is the base app window:\n  {}\n\n\
+             `export component MyApp inherits AppWindow`, with the bar as data (`app-id`, \
+             `header-icon`, `header-actions`, `header-action(id)`), the app's own content as the \
+             children, `export {{ WindowChrome }} from \"app_window.slint\";` beside the import, \
+             and `yantrik_app_runtime::window_chrome!(ui)` once in main. See \
+             crates/yantrik-ui-kit/slint/app_window.slint.",
+            wrong.join("\n  ")
         );
     }
 }
