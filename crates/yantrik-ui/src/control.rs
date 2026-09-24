@@ -1014,8 +1014,11 @@ pub fn publish(
         .action(
             // Parity with the pin on every tile in All apps. Deciding what sits on START is a
             // person's call, and an agent tidying a desktop on someone's behalf needs the same
-            // verb rather than a way to fake the click.
+            // verb rather than a way to fake the click. `sensitive` because the pin list is
+            // written to the shell's settings: the decision outlives the turn that made it and
+            // is still standing after a restart, which is what a stored setting is.
             Action::new("pin_app", "Pin an app to START, or unpin it")
+                .risk("sensitive")
                 .arg(Param::text("name").describe("App id, e.g. notes, files, browser, chromium"))
                 .arg(Param::flag("pinned").describe("true to pin, false to unpin")),
             move |args| {
@@ -1204,8 +1207,12 @@ pub fn publish(
         .action(
             // Parity, deliberately: anything a person can do on the Harnesses screen, an agent
             // can do here. A control surface that could not change which mind is answering would
-            // be the one decision on this desktop reserved for the mouse.
+            // be the one decision on this desktop reserved for the mouse. `sensitive` because the
+            // choice is written to the shell's settings as the preferred mind: it decides who
+            // answers from now on, stands after a restart, and belongs in front of the person
+            // before it happens rather than after.
             Action::new("use_harness", "Choose which mind answers when the shell is asked something")
+                .risk("sensitive")
                 .arg(Param::text("id").describe("Harness id, as `describe shell` lists under `minds`")),
             move |args| {
                 let id = args["id"].as_str().unwrap_or_default().trim().to_string();
@@ -1564,7 +1571,13 @@ pub fn publish(
             //
             // So the file first, the error propagated, the screen after. An error out of here
             // means the shell is exactly as the caller found it.
+            //
+            // `sensitive` because the setting stands after a restart — the description says so —
+            // and a Do Not Disturb left on by a caller swallows every notification that follows,
+            // quietly, until somebody notices. A lasting change to how the machine behaves is
+            // for the person to see first.
             Action::new("set_do_not_disturb", "Hold or release notifications. Stays after a restart")
+                .risk("sensitive")
                 .arg(Param::flag("on")),
             move |args| {
                 let ui = dnd_ui()?;
@@ -2797,5 +2810,85 @@ mod locked_state_tests {
              past the login screen (#203). Arm as written:\n{}",
             &arm[..nav]
         );
+    }
+}
+
+#[cfg(test)]
+mod lasting_settings_grade_tests {
+    //! #48, on the shell's own surface: the walk of every published action found three that
+    //! write settings which outlive the turn, graded as if they moved a window. `pin_app`
+    //! writes the START pin list, `use_harness` writes the preferred mind — deciding who
+    //! answers after a restart — and `set_do_not_disturb` writes `dnd_mode`, which swallows
+    //! every notification that follows until somebody notices. All three write through
+    //! `crate::wire::settings` into the shell's settings file; the same walk left the show,
+    //! read and window verbs where they were, and left `lock` at `safe` (#215).
+    //!
+    //! The handlers need a live shell to run, so the grades are pinned against the source
+    //! the way `lock_grade_tests` pins `lock`.
+    use std::path::Path;
+
+    /// One action's declaration and handler, from its quoted name to where the next
+    /// `.action(` begins, as written above the tests.
+    fn declaration(name: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
+        let quoted = format!("\"{name}\"");
+        let from = src
+            .find(&quoted)
+            .unwrap_or_else(|| panic!("the shell no longer publishes {name}"));
+        let rest = &src[from..];
+        let end = rest.find(".action(").unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    /// A choice written into the settings file is a choice the person sees first.
+    #[test]
+    fn what_outlives_the_turn_asks_first() {
+        for (name, why) in [
+            ("pin_app", "writes the START pin list into the shell's settings"),
+            (
+                "use_harness",
+                "writes the preferred mind into the shell's settings, deciding which mind \
+                 answers after a restart",
+            ),
+            (
+                "set_do_not_disturb",
+                "writes dnd_mode into the shell's settings, holding every notification that \
+                 follows until somebody notices",
+            ),
+        ] {
+            let declaration = declaration(name);
+            assert!(
+                declaration.contains(".risk(\"sensitive\")"),
+                "`shell.{name}` must be graded sensitive: it {why}, and an effect that \
+                 outlives the turn is at least `sensitive` (#48) — graded `standard`, or \
+                 undeclared and taking the default, it runs unasked in the default mode. \
+                 Declaration as written:\n{declaration}"
+            );
+            assert!(
+                !declaration.contains(".risk(\"standard\")"),
+                "`shell.{name}` is graded standard again (#48). Declaration as \
+                 written:\n{declaration}"
+            );
+        }
+    }
+
+    /// And the walk's keeps are keeps: the shell's show, read and window verbs do not write
+    /// settings, and `set_mind_panel` — which remembers how much of one panel is drawn, in
+    /// the panel's own file — stays `safe` beside them. If one of these ever does start
+    /// writing to the settings file, this is the test that asks what its grade became.
+    #[test]
+    fn showing_and_reading_stay_below_the_line() {
+        for name in ["open_app", "show_screen", "focus_window", "set_mind_panel"] {
+            let declaration = declaration(name);
+            assert!(
+                !declaration.contains(".risk(\"sensitive\")"),
+                "`shell.{name}` shows, reads or moves a window and writes no setting: making \
+                 it a card in `ask` mode is the everyday flow #48 says must keep working. \
+                 Declaration as written:\n{declaration}"
+            );
+        }
     }
 }
