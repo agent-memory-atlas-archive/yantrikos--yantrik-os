@@ -140,3 +140,15 @@ Finished tab with the failed recipe opened, and the light theme beside the outpu
 ```sh
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/recipes.png 1280 1000 verify-recipes
 ```
+
+## Approvals
+
+`verify-approval-card` draws the Lens waiting on the longest real approval card — the paragraph
+`shell` publishes for `run_recipe`, an agent row, two arguments, the session row — at 1280×800,
+and sends real pointer events: it scans for Deny and Allow the way a person looks for them and
+asserts both answer, on one row, with the whole button inside the panel above the reply box, that
+the session row answers too, and that the card leads with the description's first sentence (#218).
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/approval-card.png 1280 800 verify-approval-card
+```

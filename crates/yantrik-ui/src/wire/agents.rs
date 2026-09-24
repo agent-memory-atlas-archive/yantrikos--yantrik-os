@@ -1622,6 +1622,7 @@ mod tests {
     }
 
     fn pending_card(id: &str, agent: &str) -> crate::approvals::Card {
+        let purpose = "Run one command line in a fresh terminal of your own.";
         crate::approvals::Card {
             id: id.into(),
             requester: "pi 0.87".into(),
@@ -1633,7 +1634,8 @@ mod tests {
             app: "shell".into(),
             action: "agent_run".into(),
             grade: "sensitive".into(),
-            purpose: "Run one command line in a fresh terminal of your own.".into(),
+            purpose: purpose.into(),
+            summary: crate::approvals::summary_of(purpose),
             args: vec!["command: rm -rf build".into()],
             warning: String::new(),
             can_session: true,

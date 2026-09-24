@@ -10,6 +10,7 @@ mod screen_controls_tests;
 mod apps_button_tests;
 mod lens_tests;
 mod overview_tests;
+mod approval_tests;
 use slint::{
     platform::{
         software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
@@ -45,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-screen-controls") { return screen_controls_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-apps-button") { return apps_button_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-lens-answers") { return lens_tests::run(&window, output); }
+    if args.iter().any(|a| a == "verify-approval-card") { return approval_tests::run(&window, output); }
     if args.iter().any(|a| a == "lens-answer") { return lens_tests::run_lens(&window, output); }
     if args.iter().any(|a| a == "verify-agents-overview") { return overview_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-idle") {

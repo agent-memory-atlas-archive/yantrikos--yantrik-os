@@ -337,6 +337,7 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         discrepancies: lines(&[]),
         app: "files".into(),
         action: "move".into(),
+        summary: "Move files or folders to another place, or into the recoverable Trash.".into(),
         purpose: "Move files or folders to another place, or into the recoverable Trash.".into(),
         grade: "sensitive".into(),
         args: lines(&["from: ~/Pictures/copy of a.jpg", "to: ~/.local/share/Trash"]),

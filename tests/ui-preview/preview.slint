@@ -280,7 +280,7 @@ export { AgentsState, AgentWindow, AgentTabData, AgentRowData, AgentRunData, Age
 export { ToolCallData } from "components/tool_call.slint";
 export { OverviewNode, OverviewEdge } from "agents_overview.slint";
 export { ApprovalRequest } from "components/intent_lens.slint";
-import { IntentLens } from "components/intent_lens.slint";
+import { IntentLens, ApprovalRequest } from "components/intent_lens.slint";
 
 // The Lens in a conversation with an attached mind: its header's "open in Agents".
 export component LensAgentsProbe inherits Window {
@@ -340,6 +340,37 @@ export component LensAnswerProbe inherits Window {
         chat-mode: true;
         mind-name: "pi";
         messages: root.messages;
+    }
+}
+
+// The Lens waiting on one approval (#218): the longest real card — `shell.run_recipe`'s
+// published paragraph — between the transcript and the reply box at 1280×800, where its
+// Deny/Allow buttons used to land below the panel's bottom edge, unreachable. Filled with
+// fixture data by src/approval_tests.rs, which presses the buttons by scanning for them the
+// way a person would and asserts where they answered.
+export component ApprovalLensProbe inherits Window {
+    width: 1280px;
+    height: 800px;
+    default-font-family: Theme.font-ui;
+    background: Theme.bg-deep;
+    in property <[MessageData]> messages;
+    in property <[ApprovalRequest]> approvals;
+    in property <int> approvals-waiting: 0;
+    in-out property <int> allowed: 0;
+    in-out property <int> sessioned: 0;
+    in-out property <int> denied: 0;
+    IntentLens {
+        width: 100%;
+        height: 100%;
+        is-open: true;
+        chat-mode: true;
+        mind-name: "pi";
+        messages: root.messages;
+        approvals: root.approvals;
+        approvals-waiting: root.approvals-waiting;
+        approval-allow(id) => { root.allowed += 1; }
+        approval-allow-session(id) => { root.sessioned += 1; }
+        approval-deny(id) => { root.denied += 1; }
     }
 }
 
