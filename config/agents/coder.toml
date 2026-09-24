@@ -25,7 +25,7 @@ Notes — anything the reviewer should look at first.
 
 [reach]
 # Its own terminal (commands run in its pane, each asked about in `ask` mode) and the Editor.
-surfaces = ["shell.agent_*", "shell.editor_*", "editor"]
+surfaces = ["shell.agent_*", "editor"]
 ceiling = "sensitive"
 
 [budget]

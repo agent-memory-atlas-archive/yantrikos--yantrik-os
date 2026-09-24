@@ -33,7 +33,6 @@ mod app_header_is_mandatory {
         ("spreadsheet", "spreadsheet.slint"),
         ("system-monitor", "system_monitor.slint"),
         ("terminal", "terminal.slint"),
-        ("text-editor", "text_editor.slint"),
         ("weather", "weather.slint"),
     ];
 

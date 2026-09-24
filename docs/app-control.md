@@ -366,7 +366,7 @@ publishes right now is `yos describe <name>`; whether it keeps the protocol, `yo
 | `containers` | `app-containers.sock` | `container-manager` | Docker or Podman containers |
 | `documents` | `app-documents.sock` | `document-editor` | written documents — reports, letters, plans — saved as files in ~/Documents |
 | `download-manager` | `app-download-manager.sock` | `downloads` | fetch a URL to a file, with progress |
-| `editor` | `app-editor.sock` | `text-editor` | plain-text and code files, opened and saved by path |
+| `editor` | `app-editor.sock` | `text-editor` | write a new text or code file (new with its text, then save_as a path), or open and edit one by path |
 | `email` | `app-email.sock` | — | read and send mail |
 | `image-viewer` | `app-image-viewer.sock` | `images`, `image` | view pictures |
 | `network` | `app-network.sock` | `network-manager` | this machine's connections, Wi-Fi and firewall state |

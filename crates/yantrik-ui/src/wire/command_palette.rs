@@ -40,13 +40,8 @@ fn build_commands() -> Vec<CommandItem> {
     nav(&mut cmds, "Go to Files", "8", "F", "nav:8");
     nav(&mut cmds, "Go to Settings", "7", "⚙", "nav:7");
     nav(&mut cmds, "Go to Packages", "21", "P", "nav:21");
-    nav(&mut cmds, "Go to Image Viewer", "11", "I", "nav:11");
-    nav(&mut cmds, "Go to Text Editor", "12", "≡", "nav:12");
-    nav(&mut cmds, "Go to Media Player", "13", "▶", "nav:13");
-
-    // ── Text Editor ──
-    cmd(&mut cmds, "New Editor Tab", "Editor", "≡", "editor:new-tab", "");
-    cmd(&mut cmds, "Open File in Editor", "Editor", "≡", "editor:open", "");
+    // Images, Text Editor and Media Player went the same way in #253, with the Editor's two
+    // rows: the shell drew its own copy of each, and those copies are gone.
 
     // Music and ySheets are shelved, so the palette does not offer them. "Go to Music",
     // "Go to Spreadsheet", "New Spreadsheet" and "Import CSV" were here; see
@@ -99,8 +94,6 @@ fn screen_for(action: &str) -> Option<i32> {
     match action {
         "system:notifications" => Some(9),
         "system:about" => Some(16),
-        // The editor is still a screen of the shell as well as a binary.
-        a if a.starts_with("editor:") => Some(12),
         _ => None,
     }
 }

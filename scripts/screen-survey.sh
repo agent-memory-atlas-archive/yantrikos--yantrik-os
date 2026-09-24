@@ -93,7 +93,7 @@ if [ "$ONLY" = "all" ] || [ "$ONLY" = "shell" ]; then
   # The same names the control surface offers. `terminal` used to be in this list and is not
   # a shell screen any more -- it became its own app binary, and asking for it routed to the
   # About screen, which the survey then filed under "shell-terminal".
-  for s in desktop files settings notifications memory system bond personality permissions            about packages devices images editor media; do
+  for s in desktop files settings notifications memory system bond personality permissions            about packages devices; do
     on_vm "yos act shell show_screen screen=$s" >/dev/null
     settle 3
     shot "shell-$s"

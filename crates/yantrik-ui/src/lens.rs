@@ -1390,7 +1390,7 @@ fn match_tool_intents(lower: &str, original: &str) -> Vec<LensResult> {
             (&["play music", "music player", "media player", "play video", "play media"],
              "Open Media Player", "Launch media app", "exec:mpv"),
             (&["edit code", "code editor", "open editor", "text editor"],
-             "Open Editor", "Launch text editor", "navigate:editor"),
+             "Open Editor", "Launch text editor", "launch:editor"),
         ];
         for (triggers, title, subtitle, action) in intent_apps {
             if triggers.iter().any(|t| lower == *t || lower.starts_with(t)) {

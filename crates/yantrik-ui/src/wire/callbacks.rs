@@ -197,8 +197,6 @@ fn wire_file_open(ui: &App, ctx: &AppContext) {
     // Open a file — route through mime_dispatch
     let ui_weak = ui.as_weak();
     let bp = browser_path.clone();
-    let iv_state = ctx.image_viewer_state.clone();
-    let mp_handle = ctx.media_player.clone();
     ui.on_file_open(move |name| {
         if crate::fileops::name(&name).is_err() { return; }
         if let Some(ui) = ui_weak.upgrade() {
@@ -226,12 +224,29 @@ fn wire_file_open(ui: &App, ctx: &AppContext) {
             FileAction::TextEditor => {
                 super::dock::spawn_app_with_args("editor", "yantrik-text-editor", &[&full.to_string_lossy()]);
             }
-            FileAction::AudioPlayer => {
-                if let Some(ui) = ui_weak.upgrade() {
-                    super::media_player::start_playback(&ui, &full, &mp_handle);
-                    ui.set_current_screen(13);
-                    ui.invoke_navigate(13);
+            FileAction::MediaPlayer => {
+                // mpv's own window, opened the way its desktop entry opens it: pseudo-gui gives
+                // a song a window with the play bar, where a bare `mpv song.mp3` plays with no
+                // window at all and nothing to stop it by. Through the one launcher, so the
+                // child does not inherit SLINT_FULLSCREEN.
+                //
+                // Said on the Files screen when there is no mpv: the image this desktop builds
+                // does not install it, and a failed launch is otherwise only a log line.
+                if super::dock::find_program("mpv").is_none() {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_file_notice(
+                            format!("{name_str} cannot play: no media player (mpv) is installed.")
+                                .into(),
+                        );
+                    }
+                    return;
                 }
+                let target = full.to_string_lossy().to_string();
+                super::dock::spawn_app_with_args(
+                    "mpv",
+                    "mpv",
+                    &["--player-operation-mode=pseudo-gui", "--", target.as_str()],
+                );
             }
             FileAction::Browser => {
                 // The browser the Browser pin opens, with the file as its argument: the same
@@ -249,12 +264,6 @@ fn wire_file_open(ui: &App, ctx: &AppContext) {
                         "Cannot open the file in a browser: none is installed"
                     ),
                 }
-            }
-            FileAction::External(cmd) => {
-                // Same launcher as everywhere else, for the same reason: a bare Command hands
-                // the child SLINT_FULLSCREEN and it opens with no way to close it.
-                let target = full.to_string_lossy().to_string();
-                super::dock::spawn_app_with_args(&cmd, &cmd, &[target.as_str()]);
             }
         }
     });

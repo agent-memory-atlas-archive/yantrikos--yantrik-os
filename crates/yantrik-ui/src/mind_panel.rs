@@ -1184,8 +1184,12 @@ mod tests {
         }
 
         // Its room: every maximized shell window stops short of it, and the desktop is inset by it.
+        // As many as there are framed screens, counted rather than typed: this said `>= 16` and
+        // failed the day three screens became windows of their own (#253).
+        let framed = app.lines().filter(|l| l.trim_start().starts_with("if current-screen == ") && l.contains(": WindowFrame {")).count();
         let maximized: Vec<&str> = app.lines().filter(|l| l.contains("width: root.window-maximized ?")).collect();
-        assert!(maximized.len() >= 16, "found {} maximized widths", maximized.len());
+        assert!(framed >= 10, "found only {framed} framed screens; the reader is broken");
+        assert!(maximized.len() >= framed, "found {} maximized widths for {framed} framed screens", maximized.len());
         for line in &maximized {
             assert!(line.contains("parent.width - root.mind-panel-reserve"), "a maximized window runs under the panel: {line}");
         }

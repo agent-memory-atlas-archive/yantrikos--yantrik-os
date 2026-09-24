@@ -139,8 +139,17 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             },
         )
         .action(
-            Action::new("files_new_file", "Create an empty file in the current directory").defers()
-                .arg(Param::text("name").describe("The new file's name")),
+            // The shell's own editor_* actions were the way to put text in a file until #253
+            // removed them, and a mind asked to "create a text file" reads this action first:
+            // the live T6/T7 run found the Files action and never the Editor. So it says where
+            // text goes.
+            Action::new(
+                "files_new_file",
+                "Create an empty file in the current directory. To write text into a file, use the \
+                 `editor` app: `new` with `text`, then `save_as` the path",
+            )
+            .defers()
+            .arg(Param::text("name").describe("The new file's name")),
             move |args| {
                 let ui = up(&for_file)?;
                 let name = args["name"].as_str().unwrap_or_default().to_string();

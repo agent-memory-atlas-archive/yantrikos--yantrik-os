@@ -980,13 +980,27 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
     };
 
     add(
+        // Standard, with or without `text`: a new tab replaces nothing. With `save_as` it is the
+        // way to write a file's text without asking anyone — the route a mind running unattended
+        // needs, since `set_content` is sensitive and waits for a person (#253).
         act(
             "new",
-            "Open an empty new tab and make it the active one. Nothing is written to disk until \
-             `save_as` gives it a path; up to eight tabs can be open.",
+            "Open a new tab and make it the active one, empty or holding the text given. Nothing \
+             is written to disk until `save_as` gives it a path; up to eight tabs can be open.",
+        )
+        .arg(
+            arg(
+                "text",
+                "What the new tab holds, up to 1 MiB and 20,000 lines of UTF-8 with no control \
+                 characters. Leave it out for an empty tab.",
+            )
+            .optional(),
         ),
-        |ui, s, _| {
+        |ui, s, args| {
             no_dialog(ui, "new")?;
+            // Checked before the tab opens, so text that is refused leaves no empty tab behind.
+            let text = args.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            document::validate(&text).map_err(|e| refuse(ui, e))?;
             let before = s.borrow().docs.len();
             action(ui, s, "new");
             if s.borrow().docs.len() == before {
@@ -994,6 +1008,13 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
                     ui,
                     "Eight tabs are already open; close one before opening another.",
                 ));
+            }
+            if !text.is_empty() {
+                ui.set_content(text.clone().into());
+                edit(ui, s, text.clone());
+                if s.borrow().docs[s.borrow().active].text != text {
+                    return Err(refuse(ui, "The new tab is open but empty; the text was rejected."));
+                }
             }
             Ok(document_now(ui, s))
         },
@@ -1308,7 +1329,8 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
         act(
             "set_content",
             "Replace everything in the active tab with this text. The file on disk is untouched \
-             until `save`; whatever was in the tab and unsaved is gone.",
+             until `save`; whatever was in the tab and unsaved is gone. To start a document with \
+             text, `new` with `text` does it without replacing anything.",
         )
         .risk("sensitive")
         .arg(arg(
@@ -1331,6 +1353,40 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
                 return Err(refuse(ui, "The tab was not changed; the text was rejected."));
             }
             Ok(answer)
+        },
+    );
+
+    add(
+        // Standard, unlike `set_content`: it adds to the tab and takes nothing away, and `undo`
+        // takes it back off. With `new` it is how a mind under a `standard` ceiling writes a
+        // draft here — the Writer role's way in since the shell's own editor, and its
+        // `editor_append`, were removed (#253).
+        act(
+            "append",
+            "Add this text to the end of the active tab; on a new, empty tab it is the whole \
+             text. Nothing already in the tab is changed, and the file on disk is untouched \
+             until `save`.",
+        )
+        .arg(arg(
+            "text",
+            "The text to add, exactly as given: start it with a newline to begin a new line. The \
+             whole tab has to stay within 1 MiB and 20,000 lines.",
+        )),
+        |ui, s, args| {
+            no_dialog(ui, "append")?;
+            let add = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| refuse(ui, "`append` needs `text`: what to add to the end of the tab."))?;
+            let text = format!("{}{add}", s.borrow().docs[s.borrow().active].text);
+            document::validate(&text).map_err(|e| refuse(ui, e))?;
+            ui.set_content(text.clone().into());
+            edit(ui, s, text.clone());
+            if s.borrow().docs[s.borrow().active].text != text {
+                return Err(refuse(ui, "The tab was not changed; the text was rejected."));
+            }
+            Ok(document_now(ui, s))
         },
     );
 

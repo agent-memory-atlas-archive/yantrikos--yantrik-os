@@ -20,16 +20,13 @@ mod clipboard;
 pub mod dock;
 pub mod harness;
 pub mod i18n;
-pub mod image_viewer;
 mod lens;
-pub mod media_player;
 mod navigate;
 pub mod notifications;
 mod power;
 pub mod screenshot;
 pub mod settings;
 mod system_poll;
-pub mod text_editor;
 mod timers;
 pub mod toast;
 mod voice_mode;
@@ -81,9 +78,6 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     voice_mode::wire(ui, ctx);
     settings::wire(ui, ctx);
     system_poll::wire(ui, ctx);
-    image_viewer::wire(ui, ctx);
-    text_editor::wire(ui, ctx);
-    media_player::wire(ui, ctx);
     package_manager::wire(ui, ctx);
     screenshot::wire(ui, ctx);
     // Owns the notification centre, the toasts and the poll of the one store. `toast` is the
