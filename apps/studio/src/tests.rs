@@ -1313,15 +1313,18 @@ fn cancel_all_stops_every_job_including_the_ones_not_started() {
 
     call(&actions, "generate", json!({ "prompt": "one long render", "width": 64, "height": 64 })).unwrap();
     call(&actions, "generate", json!({ "prompt": "another long render", "width": 64, "height": 64 })).unwrap();
+    // Wait until one of them is actually RUNNING, not just listed: cancelling while both are still
+    // pending asks the server to stop nothing, and the interrupt this test waits for below never
+    // comes. That is what failed on CI's slower runner, where neither had started after 2 seconds.
     let mut waited = 0;
     loop {
         let state = engine.snapshot().state();
-        let listed = state["queue"]["running"].as_array().unwrap().len()
-            + state["queue"]["pending"].as_array().unwrap().len();
-        if listed == 2 {
+        let running = state["queue"]["running"].as_array().unwrap().len();
+        let listed = running + state["queue"]["pending"].as_array().unwrap().len();
+        if listed == 2 && running >= 1 {
             break;
         }
-        assert!(waited < 200, "the two jobs never reached the queue");
+        assert!(waited < 1000, "the two jobs never reached the queue with one running");
         waited += 1;
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -1332,7 +1335,7 @@ fn cancel_all_stops_every_job_including_the_ones_not_started() {
     // The server is told about the render that was running; the one still pending never began.
     let mut waited = 0;
     while server.with(|recorded| recorded.interrupts) == 0 {
-        assert!(waited < 200, "the server was never told to stop");
+        assert!(waited < 1000, "the server was never told to stop");
         waited += 1;
         std::thread::sleep(Duration::from_millis(10));
     }
