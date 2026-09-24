@@ -968,10 +968,10 @@ pub fn publish(
             //
             // `send_message` already puts a question to the desktop, but it asks it and is done —
             // there was no way to leave the Lens standing open in front of a person with a draft
-            // in it, which is what "here, have a look at this" is. The desktop advertises Ctrl+K
-            // in two places for exactly this, and a compositor keybind needs a verb to call:
-            // config/labwc/rc.xml binds Super+K to this action, because that is the only route
-            // that works while another app holds the keyboard.
+            // in it, which is what "here, have a look at this" is. The desktop advertises Super+K
+            // in two places for exactly this, and the compositor keybind behind the advert needs
+            // a verb to call: config/labwc/rc.xml binds Super+K to this action, because that is
+            // the only route that works while another app holds the keyboard.
             //
             // `safe`: it shows a panel. Nothing is sent, nothing is spawned, nothing is written.
             //

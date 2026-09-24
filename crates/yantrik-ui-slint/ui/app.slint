@@ -1269,10 +1269,12 @@ export component App inherits Window {
             focus-on-tab-navigation: false;
 
             capture-key-pressed(event) => {
-                // Ctrl+K — the ask bar, advertised on the desktop in two places and until now
-                // wired to nothing at all. The Lens lives on the desktop screen, so summoning it
-                // from elsewhere goes there first; opening it any other way (the ask bar, the
-                // orb, the taskbar anchor) does exactly these two lines.
+                // Ctrl+K — the ask bar while the shell holds the keyboard. It was once wired to
+                // nothing at all; what the desktop advertises now is Super+K, the compositor
+                // binding that also works from inside any app (config/labwc/rc.xml, #209). The
+                // Lens lives on the desktop screen, so summoning it from elsewhere goes there
+                // first; opening it any other way (the ask bar, the orb, the taskbar anchor)
+                // does exactly these two lines.
                 if event.modifiers.control && (event.text == "k" || event.text == "K") {
                     if root.current-screen != 1 {
                         root.current-screen = 1;

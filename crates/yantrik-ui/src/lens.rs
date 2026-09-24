@@ -1563,3 +1563,93 @@ pub fn capitalize(s: &str) -> String {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    /// The repository root, from this crate's manifest directory.
+    fn repo_root() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// Translate a labwc `keybind key="..."` value into the way the desktop writes a key name
+    /// on screen: "W-k" becomes "Super K". Everything before the last "-" is a modifier; a
+    /// single-character keysym is uppercased, and anything else ("Print", "XF86AudioMute") is
+    /// kept as written.
+    fn display_key(binding: &str) -> Option<String> {
+        let mut parts = binding.split('-');
+        let keysym = parts.next_back()?;
+        if keysym.is_empty() {
+            return None;
+        }
+        let mut words: Vec<String> = Vec::new();
+        for modifier in parts {
+            let name = match modifier {
+                "W" => "Super",
+                "C" => "Ctrl",
+                "A" => "Alt",
+                "S" => "Shift",
+                // An unknown modifier has no on-screen spelling; fail rather than guess.
+                _ => return None,
+            };
+            words.push(name.to_string());
+        }
+        words.push(if keysym.len() == 1 {
+            keysym.to_uppercase()
+        } else {
+            keysym.to_string()
+        });
+        Some(words.join(" "))
+    }
+
+    /// Find the key rc.xml binds to a command mentioning `needle`. Read by hand rather than
+    /// with an XML parser: this crate has no XML dependency, the file is checked in beside the
+    /// test, and all the scan needs is each `<keybind key="...">` paired with its own block.
+    fn bound_key(rc_xml: &str, needle: &str) -> Option<String> {
+        let mut rest = rc_xml;
+        while let Some(open) = rest.find("<keybind key=\"") {
+            rest = &rest[open + "<keybind key=\"".len()..];
+            let quote = rest.find('"')?;
+            let key = &rest[..quote];
+            let close = rest.find("</keybind>")?;
+            if rest[..close].contains(needle) {
+                return Some(key.to_string());
+            }
+            rest = &rest[close..];
+        }
+        None
+    }
+
+    /// The ask bar advertised "Ctrl K" while the key that opens the Lens from inside any app
+    /// was Super+K, bound by the compositor: Ctrl+K reaches the shell only while the shell
+    /// holds the keyboard, and with the Terminal focused it typed a literal "k" (#209). The
+    /// hints now name the bound key, and this keeps the two from drifting apart again —
+    /// whatever rc.xml binds `open_lens` to is what the on-screen copy must say.
+    #[test]
+    fn the_ask_bar_hints_say_the_key_rc_xml_binds_to_open_lens() {
+        let root = repo_root();
+        let rc_xml = std::fs::read_to_string(root.join("config/labwc/rc.xml"))
+            .expect("config/labwc/rc.xml is in the repository");
+        let binding = bound_key(&rc_xml, "open_lens")
+            .expect("rc.xml binds a key to `yos act shell open_lens`");
+        let hint = display_key(&binding).unwrap_or_else(|| {
+            panic!("rc.xml binds open_lens to {binding}, which has no on-screen spelling")
+        });
+
+        // Every place the desktop shows the shortcut: the ask bar chip and the day-one card in
+        // agent mode (desktop.slint), and the ask bar chip on the everyday desktop.
+        for file in [
+            "crates/yantrik-ui-slint/ui/desktop.slint",
+            "crates/yantrik-ui-slint/ui/components/desktop_home.slint",
+        ] {
+            let slint = std::fs::read_to_string(root.join(file))
+                .unwrap_or_else(|e| panic!("{file} is in the repository: {e}"));
+            assert!(
+                slint.contains(&hint),
+                "{file} never says \"{hint}\", the key rc.xml binds to open_lens — the ask bar \
+                 would advertise a shortcut that does not work everywhere"
+            );
+        }
+    }
+}

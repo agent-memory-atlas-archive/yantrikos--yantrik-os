@@ -79,13 +79,15 @@ export component DesktopHome inherits Rectangle {
                     spacing: 14px;
                     Icon { commands: Icons.search; size: 21px; tint: Theme.accent; y: (parent.height - self.height) / 2; }
                     Text { text: "Ask, search, or open anything"; color: Theme.text-primary; font-size: Theme.fs-title-2; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                    // The compositor's Super+K (config/labwc/rc.xml) — the key that works from
+                    // inside any app; the ask bar chip in desktop.slint says why.
                     if root.width > 440px : Rectangle {
-                        width: 52px; height: 25px;
+                        width: 58px; height: 25px;
                         y: (parent.height - self.height) / 2;
                         border-radius: Theme.r-sm;
                         background: Theme.hover-fill;
                         border-width: 1px; border-color: Theme.border-strong;
-                        Text { text: "Ctrl K"; font-size: Theme.fs-caption; color: Theme.text-secondary; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { text: "Super K"; font-size: Theme.fs-caption; color: Theme.text-secondary; horizontal-alignment: center; vertical-alignment: center; }
                     }
                 }
             }
