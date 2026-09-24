@@ -21,6 +21,30 @@ fn bad_request(message: impl Into<String>) -> ServiceError {
     ServiceError { code: -32602, message: message.into() }
 }
 
+/// Whether `id` can name a file in this store's folder and nothing else.
+///
+/// Every id this service hands out is a uuid7 — lowercase hex and dashes, 36 characters — and a
+/// remote calendar's id never becomes a filename (it lives inside the event file and is found by
+/// scanning), so a real id is a short run of letters, digits and dashes. Anything else is not an
+/// id this store ever issued: separators, `..`, a leading dot and absurd lengths all fall
+/// outside that set. Every door that builds a path from an id checks it before touching the
+/// filesystem, because ids arrive from callers — over a socket that checks nobody (#161) as
+/// well as over one that does — and an id that is really a path is a read or a write to any
+/// `.json` the person owns. The rule notes-service's `note_path` keeps (#320).
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// The refusal for an id that is not one, saying what ids are so a caller that spelled a path
+/// learns the store is keyed by names.
+fn not_an_id(id: &str) -> ServiceError {
+    bad_request(format!(
+        "`{id}` is not an event id; ids are the names list_events reports, never paths"
+    ))
+}
+
 /// Parse an ISO 8601 datetime. Accepts `2026-03-18T10:00:00` and bare `2026-03-18`,
 /// the latter as the start of that day. The one implementation lives in the contracts crate
 /// because the reminder timer reads these files too, from another service.
@@ -65,6 +89,12 @@ impl EventStore {
         Self { dir }
     }
 
+    /// Where the events live. `describe_view` reports it, so a caller reads the directory this
+    /// store actually answers from rather than assuming the default one.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn event_path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.json"))
     }
@@ -75,6 +105,12 @@ impl EventStore {
     }
 
     fn write_event(&self, event: &CalendarEvent) -> Result<(), ServiceError> {
+        // The id read back out of a file is as untrusted as one off the socket: it names the
+        // path this write lands on, and `update` writes the event a file carried — so a file
+        // planted with a path for its id cannot aim a later write outside the folder either.
+        if !valid_id(&event.id) {
+            return Err(not_an_id(&event.id));
+        }
         // The directory can be missing on a machine where nothing has been saved yet, and a
         // calendar that refuses the first event anyone gives it is not a calendar.
         std::fs::create_dir_all(&self.dir)
@@ -99,7 +135,14 @@ impl EventStore {
     }
 
     /// One event by id, or `None` if nothing is stored under it.
+    ///
+    /// An id that is not one is also `None`, decided before the filesystem is touched: both
+    /// callers that return a `Result` — the raw method and [`Self::update`] — answer a miss
+    /// with -32602, so a path spelled at this door is refused without ever being opened.
     pub fn get(&self, id: &str) -> Option<CalendarEvent> {
+        if !valid_id(id) {
+            return None;
+        }
         self.read_event(&self.event_path(id))
     }
 
@@ -305,6 +348,11 @@ impl EventStore {
 
     /// Change a stored event. Fields left out keep what they had.
     pub fn update(&self, params: &UpdateEventParams) -> Result<CalendarEvent, ServiceError> {
+        // Before the read this update starts from: the argument's id names the file to open,
+        // and an id that is a path would open one outside the folder.
+        if !valid_id(&params.id) {
+            return Err(not_an_id(&params.id));
+        }
         let mut event = self
             .get(&params.id)
             .ok_or_else(|| bad_request(format!("No event here with id {}", params.id)))?;
@@ -361,6 +409,11 @@ impl EventStore {
     /// Remove an event. Removing something that was never here is an error, not a success:
     /// the caller asked for a state change that did not happen.
     pub fn delete(&self, id: &str) -> Result<(), ServiceError> {
+        // The one door that removes files: an id that is a path would remove one outside the
+        // folder, which is what notes-service's delete did before #320.
+        if !valid_id(id) {
+            return Err(not_an_id(id));
+        }
         let path = self.event_path(id);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
