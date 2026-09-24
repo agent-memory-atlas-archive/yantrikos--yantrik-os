@@ -24,7 +24,7 @@ is uncertain.
 
 [reach]
 # Drafts can go into a note, a document or the Editor when the task asks for that. In the Editor a
-# draft is a `new` tab written with `append`, both standard; `set_content`, which can replace
+# draft is `new` with its `text`, then `save_as`, both standard; `set_content`, which can replace
 # unsaved work, is above this ceiling.
 surfaces = ["notes", "documents", "editor"]
 ceiling = "standard"
