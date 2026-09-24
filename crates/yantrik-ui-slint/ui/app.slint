@@ -150,6 +150,7 @@ export component App inherits Window {
     // ── Agents glue: the Lens's "open in Agents" (crates/yantrik-ui/src/wire/agents.rs) ──
     in property <bool> lens-can-open-in-agents: false;
     callback lens-open-in-agents();
+    callback lens-open-history();
 
     // ── The vault, and the one way a passphrase gets into this machine ──
     //
@@ -1477,6 +1478,7 @@ export component App inherits Window {
             approval-deny(id) => { root.approval-deny(id); }
             lens-can-open-in-agents: root.lens-can-open-in-agents;
             lens-open-in-agents => { root.lens-open-in-agents(); }
+            lens-open-history => { root.lens-open-history(); }
             // Urges
             urges: root.urges;
             // Whisper Cards

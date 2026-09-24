@@ -423,6 +423,10 @@ fn wire_open_close(ui: &App, ctx: &AppContext) {
                     tracing::warn!(%why, "The chat opened, but the shell could not be brought in front of the window over it");
                 }
             }
+            // An empty Lens is one the shell has just started under: put the conversation back
+            // from the saved session before anything else looks at it (#246).
+            crate::lens_history::restore_if_empty(&ui);
+
             // Restore chat mode if there are existing messages
             let messages = ui.get_messages();
             let msg_model = messages
