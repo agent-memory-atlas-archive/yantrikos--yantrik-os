@@ -228,10 +228,12 @@ if [ -d "$CHROME/fonts" ]; then
 fi
 
 mkdir -p /opt/yantrik/logs
-exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml' \
+exec labwc -s '/opt/yantrik/bin/yantrik-shell /opt/yantrik/config.yaml' \
   >> /opt/yantrik/logs/session.log 2>&1
 SESSION
 "${SSH[@]}" "chmod +x $REMOTE/bin/yantrik-session"
+# What the session runs in the shell's place: it starts the shell again when it dies (#247).
+"${SSH[@]}" "cat > $REMOTE/bin/yantrik-shell && chmod +x $REMOTE/bin/yantrik-shell" < "$SCRIPT_DIR/yantrik-shell"
 
 say "Done: binaries, yos/yos-mcp/release-check, models, chrome, .desktop entries, session"
 "${SSH[@]}" "ls $REMOTE/bin | tr '\n' ' '; echo; echo; echo 'start:  setsid $REMOTE/bin/yantrik-session &'"

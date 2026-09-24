@@ -392,7 +392,7 @@ sudo getcap "$ROOTFS/opt/yantrik/bin/perception-service" | grep -q cap_sys_admin
 sudo mkdir -p "$ROOTFS/opt/yantrik/share"
 sudo cp -a "$UNPACK/share/." "$ROOTFS/opt/yantrik/share/"
 sudo chown -R root:root "$ROOTFS/opt/yantrik/share"
-for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session \
+for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session bin/yantrik-shell \
                 share/icons/hicolor/scalable/apps/yantrik.svg; do
     [ -e "$ROOTFS/opt/yantrik/$required" ] || fail "$required missing from the image — the desktop session would not be the shipped one"
 done

@@ -3,8 +3,10 @@
 # yantrik-session — the desktop session
 # ═══════════════════════════════════════════════════════════════════════════════════════
 #
-# Started by yantrik-session.service on tty1. labwc supervises the shell; the shell is the
-# thing the user sees and the thing an agent acts on, and they are two views of one state
+# Started by yantrik-session.service on tty1. labwc runs yantrik-shell, which runs the shell and
+# starts it again when it dies (#247). labwc's `-s` runs its command once, and this header used
+# to say labwc supervised the shell; nothing did, and a crash left a blank screen. The shell is
+# the thing the user sees and the thing an agent acts on, and they are two views of one state
 # rather than two programs that happen to agree.
 #
 # This file used to exist only inside cloud-init's write_files, which meant it could be
@@ -108,4 +110,4 @@ mkdir -p "$LOG_DIR" 2>/dev/null || true
 # Rotate on start rather than growing without bound; one previous boot is enough to compare.
 [ -f "$LOG_DIR/yantrik-os.log" ] && mv -f "$LOG_DIR/yantrik-os.log" "$LOG_DIR/yantrik-os.log.1" 2>/dev/null
 
-exec labwc -s '/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml'   >>"$LOG_DIR/yantrik-os.log" 2>&1
+exec labwc -s '/opt/yantrik/bin/yantrik-shell /opt/yantrik/config.yaml'   >>"$LOG_DIR/yantrik-os.log" 2>&1
