@@ -181,6 +181,13 @@ jobs:
       - name: The attachable harnesses close every turn exactly once
         run: python3 -m unittest discover -s harnesses/tests -v
 
+      # A service answers its own methods beside its gated `app.act`, and those meet no ceiling,
+      # no mode and no grant (#161). Until a caller can be told from a person's button they stay
+      # open, so docs/app-control.md lists every one; this reads each service's dispatch and fails
+      # when a method is added without a row, or a row outlives its method. Stdlib-only.
+      - name: Every service method is in the guide's table of ungated doors
+        run: python3 -m unittest discover -s tests/service-methods -v
+
       # The Blender control surface's tests: the addon that answers for somebody else's
       # program, driven against a fake `bpy`. Stdlib-only, no Blender and no display needed,
       # like everything above. Among them is one vector the Rust side asserts too — the

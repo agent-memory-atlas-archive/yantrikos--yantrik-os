@@ -359,6 +359,62 @@ arcade's author graded a built game as work somebody asked for, the way Notes gr
 (`standard`, recoverable). None of the four writes configuration, so none is #48's rule; whether
 every trash-move of finished work deserves a card is a judgement for its own issue.
 
+### A service's own methods, beside its `app.act`
+
+A service answers more than `app.describe` and `app.act` on its socket. Each one also has the
+methods its own app and the shell were written against, and those meet **no ceiling, no mode and
+no grant**. System Monitor's End button calls `sysmon.kill_process {pid}`; so can anything that
+opens `system-monitor.sock` and writes one JSON-RPC line — a mind with `agent_run`, or a script.
+`yos` has no command that sends one, and the MCP bridge publishes none, but neither is a wall.
+
+They stay open until a caller can be told apart from a person's own button (#43, #161): gating
+`sysmon.kill_process` today would refuse the End button, which is the person. Until then this is
+the list, so that what is ungated is at least written down. "Gated way in" is the `app.act` action
+that does the same thing under the rule above; `—` means there is none, and the raw method is the
+only way to it. The table is checked against the services' own dispatch by
+`tests/service-methods` — a method added to a service and not to this table fails CI, and so does
+a row for a method a service no longer answers.
+
+<!-- service-methods:begin -->
+| service | methods | kind | gated way in | who calls it | what it changes |
+|---|---|---|---|---|---|
+| a11y-service | `a11y.windows`, `a11y.describe`, `a11y.status` | reads | | the companion's `list_readable_windows`, `describe_window` | |
+| a11y-service | `a11y.act` | changes | — | the companion's `window_action` (its own grade, `standard`) | presses, types into or toggles a widget in someone else's program (#43) |
+| calendar-service | `calendar.events`, `calendar.get_event`, `calendar.revision` | reads | | Calendar, the companion | |
+| calendar-service | `calendar.create_event`, `calendar.update_event` | changes | `calendar.add_event`, `calendar.update_event` — standard | Calendar's own form; the companion's `calendar_create_event`, `calendar_update_event` | the person's events |
+| calendar-service | `calendar.delete_event` | changes | `calendar.delete_event` — sensitive, and not recoverable, so asked in every mode but bypass | Calendar's Delete; the companion's `calendar_delete_event`, which grades itself `standard` | removes the event's file; there is no trash |
+| calendar-service | `calendar.upsert_remote` | changes | — | the companion's Google Calendar sync | writes an event under a remote id, adopting nothing a surface caller made |
+| email-service | `email.accounts`, `email.list_folders`, `email.list_messages`, `email.get_message`, `email.search`, `email.oauth_status` | reads | | Email | |
+| email-service | `email.send_message` | changes | — (the app deliberately publishes no `send`) | Email's Send | mail that has gone cannot be taken back |
+| email-service | `email.delete_message`, `email.move_message` | changes | — | Email | the mailbox on the server |
+| email-service | `email.mark_read`, `email.mark_starred` | changes | `email.mark_read`, `email.flag` — standard | Email | a flag on the server |
+| email-service | `email.save_account` | changes | — | Email's account form | writes the account, password included, into the mail config |
+| email-service | `email.test_account` | changes | — | Email's account form | stores nothing, but signs in to whatever server it is given, with the password it is given |
+| email-service | `email.oauth_begin`, `email.oauth_cancel` | changes | `email.begin_google_sign_in` — sensitive (begin only) | Email's Sign in with Google | puts a full-access consent screen in front of the person |
+| network-service | `network.interfaces`, `network.status`, `network.dns`, `network.wifi_state`, `network.wifi_known`, `network.firewall` | reads | | Network, the companion | |
+| network-service | `network.wifi_scan` | changes | `network.wifi_scan` — standard | Network; the companion's `wifi_scan` | a radio rescan, when `rescan` is set |
+| network-service | `network.wifi_connect`, `network.wifi_forget` | changes | `network.wifi_connect`, `network.wifi_forget` — sensitive | Network; the companion's `wifi_connect` | what the machine joins; forgetting deletes a stored credential |
+| network-service | `network.wifi_disconnect`, `network.wifi_radio` | changes | `network.wifi_disconnect`, `network.wifi_radio` — dangerous | Network; the companion's `wifi_disconnect`, `wifi_radio` | can take away the link the machine is reached over |
+| network-service | `network.dns_set` | changes | — | the companion's `network_dns_set` (its own grade, `sensitive`) | the resolvers of the active connection |
+| notes-service | `notes.list`, `notes.get`, `notes.search` | reads | | nothing on this desktop | |
+| notes-service | `notes.create`, `notes.update`, `notes.delete`, `notes.set_pinned`, `notes.set_tags` | changes | — | nothing on this desktop: Notes keeps the same folder itself | the Notes library in `~/.local/share/yantrik/notes`; `delete` removes the file, no trash. Ids are file names in that folder and nothing else: a path is refused |
+| notifications-service | `notifications.list`, `notifications.since` | reads | | the shell's notification centre | |
+| notifications-service | `notifications.add` | changes | `notifications.notify` — standard | every app, through `yantrik_app_runtime::notify` | a banner, attributed to the sender the kernel names, not the one it claims |
+| notifications-service | `notifications.dismiss`, `notifications.dismiss_all`, `notifications.mark_read` | changes | `notifications.dismiss`, `notifications.dismiss_all`, `notifications.mark_read` — standard | the notification centre | what the person has yet to see |
+| notifications-service | `notifications.action` | changes | — | the notification centre's buttons | tells the sending program its button was pressed, and it acts on that |
+| perception-journal | `journal.since`, `journal.status` | reads | | `yos journal` | |
+| perception-service | `perception.snapshot`, `perception.since`, `perception.scope` | reads | | `yos perception`, the journal | |
+| system-monitor-service | `sysmon.snapshot`, `sysmon.processes` | reads | | System Monitor | |
+| system-monitor-service | `sysmon.kill_process` | changes | `system-monitor.kill_process` — dangerous, on the window and on the service | System Monitor's End and Force Kill | ends what somebody else is running |
+| weather-service | `weather.current`, `weather.hourly`, `weather.daily`, `weather.alerts`, `weather.air_quality`, `weather.geocode`, `weather.suggest` | reads | | Weather | |
+<!-- service-methods:end -->
+
+Two of the rows are the same act graded twice. The companion's own `calendar_delete_event` tool is
+`standard` and calls `calendar.delete_event` straight, while the app publishes the same deletion
+as `sensitive` and not recoverable; a mind using the tool meets its own ceiling and not the card.
+And notes-service writes the folder the Notes app reads with no caller at all on this desktop —
+the row that most plainly wants removing rather than gating, when #161 is closed.
+
 ## Threading
 
 Both closures run on the UI thread, because that is the only thread allowed to touch a Slint
