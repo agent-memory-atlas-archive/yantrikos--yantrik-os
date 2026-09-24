@@ -334,6 +334,7 @@ fn real_editor_keyboard_tabs_search_save_close_and_recovery() {
     every_action_says_what_it_does(&published);
     the_editor_answers_with_what_it_wrote(&ui, &s, &published, &dir);
     a_missing_required_argument_is_refused_by_name(&ui, &s, &published);
+    append_adds_to_the_end_and_takes_nothing_away(&s, &published);
 
     let mut b = s.borrow_mut();
     b.recovery_timer.stop();
@@ -555,4 +556,35 @@ fn a_missing_required_argument_is_refused_by_name(
         no_path.contains("path"),
         "the refusal has to name the argument that was missing: {no_path}"
     );
+}
+
+/// A Writer's way into the Editor (#253). The shell had an editor of its own with an
+/// `editor_append` graded `standard`, and that editor is gone; `set_content` here is `sensitive`
+/// and above a Writer's ceiling, so `append` is what that role writes a draft with.
+fn append_adds_to_the_end_and_takes_nothing_away(s: &State, published: &[(Action, Handler)]) {
+    let (spec, _) = published
+        .iter()
+        .find(|(spec, _)| spec.name == "append")
+        .expect("the editor publishes `append`");
+    assert_eq!(
+        spec.permission, "standard",
+        "`append` takes nothing away, and it is the Writer role's way in under a `standard` ceiling"
+    );
+
+    let text = || s.borrow().docs[s.borrow().active].text.clone();
+    let before = text();
+    let added = act_on(published, "append", serde_json::json!({ "text": "\nMinutes\n" }))
+        .expect("append to the active tab");
+    assert_eq!(added["modified"], true, "answer: {added}");
+    act_on(published, "append", serde_json::json!({ "text": "- budget agreed\n" }))
+        .expect("append again");
+    assert_eq!(text(), format!("{before}\nMinutes\n- budget agreed\n"), "nothing before it changed");
+
+    act_on(published, "undo", serde_json::json!({})).expect("undo the second append");
+    assert_eq!(text(), format!("{before}\nMinutes\n"), "undo takes one append back off");
+
+    let refused = act_on(published, "append", serde_json::json!({ "text": "" }))
+        .expect_err("append with nothing to add must be refused");
+    assert!(refused.contains("text"), "the refusal names the argument: {refused}");
+    assert_eq!(text(), format!("{before}\nMinutes\n"), "a refused append changes nothing");
 }

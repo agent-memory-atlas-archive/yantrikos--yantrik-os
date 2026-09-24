@@ -50,7 +50,6 @@ mod control_approvals;
 mod control_installer;
 mod control_update;
 mod control_files;
-mod control_editor;
 /// Agents' commands on the shell's surface: agent_run / agent_job / agent_input / agent_kill.
 mod control_agent_terminal;
 /// A recipe on the shell's surface: answer_recipe / pause_recipe / resume_recipe / cancel_recipe.

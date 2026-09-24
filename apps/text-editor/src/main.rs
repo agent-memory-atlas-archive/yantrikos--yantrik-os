@@ -1333,6 +1333,39 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
     );
 
     add(
+        // Standard, unlike `set_content`: it adds to the tab and takes nothing away, and `undo`
+        // takes it back off. With `new` it is how a mind under a `standard` ceiling writes a
+        // draft here — the Writer role's way in since the shell's own editor, and its
+        // `editor_append`, were removed (#253).
+        act(
+            "append",
+            "Add this text to the end of the active tab. Nothing already in the tab is changed, \
+             and the file on disk is untouched until `save`.",
+        )
+        .arg(arg(
+            "text",
+            "The text to add, exactly as given: start it with a newline to begin a new line. The \
+             whole tab has to stay within 1 MiB and 20,000 lines.",
+        )),
+        |ui, s, args| {
+            no_dialog(ui, "append")?;
+            let add = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| refuse(ui, "`append` needs `text`: what to add to the end of the tab."))?;
+            let text = format!("{}{add}", s.borrow().docs[s.borrow().active].text);
+            document::validate(&text).map_err(|e| refuse(ui, e))?;
+            ui.set_content(text.clone().into());
+            edit(ui, s, text.clone());
+            if s.borrow().docs[s.borrow().active].text != text {
+                return Err(refuse(ui, "The tab was not changed; the text was rejected."));
+            }
+            Ok(document_now(ui, s))
+        },
+    );
+
+    add(
         // Published because `set_content` and `replace-all` rewrite a whole tab in one call and
         // the person at the keyboard had Ctrl+Z while a mind had nothing: a caller that could
         // destroy a draft could not put it back.

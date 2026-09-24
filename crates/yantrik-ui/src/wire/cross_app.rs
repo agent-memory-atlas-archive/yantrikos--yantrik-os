@@ -173,9 +173,7 @@ fn wire_cross_app_action(ui: &App, ctx: &AppContext) {
             "file_to_editor" => {
                 let path = parsed["path"].as_str().unwrap_or("");
                 if !path.is_empty() {
-                    ui.set_editor_open_path(SharedString::from(path));
-                    ui.set_current_screen(12);
-                    ui.invoke_navigate(12);
+                    super::dock::spawn_app_with_args("editor", "yantrik-text-editor", &[path]);
                 }
             }
 

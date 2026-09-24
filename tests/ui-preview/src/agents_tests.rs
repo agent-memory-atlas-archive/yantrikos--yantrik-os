@@ -455,10 +455,10 @@ fn roles() -> ModelRc<AgentRoleData> {
     ModelRc::new(VecModel::from(vec![
         role("researcher", "Researcher", "Finds out what is true and says how it knows, with sources.", "shell.open_app · at most standard", "deepseek"),
         role("planner", "Planner", "Turns a goal into steps someone can start on today; reads only.", "calendar and notes · at most safe", "deepseek"),
-        role("coder", "Coder", "Makes a code change and proves it with the build and the tests.", "shell.agent_*, shell.editor_* and editor · at most sensitive", "pi"),
+        role("coder", "Coder", "Makes a code change and proves it with the build and the tests.", "shell.agent_* and editor · at most sensitive", "pi"),
         role("reviewer", "Reviewer", "Reviews a change for bugs and risks; reads only.", "editor, documents and notes · at most safe", "deepseek"),
         role("red-team", "Red team", "Attacks a proposal to find how it breaks; touches nothing.", "nothing on this desktop beyond asking the person and reading its own session · at most safe", "deepseek"),
-        role("writer", "Writer", "Writes a piece for its reader: a note, an email, release notes, a page.", "notes, documents, editor and shell.editor_* · at most standard", ""),
+        role("writer", "Writer", "Writes a piece for its reader: a note, an email, release notes, a page.", "notes, documents and editor · at most standard", ""),
         role("chair", "Chair", "Weighs several answers to one question and gives a verdict.", "nothing on this desktop beyond asking the person and reading its own session · at most safe", "deepseek"),
         role("scribe", "Scribe", "Summarises a session, a document or a discussion for someone who was not there.", "notes · at most standard", "pi"),
     ]))

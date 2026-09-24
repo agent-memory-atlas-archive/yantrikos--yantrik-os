@@ -100,22 +100,9 @@ DesktopEntry {
             categories: "System;FileManager;".into(), comment: "Browse files".into(),
             app_id: "files".into(), icon_char: "F".into(), ..Default::default()
         },
-// "Editor" is NOT listed here, though the shell does have an editor screen.
-        //
-        // yantrik-text-editor is a real application with its own window and its own taskbar
-        // entry, and it ships a .desktop file. Listing the shell's embedded editor beside it
-        // put two entries called "Editor", with the same icon, next to each other in the
-        // launcher — photographed doing exactly that. One of them opened a window and the
-        // other changed the shell's screen, and nothing distinguished them.
-        //
-        // The application wins: it is the one you can alt-tab to. Screen 12 is still reached
-        // by the dock, by the file browser opening a text file, and by the editor_* actions on
-        // the control surface — none of which go through this list.
-        DesktopEntry {
-            name: "Media Player".into(), exec: "__builtin__".into(), icon: String::new(),
-            categories: "AudioVideo;Player;".into(), comment: "Music & media".into(),
-            app_id: "media".into(), icon_char: "\u{266A}".into(), ..Default::default()
-        },
+// "Editor", "Images" and "Media Player" are not listed here. The Editor and Images are
+        // applications with windows of their own and ship .desktop files; the shell's copies of
+        // all three are gone (#253). Sound and video open from Files in mpv's own window.
         DesktopEntry {
             name: "Bond".into(), exec: "__builtin__".into(), icon: String::new(),
             categories: "Utility;".into(), comment: "Companion bond tracker".into(),

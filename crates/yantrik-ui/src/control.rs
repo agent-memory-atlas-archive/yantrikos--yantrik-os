@@ -123,9 +123,6 @@ const SCREENS: &[(&str, i32)] = &[
     ("files", 8),
     ("notifications", 9),
     ("system", 10),
-    ("images", 11),
-    ("editor", 12),
-    ("media", 13),
     ("about", 16),
     ("packages", 21),
     ("devices", 27),
@@ -133,6 +130,14 @@ const SCREENS: &[(&str, i32)] = &[
     ("problems", 33),
     ("agents", 34),
     ("recipes", 35),
+];
+
+/// Screens the shell drew for itself until #253, and where each went. A caller that learnt the
+/// old names is told that, instead of a list without them.
+const BECAME_WINDOWS: &[(&str, &str)] = &[
+    ("images", "Images is an app of its own now: open_app name=image"),
+    ("editor", "the Editor is an app of its own now: open_app name=editor, then its own surface, `editor`"),
+    ("media", "sound and video play in mpv's own window now: open the file from Files"),
 ];
 
 /// What `describe` calls the screen the shell is on.
@@ -408,21 +413,11 @@ pub fn publish(
                 serde_json::Value::Null
             };
 
-            // The open document, when the editor is up — so an agent reads what it is editing
-            // the same way it reads a directory or the weather.
-            let editor = if screen == 12 {
-                crate::control_editor::state(&ui)
-            } else {
-                serde_json::Value::Null
-            };
-
             // The one line worth reading first: where the user is, what is open, and whether
             // anything is wrong. Trouble comes before window count, because trouble is the
             // reason to look.
             let summary = if screen == 2 {
                 crate::control_installer::summary(&ui)
-            } else if screen == 12 {
-                crate::control_editor::summary(&ui)
             } else if !down.is_empty() {
                 format!(
                     "Yantrik — {} screen, {} windows open, {} not running",
@@ -602,7 +597,6 @@ pub fn publish(
                 .with("agent_jobs", crate::control_agent_terminal::for_describe())
                 .with("files", files)
                 .with("installer", installer)
-                .with("editor", editor)
                 .with("services", serde_json::Value::Array(services))
                 .with("companion_online", ui.get_companion_online())
                 .with("companion_status", ui.get_companion_status().to_string())
@@ -1139,7 +1133,7 @@ pub fn publish(
             Action::new("show_screen", "Switch the shell to one of its screens")
                 .arg(
                     Param::text("screen")
-                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media, problems, agents, recipes — or launchpad, the launcher, which opens over the desktop"),
+                        .describe("desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, problems, agents, recipes — or launchpad, the launcher, which opens over the desktop"),
                 )
                 .arg(
                     Param::text("section")
@@ -1183,6 +1177,9 @@ pub fn publish(
                     .find(|(name, _)| *name == want)
                     .map(|(_, id)| *id)
                     .ok_or_else(|| {
+                        if let Some((_, went)) = BECAME_WINDOWS.iter().find(|(n, _)| *n == want) {
+                            return format!("`{want}` is not a screen any more; {went}");
+                        }
                         let names: Vec<&str> = SCREENS.iter().map(|(n, _)| *n).collect();
                         format!("no screen called `{want}`; there is: {}", names.join(", "))
                     })?;
@@ -1439,8 +1436,7 @@ pub fn publish(
     // how a mind hands work to another agent, or to a role from the catalog. The caller's agent
     // comes from its token. See `control_agents` and design/agents-workspace-2026-09-23.md,
     // decision 1, and design/desk-and-mind-2026-09-23.md, section 5.
-    let surface = crate::control_agents::actions(surface, ui);
-    crate::control_editor::actions(surface, ui).serve();
+    crate::control_agents::actions(surface, ui).serve();
 }
 
 #[cfg(test)]

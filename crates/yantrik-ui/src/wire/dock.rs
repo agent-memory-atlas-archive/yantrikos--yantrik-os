@@ -61,7 +61,6 @@ const ROUTES: &[(&[&str], Launch)] = &[
     (&["memory"], Launch::Screen(6)),
     (&["notifications"], Launch::Screen(9)),
     (&["system"], Launch::Screen(10)),
-    (&["media"], Launch::Screen(13)),
     (&["about"], Launch::Screen(16)),
     // "Install companion skills" is a section of Settings, not a screen of its own.
     (&["skills"], Launch::SettingsSection(7)),

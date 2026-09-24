@@ -1,4 +1,4 @@
-//! MIME dispatch — route file opens to internal viewers or external apps.
+//! MIME dispatch — which app window opens a file.
 //!
 //! Classifies files by extension and returns a `FileAction` telling the
 //! caller which app opens them. The person's own defaults, from the
@@ -11,16 +11,16 @@ use std::path::{Path, PathBuf};
 /// What to do when a file is opened.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileAction {
-    /// Open in internal Image Viewer (screen 11).
+    /// Open in the Images app, `yantrik-image-viewer`.
     ImageViewer,
-    /// Open in internal Text Editor (screen 12).
+    /// Open in the Editor app, `yantrik-text-editor`.
     TextEditor,
-    /// Open in internal Audio Player (screen 13).
-    AudioPlayer,
+    /// Play in mpv's own window, sound and video alike. Sound used to play in a screen of the
+    /// shell's own, which was not a window and could not be moved, closed or put behind
+    /// anything (#253).
+    MediaPlayer,
     /// Open in the machine's web browser, whichever `wire::dock::find_browser` finds.
     Browser,
-    /// Launch via external command (e.g. mpv for video).
-    External(String),
 }
 
 /// The person's default apps, as the `[Default Applications]` section of a
@@ -115,8 +115,9 @@ fn action_for_desktop(id: &str) -> Option<FileAction> {
     match id.trim().to_lowercase().as_str() {
         "yantrik-text-editor.desktop" => Some(FileAction::TextEditor),
         "yantrik-image-viewer.desktop" => Some(FileAction::ImageViewer),
-        "yantrik-music-player.desktop" => Some(FileAction::AudioPlayer),
-        "mpv.desktop" => Some(FileAction::External("mpv".to_string())),
+        // The Music app is not built yet (see `wire::dock`'s shelf), so a default naming it
+        // plays where it would have played before it was chosen.
+        "yantrik-music-player.desktop" | "mpv.desktop" => Some(FileAction::MediaPlayer),
         "firefox.desktop"
         | "firefox-esr.desktop"
         | "librewolf.desktop"
@@ -214,14 +215,12 @@ fn builtin(filename: &str) -> FileAction {
         return FileAction::ImageViewer;
     }
 
-    // Audio
-    if matches_ext(&lower, &[".mp3", ".ogg", ".flac", ".wav", ".m4a", ".aac", ".opus", ".wma"]) {
-        return FileAction::AudioPlayer;
-    }
-
-    // Video — launch mpv externally
-    if matches_ext(&lower, &[".mp4", ".mkv", ".avi", ".webm", ".mov", ".wmv", ".flv"]) {
-        return FileAction::External("mpv".to_string());
+    // Sound and video, both in mpv's window
+    if matches_ext(&lower, &[
+        ".mp3", ".ogg", ".flac", ".wav", ".m4a", ".aac", ".opus", ".wma",
+        ".mp4", ".mkv", ".avi", ".webm", ".mov", ".wmv", ".flv",
+    ]) {
+        return FileAction::MediaPlayer;
     }
 
     // Text / code / config — open in editor
@@ -315,10 +314,10 @@ mod tests {
             ("icon.PNG", FileAction::ImageViewer),
             ("art.webp", FileAction::ImageViewer),
             // Audio
-            ("song.mp3", FileAction::AudioPlayer),
-            ("track.FLAC", FileAction::AudioPlayer),
+            ("song.mp3", FileAction::MediaPlayer),
+            ("track.FLAC", FileAction::MediaPlayer),
             // Video
-            ("movie.mp4", FileAction::External("mpv".to_string())),
+            ("movie.mp4", FileAction::MediaPlayer),
             // Text and code
             ("main.rs", FileAction::TextEditor),
             ("readme.md", FileAction::TextEditor),
@@ -357,12 +356,9 @@ mod tests {
         assert_eq!(classify_with("manual.pdf", &defaults), FileAction::Browser);
         // vlc.desktop is an app the shell has no route to, so its line is not
         // followed and the built-in table still answers for video.
-        assert_eq!(
-            classify_with("movie.mp4", &defaults),
-            FileAction::External("mpv".to_string())
-        );
+        assert_eq!(classify_with("movie.mp4", &defaults), FileAction::MediaPlayer);
         // A type with no default line is untouched.
-        assert_eq!(classify_with("song.mp3", &defaults), FileAction::AudioPlayer);
+        assert_eq!(classify_with("song.mp3", &defaults), FileAction::MediaPlayer);
     }
 
     /// A mimeapps.list that is missing, empty or malformed simply leaves no

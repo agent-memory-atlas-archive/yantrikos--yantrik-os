@@ -24,9 +24,7 @@ use crate::notifications;
 use crate::system_context;
 use crate::wire::app_framework::{AppState, BackgroundJobManager};
 use crate::wire::entity_bridge::SharedEntityGraph;
-use crate::wire::image_viewer::ImageViewerState;
 use crate::terminal::TerminalHandle;
-use crate::wire::media_player::MpvHandle;
 use crate::{App, AccentPreset, ThemeMode, ThemeOverrides, MessageData, UrgeCardData, WhisperCardItem};
 use yantrik_companion::skills::SkillRegistry;
 
@@ -56,11 +54,6 @@ pub struct AppContext {
     pub accumulator: Rc<RefCell<ActivityAccumulator>>,
     pub notification_store: notifications::SharedStore,
     pub voice_config: VoiceConfig,
-    pub image_viewer_state: Rc<RefCell<ImageViewerState>>,
-    pub editor_file_path: Rc<RefCell<String>>,
-    pub editor_tabs: Rc<RefCell<Option<Rc<RefCell<Vec<crate::wire::text_editor::TabState>>>>>>,
-    pub editor_active_tab: Rc<RefCell<Option<Rc<RefCell<usize>>>>>,
-    pub media_player: Rc<RefCell<Option<MpvHandle>>>,
     pub frecency: Rc<RefCell<FrecencyStore>>,
     pub browser_history_back: Rc<RefCell<Vec<String>>>,
     pub browser_history_forward: Rc<RefCell<Vec<String>>>,
@@ -522,11 +515,6 @@ impl AppContext {
             // empty and the first poll fills it; the service owns the file.
             notification_store: Rc::new(RefCell::new(notifications::NotificationMirror::new())),
             voice_config,
-            image_viewer_state: Rc::new(RefCell::new(ImageViewerState::default())),
-            editor_file_path: Rc::new(RefCell::new(String::new())),
-            editor_tabs: Rc::new(RefCell::new(None)),
-            editor_active_tab: Rc::new(RefCell::new(None)),
-            media_player: Rc::new(RefCell::new(None)),
             frecency: Rc::new(RefCell::new(FrecencyStore::load())),
             browser_history_back: Rc::new(RefCell::new(Vec::new())),
             browser_history_forward: Rc::new(RefCell::new(Vec::new())),
