@@ -41,9 +41,9 @@ fn refresh_agent_rail(ui: &WeatherApp) {
     }
     ui.set_agent_context(ModelRc::new(VecModel::from(context)));
 
-    let online = companion::is_online();
+    let reach = companion::reach();
     let mut next: Vec<AgentSuggestion> = Vec::new();
-    if online && !c.temperature.is_empty() {
+    if reach == companion::Reach::Ready && !c.temperature.is_empty() {
         next.push(AgentSuggestion {
             id: "advise".into(),
             label: "What should I plan for?".into(),
@@ -54,10 +54,9 @@ fn refresh_agent_rail(ui: &WeatherApp) {
         });
     }
     ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
-    ui.set_agent_unavailable(if online {
-        SharedString::new()
-    } else {
-        companion::OFFLINE_HINT.into()
+    ui.set_agent_unavailable(match reach.hint() {
+        Some(hint) => hint.into(),
+        None => SharedString::new(),
     });
 }
 
@@ -1166,8 +1165,8 @@ fn wire(app: &WeatherApp) {
                 ui.set_ai_response("There is no reading yet — refresh first.".into());
                 return;
             }
-            if !companion::is_online() {
-                ui.set_ai_response(companion::OFFLINE_HINT.into());
+            if let Some(hint) = companion::reach().hint() {
+                ui.set_ai_response(hint.into());
                 return;
             }
             ui.set_ai_is_working(true);
@@ -1182,9 +1181,7 @@ fn wire(app: &WeatherApp) {
                         Ok(text) => ui.set_ai_response(text.into()),
                         Err(e) => {
                             tracing::warn!(error = %e, "companion call failed");
-                            ui.set_ai_response(
-                                format!("The companion did not answer: {e}").into(),
-                            );
+                            ui.set_ai_response(e.to_string().into());
                         }
                     }
                 });
