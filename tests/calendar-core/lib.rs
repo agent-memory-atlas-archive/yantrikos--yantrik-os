@@ -841,9 +841,9 @@ mod tests {
 #[cfg(test)]
 mod view_tests {
     use super::views::{
-        all_day_bounds, day_view, last_day_of_month, named_on, rescheduled, selected_date,
-        start_and_end, timezone_label, today_line, visible_range, week_bounds, week_view,
-        EventRef, Named, SourceEvent, ViewMode,
+        added_clock, all_day_bounds, day_view, last_day_of_month, named_on, rescheduled,
+        selected_date, start_and_end, timezone_label, today_line, visible_range, week_bounds,
+        week_view, EventRef, Named, SourceEvent, ViewMode,
     };
     use chrono::NaiveDate;
 
@@ -1320,6 +1320,32 @@ mod view_tests {
             ("2026-09-22T00:00:00".to_string(), "2026-09-22T23:59:00".to_string())
         );
         assert!(all_day_bounds("the 22nd").is_none());
+    }
+
+    #[test]
+    fn an_all_day_add_needs_no_time() {
+        // The describe says `time` is not used with `all_day`, and the call sent that way used
+        // to be refused as "needs argument `time`" before it reached anything (#297). A
+        // whole-day event has no clock: the answer is the empty one, and a `time` that arrived
+        // anyway is not consulted, exactly as `all_day` promises.
+        assert_eq!(added_clock(None, true).unwrap(), "");
+        assert_eq!(added_clock(Some("14:30"), true).unwrap(), "");
+    }
+
+    #[test]
+    fn a_timed_add_without_a_time_is_refused_in_a_sentence_that_names_time() {
+        // The optionality stops where the whole day stops: an event at a particular hour is
+        // nothing without it. The refusal is the handler's own sentence, not the format
+        // complaint about an empty string, and it points at the way out.
+        let refused = added_clock(None, false).unwrap_err();
+        assert!(refused.contains("`time`"), "{refused}");
+        assert!(refused.contains("all_day"), "{refused}");
+        let refused = added_clock(Some("   "), false).unwrap_err();
+        assert!(refused.contains("`time`"), "{refused}");
+        // A `time` that is there but cannot hold a clock keeps its format refusal.
+        let refused = added_clock(Some("1430"), false).unwrap_err();
+        assert!(refused.contains("14:30") && refused.contains("1430"), "{refused}");
+        assert_eq!(added_clock(Some(" 14:30 "), false).unwrap(), "14:30");
     }
 
     #[test]

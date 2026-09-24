@@ -287,6 +287,31 @@ pub fn all_day_bounds(date: &str) -> Option<(String, String)> {
     Some((iso(day.and_hms_opt(0, 0, 0)?), iso(day.and_hms_opt(23, 59, 0)?)))
 }
 
+/// The clock a new event gets: required unless the event fills the day.
+///
+/// `add_event` declares `time` optional because `all_day` has no use for one, which leaves this
+/// handler deciding what an absent `time` means. A whole-day event needs none — the answer is
+/// empty, and `store_event` does not consult it — and a timed event cannot be placed at an hour
+/// nobody gave, so it is refused in a sentence naming `time` and pointing at `all_day`. Until
+/// today the opposite held: `time` was required on the surface, so the all-day add sent exactly
+/// as the describe told it to be sent — without `time` — never reached this code at all, and was
+/// refused as "needs argument `time`" by the argument check (#297). A `time` that did arrive but
+/// cannot hold a clock keeps the format refusal it always had.
+pub fn added_clock(time: Option<&str>, all_day: bool) -> Result<String, String> {
+    if all_day {
+        return Ok(String::new());
+    }
+    let Some(time) = time.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Err("`time` is needed for an event at a particular hour; set `all_day` for a \
+                    whole day"
+            .into());
+    };
+    if !time.contains(':') {
+        return Err(format!("`time` should look like 14:30, not `{time}`"));
+    }
+    Ok(time.to_string())
+}
+
 /// The events on `date` whose title is `title`, compared without case or surrounding space.
 ///
 /// `date` is matched as a prefix of the stored start, which is what the rest of this app does with
