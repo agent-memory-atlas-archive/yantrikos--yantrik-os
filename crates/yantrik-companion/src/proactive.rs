@@ -174,13 +174,14 @@ impl ProactiveEngine {
             return None;
         }
 
-        // Nothing that starts with a tool's error is a thought. See `looks_like_tool_error`.
-        if let Some(why) = looks_like_tool_error(&text) {
+        // Machinery, a raw tool call, or idle thinking that found nothing — none of it is a
+        // thought worth saying anywhere. See `judge_proactive`.
+        if let Some(why) = must_not_be_said(&text) {
             tracing::warn!(
                 instinct = urge.instinct_name,
                 reason = why,
                 text = text.as_str(),
-                "Proactive refused — the composed message is a tool error, not something to say"
+                "Proactive refused — the composed message is not something to say"
             );
             return None;
         }
@@ -421,6 +422,233 @@ pub fn looks_like_tool_error(text: &str) -> Option<&'static str> {
         .map(|(_, reason)| *reason)
 }
 
+// ── What may become a notification ──────────────────────────────────────────────────────────
+//
+// Observed on 23 September 2026 (issue #216): the desktop's own companion filed 35 notifications
+// in one day, almost all of it chatter rather than anything a person could act on — "coffee's on,
+// tech's your jam … [unverified] ☕", "how's your day going?", a raw
+// `recall(query=…) → Nothing to surface right now.`, and a toast that read "Nothing actionable
+// right now". Notifications are the desktop's one interruptive channel; filling it with small
+// talk, internal markers and leaked tool calls teaches people to clear it unread, and then the
+// approval, the finished agent or the failed recipe that actually matters is cleared with the
+// rest.
+//
+// The rule is one pure function, [`judge_proactive`], so it can be tested against the messages
+// that were really filed. It separates three outcomes: machinery and empty findings must not be
+// said anywhere; small talk may reach the Lens, which a person opened on purpose, but must not
+// interrupt; and only something actionable — a reminder the person set, a finding about their
+// files or calendar with a thing to do, a follow-up they asked for — may become a notification.
+// The daily cap on the companion's notifications lives in the shell, next to the store it feeds;
+// this is the content half of the same rule.
+
+/// What a proactive thought may become.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationVerdict {
+    /// Actionable, and cleaned of the markers and emoji a persona adds: it may become a
+    /// notification. The cleaned text is carried here.
+    Notify(String),
+    /// Small talk. It may reach the Lens if the Lens is open, but it must not interrupt.
+    LensOnly,
+    /// Machinery, or idle thinking that found nothing. It must not be said anywhere. The reason,
+    /// for the log.
+    Refuse(&'static str),
+}
+
+/// The rule for what a proactive companion thought may become. One pure function — see the
+/// comment above for why it exists and what it refuses.
+pub fn judge_proactive(text: &str) -> NotificationVerdict {
+    // Machinery first: a tool's own error wearing a sentence.
+    if let Some(why) = looks_like_tool_error(text) {
+        return NotificationVerdict::Refuse(why);
+    }
+    // A raw tool call is machinery too, whether or not it errored. `recall(query=…) → …` was
+    // filed verbatim as a notification; nobody asked to read the transcript.
+    if looks_like_tool_call(text) {
+        return NotificationVerdict::Refuse("a raw tool call");
+    }
+    // Idle thinking that found nothing has nothing to say. "Nothing actionable right now" must
+    // never reach a person — saying it is the interruptive channel spending itself on silence.
+    if is_empty_finding(text) {
+        return NotificationVerdict::Refuse("idle thinking found nothing");
+    }
+    // Only something a person can act on may interrupt. Everything else — the greetings, the
+    // "how's your day", the playful observations — stays in the Lens.
+    if !is_actionable(text) {
+        return NotificationVerdict::LensOnly;
+    }
+    NotificationVerdict::Notify(clean_for_person(text))
+}
+
+/// The [`NotificationVerdict::Refuse`] case on its own, for the gates that drop a message
+/// everywhere — the transcript included — rather than only withholding a notification. This is a
+/// projection of the one rule, not a second rule: `ProactiveEngine::check` and the bridge's
+/// delivery join ask it so machinery and empty findings are never composed into a message at all.
+pub fn must_not_be_said(text: &str) -> Option<&'static str> {
+    match judge_proactive(text) {
+        NotificationVerdict::Refuse(why) => Some(why),
+        _ => None,
+    }
+}
+
+/// Does the text open as a raw tool call — `name(args)`, with or without a `→ result` after it?
+///
+/// Matched at the start, or by a result arrow, so a sentence that merely mentions a call in
+/// passing ("I ran the backup check") is not caught. The transcript line the companion leaked read
+/// `recall(query="…") → Nothing to surface right now.` and starts with the call.
+fn looks_like_tool_call(text: &str) -> bool {
+    let t = text
+        .trim_start()
+        .trim_start_matches(['*', '_', '`', '>', '"', '\'', ' ']);
+    // A result arrow just after a closing paren: `recall(…) → Nothing to surface right now.`
+    if t.contains(") →") || t.contains(")->") || t.contains(") ->") {
+        return true;
+    }
+    // Or the message simply opens with a call: an identifier, no space, then `(`.
+    let Some(paren) = t.find('(') else {
+        return false;
+    };
+    paren > 0
+        && !t[..paren].contains(' ')
+        && t[..paren]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// Openings that mean idle thinking found nothing and there is nothing to say.
+const EMPTY_FINDING: &[&str] = &[
+    "nothing actionable",
+    "nothing to surface",
+    "nothing to report",
+    "nothing to show",
+    "nothing to tell",
+    "nothing to flag",
+    "nothing worth",
+    "nothing pending",
+    "nothing new",
+    "nothing interesting",
+    "no pending",
+    "all clear",
+    "all quiet",
+];
+
+/// Is this idle thinking that found nothing? Matched at the start, the way `looks_like_tool_error`
+/// is: a thought may mention that something is clear, but opening with it means the turn produced
+/// nothing, and "nothing" is never worth an interruption.
+fn is_empty_finding(text: &str) -> bool {
+    let start = text
+        .trim_start()
+        .trim_start_matches(['*', '_', '`', '>', '"', '\'', ' '])
+        .to_lowercase();
+    EMPTY_FINDING.iter().any(|opening| start.starts_with(opening))
+}
+
+/// Words and phrases that mark a thought as something a person can act on: a reminder, a finding
+/// about their files, calendar, mail or money with a thing to do, a step that needs a decision, or
+/// a follow-up they asked for. A heuristic, not a parser — a proactive thought that misses every
+/// cue is treated as small talk and kept out of the notification store, and the shell's daily cap
+/// is the backstop for volume. Chosen so the chatty messages filed on 23 September match none of
+/// them; the test table below holds those verbatim.
+const ACTIONABLE: &[&str] = &[
+    // A reminder, or something on the clock.
+    "reminder", "remind", "don't forget", "do not forget", "remember to", "time to",
+    "due", "deadline", "overdue", "scheduled", "schedule", "appointment", "meeting",
+    "standup", "stand-up", "interview", "starts in", "starts at", "minutes",
+    // A follow-up or a commitment — something the person asked for or owes.
+    "you asked", "you wanted", "you said", "you mentioned", "you requested", "as requested",
+    "follow up", "follow-up", "followup", "commitment", "committed", "todo", "to-do", "task",
+    // A finding about the person's files, calendar, mail or money.
+    "email", "e-mail", "inbox", "unread", "attachment", "file", "folder", "document",
+    "calendar", "backup", "invoice", "bill", "payment", "receipt", "renewal", "delivery",
+    "shipment", "expires", "expiring", "expired",
+    // Something went wrong, or needs a decision.
+    "needs attention", "action needed", "action required", "requires", "approval", "approve",
+    "waiting for", "pending approval", "failed", "failure", "error", "warning", "alert",
+    "critical", "blocked", "rejected", "denied", "unpaid", "running low", "low battery",
+    "low storage", "disk full", "almost full",
+    // An explicit nudge.
+    "you might want", "you may want", "consider", "heads up", "heads-up", "just so you know",
+    "wanted to let you know", "letting you know", "fyi",
+];
+
+/// Is this something a person can act on? A case-insensitive match against [`ACTIONABLE`].
+fn is_actionable(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ACTIONABLE.iter().any(|cue| lower.contains(cue))
+}
+
+/// Markers the machine writes for itself that must never reach a person's text. These are the
+/// exact forms the hallucination firewall and the recipe executor emit.
+const INTERNAL_MARKERS: &[&str] = &[
+    "[unverified]",
+    "_(unverified)_",
+    "(unverified)",
+    "_(limited source)_",
+    "[limited source]",
+    "[verified]",
+    "[citation needed]",
+];
+
+/// Take the machine's own decorations off a message bound for a person: the internal markers the
+/// firewall and recipe executor add, and the emoji the persona adds. What is left is the sentence.
+fn clean_for_person(text: &str) -> String {
+    let mut cleaned = text.to_string();
+    for marker in INTERNAL_MARKERS {
+        // With the space before it first, so removing the marker does not strand a double space.
+        cleaned = cleaned.replace(&format!(" {marker}"), "");
+        cleaned = cleaned.replace(marker, "");
+    }
+    let cleaned: String = cleaned.chars().filter(|c| !is_emoji(*c)).collect();
+    tidy_spaces(&cleaned)
+}
+
+/// Is this character a picture rather than a word — an emoji, a dingbat, a variation selector or a
+/// zero-width joiner? The punctuation a sentence needs (— … ' " ·) is deliberately kept.
+fn is_emoji(c: char) -> bool {
+    matches!(c as u32,
+        0x1F000..=0x1FAFF  // pictographs, emoticons, transport, supplemental symbols
+        | 0x2600..=0x27BF  // misc symbols and dingbats — ☕ ✨ ✅
+        | 0x2B00..=0x2BFF  // misc symbols and arrows — ⭐
+        | 0xFE00..=0xFE0F  // variation selectors
+        | 0x200D           // zero-width joiner
+        | 0x20E3           // combining enclosing keycap
+    )
+}
+
+/// Collapse the double spaces a removal left behind and trim, without flattening line breaks —
+/// `headline_and_rest` in the shell still reads them to split a title from a body.
+fn tidy_spaces(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            let mut collapsed = String::with_capacity(line.len());
+            let mut prev_space = false;
+            for ch in line.chars() {
+                if ch == ' ' {
+                    if prev_space {
+                        continue;
+                    }
+                    prev_space = true;
+                } else {
+                    prev_space = false;
+                }
+                collapsed.push(ch);
+            }
+            // A space stranded before punctuation by a removal.
+            collapsed
+                .replace(" .", ".")
+                .replace(" ,", ",")
+                .replace(" ;", ";")
+                .replace(" :", ":")
+                .replace(" !", "!")
+                .replace(" ?", "?")
+                .trim()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +695,121 @@ mod tests {
             None
         );
         assert_eq!(looks_like_tool_error(""), None);
+    }
+
+    #[test]
+    fn only_something_actionable_may_become_a_notification() {
+        use NotificationVerdict::*;
+
+        // The day the companion filed 35 notifications, verbatim. Not one of these is something a
+        // person could act on, so not one may interrupt — they are Lens-only at most.
+        for small_talk in [
+            "Hey Pranab — coffee's on, tech's your jam, and I'm here to keep things rolling \
+             smoothly today [unverified]. ☕",
+            "Hey Pranab—how's your day going? Coffee still in hand? ☕",
+            "Browser's off its leash — zero tabs, no processes humming. Not that I blame it; \
+             probably just wants a vacation from your debugging sessions.",
+            "You've got that tech-debugging itch again, don't you? Remember the WebGL session \
+             earlier—how'd it go down?",
+            "Hey, what's new on your end? Still hacking away at tech stuff or just chilling today?",
+        ] {
+            assert_eq!(
+                judge_proactive(small_talk),
+                LensOnly,
+                "small talk must not become a notification: {small_talk}"
+            );
+        }
+
+        // A raw tool call, and idle thinking that found nothing, are refused outright — never said
+        // anywhere, let alone filed.
+        assert_eq!(
+            judge_proactive(
+                "recall(query=\"interesting memory connection past conversation event\") → \
+                 Nothing to surface right now."
+            ),
+            Refuse("a raw tool call")
+        );
+        assert_eq!(
+            judge_proactive("Nothing actionable right now — no pending tasks or reminders."),
+            Refuse("idle thinking found nothing")
+        );
+        // A tool's error is still machinery, by the older rule this one is built on.
+        assert_eq!(
+            judge_proactive("Error: query is required, so there is nothing to surface."),
+            Refuse("a tool's error string")
+        );
+
+        // What the channel is for: a reminder, a finding with a thing to do, a follow-up asked for.
+        for actionable in [
+            "Your meeting starts in 15 minutes.",
+            "Reminder: standup moved to 10:30.",
+            "You have 2 unread emails from Sam.",
+            "The nightly backup failed — the disk is almost full.",
+            "You asked me to follow up on the report; it is ready to review.",
+        ] {
+            assert!(
+                matches!(judge_proactive(actionable), Notify(_)),
+                "an actionable thought may become a notification: {actionable}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_notification_reaches_the_person_without_markers_or_emoji() {
+        use NotificationVerdict::*;
+
+        // The internal marker the firewall adds and the emoji the persona adds are stripped; the
+        // sentence a person can act on survives whole.
+        assert_eq!(
+            judge_proactive("The nightly backup failed [unverified]. ☕"),
+            Notify("The nightly backup failed.".to_string())
+        );
+        assert_eq!(
+            judge_proactive("Heads up — your invoice is due today 🎉 _(limited source)_"),
+            Notify("Heads up — your invoice is due today".to_string())
+        );
+        // Punctuation a sentence needs is kept; only the pictures go.
+        assert_eq!(
+            judge_proactive("Your meeting starts in 15 minutes…"),
+            Notify("Your meeting starts in 15 minutes…".to_string())
+        );
+    }
+
+    #[test]
+    fn a_proactive_turn_that_ends_in_a_tool_call_files_nothing() {
+        // The other half of the same fault: an idle turn planned a `recall`, the tool came back
+        // with nothing to surface, and the composed message was the raw call. `check` is the gate
+        // every urge passes through, so it must file nothing at all here.
+        let conn = Connection::open_in_memory().unwrap();
+        let queue = UrgeQueue::new(
+            &conn,
+            crate::config::UrgeQueueConfig {
+                expiry_hours: 48.0,
+                max_pending: 20,
+                boost_increment: 0.1,
+            },
+        );
+        // An instinct with no template, so `compose_message` falls through to the legacy path and
+        // returns the suggested message verbatim — the raw tool call.
+        let spec = crate::types::UrgeSpec::new("recall_probe", "a recall that found nothing", 0.95)
+            .with_message(
+                "recall(query=\"interesting memory connection past conversation event\") → \
+                 Nothing to surface right now.",
+            )
+            .with_cooldown("recall_probe:test");
+        assert!(queue.push(&conn, &spec).is_some(), "the urge should queue");
+
+        let mut engine = ProactiveEngine::new(
+            ProactiveConfig {
+                enabled: true,
+                delivery_threshold: 0.4,
+                cooldown_minutes: 0,
+            },
+            "Pranab",
+        );
+        assert!(
+            engine.check(&queue, &conn).is_none(),
+            "a turn that ends in a raw tool call must file nothing"
+        );
     }
 }

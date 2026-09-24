@@ -2056,22 +2056,24 @@ fn worker_loop(
                         companion.record_suppressed_urge(&delivery_key, reason);
                     }
 
-                    // Machinery talking, not the companion. Checked before every other gate
-                    // because the others all ask WHEN this should be said, and this one says it
-                    // must not be said at all. An EXECUTE urge reaches here without passing
-                    // through `ProactiveEngine::check`, which is why the same rule is applied
-                    // in both places — and this is the path notification 68 took.
-                    if let Some(why) = yantrik_companion::proactive::looks_like_tool_error(&msg.text) {
+                    // Machinery talking, a raw tool call, or idle thinking that found nothing —
+                    // not the companion. Checked before every other gate because the others all
+                    // ask WHEN this should be said, and this one says it must not be said at all.
+                    // An EXECUTE urge reaches here without passing through `ProactiveEngine::check`,
+                    // which is why the same rule is applied in both places — and that is the path
+                    // notification 68 took. Small talk is not refused here: it may still reach the
+                    // Lens, and `deliver_proactive` keeps it out of the notification store.
+                    if let Some(why) = yantrik_companion::proactive::must_not_be_said(&msg.text) {
                         tracing::warn!(
                             reason = why,
                             text = msg.text,
                             urges = ?msg.urge_ids,
-                            "Refused a proactive message: it is a tool error, not a thought"
+                            "Refused a proactive message: it is not something to say"
                         );
-                        companion.record_suppressed_urge(&delivery_key, "the message was a tool error");
+                        companion.record_suppressed_urge(&delivery_key, why);
                         event_bus.emit(
                             yantrik_os::EventKind::ProactiveSuppressed {
-                                reason: "the message was a tool error".into(),
+                                reason: why.into(),
                                 urge_ids: msg.urge_ids.clone(),
                             },
                             yantrik_os::EventSource::ProactiveEngine,
@@ -2187,12 +2189,15 @@ fn worker_loop(
                                             is_streaming: false,
                                             blocks: ModelRc::default(),
                                         });
-                                        // Kept, and only raised when the Lens is closed — and
-                                        // re-checked here on the UI thread, which is the one
-                                        // place that reading is exact.
-                                        crate::wire::notifications::companion_said(
+                                        // Raised only when the Lens is closed — re-checked here on
+                                        // the UI thread, which is the one place that reading is
+                                        // exact — and only when the thought is actionable and
+                                        // today's cap is not reached. `companion_thought` is the
+                                        // gated sibling of `companion_said`; the message is already
+                                        // in the transcript above either way, so small talk still
+                                        // reaches the Lens (issue #216).
+                                        crate::wire::notifications::companion_thought(
                                             &ui,
-                                            "The mind said something",
                                             &notif_text,
                                         );
                                     }
