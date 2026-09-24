@@ -209,10 +209,20 @@ export component TerminalProbe inherits Window {
     }
 }
 
-import { FileBrowser, FileEntry } from "file_browser.slint";
+import { FileBrowser, FileEntry, FileRecentData } from "file_browser.slint";
 export component FilesProbe inherits Window {
-    width: 800px; height: 600px;
+    // A settable canvas so a test can draw the screen at the size the live VM gives it
+    // (1280 wide, and 800 minus status bar, taskbar and window title tall).
+    in property <length> canvas-width: 800px;
+    in property <length> canvas-height: 600px;
+    width: root.canvas-width; height: root.canvas-height;
     in property <[FileEntry]> entries;
+    in property <[FileRecentData]> recent;
+    in property <string> notice;
+    in property <string> notice-created;
+    in property <bool> notice-created-dir;
+    // The dialog panel's height, so a test can see the naming dialog hug its contents.
+    out property <length> dialog-height: browser.dialog-height;
     in-out property <int> selected: -1;
     in-out property <bool> grid: false;
     in-out property <string> action;
@@ -222,8 +232,12 @@ export component FilesProbe inherits Window {
     in-out property <bool> shift-selected;
     in-out property <bool> light: false;
     changed light => { ThemeMode.dark = !root.light; }
-    FileBrowser {
+    browser := FileBrowser {
         entries: root.entries;
+        recent: root.recent;
+        notice: root.notice;
+        notice-created: root.notice-created;
+        notice-created-dir: root.notice-created-dir;
         is-loading: root.loading;
         current-path: "~/Documents";
         breadcrumbs: [{label: "Home", full-path: "~"},{label:"Documents", full-path:"~/Documents"}];
@@ -232,6 +246,7 @@ export component FilesProbe inherits Window {
         grid-view <=> root.grid;
         multi-select-clicked(index, control, shift) => { root.selected = index; root.control-selected = control; root.shift-selected = shift; }
         create-folder(name) => { root.action = "folder:" + name; }
+        navigate-dir(name) => { root.action = "folder:" + name; }
         file-rename(old, name) => { root.action = "rename:" + name; }
         navigate-to-path(path) => { root.action = "path:" + path; }
         file-filter-changed(query) => { root.query = query; }

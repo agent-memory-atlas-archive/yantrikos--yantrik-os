@@ -234,9 +234,12 @@ fn wire_file_open(ui: &App, ctx: &AppContext) {
                 // does not install it, and a failed launch is otherwise only a log line.
                 if super::dock::find_program("mpv").is_none() {
                     if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_file_notice(
-                            format!("{name_str} cannot play: no media player (mpv) is installed.")
-                                .into(),
+                        // Through the shared setter, so a stale Open/Rename from an older
+                        // creation notice does not stay behind under this message.
+                        super::files::set_notice(
+                            &ui,
+                            &format!("{name_str} cannot play: no media player (mpv) is installed."),
+                            None,
                         );
                     }
                     return;

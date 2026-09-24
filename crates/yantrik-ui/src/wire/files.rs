@@ -53,7 +53,8 @@ enum Event {
     ),
     Preview(u64, String, FileDetailData, String),
     Progress(String, f32),
-    Done(String, Vec<String>, Vec<PathBuf>, Option<Vec<String>>),
+    // Message, what was created (name, is a folder), undo ids, moved paths, remaining trash.
+    Done(String, Option<(String, bool)>, Vec<String>, Vec<PathBuf>, Option<Vec<String>>),
     Notice(String),
 }
 #[derive(Clone)]
@@ -221,20 +222,15 @@ impl Browser {
             self.selected.iter().next().map(|i| *i as i32).unwrap_or(-1)
         });
         ui.set_file_selection_count(self.selected.len() as i32);
-        let bytes: u64 = self
+        // Say what the selection is, not "1 selected · 0.0 KiB in files": a folder answers
+        // with what it holds (issue #208), and only real files add up to a size.
+        let picked: Vec<&fsview::DirEntry> = self
             .selected
             .iter()
             .filter_map(|i| self.visible.get(*i))
-            .filter(|i| !i.entry.is_dir)
-            .fold(0u64, |total, i| total.saturating_add(i.entry.size_bytes));
-        ui.set_file_selection_size_text(
-            format!(
-                "{} selected · {:.1} KiB in files",
-                self.selected.len(),
-                bytes as f64 / 1024.
-            )
-            .into(),
-        );
+            .map(|i| &i.entry)
+            .collect();
+        ui.set_file_selection_size_text(fsview::selection_text(&picked, self.hidden).into());
         self.preview += 1;
         ui.set_file_ai_summary("".into());
         ui.set_file_detail_data(FileDetailData::default());
@@ -257,8 +253,9 @@ impl Browser {
         if paths.is_empty() {
             return;
         }
-        ui.set_file_notice(
-            format!(
+        set_notice(
+            ui,
+            &format!(
                 "{} {}. Open the destination folder and paste.",
                 paths.len(),
                 if cut {
@@ -266,8 +263,8 @@ impl Browser {
                 } else {
                     "items copied"
                 }
-            )
-            .into(),
+            ),
+            None,
         );
         self.clipboard = Some(Clipboard { paths, cut });
         ui.set_file_has_clipboard(true);
@@ -275,7 +272,7 @@ impl Browser {
     fn load(&mut self, ui: &App, path: String, trash: bool, record: bool) {
         let path = fsview::collapse_home(&fsview::expand_home(&path));
         if record {
-            ui.set_file_notice("".into());
+            set_notice(ui, "", None);
         }
         if let Some(cancel) = self.listing_cancel.take() {
             cancel.store(true, Ordering::Release);
@@ -433,13 +430,11 @@ impl Browser {
     }
     fn job(&mut self, ui: &App, job: Job) {
         if ui.get_file_browser_loading() {
-            ui.set_file_notice("Wait for this folder to finish loading.".into());
+            set_notice(ui, "Wait for this folder to finish loading.", None);
             return;
         }
         if self.job_cancel.is_some() {
-            ui.set_file_notice(
-                "A file operation is already running. Wait or cancel it first.".into(),
-            );
+            set_notice(ui, "A file operation is already running. Wait or cancel it first.", None);
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -448,7 +443,7 @@ impl Browser {
         ui.set_file_operation_busy(true);
         ui.set_file_operation_text("Preparing…".into());
         ui.set_file_operation_progress(0.);
-        ui.set_file_notice("".into());
+        set_notice(ui, "", None);
         std::thread::spawn(move || run_job(job, cancel, sink));
     }
 }
@@ -509,11 +504,50 @@ fn free_space(path: &Path) -> String {
         String::new()
     }
 }
+/// The notice a finished job leaves behind. An error or a cancel outranks everything; a
+/// creation names the thing it made so the footer can offer Open and Rename for it — the
+/// old "Created folder · 1 item" did not say which folder (issue #208); counted jobs keep
+/// their summary.
+fn done_message(
+    label: &str,
+    done: usize,
+    total: usize,
+    error: Option<&String>,
+    canceled: bool,
+    created: Option<&(String, bool)>,
+) -> String {
+    if let Some(error) = error {
+        format!("{label}: {done}/{total}. {error}")
+    } else if canceled {
+        format!("Canceled after {done}/{total} items. Completed items are kept.")
+    } else if let Some((name, folder)) = created {
+        format!("Created {} \"{name}\"", if *folder { "folder" } else { "file" })
+    } else {
+        format!("{label} · {done} {}", if done == 1 { "item" } else { "items" })
+    }
+}
+
+/// Put a notice in the footer. `created` carries the name of the thing just made, and
+/// whether it is a folder, when the notice is about a creation — the footer's Open and
+/// Rename buttons act on that name. Every other notice clears them.
+pub(super) fn set_notice(ui: &App, text: &str, created: Option<(String, bool)>) {
+    ui.set_file_notice(text.into());
+    ui.set_file_notice_created(
+        created
+            .as_ref()
+            .map(|(name, _)| name.as_str())
+            .unwrap_or("")
+            .into(),
+    );
+    ui.set_file_notice_created_dir(created.is_some_and(|(_, folder)| folder));
+}
+
 fn run_job(job: Job, cancel: Arc<AtomicBool>, sink: Sink) {
     let root = fileops::trash_root();
     let mut undo = vec![];
     let mut moved = vec![];
     let mut errors = vec![];
+    let mut created = None;
     let mut done = 0usize;
     let mut total = 1usize;
     let mut label = "Completed";
@@ -657,25 +691,26 @@ fn run_job(job: Job, cancel: Arc<AtomicBool>, sink: Sink) {
             } else {
                 fileops::create_file(&dir, &name)
             } {
-                Ok(()) => done = 1,
+                Ok(()) => {
+                    done = 1;
+                    created = Some((name, folder));
+                }
                 Err(e) => errors.push(e),
             }
         }
     }
-    let message = if let Some(error) = errors.first() {
-        format!("{label}: {done}/{total}. {error}")
-    } else if cancel.load(Ordering::Acquire) {
-        format!("Canceled after {done}/{total} items. Completed items are kept.")
-    } else {
-        format!(
-            "{label} · {done} {}",
-            if done == 1 { "item" } else { "items" }
-        )
-    };
+    let message = done_message(
+        label,
+        done,
+        total,
+        errors.first(),
+        cancel.load(Ordering::Acquire),
+        created.as_ref(),
+    );
     let remaining = fileops::trash_items(&root)
         .ok()
         .map(|items| items.into_iter().map(|i| i.id).collect());
-    sink.send(Event::Done(message, undo, moved, remaining));
+    sink.send(Event::Done(message, created, undo, moved, remaining));
 }
 
 pub fn wire(ui: &App, ctx: &AppContext) {
@@ -764,7 +799,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                             s.paint(&u);
                             s.tabs_ui(&u);
                         }
-                        Err(e) => u.set_file_notice(e.into()),
+                        Err(e) => set_notice(&u, &e, None),
                     }
                 }
                 Event::Preview(generation, name, detail, content) => {
@@ -778,11 +813,11 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                     u.set_file_operation_text(text.into());
                     u.set_file_operation_progress(progress);
                 }
-                Event::Done(message, undo, moved, remaining) => {
+                Event::Done(message, created, undo, moved, remaining) => {
                     s.job_cancel = None;
                     u.set_file_operation_busy(false);
                     u.set_file_operation_text(message.clone().into());
-                    u.set_file_notice(message.into());
+                    set_notice(&u, &message, created);
                     if !undo.is_empty() {
                         s.undo = undo;
                     }
@@ -801,7 +836,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                     u.set_file_can_undo(!s.undo.is_empty());
                     s.refresh(&u);
                 }
-                Event::Notice(text) => u.set_file_notice(text.into()),
+                Event::Notice(text) => set_notice(&u, &text, None),
             }
         }
     });
@@ -963,7 +998,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         }
     });
     bind!(on_file_dismiss_notice, |u, s| {
-        u.set_file_notice("".into());
+        set_notice(&u, "", None);
     });
     bind!(on_file_toggle_trash, |u, s| {
         let path = s.tabs[s.active].path.clone();
@@ -1105,4 +1140,46 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     });
     set_places(ui);
     state.borrow().tabs_ui(ui);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::done_message;
+
+    #[test]
+    fn a_creation_names_the_thing_it_made() {
+        let made = ("Tour 23 Sep".to_string(), true);
+        assert_eq!(
+            done_message("Created folder", 1, 1, None, false, Some(&made)),
+            "Created folder \"Tour 23 Sep\""
+        );
+        let made = ("notes.md".to_string(), false);
+        assert_eq!(
+            done_message("Created file", 1, 1, None, false, Some(&made)),
+            "Created file \"notes.md\""
+        );
+    }
+
+    #[test]
+    fn counted_jobs_keep_their_summary() {
+        assert_eq!(done_message("Copied", 1, 3, None, false, None), "Copied · 1 item");
+        assert_eq!(
+            done_message("Moved to Trash", 4, 4, None, false, None),
+            "Moved to Trash · 4 items"
+        );
+    }
+
+    #[test]
+    fn an_error_or_a_cancel_outranks_the_name() {
+        let made = ("Tour 23 Sep".to_string(), true);
+        let error = "File exists".to_string();
+        assert_eq!(
+            done_message("Created folder", 0, 1, Some(&error), false, Some(&made)),
+            "Created folder: 0/1. File exists"
+        );
+        assert_eq!(
+            done_message("Copied", 2, 5, None, true, None),
+            "Canceled after 2/5 items. Completed items are kept."
+        );
+    }
 }
