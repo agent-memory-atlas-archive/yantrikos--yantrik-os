@@ -161,6 +161,56 @@ pub(crate) fn screen_name(id: i32) -> &'static str {
     }
 }
 
+/// Which of the two things `open_app` can do a name does, when it is one of the desktop's own.
+///
+/// `Some` for a name that is part of the shell rather than a program: the screen it lands on and,
+/// for a section of Settings, which section — both in the words `describe shell` uses. Asked of
+/// the dock's route table, which is the table the launch itself dispatches on, so the answer and
+/// the launch cannot disagree about what just happened. `None` means a window is coming: a
+/// program from the catalogue, the browser, Blender, or the launcher, which answers with its own
+/// report before this is ever reached.
+fn switches_the_shell(name: &str) -> Option<(&'static str, Option<&'static str>)> {
+    use crate::wire::dock::Launch;
+    match crate::wire::dock::route(name) {
+        Some(Launch::Screen(id)) => SCREENS.iter().find(|(_, s)| *s == id).map(|(n, _)| (*n, None)),
+        Some(Launch::SettingsSection(id)) => SETTINGS_SECTIONS
+            .iter()
+            .find(|(_, s)| *s == id)
+            .map(|(n, _)| ("settings", Some(*n))),
+        _ => None,
+    }
+}
+
+/// `open_app`'s answer when the name was one of the desktop's own screens.
+///
+/// Two facts the caller needs and could not see from here: that no window is coming, and whether
+/// the switch is in sight. The shell is one ordinary fullscreen toplevel to labwc and cannot
+/// raise itself, so a screen switched while an app window is in front was switched underneath it
+/// — `show_screen` and `open_launcher` both learned that in #71 and report the raise in these
+/// same words. Failing to raise is not an error: the screen did change, it is just covered.
+fn shell_screen_answer(
+    screen: &'static str,
+    section: Option<&'static str>,
+    raised: Result<(), String>,
+) -> serde_json::Value {
+    let mut answer = serde_json::json!({ "showing": screen });
+    if let Some(section) = section {
+        answer["section"] = section.into();
+    }
+    match raised {
+        Ok(()) => answer["raised"] = true.into(),
+        Err(why) => {
+            answer["raised"] = false.into();
+            answer["note"] = format!(
+                "the shell is on `{screen}`, but its own window could not be brought to the \
+                 front, so an app window may still be covering it: {why}"
+            )
+            .into();
+        }
+    }
+    answer
+}
+
 /// Join names the way a person would read them out: "a", "a and b", "a, b and c".
 ///
 /// This line is the first thing anyone sees of the desktop, and "calendar and email and notes"
@@ -780,9 +830,9 @@ pub fn publish(
             //
             // `invoke_launch_app` reaches the dock's callback, and most of its branches
             // `spawn()` a process: the window arrives seconds later, if it arrives at all (a
-            // failed spawn is logged, not returned). A couple of branches only switch screens and
-            // do settle on return, but the caller cannot tell which branch it took, so the
-            // conservative claim is the only honest one.
+            // failed spawn is logged, not returned). The branches that only switch one of the
+            // desktop's own screens settle on return, and now say which happened — the caller was
+            // told `launching` either way, and waited for a window that was never coming (#45).
             Action::new("open_app", "Launch an app, or focus it if it is already running")
                 .arg(Param::text("name").describe("App id, e.g. notes, email, terminal, files"))
                 .defers(),
@@ -811,9 +861,21 @@ pub fn publish(
                 // The launcher's own path: it resolves the binary, enforces one window per app,
                 // and focuses the running one instead of starting a second.
                 ui.invoke_launch_app(name.clone().into());
+                // Which of the two that did. A program opens a window; a name that is part of the
+                // desktop switches one of its screens, and no window exists or ever will. The
+                // listing has always said which a name is (`opens: "app"` against `opens: "a
+                // screen of the desktop itself"`); the answer said `launching` for both, so a
+                // caller that opened `files` waited for a window and saw nothing arrive (#45).
+                let mut answer = match switches_the_shell(&name) {
+                    Some((screen, section)) => {
+                        // Asked to come forward like any other window, because a screen switched
+                        // underneath an app window has not been shown to anyone (#71).
+                        shell_screen_answer(screen, section, crate::windows::raise_shell())
+                    }
+                    None => serde_json::json!({ "launching": name }),
+                };
                 // And the name to describe it by once it is up, which is not always the name it
                 // was opened by (`sysmonitor` opens what answers as `system-monitor`).
-                let mut answer = serde_json::json!({ "launching": name });
                 if let Some(surface) = crate::wire::dock::surface_for(&name, &catalogue) {
                     answer["describe_as"] = surface.into();
                 }
@@ -2243,6 +2305,144 @@ mod summary_running_tests {
         assert!(
             src.contains("let windows = crate::windows::shell_windows();"),
             "`describe` must consult the launch-registry window list for the open apps"
+        );
+    }
+}
+
+#[cfg(test)]
+mod open_app_answer_tests {
+    use super::{shell_screen_answer, switches_the_shell, SCREENS, screen_name};
+    use std::path::Path;
+
+    /// The `open_app` handler, as written above the tests.
+    ///
+    /// The handler needs a live Slint window and a compositor to run, so its wiring is pinned
+    /// against the source the way `window_action_tests` pins the window verbs. What it is pinned
+    /// to call is pure, and tested for real below.
+    fn handler() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
+        let from = src
+            .find("\"open_app\"")
+            .expect("the shell still publishes open_app");
+        let rest = &src[from..];
+        let end = rest.find(".action(").unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    /// A name that is part of the desktop is not a program, and the answer used to say it was.
+    ///
+    /// `open_app name=image-viewer` opened the shell's own Images screen, and `name=text-editor`
+    /// its Editor screen, while both answered `launching` — #45's two shipped binaries no route
+    /// could reach. #253 retired the screens, so the binaries open by their own names now; what
+    /// is left is the other half of the finding, that the names still switching a screen said
+    /// `launching` too. The listing has always said which a name is (`opens: "app"` against
+    /// `opens: "a screen of the desktop itself"`). This is the answer a caller reads after it has
+    /// already asked, which said the same thing either way.
+    #[test]
+    fn a_name_that_is_part_of_the_desktop_is_answered_as_a_screen_switch() {
+        // The shell's own screens, including the spellings a route also answers to.
+        assert_eq!(switches_the_shell("files"), Some(("files", None)));
+        assert_eq!(switches_the_shell("settings"), Some(("settings", None)));
+        assert_eq!(switches_the_shell("device-dashboard"), Some(("devices", None)));
+        assert_eq!(switches_the_shell("report a problem"), Some(("problems", None)));
+        assert_eq!(switches_the_shell("AGENT"), Some(("agents", None)));
+        // Skills is a section of the Settings screen, not a screen of its own.
+        assert_eq!(switches_the_shell("skills"), Some(("settings", Some("skills"))));
+
+        // A program opens a window, so `launching` is the true word and the caller is right to
+        // go looking for it — including for the two binaries #45 could not reach at all.
+        for name in [
+            "notes", "email", "image-viewer", "images", "image", "text-editor", "editor",
+            "system-monitor", "terminal", "browser", "blender",
+        ] {
+            assert_eq!(switches_the_shell(name), None, "`{name}` opens a window");
+        }
+        // The launcher is neither: it answers with its own report, taken before this is reached.
+        assert_eq!(switches_the_shell("launchpad"), None);
+    }
+
+    /// Both doors to a screen report the screen `describe` reports, for every name the shell routes.
+    ///
+    /// `open_app name=about` and `show_screen screen=about` move the same desktop screen, and a
+    /// caller that read one answer should read the other the same way: which screen it is on, and
+    /// whether the shell got in front. The two tables the answer is built from — the route table
+    /// and `SCREENS` — are kept in step here, because a route to an id `SCREENS` does not name
+    /// would answer `launching` again, quietly: the lookup finds nothing and the dispatch falls
+    /// through to the other branch. It drifted once already, with the launcher's two doors (#71).
+    #[test]
+    fn every_screen_a_route_switches_to_is_one_describe_names() {
+        let mut switched = 0;
+        for name in crate::wire::dock::builtin_app_ids() {
+            let Some((screen, _)) = switches_the_shell(name) else {
+                continue;
+            };
+            let id = SCREENS.iter().find(|(n, _)| *n == screen).map(|(_, id)| *id);
+            assert_eq!(
+                id.map(screen_name),
+                Some(screen),
+                "`open_app name={name}` answers `{screen}`, which is not a name describe gives \
+                 any screen"
+            );
+            switched += 1;
+        }
+        assert!(
+            switched >= 15,
+            "only {switched} of the desktop's own names switch a screen; the route table has \
+             changed shape and this test has stopped checking anything"
+        );
+    }
+
+    /// The action has to ask the question, not merely have the answer available beside it.
+    #[test]
+    fn open_app_answers_with_which_of_the_two_a_name_did() {
+        let handler = handler();
+        assert!(
+            handler.contains("switches_the_shell("),
+            "`open_app` must ask which of the two a name did before it answers. Answering \
+             `launching` for a screen switch is #45: the caller waits for a window no route \
+             will ever open. Handler as written:\n{handler}"
+        );
+        assert!(
+            handler.contains("\"launching\""),
+            "`open_app` must still answer `launching` for a program — that is the half of the \
+             distinction that already worked. Handler as written:\n{handler}"
+        );
+        assert!(
+            handler.contains("raise_shell()"),
+            "`open_app` asks the compositor to bring the shell forward when it switches a \
+             screen, as `show_screen` and `open_launcher` do: the shell is one fullscreen \
+             toplevel to labwc and cannot raise itself, so a screen switched underneath an app \
+             window has not been shown to anyone (#71). Handler as written:\n{handler}"
+        );
+    }
+
+    /// What the switch answers, including the case where nobody can see it.
+    #[test]
+    fn a_screen_switch_answers_with_the_screen_and_whether_it_is_in_sight() {
+        let raised = shell_screen_answer("files", None, Ok(()));
+        assert_eq!(raised["showing"], "files");
+        assert_eq!(raised["raised"], true);
+        assert!(
+            raised.get("launching").is_none(),
+            "a screen switch answers `launching`, which is what a caller waits on: {raised}"
+        );
+
+        let section = shell_screen_answer("settings", Some("skills"), Ok(()));
+        assert_eq!(section["showing"], "settings");
+        assert_eq!(section["section"], "skills");
+
+        // The screen DID change, so this is not an error — it is just possibly covered, and a
+        // caller that has been told which screen it is on is owed the difference. The same words
+        // `show_screen` uses, because it is the same fact.
+        let covered = shell_screen_answer("about", None, Err("wlrctl: no compositor".into()));
+        assert_eq!(covered["raised"], false);
+        let note = covered["note"].as_str().unwrap_or_default().to_string();
+        assert!(
+            note.contains("`about`") && note.contains("wlrctl: no compositor"),
+            "the note does not say which screen is up, or why it could not be raised: {note}"
         );
     }
 }
