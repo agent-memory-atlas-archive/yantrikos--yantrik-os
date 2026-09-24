@@ -9,5 +9,5 @@ Categories=Utility;TextEditor;
 Keywords=text;editor;code;
 # The control surface this app publishes: docs/surface-protocol.md, section 3.
 X-Yantrik-Surface=editor
-X-Yantrik-Purpose=plain-text and code files, opened and saved by path
+X-Yantrik-Purpose=write a new text or code file (new with its text, then save_as a path), or open and edit one by path
 X-Yantrik-Aliases=text-editor
