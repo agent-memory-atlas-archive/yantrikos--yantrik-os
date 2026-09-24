@@ -406,8 +406,11 @@ class ConversationTests(unittest.TestCase):
         self.start(yantrik_harness.PerConversation(minds.make))
         a = self.desktop.ask("hi", conversation="c-aaaaaa", agent_token="a" * 32)
         b = self.desktop.ask("hi", conversation="c-bbbbbb", agent_token="b" * 32)
+        # The second message to c-aaaaaa goes only once the first has closed: sent while it is
+        # still running, it is rightly answered "still working", which is a different test.
+        self.desktop.wait_closed(a)
         again = self.desktop.ask("again", conversation="c-aaaaaa", agent_token="a" * 32)
-        for turn in (a, b, again):
+        for turn in (b, again):
             self.desktop.wait_closed(turn)
         self.assertEqual(self.desktop.text(a), "c-aaaaaa heard hi")
         self.assertEqual(self.desktop.text(b), "c-bbbbbb heard hi")
