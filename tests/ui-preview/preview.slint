@@ -429,3 +429,98 @@ export component RecipesProbe inherits Window {
         height: 100%;
     }
 }
+
+// The System Monitor screen (#220), filled with fixture data by src/monitor_tests.rs: bars whose
+// fills must start at the left edge of their track, a process list that must not move when a row
+// is selected, what the list says when a filter matched nothing, and what the AI card says when
+// nothing feeds it. Callbacks are recorded there, never acted on.
+import { SystemMonitor, CpuCoreData, DiskData, MonitorProcessData } from "system_monitor.slint";
+export { CpuCoreData, DiskData, MonitorProcessData } from "system_monitor.slint";
+export component SystemMonitorProbe inherits Window {
+    in property <length> canvas-width: 1280px;
+    in property <length> canvas-height: 800px;
+    width: root.canvas-width;
+    height: root.canvas-height;
+    default-font-family: Theme.font-ui;
+    background: Theme.bg-deep;
+    in property <[CpuCoreData]> cores;
+    in property <[DiskData]> disks;
+    in property <[MonitorProcessData]> procs;
+    in-out property <string> search;
+    in-out property <int> selected-pid: -1;
+    in-out property <string> ai-model-name;
+    // Mirrored out of the screen so the test can see the geometry the person sees.
+    out property <length> health-fill-x: monitor.health-fill-x;
+    out property <length> swap-fill-x: monitor.swap-fill-x;
+    out property <length> swap-fill-width: monitor.swap-fill-width;
+    out property <length> core-fill-x: monitor.core-fill-x;
+    out property <length> core-fill-width: monitor.core-fill-width;
+    out property <length> disk-fill-x: monitor.disk-fill-x;
+    out property <length> disk-fill-width: monitor.disk-fill-width;
+    out property <length> proc-header-height: monitor.proc-header-height;
+    out property <length> proc-search-y: monitor.proc-search-y;
+    out property <string> process-empty-text: monitor.process-empty-text;
+    out property <string> ai-no-source-text: monitor.ai-no-source-text;
+    monitor := SystemMonitor {
+        width: 100%;
+        height: 100%;
+        show-back: false;
+        cpu-usage: 62.0;
+        cpu-model: "Fixture CPU @ 3.6 GHz";
+        cpu-cores: root.cores;
+        memory-usage: 55.0;
+        memory-used-text: "8.4 GB";
+        memory-total-text: "16.0 GB";
+        memory-available-text: "7.6 GB";
+        swap-usage: 42.0;
+        swap-used-text: "0.9 GB";
+        swap-total-text: "2.0 GB";
+        disks: root.disks;
+        processes: root.procs;
+        process-search <=> root.search;
+        selected-process-pid <=> root.selected-pid;
+        ai-model-name: root.ai-model-name;
+        health-score: 60.0;
+        health-status: "Degraded";
+        health-summary: "High CPU usage";
+        uptime-text: "3 h 12 m";
+        kill-process(pid) => { root.selected-pid = pid; }
+        force-kill-process(pid) => { root.selected-pid = pid; }
+    }
+}
+
+// The Weather dashboard at the app's own default window size (#220), filled with fixture data by
+// src/weather_tests.rs. The running app fills the agent rail's context, so the rail is open —
+// 280px — at 1000×720, which is exactly where the hero's stat tiles used to run under it.
+import { WeatherDashboard, WeatherCurrent, WeatherHourly, WeatherDaily } from "weather.slint";
+export { WeatherCurrent, WeatherHourly, WeatherDaily } from "weather.slint";
+import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+export { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
+export component WeatherProbe inherits Window {
+    in property <length> canvas-width: 1000px;
+    in property <length> canvas-height: 720px;
+    width: root.canvas-width;
+    height: root.canvas-height;
+    default-font-family: Theme.font-ui;
+    background: Theme.bg-deep;
+    in property <WeatherCurrent> current;
+    in property <[WeatherHourly]> hourly;
+    in property <[WeatherDaily]> daily;
+    in property <[AgentContextItem]> agent-context;
+    // The hero geometry, mirrored out of the dashboard for the same reason.
+    out property <length> hero-row-width: dash.hero-row-width;
+    out property <length> hero-tiles-x: dash.hero-tiles-x;
+    out property <length> hero-tiles-width: dash.hero-tiles-width;
+    out property <length> hero-tiles-abs-right: dash.hero-tiles-abs-right;
+    out property <length> content-space-right: dash.content-space-right;
+    dash := WeatherDashboard {
+        width: 100%;
+        height: 100%;
+        show-back: false;
+        current: root.current;
+        hourly: root.hourly;
+        daily: root.daily;
+        agent-context: root.agent-context;
+        weather-last-updated: "Updated 4 min ago";
+    }
+}
