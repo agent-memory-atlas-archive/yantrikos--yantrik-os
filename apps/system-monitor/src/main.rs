@@ -67,9 +67,9 @@ fn refresh_agent_rail(ui: &SystemMonitorApp) {
     ];
     ui.set_agent_context(ModelRc::new(VecModel::from(context)));
 
-    let online = companion::is_online();
+    let reach = companion::reach();
     let mut next: Vec<AgentSuggestion> = Vec::new();
-    if online {
+    if reach == companion::Reach::Ready {
         next.push(AgentSuggestion {
             id: "explain".into(),
             label: "Is anything wrong?".into(),
@@ -80,10 +80,9 @@ fn refresh_agent_rail(ui: &SystemMonitorApp) {
         });
     }
     ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
-    ui.set_agent_unavailable(if online {
-        SharedString::new()
-    } else {
-        companion::OFFLINE_HINT.into()
+    ui.set_agent_unavailable(match reach.hint() {
+        Some(hint) => hint.into(),
+        None => SharedString::new(),
     });
 }
 
@@ -863,8 +862,8 @@ fn wire(app: &SystemMonitorApp) -> Timer {
         let weak = app.as_weak();
         app.on_ai_explain_pressed(move || {
             let Some(ui) = weak.upgrade() else { return };
-            if !companion::is_online() {
-                ui.set_ai_response(companion::OFFLINE_HINT.into());
+            if let Some(hint) = companion::reach().hint() {
+                ui.set_ai_response(hint.into());
                 return;
             }
             let prompt = machine_question(&ui);
@@ -877,7 +876,7 @@ fn wire(app: &SystemMonitorApp) -> Timer {
                     ui.set_ai_is_working(false);
                     ui.set_ai_response(match outcome {
                         Ok(text) => text.into(),
-                        Err(e) => format!("The companion did not answer: {e}").into(),
+                        Err(e) => e.to_string().into(),
                     });
                 });
             });

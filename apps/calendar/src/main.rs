@@ -48,9 +48,9 @@ fn refresh_agent_rail(ui: &CalendarApp) {
     }
     ui.set_agent_context(ModelRc::new(VecModel::from(context)));
 
-    let online = companion::is_online();
+    let reach = companion::reach();
     let mut next: Vec<AgentSuggestion> = Vec::new();
-    if online {
+    if reach == companion::Reach::Ready {
         next.push(AgentSuggestion {
             id: "explain".into(),
             label: "What does this day look like?".into(),
@@ -73,10 +73,9 @@ fn refresh_agent_rail(ui: &CalendarApp) {
     }
     ui.set_agent_suggestions(ModelRc::new(VecModel::from(next)));
 
-    ui.set_agent_unavailable(if online {
-        SharedString::new()
-    } else {
-        "Not connected. Start the Yantrik shell for suggestions.".into()
+    ui.set_agent_unavailable(match reach.hint() {
+        Some(hint) => hint.into(),
+        None => SharedString::new(),
     });
 }
 
@@ -1599,7 +1598,7 @@ fn wire(app: &CalendarApp) -> slint::Timer {
                             tracing::warn!(error = %e, "Companion call failed");
                             ui.set_proposal(AgentProposal {
                                 title: "The companion did not answer".into(),
-                                body: format!("{e}\n\nIs the Yantrik shell running?").into(),
+                                body: e.to_string().into(),
                                 verb: "Close".into(),
                                 ..Default::default()
                             });

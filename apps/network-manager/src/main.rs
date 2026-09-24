@@ -579,9 +579,9 @@ fn refresh_agent_rail(ui: &NetworkManagerApp, state: &State) {
 
     ui.set_agent_context(ModelRc::new(VecModel::from(context)));
 
-    let online = companion::is_online();
+    let reach = companion::reach();
     let mut suggestions: Vec<AgentSuggestion> = Vec::new();
-    if online {
+    if reach == companion::Reach::Ready {
         suggestions.push(AgentSuggestion {
             id: "explain".into(),
             label: "Explain this machine's network".into(),
@@ -592,10 +592,9 @@ fn refresh_agent_rail(ui: &NetworkManagerApp, state: &State) {
         });
     }
     ui.set_agent_suggestions(ModelRc::new(VecModel::from(suggestions)));
-    ui.set_agent_unavailable(if online {
-        SharedString::new()
-    } else {
-        companion::OFFLINE_HINT.into()
+    ui.set_agent_unavailable(match reach.hint() {
+        Some(hint) => hint.into(),
+        None => SharedString::new(),
     });
 }
 
@@ -790,7 +789,7 @@ fn ask_companion(ui: &NetworkManagerApp, state: &State) {
                     });
                 }
                 Err(e) => {
-                    ui.set_ai_response(format!("The companion did not answer: {e}").as_str().into());
+                    ui.set_ai_response(e.to_string().as_str().into());
                     ui.set_proposal(AgentProposal {
                         title: "The companion did not answer".into(),
                         body: format!("{e}").as_str().into(),

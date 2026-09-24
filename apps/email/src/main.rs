@@ -138,7 +138,7 @@ fn wire_mail_ai(app: &EmailApp, which: MailAi) {
                     },
                     // Said out loud, not logged. A model that could not be reached left the card
                     // exactly as it was and the person waiting at it with no idea why.
-                    Err(e) => say(&ui, format!("The companion could not answer: {e}")),
+                    Err(e) => say(&ui, e.to_string()),
                 }
             });
         });
@@ -2114,7 +2114,7 @@ fn wire(app: &EmailApp) {
                             ui.set_compose_body(text.into());
                             clear_notice(&ui);
                         }
-                        Err(e) => say(&ui, format!("The companion could not draft that: {e}")),
+                        Err(e) => say(&ui, e.to_string()),
                     }
                 });
             });
@@ -2144,7 +2144,7 @@ fn wire(app: &EmailApp) {
                             ui.set_compose_body(text.into());
                             clear_notice(&ui);
                         }
-                        Err(e) => say(&ui, format!("The companion could not rewrite that: {e}")),
+                        Err(e) => say(&ui, e.to_string()),
                     }
                 });
             });
@@ -2196,7 +2196,7 @@ fn wire(app: &EmailApp) {
                                 );
                             }
                         }
-                        Err(e) => say(&ui, format!("The companion could not classify that: {e}")),
+                        Err(e) => say(&ui, e.to_string()),
                     }
                 });
             });
@@ -2523,5 +2523,29 @@ Small thing: the world model's epistemic states read well. \"Believed\" vs \"obs
         app.set_email_folder_counts_known(true);
         app.set_email_sync_status("Synced 2 min ago".into());
         app.set_has_account(true);
+    }
+}
+
+#[cfg(test)]
+mod enhance_tests {
+    /// The Enhance buttons used to hand the composer's body to the callback, and the handler —
+    /// which reads the body from the composer itself — put it into the prompt a second time, so
+    /// every rewrite request carried the email twice. The defect lives in the markup, so the
+    /// markup is what this pins: a button may name the tone, never the body.
+    #[test]
+    fn enhance_buttons_pass_a_tone_and_never_the_body() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/yantrik-ui-slint/ui/email.slint"
+        );
+        let src = std::fs::read_to_string(path).expect("the shared email markup");
+        let calls: Vec<&str> = src.lines().filter(|l| l.contains("enhance-text(")).collect();
+        assert!(calls.len() >= 4, "the four Enhance buttons should call enhance-text");
+        for call in &calls {
+            assert!(
+                !call.contains("compose-body"),
+                "an Enhance button hands the body to the handler, which sends it twice: {call}"
+            );
+        }
     }
 }

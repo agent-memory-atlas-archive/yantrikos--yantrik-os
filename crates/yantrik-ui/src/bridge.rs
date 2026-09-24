@@ -31,6 +31,21 @@ use crate::{App, BondData, UrgeCardData};
 /// same rule the harness path applies to a `Chunk::Failed`.
 pub const TURN_FAILED_REPLY: &str = "Something went wrong internally. Please try again.";
 
+/// Why an [`CompanionHandle::ask`] did not produce an answer.
+///
+/// `NoModel` is the case callers over RPC need told apart: when no model is reachable the
+/// offline responder serves the turn with plausible-looking canned text, and an app that
+/// cannot tell a fallback from an answer shows the fallback as the model's words — Documents
+/// offered to replace a document with it. The canned text does not leave the shell.
+#[derive(Debug)]
+pub enum AskError {
+    /// The shell answered, and no model did — none set up, or the one set up did not answer.
+    NoModel,
+    /// No answer at all: no worker, a timeout, a failure on the way, or a turn that panicked
+    /// mid-stream — the reason then carries its failure text.
+    Failed(String),
+}
+
 /// Commands from the UI thread to the companion worker.
 pub enum CompanionCommand {
     /// Send a message and receive streaming tokens.
@@ -44,6 +59,12 @@ pub enum CompanionCommand {
         /// told "running" while its request sits in a channel has been told the one thing it
         /// most needs to be right.
         job: Option<String>,
+        /// Where to say whether a model produced the answer, for callers that must not show a
+        /// fallback as one.
+        ///
+        /// Only [`CompanionHandle::ask`] passes one. The chat UI shows the offline notice from
+        /// its own wiring, and a submitted job's subscriber is the board.
+        model: Option<Sender<bool>>,
     },
     /// Count a conversation turn — one that began with the person's words and was answered.
     ///
@@ -293,11 +314,24 @@ impl CompanionHandle {
     /// The worker streams tokens for the chat UI; a caller over RPC wants one reply, so the
     /// stream is drained here. `__REPLACE__` means the next token supersedes everything so far,
     /// which is how the worker reports an error mid-stream.
-    pub fn ask(&self, prompt: String, timeout: std::time::Duration) -> Result<String, String> {
+    ///
+    /// A turn the offline responder served comes back as [`AskError::NoModel`], not as its
+    /// canned text: the caller would show that text as the answer, and apps acted on it. A
+    /// turn that panicked comes back as [`AskError::Failed`] carrying the failure text, for
+    /// the same reason: `Ok` from here is always a model's words.
+    pub fn ask(&self, prompt: String, timeout: std::time::Duration) -> Result<String, AskError> {
         let (token_tx, token_rx) = crossbeam_channel::unbounded();
+        // The worker sends whether a model produced the turn just before the end-of-turn
+        // sentinel, so by the time the stream above is over this signal has arrived.
+        let (model_tx, model_rx) = crossbeam_channel::bounded(1);
         self.cmd_tx
-            .send(CompanionCommand::SendMessage { text: prompt, token_tx, job: None })
-            .map_err(|_| "companion worker is not running".to_string())?;
+            .send(CompanionCommand::SendMessage {
+                text: prompt,
+                token_tx,
+                job: None,
+                model: Some(model_tx),
+            })
+            .map_err(|_| AskError::Failed("companion worker is not running".to_string()))?;
 
         let deadline = std::time::Instant::now() + timeout;
         let mut answer = String::new();
@@ -305,7 +339,7 @@ impl CompanionHandle {
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
-                return Err("companion timed out".to_string());
+                return Err(AskError::Failed("companion timed out".to_string()));
             }
             match token_rx.recv_timeout(left) {
                 Ok(token) if token == "__DONE__" => break,
@@ -319,13 +353,20 @@ impl CompanionHandle {
                     }
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    return Err("companion timed out".to_string())
+                    return Err(AskError::Failed("companion timed out".to_string()))
                 }
                 // The sender went away: whatever arrived is all there is.
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
         }
-        Ok(answer)
+        match model_rx.try_recv() {
+            Ok(true) => Ok(answer),
+            Ok(false) => Err(AskError::NoModel),
+            // No signal: the turn never reached the point where the worker knows — it panicked
+            // mid-stream, and the text above is TURN_FAILED_REPLY. That is a report about the
+            // turn, not the model's words, and an `Ok` would put it in a document.
+            Err(_) => Err(AskError::Failed(answer)),
+        }
     }
 
     /// Search the companion's memory.
@@ -393,6 +434,7 @@ impl CompanionHandle {
                 text,
                 token_tx,
                 job: Some(receipt.ticket.clone()),
+                model: None,
             })
             .map_err(|_| "companion worker is not running".to_string())?;
         Ok(receipt)
@@ -569,7 +611,12 @@ impl CompanionBridge {
         let (token_tx, token_rx) = crossbeam_channel::unbounded();
         if self
             .cmd_tx
-            .send(CompanionCommand::SendMessage { text, token_tx: token_tx.clone(), job: None })
+            .send(CompanionCommand::SendMessage {
+                text,
+                token_tx: token_tx.clone(),
+                job: None,
+                model: None,
+            })
             .is_err()
         {
             tracing::error!("Companion worker thread is dead — cannot send message");
@@ -798,8 +845,13 @@ fn worker_loop(
             tracing::error!(reason = %why, "Companion unavailable — answering every request with this");
             online.store(false, Ordering::Relaxed);
             while let Ok(cmd) = cmd_rx.recv() {
-                if let CompanionCommand::SendMessage { token_tx, .. } = cmd {
+                if let CompanionCommand::SendMessage { token_tx, model, .. } = cmd {
                     let _ = token_tx.send(format!("__REPLACE__{why}"));
+                    // No companion at all is the no-model case, not an answer: a caller blocked
+                    // in `ask` must not carry this text away as one.
+                    if let Some(tx) = model {
+                        let _ = tx.send(false);
+                    }
                 }
             }
             return;
@@ -966,7 +1018,7 @@ fn worker_loop(
                 crate::recipes::record(&recipe_id, outcome.map(|a| a.message));
                 recipes_dirty = true;
             }
-            Ok(CompanionCommand::SendMessage { text, token_tx, job }) => {
+            Ok(CompanionCommand::SendMessage { text, token_tx, job, model }) => {
                 // A turn can create, run or change a recipe through its tools.
                 recipes_dirty = true;
                 // Work that arrived without a ticket gets one here, and that is not bookkeeping:
@@ -1103,6 +1155,12 @@ fn worker_loop(
                         // V22: Use response.offline_mode to track LLM status
                         let ok = !response.offline_mode;
                         online.store(ok, Ordering::Relaxed);
+                        // Tell a caller blocked in `ask` whether a model answered this turn,
+                        // while the fact is still the one being stored: it must not take the
+                        // offline responder's canned text away as the model's words.
+                        if let Some(tx) = &model {
+                            let _ = tx.send(ok);
+                        }
                         if response.offline_mode {
                             tracing::info!("Response served by offline responder");
                         }
@@ -3010,5 +3068,86 @@ mod bond_property_tests {
             "a recorded event must also fire the recipe triggers naming it, or Event triggers \
              are stored and never happen. Arm as written:\n{record}"
         );
+    }
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use super::*;
+
+    /// A real `CompanionHandle` around a stub worker: it serves one message and stops, doing
+    /// what the real worker does at the end of a turn — text on the token channel, the model
+    /// signal, then the sentinel.
+    ///
+    /// The real worker needs a companion, a model and a Slint event loop, so what is pinned
+    /// here is the contract `ask` has with it, which is the part that changed.
+    fn stub(
+        served: impl Fn(&Sender<String>, &Option<Sender<bool>>) + Send + 'static,
+    ) -> CompanionHandle {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<CompanionCommand>();
+        std::thread::spawn(move || {
+            while let Ok(cmd) = cmd_rx.recv() {
+                if let CompanionCommand::SendMessage { token_tx, model, .. } = cmd {
+                    served(&token_tx, &model);
+                }
+            }
+        });
+        CompanionHandle {
+            cmd_tx,
+            online: Arc::new(AtomicBool::new(true)),
+            board: crate::jobs::Board::new(),
+        }
+    }
+
+    fn done(token_tx: &Sender<String>, model: &Option<Sender<bool>>, answered: bool) {
+        if let Some(tx) = model {
+            let _ = tx.send(answered);
+        }
+        let _ = token_tx.send("__DONE__".to_string());
+    }
+
+    /// The defect this pins: a turn the offline responder served used to come back as `Ok`
+    /// holding its canned text, and apps showed that text as the model's answer — Documents
+    /// offered to replace the document with it.
+    #[test]
+    fn a_turn_the_offline_responder_served_is_an_error_not_an_answer() {
+        let handle = stub(|token_tx, model| {
+            let _ = token_tx.send("Here is a canned reply that reads plausibly.".to_string());
+            done(token_tx, model, false);
+        });
+        match handle.ask("anything".to_string(), std::time::Duration::from_secs(10)) {
+            Err(AskError::NoModel) => {}
+            other => panic!("a fallback turn must not come back as an answer; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_turn_a_model_served_still_comes_back_as_its_text() {
+        let handle = stub(|token_tx, model| {
+            let _ = token_tx.send("The model's ".to_string());
+            let _ = token_tx.send("answer.".to_string());
+            done(token_tx, model, true);
+        });
+        let got = handle
+            .ask("anything".to_string(), std::time::Duration::from_secs(10))
+            .expect("a model's answer is an answer");
+        assert_eq!(got, "The model's answer.");
+    }
+
+    /// A turn that panicked mid-stream never reaches the point where the worker sends the
+    /// model signal, and its text is `TURN_FAILED_REPLY` — a report about the turn, not the
+    /// model's words. `Ok` would hand apps that sentence to show, or insert, as an answer:
+    /// the canned-text defect wearing a different hat.
+    #[test]
+    fn a_turn_that_panicked_is_an_error_carrying_the_failure_text() {
+        let handle = stub(|token_tx, _model| {
+            let _ = token_tx.send("__REPLACE__".to_string());
+            let _ = token_tx.send(TURN_FAILED_REPLY.to_string());
+            let _ = token_tx.send("__DONE__".to_string());
+        });
+        match handle.ask("anything".to_string(), std::time::Duration::from_secs(10)) {
+            Err(AskError::Failed(reason)) => assert_eq!(reason, TURN_FAILED_REPLY),
+            other => panic!("a turn with no model signal must not come back as an answer; got {other:?}"),
+        }
     }
 }
