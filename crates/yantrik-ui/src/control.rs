@@ -173,6 +173,32 @@ fn list_of(names: &[&str]) -> String {
     }
 }
 
+/// The names `describe shell` puts in its "{...} not running" sentence.
+///
+/// The candidates are the machine rail's records — a service the manager says failed or
+/// stopped — but the record is the manager's account of what *it* started, not the machine's
+/// account of what answers. Notes is the standing case: the app keeps its own store and never
+/// asks for notes-service, so the record stayed "stopped, on demand" beside an open Notes
+/// window and a `yos describe notes` that answered. The headline built from it told every
+/// mind, first thing, that notes was not running; Hermes believed it and refused to describe
+/// the app at all (#34). So a name leaves the sentence the moment anything answers it: an
+/// open window with that app id (`open_apps`), or a live socket (`socket_up`, which the
+/// caller extends to the app's own surface — what `yos describe <name>` actually reaches).
+/// A name nothing answers is genuinely not running, trouble or not, and stays; the full
+/// `services` array keeps carrying the raw records for a caller that wants the manager's side.
+fn not_running<'a>(
+    services: &'a [serde_json::Value],
+    open_apps: &[&str],
+    socket_up: impl Fn(&str) -> bool,
+) -> Vec<&'a str> {
+    services
+        .iter()
+        .filter(|s| matches!(s["status"].as_str(), Some("failed") | Some("stopped")))
+        .filter_map(|s| s["id"].as_str())
+        .filter(|id| !open_apps.contains(id) && !socket_up(id))
+        .collect()
+}
+
 /// How much of the conversation `describe` reports, newest last.
 ///
 /// The desktop could be asked a question by an agent and then had no way to tell it what came
@@ -283,8 +309,11 @@ pub fn publish(
             // refreshed while the desktop screen is showing, so a describe from any other screen
             // reported "0 windows open" even with apps running — the registry is refreshed by
             // launches and exits, not by which screen is up, so it is right everywhere.
-            let open: Vec<serde_json::Value> = crate::windows::shell_windows()
-                .into_iter()
+            // Held as a list, not just as the published array: the summary below asks it which
+            // apps are standing open, because a window answers for its service's name.
+            let windows = crate::windows::shell_windows();
+            let open: Vec<serde_json::Value> = windows
+                .iter()
                 .map(|w| {
                     serde_json::json!({
                         "title": w.title,
@@ -308,13 +337,15 @@ pub fn publish(
                     .collect()
             };
 
-            let down: Vec<&str> = services
-                .iter()
-                .filter(|s| {
-                    matches!(s["status"].as_str(), Some("failed") | Some("stopped"))
-                })
-                .filter_map(|s| s["id"].as_str())
-                .collect();
+            // Which names the record says are down, minus the ones the machine itself
+            // contradicts: an open window, or a socket that answers — the service's own, or
+            // the app's surface, which is what a caller reaches when it describes the app.
+            // See `not_running` for why the record alone lied (#34).
+            let open_apps: Vec<&str> = windows.iter().map(|w| w.app_id.as_str()).collect();
+            let down: Vec<&str> = not_running(&services, &open_apps, |id| {
+                yantrik_app_runtime::service::is_up(id)
+                    || yantrik_app_runtime::service::is_up(&format!("app-{id}"))
+            });
 
             // What the Files screen is showing. A directory listing is the thing an agent
             // most often needed and could not get without photographing the window.
@@ -2115,6 +2146,103 @@ mod lock_grade_tests {
              `yos ls` and a mind reading `describe` all show this sentence, and \"(the app \
              publishes no description for this action)\" is what the card in #215 said. \
              Declaration as written:\n{declaration}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod summary_running_tests {
+    //! The headline said "notes and perception not running" beside a window list that named
+    //! Notes and a `describe notes` that answered: the sentence was built from what the
+    //! ServiceManager started, and Notes — which keeps its own store and never asks for
+    //! notes-service — left that record at "stopped, on demand" for as long as it was open.
+    //! Hermes read the headline and refused to describe the app (#34).
+    use super::not_running;
+    use serde_json::json;
+
+    fn record(id: &str, status: &str) -> serde_json::Value {
+        json!({ "id": id, "status": status, "note": "on demand" })
+    }
+
+    /// A stopped or failed name that the machine answers is not "not running", whichever
+    /// way it is answered: a window for Notes, a socket for calendar, nothing for perception.
+    #[test]
+    fn a_name_the_machine_answers_is_never_called_not_running() {
+        let services = [
+            record("notes", "stopped"),
+            record("calendar", "stopped"),
+            record("perception", "stopped"),
+        ];
+        let open_apps = ["notes", "terminal"];
+        let socket_up = |id: &str| id == "calendar";
+        assert_eq!(
+            not_running(&services, &open_apps, socket_up),
+            vec!["perception"],
+            "only the name nothing answers belongs in the sentence"
+        );
+    }
+
+    /// Trouble still counts when nothing answers: a failed service and a stopped one stay,
+    /// and a running record is not the headline's business either way.
+    #[test]
+    fn a_name_nothing_answers_still_shows() {
+        let services = [
+            record("weather", "failed"),
+            record("email", "stopped"),
+            record("network", "running"),
+        ];
+        let socket_up = |_id: &str| false;
+        assert_eq!(not_running(&services, &[], socket_up), vec!["weather", "email"]);
+    }
+
+    /// The sentence itself, the way a person — and Hermes — read it.
+    #[test]
+    fn answered_names_drop_out_of_the_read_aloud_list() {
+        let services = [
+            record("calendar", "stopped"),
+            record("email", "stopped"),
+            record("notes", "stopped"),
+            record("perception", "stopped"),
+        ];
+        // The September machine: Calendar, Email and Notes open; nothing serves perception.
+        let open_apps = ["calendar", "email", "notes"];
+        let socket_up = |_id: &str| false;
+        let down = not_running(&services, &open_apps, socket_up);
+        assert_eq!(super::list_of(&down), "perception");
+    }
+
+    /// The pure rule only holds if `describe` feeds it the live accounts. Pinned against the
+    /// source, the way the other describe wirings are: the candidate list must come through
+    /// `not_running` with both open windows and both sockets — the service's own name and the
+    /// app's `app-` surface, which is the one `yos describe <name>` resolves first.
+    #[test]
+    fn describe_builds_the_sentence_from_what_answers() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path).expect("control.rs is readable");
+        let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
+        let from = src
+            .find("let down: Vec<&str> = not_running(")
+            .expect("`describe` builds its not-running list through `not_running`");
+        let end = src[from..].find("});").expect("the call ends") + 3;
+        let wiring = &src[from..from + end];
+        assert!(
+            wiring.contains("open_apps"),
+            "open windows are one of the accounts:\n{wiring}"
+        );
+        assert!(
+            wiring.contains("service::is_up(id)"),
+            "the service's own socket is the next:\n{wiring}"
+        );
+        assert!(
+            wiring.contains("\"app-{id}\""),
+            "so is the app's surface — `yos describe notes` reaches `app-notes`, and the \
+             headline must not call it not running while it answers:\n{wiring}"
+        );
+        // The windows list the ids are taken from is the same merged one the headline's
+        // `open` count and the published `windows` array use, so the two can never disagree.
+        assert!(
+            src.contains("let windows = crate::windows::shell_windows();"),
+            "`describe` must consult the launch-registry window list for the open apps"
         );
     }
 }
