@@ -2809,6 +2809,12 @@ export component App inherits Window {
 
                     for item in root.pending-approvals : ApprovalCard {
                         data: item;
+                        // The room this corner actually has: from the card's top edge (one sp-4
+                        // under the status bar) down to one sp-4 above the taskbar. A card that
+                        // grew past it would run its buttons under the taskbar, which is the
+                        // same failure the Lens had in #218 — the details scroll instead.
+                        height-limit: root.height - Theme.status-bar-height - Theme.taskbar-height
+                            - 2 * Theme.sp-4;
                         allow => { root.approval-allow(item.id); }
                         allow-session => { root.approval-allow-session(item.id); }
                         deny => { root.approval-deny(item.id); }

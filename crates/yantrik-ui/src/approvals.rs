@@ -159,6 +159,47 @@ fn clip_at_word(text: &str, max: usize) -> String {
     format!("{head}… ({} characters in full)", text.chars().count())
 }
 
+/// How much of a first sentence the card shows as its one-line summary.
+///
+/// A first sentence is short by definition; this is only the case of a description with no
+/// sentence end in it at all, where [`summary_of`] falls back to the whole text and the word
+/// bound has to do the cutting. Two hundred characters is three lines on the card at most.
+const SUMMARY_CHARS: usize = 200;
+
+/// The first sentence of a published description, for the card's one line (#218).
+///
+/// The card the live tour hit carried `run_recipe`'s whole paragraph — protocol detail about
+/// `describe shell` → `recipes` → `formations` — where a person needs one line. Published
+/// actions have no separate short field for a person (the `summary` in a `View` describes the
+/// APP, not an action), so the card takes the description's first sentence, which is the
+/// sentence that says what the action does; the rest of the paragraph stays on the card under
+/// "show more", and whole in `describe` for minds.
+///
+/// A sentence ends at a period followed by the end of the text, or by whitespace and a capital
+/// — how the next sentence starts. A period a lowercase word continues from is inside the
+/// sentence, so the periods of "e.g." do not cut it short, and neither does the one in "0.5".
+/// A description with no sentence end in it is its own first sentence.
+pub fn first_sentence(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    for (at, c) in chars.iter().enumerate() {
+        let ends = *c == '.'
+            && chars.get(at + 1).map_or(true, |next| {
+                next.is_whitespace() && chars.get(at + 2).map_or(true, |after| after.is_uppercase())
+            });
+        if ends {
+            return chars[..=at].iter().collect();
+        }
+    }
+    text.trim().to_string()
+}
+
+/// The one person-facing line the card leads with: the first sentence of the app's own
+/// description, bounded at a word so a description with no period in it cannot make the card
+/// grow past the block that shows it.
+pub fn summary_of(purpose: &str) -> String {
+    clip_at_word(&first_sentence(purpose), SUMMARY_CHARS)
+}
+
 /// What this machine established about the caller, beside what the caller said about itself.
 ///
 /// Deliberately plain data, with no `/proc` knowledge in it. The walking and the judging live in
@@ -303,6 +344,10 @@ pub struct Card {
     pub action: String,
     pub grade: String,
     pub purpose: String,
+    /// The first sentence of `purpose`, bounded at [`SUMMARY_CHARS`] — the one line a person
+    /// reads first, while the paragraph it came from stays on the card under "show more".
+    /// See [`summary_of`].
+    pub summary: String,
     /// The arguments, one `key: value` entry each, in the order a person reads them (sorted, the
     /// same order the grant is bound in — so what is shown and what is bound cannot drift).
     ///
@@ -744,6 +789,7 @@ impl Store {
                 action: record.action.clone(),
                 grade: record.grade.clone(),
                 purpose: clip_at_word(&record.purpose, PURPOSE_CHARS),
+                summary: summary_of(&record.purpose),
                 args: args_rows(&record.args),
                 warning: warning_for(&record.grade, &record.purpose),
                 can_session: may_offer_session_rule(&record.grade, &record.purpose),
@@ -1421,6 +1467,12 @@ mod approvals_tests {
         let back = ask_studio(&mut store, now, serde_json::json!({"kind": "fake"}));
         assert_eq!(back.purpose, SET_BACKEND_PURPOSE, "every character, none of them replaced");
         assert!(!back.purpose.contains("characters in full"));
+        assert_eq!(
+            back.summary,
+            "Choose where pictures are made from now on, and write that choice down in the \
+             configuration file.",
+            "and its first sentence is the card's one line"
+        );
         assert!(
             back.purpose.contains("will leave this machine and may cost money."),
             "the clause the cut fell on is the one that says why to care"
@@ -1467,6 +1519,85 @@ mod approvals_tests {
         // so the bound is a bound and not a wish.
         let unbroken = "x".repeat(PURPOSE_CHARS + 5);
         assert_eq!(clip_at_word(&unbroken, PURPOSE_CHARS), clip(&unbroken, PURPOSE_CHARS));
+    }
+
+    /// What `shell.run_recipe` publishes, verbatim — the description on the card the live tour
+    /// could not answer (#218): a paragraph of protocol detail where a person needs one line.
+    const RUN_RECIPE_PURPOSE: &str = "Start a recipe with its inputs: a built-in one by its name \
+        or id, or one a mind made. A formation — Council, Red team, Build, Writers' room; \
+        `describe shell` → `recipes` → `formations` lists each with its `inputs` — hands work to \
+        roles from the agent catalog: each works in its own pane on the Agents screen, its row \
+        saying which recipe it works for, and the recipe's stages light on the Recipes screen as \
+        they answer; its result comes as the recipe's completion. Answers with the run's id; \
+        `describe shell` → `recipes` shows how it goes, and `cancel_recipe` stops it and lets its \
+        agents go. An agent another agent or a recipe started cannot start a formation.";
+
+    /// The card leads with one person-facing line: the app's own first sentence. The paragraph
+    /// still reaches the card whole — this adds the line, it does not cut what was there.
+    #[test]
+    fn approvals_the_card_leads_with_one_person_facing_line() {
+        assert_eq!(
+            first_sentence(RUN_RECIPE_PURPOSE),
+            "Start a recipe with its inputs: a built-in one by its name or id, or one a mind made."
+        );
+        // A period inside a sentence does not end it: the cut is at a period the text goes on
+        // from, which is how "e.g." and "0.5" survive.
+        assert_eq!(
+            first_sentence("Runs e.g. the Council, then reports."),
+            "Runs e.g. the Council, then reports."
+        );
+        assert_eq!(first_sentence("Waits 0.5 s, then retries."), "Waits 0.5 s, then retries.");
+        // A description with no sentence end in it is its own first sentence; empty stays empty.
+        assert_eq!(first_sentence("Delete an event"), "Delete an event");
+        assert_eq!(first_sentence(""), "");
+
+        // A runaway first sentence is bounded at a word, and says it was cut.
+        let runaway = summary_of(&"word ".repeat(100));
+        assert!(runaway.contains("characters in full"), "{runaway}");
+        assert!(runaway.chars().count() < SUMMARY_CHARS + 40, "{} chars", runaway.chars().count());
+
+        let mut store = Store::new();
+        let now = Instant::now();
+        let id = store
+            .request(
+                "pi 0.87",
+                for_agent("pi:c-7f3a91"),
+                "shell",
+                "run_recipe",
+                args(serde_json::json!({"recipe": "writers-room"})),
+                "sensitive",
+                RUN_RECIPE_PURPOSE,
+                now,
+                "12:03",
+            )
+            .unwrap()
+            .id;
+        let card = store.pending(now).into_iter().find(|c| c.id == id).expect("the card");
+        assert_eq!(
+            card.summary,
+            "Start a recipe with its inputs: a built-in one by its name or id, or one a mind made."
+        );
+        assert_eq!(card.purpose, RUN_RECIPE_PURPOSE, "the paragraph still reaches the card whole");
+        assert!(card.purpose.starts_with(card.summary.as_str()));
+
+        // An action with nothing published gets an empty line, not a made-up one; the card hides
+        // the row, and its purpose block already says "(the app publishes no description…)".
+        let none = store
+            .request(
+                "pi 0.87",
+                for_agent("pi:c-7f3a91"),
+                "shell",
+                "agent_run",
+                args(serde_json::json!({"command": "true"})),
+                "sensitive",
+                "",
+                now,
+                "12:04",
+            )
+            .unwrap()
+            .id;
+        let card = store.pending(now).into_iter().find(|c| c.id == none).expect("the card");
+        assert_eq!(card.summary, "");
     }
 
     #[test]

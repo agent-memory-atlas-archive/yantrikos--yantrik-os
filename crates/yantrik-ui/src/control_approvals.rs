@@ -1295,6 +1295,11 @@ pub(crate) fn row_for(card: Card) -> crate::ApprovalRequest {
         } else {
             card.purpose.into()
         },
+        // The first sentence of that description, and the line the card leads with (#218):
+        // the whole paragraph is for the person who wants it, under "show more", not the first
+        // thing everybody has to read. Empty when the app publishes nothing — the card hides
+        // the row and the purpose block above says so instead.
+        summary: card.summary.into(),
         // One model entry per argument, one single-line `Text` per entry on the card. A
         // newline-joined string was the first shape of this and it is what made the card's
         // height something the layout had to discover by measuring wrapped text.
@@ -2091,20 +2096,24 @@ mod control_approvals_tests {
         use crate::approvals::{Card, Status, Verified};
         use slint::Model;
 
-        let card = |verified: Verified| Card {
-            id: "appr-1".into(),
-            requester: "an unnamed caller".into(),
-            verified,
-            app: "files".into(),
-            action: "delete".into(),
-            grade: "dangerous".into(),
-            purpose: "Delete a file. It is not recoverable.".into(),
-            args: vec!["name: taxes.pdf".into()],
-            warning: "The app says this cannot be undone.".into(),
-            can_session: false,
-            status: Status::Pending,
-            record: String::new(),
-            age_secs: 3,
+        let card = |verified: Verified| {
+            let purpose = "Delete a file. It is not recoverable.";
+            Card {
+                id: "appr-1".into(),
+                requester: "an unnamed caller".into(),
+                verified,
+                app: "files".into(),
+                action: "delete".into(),
+                grade: "dangerous".into(),
+                purpose: purpose.into(),
+                summary: crate::approvals::summary_of(purpose),
+                args: vec!["name: taxes.pdf".into()],
+                warning: "The app says this cannot be undone.".into(),
+                can_session: false,
+                status: Status::Pending,
+                record: String::new(),
+                age_secs: 3,
+            }
         };
 
         let nothing = super::row_for(card(Verified::default()));
@@ -2179,6 +2188,12 @@ mod control_approvals_tests {
         for shown in [&back, &away] {
             assert_eq!(shown.purpose.as_str(), purpose, "the sentence, whole");
             assert!(!shown.purpose.contains("characters in full"), "{}", shown.purpose);
+            assert_eq!(
+                shown.summary.as_str(),
+                "Choose where pictures are made from now on, and write that choice down in the \
+                 configuration file.",
+                "the row also carries the one line the card leads with (#218)"
+            );
             // Nothing in red. The shell knows the grade and the app's sentence; it does not know
             // what `fake` or `openai-images` means to Studio, so a hosted-service warning of its
             // own would be the OS vouching for something it has not established — in the safe
