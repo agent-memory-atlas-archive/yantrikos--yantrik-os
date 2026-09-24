@@ -677,21 +677,44 @@ export component ApprovalCard inherits Rectangle {
             // subtle border: Deny is still the ordinary filled button and the easy default, and
             // the standing yes costs the most deliberate aim of the three. Not drawn at all for
             // `dangerous`, or for an action the app says cannot be undone — see `can-session`.
-            if root.data.can-session : Rectangle {
-                height: 30px;
-                border-radius: Theme.r-md;
-                background: session-ta.has-hover ? Theme.hover-fill : transparent;
-                border-width: 1px;
-                border-color: Theme.border-subtle;
+            //
+            // The line under the button is there because the rule it mints is desktop-wide
+            // (#182): a session rule is an (app, action) pair in the mode file, every door reads
+            // the same file, and no door asks which agent the rule was minted for — so it covers
+            // every mind on this desktop, and the card must say so plainly rather than let "for
+            // this session" read as "for this agent's session". Scoping the rule to the asking
+            // agent means changing the decision table in every implementation that replays it —
+            // the shell, the Python SDK, the bridge, the Blender addon — and the vectors they
+            // all replay; until then, the honest sentence is the fix. One fixed single-line
+            // row, like every caption above, so the card's height stays arithmetic (#218).
+            if root.data.can-session : VerticalLayout {
+                spacing: Theme.sp-1;
 
-                session-ta := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.allow-session(); }
+                Rectangle {
+                    height: 30px;
+                    border-radius: Theme.r-md;
+                    background: session-ta.has-hover ? Theme.hover-fill : transparent;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+
+                    session-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.allow-session(); }
+                    }
+                    Text {
+                        text: "Allow " + root.data.app + "." + root.data.action + " for this session";
+                        color: Theme.text-dim;
+                        font-size: Theme.fs-caption;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: no-wrap;
+                        overflow: elide;
+                    }
                 }
                 Text {
-                    text: "Allow " + root.data.app + "." + root.data.action + " for this session";
+                    text: "this rule covers every mind on the desktop, not only the one asking";
                     color: Theme.text-dim;
-                    font-size: Theme.fs-caption;
+                    font-size: Theme.fs-micro;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                     wrap: no-wrap;

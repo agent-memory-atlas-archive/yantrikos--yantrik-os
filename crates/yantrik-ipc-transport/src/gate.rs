@@ -370,9 +370,30 @@ pub fn mode_from(text: &str, now_unix: u64) -> Mode {
 
 // ── Spending a grant ────────────────────────────────────────────────
 
-/// How this process spends a grant: the token and the exact triple in, and either it is burned
-/// or the reason it was not.
-type Spender = dyn Fn(&str, &str, &str, &serde_json::Value) -> Result<(), String> + Send + Sync;
+/// Who the call that carries a grant arrived as (#182): the agent token that rode beside `args`
+/// on the `app.act`, and the pid the kernel stamped on that call.
+///
+/// A grant is for the agent it was asked for, and the shell can only hold that line if the spend
+/// says who is spending. The pid travels with the token because the shell believes a token only
+/// from the process tree it was issued into — and by the time a forwarded spend reaches the
+/// shell, the socket peer is the app doing the forwarding, not the process the token rode in
+/// from. So the app hands over the kernel's own account of that process, and the shell resolves
+/// the token against it the same way it would have resolved it at the door.
+#[derive(Clone, Debug)]
+pub struct CallingAgent {
+    /// What rode beside `args`, never among them.
+    pub token: String,
+    /// The kernel's account of the process that sent it — `None` when the call arrived with no
+    /// process the kernel could name, which the shell's resolver refuses as it always has.
+    pub pid: Option<u32>,
+}
+
+/// How this process spends a grant: the id and the exact triple in, who the call arrived as
+/// (`None` for a caller that runs as no agent), and either it is burned or the reason it was not.
+type Spender =
+    dyn Fn(&str, &str, &str, &serde_json::Value, Option<&CallingAgent>) -> Result<(), String>
+        + Send
+        + Sync;
 
 static SPENDER: OnceLock<Box<Spender>> = OnceLock::new();
 
@@ -386,12 +407,12 @@ const SHELL: &str = "app-shell";
 
 /// Install the function this process spends grants with.
 ///
-/// The shell calls this once, with its own `approvals::consume`, because the shell IS the store
-/// — and asking itself over its own socket from its own RPC thread is a call that cannot be
-/// answered until the call returns. Every other process leaves it unset and spends grants over
-/// the shell's socket. A second call changes nothing: the store does not move.
+/// The shell calls this once, with its own in-process spender over the store it IS — asking
+/// itself over its own socket from its own RPC thread is a call that cannot be answered until
+/// the call returns. Every other process leaves it unset and spends grants over the shell's
+/// socket. A second call changes nothing: the store does not move.
 pub fn spend_grants_with(
-    spend: impl Fn(&str, &str, &str, &serde_json::Value) -> Result<(), String>
+    spend: impl Fn(&str, &str, &str, &serde_json::Value, Option<&CallingAgent>) -> Result<(), String>
         + Send
         + Sync
         + 'static,
@@ -410,22 +431,52 @@ pub fn spend_grants_with(
 /// stands behind this call, so before the grant is written to the socket the process listening on
 /// it must be a `yantrik-ui` binary (`owner::must_be_the_shell`, from `SO_PEERCRED` and
 /// `/proc/<pid>/exe`). Anything else that bound `app-shell.sock` is refused and never sees it.
-fn spend_grant(id: &str, app: &str, action: &str, args: &serde_json::Value) -> Result<(), String> {
+///
+/// The agent the call arrived as rides along (#182): without it the shell cannot tell whose
+/// grant this is being spent for, and a request id handed to another agent would spend it. A
+/// caller that runs as no agent — the person's own `yos act` — sends `None` and is let through
+/// as before.
+fn spend_grant(
+    id: &str,
+    app: &str,
+    action: &str,
+    args: &serde_json::Value,
+    caller: Option<&CallingAgent>,
+) -> Result<(), String> {
     if let Some(spend) = SPENDER.get() {
-        return spend(id, app, action, args);
+        return spend(id, app, action, args, caller);
     }
     SyncRpcClient::for_service(SHELL)
         .with_timeout(GRANT_ROUNDTRIP)
         .expecting_peer(crate::owner::must_be_the_shell)
-        .call(
-            "app.act",
-            serde_json::json!({
-                "action": "consume_approval",
-                "args": { "request_id": id, "app": app, "action": action, "args_json": args },
-            }),
-        )
+        .call("app.act", spend_params(id, app, action, args, caller))
         .map(|_| ())
         .map_err(|e| e.message)
+}
+
+/// The `app.act` that carries a spend to the shell: `consume_approval` with the grant's exact
+/// triple, and the calling agent beside it (#182) — the token where every agent token rides,
+/// beside `args`, and the pid the kernel stamped on the call it arrived in among the arguments,
+/// because the peer of this forwarded call is the app and the shell checks a token against the
+/// process tree it was issued into.
+fn spend_params(
+    id: &str,
+    app: &str,
+    action: &str,
+    args: &serde_json::Value,
+    caller: Option<&CallingAgent>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "action": "consume_approval",
+        "args": { "request_id": id, "app": app, "action": action, "args_json": args },
+    });
+    if let Some(caller) = caller {
+        params[AGENT_TOKEN] = serde_json::json!(caller.token);
+        if let Some(pid) = caller.pid {
+            params["args"]["caller_pid"] = serde_json::json!(pid);
+        }
+    }
+    params
 }
 
 /// The grant an `app.act` call carries: the `request_id` the shell answered `request_approval`
@@ -502,6 +553,10 @@ impl Authority {
     /// refusal and the grant is left for the shell to hold. Any grant attached is spent once the
     /// ceiling passes, whether or not the mode would have asked: a replayed, swapped or invented
     /// grant ends the call here, in the shell's words, rather than being ignored.
+    ///
+    /// `caller` is the agent this call arrived as, handed to the spend so the shell can refuse a
+    /// grant spent by an agent it was not asked for (#182); `None` for a caller that runs as no
+    /// agent.
     pub fn spend(
         &mut self,
         id: &str,
@@ -509,9 +564,10 @@ impl Authority {
         action: &str,
         graded: &str,
         args: &serde_json::Value,
+        caller: Option<&CallingAgent>,
     ) -> Result<(), String> {
         within_ceiling(&self.ceiling, app_id, action, graded)?;
-        spend_grant(id, app_id, action, args).map_err(|why| {
+        spend_grant(id, app_id, action, args, caller).map_err(|why| {
             format!(
                 "GRANT: `{id}` does not authorise {app_id}.{action} — {why} Nothing was run; \
                  a grant covers one action, once, with the arguments the person was shown."
@@ -590,9 +646,10 @@ pub fn permit(
     purpose: &str,
     args: &serde_json::Value,
     grant: Option<&str>,
+    caller: Option<&CallingAgent>,
 ) -> Result<(), String> {
     if let Some(id) = grant {
-        authority.spend(id, app_id, action, graded, args)?;
+        authority.spend(id, app_id, action, graded, args, caller)?;
     }
     decide(authority, app_id, action, graded, purpose)
 }
@@ -687,7 +744,7 @@ mod tests {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
-            spend_grants_with(move |id, app, action, args| {
+            spend_grants_with(move |id, app, action, args, _caller| {
                 if !id.starts_with("ok-") {
                     return Err(format!("no approval request `{id}`."));
                 }
@@ -810,17 +867,17 @@ mod tests {
         let args = serde_json::json!({"pid": 42});
 
         let mut tight = at("sensitive", "ask");
-        let err = permit(&mut tight, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"))
+        let err = permit(&mut tight, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"), None)
             .unwrap_err();
         assert!(err.starts_with("CEILING:"), "the ceiling's refusal, not the grant's: {err}");
         assert!(!tight.granted);
 
         let mut raised = at("dangerous", "ask");
-        permit(&mut raised, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"))
+        permit(&mut raised, "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"), None)
             .expect("the grant was left unspent by the refusal, so it holds now");
         assert!(raised.granted);
 
-        let err = permit(&mut at("dangerous", "ask"), "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"))
+        let err = permit(&mut at("dangerous", "ask"), "system-monitor", "kill_process", "dangerous", KILL, &args, Some("ok-154"), None)
             .unwrap_err();
         assert!(err.starts_with("GRANT:") && err.contains("already used"), "and holds once: {err}");
     }
@@ -829,7 +886,7 @@ mod tests {
     fn a_grant_that_does_not_hold_ends_the_call_in_the_shells_words() {
         spend_through_a_stand_in_shell();
         let err = permit(&mut at("dangerous", "bypass"), "system-monitor", "kill_process", "dangerous", KILL,
-                         &serde_json::json!({"pid": 42}), Some("made-up"))
+                         &serde_json::json!({"pid": 42}), Some("made-up"), None)
             .unwrap_err();
         assert!(err.starts_with("GRANT: `made-up` does not authorise system-monitor.kill_process"), "{err}");
         assert!(err.contains("no approval request"), "{err}");
@@ -858,9 +915,39 @@ mod tests {
         assert_eq!(agent_token_of(&params, &mut args).as_deref(), Some("tok-1"));
         assert_eq!(args, serde_json::json!({"pid": 42}));
         let mut authority = at("dangerous", "ask");
-        permit(&mut authority, "system-monitor", "kill_process", "dangerous", KILL, &args, grant_of(&params).as_deref())
+        permit(&mut authority, "system-monitor", "kill_process", "dangerous", KILL, &args, grant_of(&params).as_deref(), None)
             .expect("bound to {\"pid\": 42}, which is what the shell was handed");
         assert!(authority.granted);
+    }
+
+    /// #182: the spend an app forwards says who is spending — the token beside `args`, where it
+    /// rode on the call it arrived in, and the pid the kernel stamped on that call among the
+    /// arguments, because the peer of the forwarded call is the app and the shell checks a token
+    /// against the process tree it was issued into. A spend for a caller that runs as no agent
+    /// keeps the shape it always had: nothing to say.
+    #[test]
+    fn a_forwarded_spend_names_the_agent_it_is_spending_for() {
+        let args = serde_json::json!({"pid": 42});
+        let plain = spend_params("appr-1", "system-monitor", "kill_process", &args, None);
+        assert_eq!(plain, serde_json::json!({
+            "action": "consume_approval",
+            "args": { "request_id": "appr-1", "app": "system-monitor", "action": "kill_process",
+                      "args_json": args },
+        }));
+
+        let caller = CallingAgent { token: "tok-b".into(), pid: Some(4242) };
+        let forwarded = spend_params("appr-1", "system-monitor", "kill_process", &args, Some(&caller));
+        assert_eq!(forwarded[AGENT_TOKEN], "tok-b", "the token beside `args`, where it always rides");
+        assert_eq!(forwarded["args"]["caller_pid"], 4242);
+        assert_eq!(forwarded["args"]["args_json"], args, "the grant's arguments are untouched");
+        assert!(forwarded["args"].get(AGENT_TOKEN).is_none(), "no token among the arguments");
+
+        // A token whose call arrived with no process the kernel could name is forwarded without a
+        // pid, and the shell's resolver refuses it as it always has — never spent as no-agent.
+        let pidless = spend_params("appr-1", "system-monitor", "kill_process", &args,
+                                   Some(&CallingAgent { token: "tok-b".into(), pid: None }));
+        assert_eq!(pidless[AGENT_TOKEN], "tok-b");
+        assert!(pidless["args"].get("caller_pid").is_none());
     }
 
     #[test]

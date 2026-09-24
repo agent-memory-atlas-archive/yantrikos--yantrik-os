@@ -159,8 +159,8 @@ use std::time::Duration;
 use yantrik_ipc_contracts::email::ServiceError;
 use yantrik_ipc_transport::server::{PeerCred, RpcServer, ServiceHandler};
 use yantrik_surface::{
-    finish_later, next_action_id, refusal, ActCall, AgentTokenScope, CallerScope, Later, LaterScope,
-    LocalRegistry, NO_SUCH_METHOD, UNANSWERED,
+    finish_later, next_action_id, refusal, ActCall, Later, LaterScope, LocalRegistry,
+    NO_SUCH_METHOD, UNANSWERED,
 };
 
 /// How long the RPC thread waits for the UI thread to answer.
@@ -260,8 +260,8 @@ pub fn other_names(app_id: &str) -> &'static [&'static str] {
 // the event loop as the handler.
 pub use yantrik_ipc_transport::gate::{
     boot_id, configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, permit,
-    proc_start_ticks, spend_grants_with, unrecoverable, Authority, Mode, AGENT_TOKEN, DEFAULT_MODE,
-    LADDER, MODES, MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
+    proc_start_ticks, spend_grants_with, unrecoverable, Authority, CallingAgent, Mode, AGENT_TOKEN,
+    DEFAULT_MODE, LADDER, MODES, MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
 };
 #[cfg(test)]
 use yantrik_ipc_transport::gate::{agent_token_of, ceiling_from, DEFAULT_CEILING};
@@ -301,7 +301,7 @@ thread_local! {
 // The handler signature is untouched: fourteen apps build `|args| { ... }` closures and none of
 // them has to change. A handler that cares reads `control::caller()`; every other one never
 // learns this exists.
-pub use yantrik_surface::{agent_token, answer_later, caller, Caller};
+pub use yantrik_surface::{agent_token, answer_later, caller, AgentTokenScope, Caller, CallerScope};
 
 /// The grade THIS app publishes for one of its own actions.
 ///
@@ -535,7 +535,7 @@ impl ControlRpc {
                 // grant, which is one a person has just answered a card for. Should the app
                 // regrade the action between this read and the dispatch, the dispatch still
                 // decides on the grade it publishes then; the most that race can cost is the grant.
-                call.spend_grant(&mut authority, &self.app_id, || {
+                call.spend_grant(&mut authority, &self.app_id, who, || {
                     let (name, args, reach) = (call.action.clone(), call.args.clone(), reach.clone());
                     on_ui_thread(who, move |reg| {
                         reg.within_reach(reach.as_ref(), &name, &args).and_then(|()| reg.check_call(&name, &args))
@@ -1179,7 +1179,9 @@ mod tests {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
-            spend_grants_with(move |id, app, action, args| {
+            spend_grants_with(move |id, app, action, args, caller| {
+                SPEND_CALLERS.lock().unwrap_or_else(|e| e.into_inner())
+                    .push((id.to_string(), caller.map(|c| (c.token.clone(), c.pid))));
                 if let Some((a, x, bound)) = allowed(id) {
                     if (a.as_str(), x.as_str(), &bound) != (app, action, args) {
                         return Err(format!("`{id}` was approved for {a}.{x} with {bound}, and this call carries {args}."));
@@ -1214,6 +1216,10 @@ mod tests {
         std::sync::Mutex::new(Vec::new());
     /// The allowed grants the stand-in has spent.
     static SPENT_GRANTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    /// Who each spend the stand-in saw arrived as (#182): id → the caller's claim, `None` for a
+    /// call that runs as no agent.
+    static SPEND_CALLERS: std::sync::Mutex<Vec<(String, Option<(String, Option<u32>)>)>> =
+        std::sync::Mutex::new(Vec::new());
 
     fn allow(id: &str, app: &str, action: &str, args: serde_json::Value) {
         ALLOWED.lock().unwrap_or_else(|e| e.into_inner()).push((id.into(), app.into(), action.into(), args));
@@ -1232,10 +1238,20 @@ mod tests {
         SPENT_GRANTS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|g| g == id)
     }
 
+    /// Who the stand-in was told is spending `id` (#182); `None` when it never saw the spend.
+    fn spend_caller(id: &str) -> Option<Option<(String, Option<u32>)>> {
+        SPEND_CALLERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(g, _)| g == id)
+            .map(|(_, c)| c.clone())
+    }
+
     /// Spend `id` for `blender.render`, graded `sensitive`, under `authority`, the way the RPC
     /// thread does before anything reaches the UI thread.
     fn spend_for_render(mut authority: Authority, id: &str, args: &serde_json::Value) -> Result<Authority, String> {
-        authority.spend(id, "blender", "render", "sensitive", args).map(|()| authority)
+        authority.spend(id, "blender", "render", "sensitive", args, None).map(|()| authority)
     }
 
     /// A grant is spent on the RPC thread, before anything reaches the UI thread: a spent one,
@@ -1797,5 +1813,40 @@ mod tests {
         // And the grant the two refusals carried was never spent.
         spend_for_render(open(), "fresh-socket", &serde_json::json!({"out": "x.png"}))
             .expect("nothing spent `fresh-socket` on the way to either refusal");
+    }
+
+    /// #182: a grant is for the agent it was asked for, and the shell can only hold that line if
+    /// the spend says who is spending. So when a call that carries an agent token spends a grant
+    /// through this dispatch, the shell is told the token — beside `args`, as it arrived — and
+    /// the pid the kernel stamped on the call: the process the token rode in from, checked the
+    /// same way the shell would have checked it at its own door. A call with no token spends as
+    /// no agent, exactly as the person's own `yos act` always has.
+    #[cfg(unix)]
+    #[test]
+    fn a_spend_names_the_agent_whose_call_it_rides_on() {
+        spend_through_a_stand_in_shell();
+        let args = serde_json::json!({"command": "ls"});
+        allow("spend-182-agent", "caller-test", "echo", args.clone());
+        allow("spend-182-person", "caller-test", "echo", args.clone());
+
+        let act = |grant: &str, token: Option<&str>| {
+            let mut params = serde_json::json!({ "action": "echo", "args": args, "grant": grant });
+            if let Some(token) = token {
+                params["agent_token"] = serde_json::json!(token);
+            }
+            call(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "app.act", "params": params}).to_string())
+        };
+
+        let reply = act("spend-182-agent", Some("tok-182"));
+        assert_eq!(reply["result"]["result"]["agent_token"], "tok-182", "the act itself ran: {reply}");
+        assert_eq!(
+            spend_caller("spend-182-agent"),
+            Some(Some(("tok-182".to_string(), Some(std::process::id())))),
+            "the spend carries the token and the kernel's account of the process it arrived in"
+        );
+
+        let reply = act("spend-182-person", None);
+        assert!(reply["result"].is_object(), "the same act with no token still runs: {reply}");
+        assert_eq!(spend_caller("spend-182-person"), Some(None), "no token, no agent claimed");
     }
 }

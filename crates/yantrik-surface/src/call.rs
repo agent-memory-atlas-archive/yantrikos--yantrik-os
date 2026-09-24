@@ -3,7 +3,7 @@
 use serde_json::Value;
 use yantrik_ipc_contracts::control_surface::View;
 use yantrik_ipc_contracts::email::ServiceError;
-use yantrik_ipc_transport::gate::{agent_token_of, grant_of, Authority};
+use yantrik_ipc_transport::gate::{agent_token_of, grant_of, Authority, CallingAgent};
 use yantrik_ipc_transport::reach::{self, Reach};
 
 use crate::context::{off_the_reactor, Caller, Later};
@@ -108,7 +108,9 @@ impl ActCall {
     ///    answers with the grade the surface publishes for the action now.
     /// 2. the ceiling, on that grade (#154) — inside `Authority::spend`.
     /// 3. the spend, against the arguments as sent: what the person saw on the card is what the
-    ///    grant is bound to, never the converted form the handler will read.
+    ///    grant is bound to, never the converted form the handler will read — and for the agent
+    ///    this call arrived as (`who` is the kernel's account of it), because a grant asked for
+    ///    by one agent is not another's to spend (#182).
     ///
     /// `checked` is called only when there is a grant: for a window it is a round trip to the UI
     /// thread, paid only by a call a person has just answered a card for.
@@ -116,11 +118,19 @@ impl ActCall {
         &self,
         authority: &mut Authority,
         app_id: &str,
+        who: Option<Caller>,
         checked: impl FnOnce() -> Result<&'static str, ServiceError>,
     ) -> Result<(), ServiceError> {
         let Some(id) = self.grant.as_deref() else { return Ok(()) };
         let grade = checked()?;
-        authority.spend(id, app_id, &self.action, grade, &self.args).map_err(refusal)
+        // The token beside `args` and the pid the kernel stamped on the call it arrived in:
+        // together they are who the shell resolves the spend against. No token, no claim — the
+        // person's own `yos act` spends as no agent, as it always has.
+        let caller = self.agent_token.as_ref().map(|token| CallingAgent {
+            token: token.clone(),
+            pid: who.and_then(|c| u32::try_from(c.pid).ok()).filter(|pid| *pid > 0),
+        });
+        authority.spend(id, app_id, &self.action, grade, &self.args, caller.as_ref()).map_err(refusal)
     }
 
     /// The dispatch's own record of the call. The audit log is the shell's job.
@@ -214,7 +224,7 @@ mod tests {
             mode: yantrik_ipc_transport::gate::Mode::named("ask"),
             granted: false,
         };
-        call.spend_grant(&mut authority, "notes", || panic!("asked for a grade with no grant to spend"))
+        call.spend_grant(&mut authority, "notes", None, || panic!("asked for a grade with no grant to spend"))
             .unwrap();
         assert!(call.reach().unwrap().is_none(), "no token, no reach, no file read");
         assert!(!authority.granted);

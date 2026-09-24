@@ -173,6 +173,7 @@ impl Store {
                     approvals_asked: 0,
                     approvals_answered: 0,
                     pending_approvals: Vec::new(),
+                    job_waits: false,
                     seq,
                     touched: now,
                     next_turn: 1,
@@ -300,6 +301,46 @@ impl Store {
         }
         set_state(agent, state, now);
         self.mark(i);
+    }
+
+    /// Which agents have a terminal job sitting at its prompt, as the shell's tick sees it
+    /// (#182). A job waiting on the person's keyboard waits on the person exactly like an
+    /// approval card does, and the list sorts the two alike: an agent with any job waiting goes
+    /// to `WaitingForYou`, and comes back when none waits by the same rule a settled card uses.
+    /// A repeated unchanged report changes nothing — the tick runs four times a second, and a
+    /// job still waiting is not news, so it neither re-stamps `since` nor redraws the row.
+    pub fn jobs_waiting(&mut self, waiting: &[AgentId]) {
+        for id in waiting {
+            self.known(id);
+        }
+        let now = self.now();
+        for i in 0..self.agents.len() {
+            let waits = waiting.contains(&self.agents[i].meta.id);
+            let agent = &mut self.agents[i];
+            if waits {
+                if agent.job_waits && agent.state == State::WaitingForYou {
+                    continue;
+                }
+                agent.job_waits = true;
+                set_state(agent, State::WaitingForYou, now);
+            } else if agent.job_waits {
+                agent.job_waits = false;
+                // The card's own rule for coming back, with nothing left holding the row.
+                if agent.state == State::WaitingForYou && agent.pending_approvals.is_empty() {
+                    let next = if agent.cards().any(Card::running) {
+                        State::RunningTool
+                    } else if agent.open_turn().is_some() {
+                        State::Thinking
+                    } else {
+                        State::Idle
+                    };
+                    set_state(agent, next, now);
+                }
+            } else {
+                continue;
+            }
+            self.mark(i);
+        }
     }
 
     // ── Beyond the five: what the text path and the approval card add ──
@@ -511,7 +552,9 @@ impl Store {
             // belongs in the session.
             None => turn_for_verified(agent, now).items.push(Item::Note(line)),
         }
-        if agent.state == State::WaitingForYou && agent.pending_approvals.is_empty() {
+        // Back to work only when nothing else holds the row: a terminal job still at its prompt
+        // keeps it waiting on the person (#182), and `jobs_waiting` brings it back instead.
+        if agent.state == State::WaitingForYou && agent.pending_approvals.is_empty() && !agent.job_waits {
             let next = if agent.cards().any(Card::running) {
                 State::RunningTool
             } else if agent.open_turn().is_some() {
@@ -1313,6 +1356,9 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
         approvals_asked: record.approvals_asked,
         approvals_answered: record.approvals_answered,
         pending_approvals: Vec::new(),
+        // A job that waited before a restart is not waiting now: nothing survived to hold the
+        // prompt. The shell's next tick says otherwise if one somehow is.
+        job_waits: false,
         seq: 0,
         touched: record.touched,
         next_turn: record.next_turn,
@@ -1969,5 +2015,51 @@ mod tests {
         let dir = Path::new("/data/agents");
         assert_eq!(file_for(dir, &id("pi:c3")), dir.join("pi:c3.jsonl"));
         assert_eq!(file_for(dir, &id("../../etc/passwd")), dir.join("_.._etc_passwd.jsonl"));
+    }
+
+    /// A terminal job at its prompt is the person's to answer (#182): the row goes to
+    /// WaitingForYou and the Active list sorts it top, exactly like an approval card's. While
+    /// the job waits, a settled card does not send the row back to work; when the job moves on,
+    /// it goes back by the card's own rule.
+    #[test]
+    fn a_terminal_job_at_its_prompt_waits_on_the_person_like_a_card() {
+        let (mut s, clock) = store();
+        let pi = id("pi:c-182");
+        let ds = id("deepseek:c-182");
+        s.open_turn(&pi, "deploy the notes service");
+        s.open_turn(&ds, "tidy the photos folder");
+        assert_eq!(s.list(Tab::Active, None)[0], ds, "newest first, until somebody waits");
+
+        s.jobs_waiting(&[pi.clone()]);
+        assert_eq!(s.agent(&pi).unwrap().state, State::WaitingForYou);
+        assert_eq!(s.list(Tab::Active, None)[0], pi, "the row waiting on the person sorts top");
+        assert!(s.list(Tab::NeedsYou, None).contains(&pi), "and Needs you holds it");
+
+        // The tick reports the same job four times a second: still waiting is not news.
+        let (rev, since) = (s.revision(), s.agent(&pi).unwrap().since);
+        clock.fetch_add(1, Ordering::SeqCst);
+        s.jobs_waiting(&[pi.clone()]);
+        assert_eq!((s.revision(), s.agent(&pi).unwrap().since), (rev, since), "unchanged, so nothing redraws");
+
+        // A card asked and settled while the job waits leaves the row where it is.
+        s.approval_asked(&pi, "appr-182", "files.move");
+        s.approval_settled(&pi, "appr-182", ApprovalOutcome::Allowed, "");
+        assert_eq!(s.agent(&pi).unwrap().state, State::WaitingForYou, "the job is still at its prompt");
+
+        // The job moves on: back to work by the card's own rule — its turn is still open.
+        s.jobs_waiting(&[]);
+        assert_eq!(s.agent(&pi).unwrap().state, State::Thinking);
+
+        // With no job waiting, a settled card sends the row back as it always has.
+        s.approval_asked(&pi, "appr-183", "files.move");
+        s.approval_settled(&pi, "appr-183", ApprovalOutcome::Denied, "");
+        assert_eq!(s.agent(&pi).unwrap().state, State::Thinking);
+
+        // A waiting job for an agent the store has not heard of makes it known.
+        let hermes = id("hermes:c-182");
+        s.jobs_waiting(&[hermes.clone()]);
+        assert_eq!(s.agent(&hermes).unwrap().state, State::WaitingForYou);
+        s.jobs_waiting(&[]);
+        assert_eq!(s.agent(&hermes).unwrap().state, State::Idle, "no turn, no card, nothing to go back to");
     }
 }

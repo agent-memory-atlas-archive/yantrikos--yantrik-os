@@ -271,6 +271,11 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             agents::store().save_if_due();
             let seen = Seen::now();
             sync_with_host(&seen);
+            // A terminal job sitting at its prompt waits on the person exactly like an approval
+            // card does (#182): its row goes to WaitingForYou, and the Active list sorts it top.
+            let waiting_jobs = waiting_input_jobs();
+            let waiting: Vec<AgentId> = waiting_jobs.iter().map(|(agent, _)| agent.clone()).collect();
+            agents::store().jobs_waiting(&waiting);
             let Some(ui) = weak.upgrade() else { return };
             // The Lens offers "open in Agents" while its conversation is an attached mind's.
             let lens_agent = crate::wire::harness::host()
@@ -283,7 +288,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 refresh(&ui, &state, false);
             }
             refresh_windows(&ui, &state);
-            tell_the_person(&ui, &state, &mut watch.borrow_mut());
+            tell_the_person(&ui, &state, &mut watch.borrow_mut(), &waiting_jobs);
         });
     }
     // The timer lives as long as the shell, the idiom every wire module uses.
@@ -1482,17 +1487,21 @@ fn stopped(turn: &crate::agents::model::Turn) -> bool {
     })
 }
 
+/// The agent terminal's jobs sitting at a prompt: `(agent, job)`.
+fn waiting_input_jobs() -> Vec<(AgentId, String)> {
+    crate::control_agent_terminal::running_jobs()
+        .into_iter()
+        .filter(|(_, job)| job["waiting_for_input"] == true)
+        .map(|(agent, job)| (agent, job["job"].as_str().unwrap_or_default().to_string()))
+        .collect()
+}
+
 /// Send what the person should hear, except about what they are already looking at: the agent
 /// selected on the Agents screen, one in a window of its own, or — with the Lens open — the
 /// Lens's own mind, whose answer and cards are in front of them there. A "needs you" is also held
 /// while the Lens is open at all: its approval card is in the Lens, and a toast would land on it.
-fn tell_the_person(ui: &App, state: &Shared, watch: &mut Watch) {
-    let waiting_jobs: Vec<(AgentId, String)> = crate::control_agent_terminal::running_jobs()
-        .into_iter()
-        .filter(|(_, job)| job["waiting_for_input"] == true)
-        .map(|(agent, job)| (agent, job["job"].as_str().unwrap_or_default().to_string()))
-        .collect();
-    let notices = agents::store().read(|s| watch.changes(s, &waiting_jobs));
+fn tell_the_person(ui: &App, state: &Shared, watch: &mut Watch, waiting_jobs: &[(AgentId, String)]) {
+    let notices = agents::store().read(|s| watch.changes(s, waiting_jobs));
     if notices.is_empty() {
         return;
     }
@@ -1766,6 +1775,21 @@ mod tests {
         assert!(app.contains("lens-open-in-agents => { root.lens-open-in-agents(); }"));
         let this = read("src/wire/agents.rs");
         assert!(this.contains("ui.on_lens_open_in_agents(") && this.contains("feed::main_agent(&host.active_id())"));
+    }
+
+    /// The session row says what its rule actually covers (#182). The rule is an (app, action)
+    /// pair in the mode file; every door reads that file for every mind, and none asks which
+    /// agent the rule was minted for — so "for this session" on its own reads as "for this
+    /// agent's session", and it is not. Until the rule itself is scoped to the asking agent,
+    /// the card must say plainly that the person is arming the whole desktop.
+    #[test]
+    fn the_session_row_says_its_rule_covers_every_mind() {
+        let lens = read("../yantrik-ui-slint/ui/components/intent_lens.slint");
+        let row = lens.split("if root.data.can-session :").nth(1).expect("the session row is drawn");
+        assert!(
+            row.lines().take(45).any(|l| l.contains("this rule covers every mind on the desktop, not only the one asking")),
+            "the session row says whose sessions the rule covers, inside the row that mints it"
+        );
     }
 
     #[test]

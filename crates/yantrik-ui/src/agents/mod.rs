@@ -18,7 +18,8 @@
 //! | `text(&id, delta)` | the host, for each `harness.chunk` |
 //! | `event(&id, &Event, Provenance)` | the host's `Chunk::Event` (`Reported`); anything the shell saw itself (`Verified`) |
 //! | `command_started / command_output / command_finished` | the agent terminal: `Jobs::on_output(agent, job, bytes)` and `Jobs::on_finish` (`Verified`, bytes as read off the PTY) |
-//! | `set_state(&id, State)` | the host (`HarnessGone`), the approval card and the terminal (`WaitingForYou`) |
+//! | `set_state(&id, State)` | the host (`HarnessGone`) and the approval card (`WaitingForYou`) |
+//! | `jobs_waiting(&[AgentId])` | the shell's tick: which agents have a terminal job at a prompt (`WaitingForYou`, #182) |
 //! | `approval_asked / approval_answered / approval_settled` | `control_approvals`: a request carrying this agent's token, and how it came out ([`settle_approvals`]) |
 //! | `remove_agent(&id)` | Close |
 //!
@@ -122,6 +123,10 @@ impl Agents {
 
     pub fn set_state(&self, id: &AgentId, state: State) {
         self.lock().set_state(id, state)
+    }
+
+    pub fn jobs_waiting(&self, waiting: &[AgentId]) {
+        self.lock().jobs_waiting(waiting)
     }
 
     pub fn command_started(&self, id: &AgentId, job: &str, command: &str, cwd: &str) {

@@ -142,7 +142,7 @@ pub(crate) mod stand_in {
     fn install() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            crate::gate::spend_grants_with(|id, app, action, args| {
+            crate::gate::spend_grants_with(|id, app, action, args, _caller| {
                 let allowed = ALLOWED.lock().unwrap_or_else(|e| e.into_inner());
                 let Some((_, a, x, bound)) = allowed.iter().find(|(g, ..)| g == id) else {
                     return Err(format!("no approval request `{id}`."));

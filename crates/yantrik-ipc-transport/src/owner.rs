@@ -51,6 +51,24 @@ pub fn is_shell_binary(exe: &str) -> bool {
     exe.starts_with('/') && crate::peer_identity::basename(exe) == SHELL_BINARY
 }
 
+/// Whether `exe` — `/proc/<pid>/exe` resolved — is one of the desktop's own binaries: an app
+/// (`yantrik-*`) or a Rust service (`*-service`).
+///
+/// These are the only callers trusted to forward the kernel pid of another call (the
+/// `caller_pid` on `consume_approval`, #182), because they are the only ones that ever hold one:
+/// the peer of a forwarded spend is the forwarder, not the process the token arrived from. The
+/// rule is the file name, not the directory — as in [`is_shell_binary`], so an installed binary
+/// and a developer's own build both pass. A test binary (`yantrik_ui-…`, underscore) is
+/// deliberately none of them: a test is a direct caller and is judged by its own pid.
+pub fn is_own_binary(exe: &str) -> bool {
+    let exe = exe.strip_suffix(DELETED).unwrap_or(exe);
+    if !exe.starts_with('/') {
+        return false;
+    }
+    let name = crate::peer_identity::basename(exe);
+    name.starts_with("yantrik-") || name.ends_with("-service")
+}
+
 /// The program behind a pid, as `/proc` says it, or `None` when it cannot be read.
 #[cfg(target_os = "linux")]
 pub fn exe_of(pid: i32) -> Option<String> {
@@ -262,6 +280,35 @@ mod tests {
             "/opt/yantrik/bin/yantrik-ui (deleted) (deleted)",
         ] {
             assert!(!is_shell_binary(exe), "{exe}");
+        }
+    }
+
+    /// The forwarders an agent's spend comes through — apps and Rust services, installed or a
+    /// developer's own build, live or replaced underfoot — are trusted with a forwarded pid
+    /// (#182). Everything else is a direct caller: the python `yos` execs, a Blender or
+    /// LibreOffice addon, a test binary (`yantrik_ui-…`, underscore), a bare name with no
+    /// directory, nothing at all.
+    #[test]
+    fn the_desktops_own_binaries_are_the_forwarders() {
+        for exe in [
+            "/opt/yantrik/bin/yantrik-notes",
+            "/home/yantrik/targets/bs4/release/yantrik-files",
+            "/opt/yantrik/bin/weather-service",
+            "/opt/yantrik/bin/system-monitor-service",
+            "/opt/yantrik/bin/yantrik-ui",
+            "/opt/yantrik/bin/yantrik-notes (deleted)",
+        ] {
+            assert!(is_own_binary(exe), "{exe}");
+        }
+        for exe in [
+            "/usr/bin/python3.12",
+            "/opt/blender/blender",
+            "/build/targets/bs4/release/deps/yantrik_ui-f7c63d24e57ff600",
+            "yantrik-notes",
+            "-service",
+            "",
+        ] {
+            assert!(!is_own_binary(exe), "{exe}");
         }
     }
 
