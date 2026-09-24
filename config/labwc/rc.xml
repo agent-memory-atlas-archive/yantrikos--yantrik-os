@@ -82,6 +82,7 @@
       Alt+F4             close                    (Windows, GNOME)
       Super+Left/Right   snap to half             (Windows Aero Snap, GNOME)
       Super+Up/Down      maximize / restore       (Windows, GNOME)
+      Super+D            show desktop, then back  (Windows)
       Super+E            files                    (Windows Explorer)
       Super+L            lock                     (Windows, GNOME)
       Ctrl+Alt+T         terminal                 (Ubuntu)
@@ -138,7 +139,7 @@
     </keybind>
     <keybind key="W-d">
       <action name="Execute">
-        <command>/opt/yantrik/bin/yos act shell show_screen screen=desktop</command>
+        <command>/opt/yantrik/bin/yos act shell show_desktop</command>
       </action>
     </keybind>
     <keybind key="C-A-t">

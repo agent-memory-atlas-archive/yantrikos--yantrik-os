@@ -6,7 +6,9 @@
 // is actually doing; the other is not. Everything installed lives behind the launcher button.
 //
 // Layout, left to right:
-//   [⊞ Apps] │ window │ window │ window …                              │ [● Companion 2]
+//   [⊞ Apps] │ window │ window │ window …                    │ [● Chat · Hermes 2] │ ▕
+//
+// The last strip, in the corner, is Show desktop (#241): the place a thrown pointer lands.
 //
 // Windows come from the compositor (wlrctl toplevel list via windows.rs) already refreshed on
 // the 3s poll; the first entry is the most recently focused, and is drawn as active.
@@ -41,10 +43,13 @@ export component Taskbar inherits Rectangle {
     in property <int> companion-count: 0;
     in property <bool> companion-online: true;
     in property <string> companion-status: "idle";
+    // The mind the chat talks to, named on the Chat button: "Chat · Hermes". Empty: just "Chat".
+    in property <string> chat-with: "";
 
     callback open-launcher();
     callback activate-window(string);
     callback open-companion();
+    callback show-desktop();
 
     height: Theme.taskbar-height;
     // Glass, for the same reason the status bar is: the wallpaper should carry on
@@ -56,7 +61,9 @@ export component Taskbar inherits Rectangle {
 
     HorizontalLayout {
         padding-left: Theme.sp-2;
-        padding-right: Theme.sp-2;
+        // Room on the right for Show desktop, which is outside this layout so it can reach the
+        // very corner (below).
+        padding-right: 12px + Theme.sp-2;
         padding-top: 4px;
         padding-bottom: 4px;
         spacing: Theme.sp-2;
@@ -216,8 +223,10 @@ export component Taskbar inherits Rectangle {
                                   : root.companion-status == "thinking" ? Theme.accent-light
                                   : Theme.accent;
                     }
+                    // "Chat", not "Companion": the Lens talks to whichever mind is answering, and
+                    // a person looking for the chat looks for that word (#241).
                     Text {
-                        text: "Companion";
+                        text: root.chat-with == "" ? "Chat" : "Chat · " + root.chat-with;
                         color: Theme.text-primary;
                         font-size: Theme.fs-caption;
                         vertical-alignment: center;
@@ -231,6 +240,26 @@ export component Taskbar inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+
+    // ── Show desktop ──
+    //
+    // The bottom-right corner, where a pointer thrown at the edge lands: every app window away
+    // and the desktop shown, and pressed again, the same windows back (#241). Outside the layout
+    // above, which is padded, so it reaches the last pixel on both edges; a narrow strip with a
+    // hairline on its left, the shape Windows gave the same button, found by aim, not by reading.
+    desk := TouchArea {
+        x: parent.width - self.width;
+        y: 0;
+        width: 12px;
+        height: parent.height;
+        mouse-cursor: pointer;
+        clicked => { root.show-desktop(); }
+        Rectangle {
+            width: 100%; height: 100%;
+            background: desk.has-hover ? Theme.hover-fill : transparent;
+            Rectangle { x: 0; width: 1px; height: 60%; y: parent.height * 0.2; background: Theme.separator; }
         }
     }
 }
