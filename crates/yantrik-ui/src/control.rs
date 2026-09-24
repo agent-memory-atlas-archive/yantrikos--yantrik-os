@@ -1137,7 +1137,10 @@ pub fn publish(
                 }
                 let host = crate::wire::harness::host()
                     .ok_or_else(|| "the harness host is not running".to_string())?;
-                host.set_active(&id)?;
+                // The same refusal the Settings page's *Use this* gets: a mind whose process
+                // is gone has already left `harnesses`, and choosing it anyway is answered
+                // with what is attached rather than a quiet success (#67).
+                crate::wire::harness::choose(host, &id)?;
                 // The same memory the Settings screen writes. A choice made here is a choice
                 // about the machine, and an agent that switches minds should not have its
                 // decision quietly undone by the next restart any more than a person should.
