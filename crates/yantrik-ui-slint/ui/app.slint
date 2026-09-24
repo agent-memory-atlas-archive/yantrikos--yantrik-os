@@ -1154,6 +1154,13 @@ export component App inherits Window {
                 // first; opening it any other way (the ask bar, the orb, the taskbar anchor)
                 // does exactly these two lines.
                 if event.modifiers.control && (event.text == "k" || event.text == "K") {
+                    // Not from the lock or login screen (#203): these two lines used to walk
+                    // the shell off either one straight to the desktop with the Lens open and
+                    // no password, exactly what `yos act shell open_lens` did over the socket.
+                    // The key is swallowed rather than rejected so it reaches nothing else.
+                    if root.current-screen == 3 || root.current-screen == 32 {
+                        return accept;
+                    }
                     if root.current-screen != 1 {
                         root.current-screen = 1;
                         root.navigate(1);

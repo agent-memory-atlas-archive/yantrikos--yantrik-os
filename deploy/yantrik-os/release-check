@@ -632,9 +632,11 @@ def _agent_command():
 
 # ── last: what the run leaves behind ────────────────────────────────────────────────────────
 
-# Last of all, in every tier, so it sees what every check before it left. It ran in the middle of
-# ci, and the rc browser check that came later left its own page open in Chromium where nothing
-# looked (#190).
+# Last of every check that runs on an unlocked machine, in every tier, so it sees what every
+# check before it left. It ran in the middle of ci, and the rc browser check that came later
+# left its own page open in Chromium where nothing looked (#190). Only the locked-desktop check
+# comes after, and only because it must: it leaves the machine locked and nothing on this socket
+# can undo that, so anything that looked at the machine afterwards would see it through the lock.
 @check("no launch failed, no window is listed twice, and no window of the run's is left open")
 def _windows():
     def left_open():
@@ -658,6 +660,40 @@ def _windows():
     if msgs:
         raise Failed("; ".join(msgs))
     return "%d windows, none twice, none of the run's left open, no failed launch" % len(titles)
+
+
+@check("a locked desktop refuses to be taken anywhere")
+def _locked():
+    # #203: the login screen could be walked straight past — `yos act shell open_lens` took the
+    # desktop to the Lens with no credentials. Locked is a state now, held at the dispatch, and
+    # this is the check that it holds on a shipped machine. It runs last because it leaves the
+    # machine locked and nothing on this socket can undo that — which is the fix. The boottest's
+    # QEMU is thrown away afterwards; on a real machine a person unlocks at the keyboard, and the
+    # manual list already says so.
+    if state().get("screen") not in ("lock", "login"):
+        act("shell", "lock", timeout=15)
+        if not wait(lambda: state().get("screen") == "lock", 15):
+            raise Failed("shell.lock did not lock: screen is %r" % state().get("screen"))
+    st = state()
+    if st.get("locked") is not True:
+        raise Failed("a locked desktop does not say locked: true: %s" % json.dumps(st)[:200])
+    seen = []
+    for action, args in (("open_lens", {}), ("show_screen", {"screen": "desktop"})):
+        try:
+            act("shell", action, timeout=15, **args)
+            seen.append(("raw socket %s" % action, False, "it ran"))
+        except Exception as e:  # noqa: BLE001
+            seen.append(("raw socket %s" % action, "LOCKED:" in str(e), str(e)[:90]))
+        code, out = sh("yos act --no-ask shell %s%s"
+                       % (action, "".join(" %s=%s" % kv for kv in args.items())), timeout=30)
+        seen.append(("yos %s" % action, "LOCKED:" in out, out[:90]))
+    screen = state().get("screen")
+    open_doors = [d for d, refused, _ in seen if not refused]
+    if screen not in ("lock", "login"):
+        open_doors.append("the refusals did not hold the screen: %r" % screen)
+    if open_doors:
+        raise Failed("on a locked desktop: %s — %s" % (open_doors, seen))
+    return "open_lens and show_screen refused with LOCKED: over the socket and the CLI; the screen is still %s" % screen
 
 
 MANUAL = [

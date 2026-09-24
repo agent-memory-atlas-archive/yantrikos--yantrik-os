@@ -581,6 +581,17 @@ impl App {
         self
     }
 
+    /// A rule about this app's own state that every call to it is held to, whatever the action.
+    ///
+    /// The dispatch consults it before the arguments and the gate are read, and before a grant is
+    /// spent, so a rule belongs here rather than in each handler: an action added tomorrow is
+    /// held to it without its author having to remember. The shell's rule is the locked desktop
+    /// (#203). Runs on the UI thread.
+    pub fn state_rule(mut self, f: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) -> Self {
+        self.registry.set_state_rule(Box::new(f));
+        self
+    }
+
     /// One thing this app can be asked to do. Runs on the UI thread.
     pub fn action(
         mut self,
