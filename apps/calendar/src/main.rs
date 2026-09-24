@@ -1028,7 +1028,9 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
             Action::new("add_event", "Put something on the calendar")
                 .arg(Param::text("title"))
                 .arg(Param::text("date").describe("YYYY-MM-DD"))
-                .arg(Param::text("time").describe("HH:MM, 24-hour"))
+                .arg(Param::text("time")
+                    .describe("HH:MM, 24-hour; needed unless `all_day` is set")
+                    .optional())
                 .arg(Param::text("notes").optional())
                 // The form has no duration field and the template path already carries minutes,
                 // so the one caller that could say how long a thing runs was the one that could
@@ -1047,7 +1049,6 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 let ui = add_ui()?;
                 let title = args["title"].as_str().unwrap_or_default().trim().to_string();
                 let date = args["date"].as_str().unwrap_or_default().trim().to_string();
-                let time = args["time"].as_str().unwrap_or_default().trim().to_string();
                 let all_day = args["all_day"].as_bool().unwrap_or(false);
                 if title.is_empty() {
                     return Err("`title` is empty".into());
@@ -1057,9 +1058,10 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 if date.len() != 10 || date.matches('-').count() != 2 {
                     return Err(format!("`date` should look like 2026-09-06, not `{date}`"));
                 }
-                if !all_day && !time.contains(':') {
-                    return Err(format!("`time` should look like 14:30, not `{time}`"));
-                }
+                // Whether this call needed a `time` at all is decided here, not by the
+                // declaration: `time` is optional on the surface because an all-day event has
+                // no clock to give, but a timed one is nothing without it.
+                let time = views::added_clock(args["time"].as_str(), all_day)?;
                 let duration_min = match args.get("duration_min") {
                     None | Some(serde_json::Value::Null) => None,
                     Some(v) => Some(
