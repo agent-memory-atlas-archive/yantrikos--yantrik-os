@@ -110,6 +110,15 @@ const ARG_VALUE_CHARS: usize = 60;
 /// more to the point, in the grant, which is bound to all of them whatever the card had room for.
 const ARG_ROWS: usize = 8;
 
+/// How much of the "what the ids name" line the card shows before it stops.
+///
+/// It is drawn as one elided row beside the arguments, so its height is already fixed; this is
+/// the bound against the absurd — a name built from arguments an app made up by the kilometre —
+/// and it sits well above any event title a naming line on this machine carries. The card
+/// leads the person to the name, not past it: what the grant binds to is the arguments box, in
+/// full and bounded there.
+const TARGET_CHARS: usize = 160;
+
 /// How much of the action's own description the card shows before it stops.
 ///
 /// This was 240, on the belief that every published purpose on this machine is one sentence.
@@ -301,6 +310,15 @@ struct Record {
     canonical: String,
     grade: String,
     purpose: String,
+    /// The thing an id in the arguments names, in the app's own words — or empty. #54: a card
+    /// for `calendar.delete_event {"id": "01a0c718-…"}` said only the uuid, and a person cannot
+    /// answer "may this be deleted?" to a handle. The app publishes an id→name index on its
+    /// `describe`, and the card builder looks the arguments up in it here.
+    ///
+    /// Display only, and deliberately outside the grant: the binding is the arguments, byte for
+    /// byte (see [`Store::consume`]), so an id whose meaning the app later changes loosens
+    /// nothing the person allowed.
+    target: String,
     created: Instant,
     /// Wall-clock `HH:MM` for the transcript record. `Instant` cannot render as a time of day,
     /// and the record a person reads afterwards is about when, not about how long ago.
@@ -355,6 +373,12 @@ pub struct Card {
     /// single-line `Text` on the card. That is what makes the card's height a known number of
     /// lines instead of something the layout has to discover by measuring wrapped text.
     pub args: Vec<String>,
+    /// What the arguments name, in the app's own words — one line, or empty when the app
+    /// publishes no index of its ids. #54: the person who cannot answer "may
+    /// `delete_event {"id": "01a0c718-…"}?` run?" from a uuid reads this instead. It says
+    /// nothing about what the grant covers — the arguments box above is that, byte for byte —
+    /// and a cut one names its true length like every other bounded line on the card.
+    pub target: String,
     /// A sentence to put in front of the buttons, or empty. See [`warning_for`].
     pub warning: String,
     /// Whether the card may offer "Allow for this session" as a third choice. See
@@ -524,6 +548,11 @@ impl Store {
     ///
     /// `now` and `at` are passed in rather than read here so the tests can move the clock. The
     /// public wrappers below supply the real ones; nothing outside this module can pick a time.
+    ///
+    /// `target` is the one line saying what an id in the arguments names, worked out from the
+    /// target app's own index by whoever raises the card — see [`Card::target`]. It is not part
+    /// of the identity of the question either: the same action with the same arguments is the
+    /// same question however its ids read, whether or not the app has said why.
     #[allow(clippy::too_many_arguments)]
     pub fn request(
         &mut self,
@@ -534,6 +563,7 @@ impl Store {
         args: serde_json::Value,
         grade: &str,
         purpose: &str,
+        target: &str,
         now: Instant,
         at: &str,
     ) -> Result<Requested, String> {
@@ -602,6 +632,7 @@ impl Store {
             canonical,
             grade: grade.to_string(),
             purpose: purpose.trim().to_string(),
+            target: target.trim().to_string(),
             created: now,
             created_at: at.to_string(),
             decided: None,
@@ -791,6 +822,10 @@ impl Store {
                 purpose: clip_at_word(&record.purpose, PURPOSE_CHARS),
                 summary: summary_of(&record.purpose),
                 args: args_rows(&record.args),
+                // At a word, not at the bound: a cut in the middle of the name is the
+                // `PURPOSE_CHARS` mistake rebuilt — "13:0" and "13:00… " are not the same
+                // sentence about when the appointment is.
+                target: clip_at_word(&record.target, TARGET_CHARS),
                 warning: warning_for(&record.grade, &record.purpose),
                 can_session: may_offer_session_rule(&record.grade, &record.purpose),
                 status,
@@ -885,6 +920,7 @@ pub fn request(
     args: serde_json::Value,
     grade: &str,
     purpose: &str,
+    target: &str,
 ) -> Result<Requested, String> {
     locked().request(
         requester,
@@ -894,6 +930,7 @@ pub fn request(
         args,
         grade,
         purpose,
+        target,
         Instant::now(),
         &hhmm(),
     )
@@ -1022,6 +1059,7 @@ mod approvals_tests {
                 args(serde_json::json!({"id": "evt-3", "confirm": true})),
                 "sensitive",
                 "Delete an event from the calendar. It is not recoverable.",
+                "",
                 now,
                 "12:03",
             )
@@ -1184,6 +1222,7 @@ mod approvals_tests {
                     serde_json::json!({"id": format!("evt-{n}")}),
                     "sensitive",
                     "Delete an event.",
+                    "",
                     now,
                     "12:03",
                 )
@@ -1198,6 +1237,7 @@ mod approvals_tests {
                 serde_json::json!({"id": "evt-99"}),
                 "sensitive",
                 "Delete an event.",
+                "",
                 now,
                 "12:03",
             )
@@ -1219,6 +1259,7 @@ mod approvals_tests {
                 serde_json::json!({"id": "evt-3"}),
                 "sensitive",
                 "Delete an event.",
+                "",
                 now,
                 "12:03",
             )
@@ -1232,6 +1273,7 @@ mod approvals_tests {
                 serde_json::json!({"id": "evt-3"}),
                 "sensitive",
                 "Delete an event.",
+                "",
                 now,
                 "12:03",
             )
@@ -1262,6 +1304,7 @@ mod approvals_tests {
                 serde_json::json!({"id": "evt-3", "confirm": true}),
                 "sensitive",
                 "Delete an event.",
+                "",
                 now + Duration::from_secs(5),
                 "12:03",
             )
@@ -1278,6 +1321,7 @@ mod approvals_tests {
                 serde_json::json!({"id": "evt-9"}),
                 "sensitive",
                 "Delete an event.",
+                "",
                 now + Duration::from_secs(5),
                 "12:03",
             )
@@ -1293,6 +1337,7 @@ mod approvals_tests {
                 serde_json::json!({"id": "evt-3", "confirm": true}),
                 "sensitive",
                 "Delete an event.",
+                "",
                 now + DENIAL_QUIET + Duration::from_secs(1),
                 "12:03",
             )
@@ -1362,6 +1407,7 @@ mod approvals_tests {
                 serde_json::json!({"name": "taxes.pdf"}),
                 "dangerous",
                 "Delete a file. It is not recoverable.",
+                "",
                 now,
                 "12:03",
             )
@@ -1393,6 +1439,71 @@ mod approvals_tests {
             card.warning, "The app says this cannot be undone.",
             "the app's own sentence about recoverability has to reach the person"
         );
+        // Nothing in the store's own `ask` line resolved to a name, and that empty row stays
+        // empty rather than showing a placeholder.
+        assert_eq!(card.target, "");
+    }
+
+    /// #54: a person asked "may this be deleted?" about `{"id": "01a0c718-…"}` could not answer
+    /// from a handle. The app's naming index turns the id back into the appointment on a line
+    /// beside the arguments — and stays out of what the grant binds to.
+    #[test]
+    fn approvals_the_card_names_the_thing_not_the_handle() {
+        let mut store = Store::new();
+        let now = Instant::now();
+        let id = store
+            .request(
+                "hermes",
+                verified(),
+                "calendar",
+                "delete_event",
+                serde_json::json!({"id": "01a0c718-3931-7342-b9c7-8de36140ddb0"}),
+                "sensitive",
+                "Take an event off the calendar. It is not recoverable.",
+                "id 01a0c718… is \u{201c}Dentist, Fri 25 Sep 13:00\u{201d}",
+                now,
+                "12:03",
+            )
+            .unwrap()
+            .id;
+        let card = store.pending(now).into_iter().find(|c| c.id == id).unwrap();
+        assert_eq!(card.target, "id 01a0c718… is \u{201c}Dentist, Fri 25 Sep 13:00\u{201d}");
+        // One row, or the card's height stops being arithmetic.
+        assert!(!card.target.contains('\n'));
+
+        // The same question from the same agent, while it is still waiting, is one card however
+        // its ids read — the naming line cannot smuggle a second card onto the screen beside the
+        // first, because it is not part of what makes a question the question it is.
+        let again = store
+            .request(
+                "hermes",
+                verified(),
+                "calendar",
+                "delete_event",
+                serde_json::json!({"id": "01a0c718-3931-7342-b9c7-8de36140ddb0"}),
+                "sensitive",
+                "Take an event off the calendar. It is not recoverable.",
+                "a different sentence about the same event",
+                now,
+                "12:04",
+            )
+            .unwrap();
+        assert!(!again.fresh, "the repeat found the card already up, not a second one");
+        assert_eq!(again.id, id);
+
+        // A grant is bound to the arguments the person was shown, byte for byte — the name is a
+        // thing said about them, not another thing approved beside them. So consume reads the
+        // uuid alone, and the uuid alone is what decides it.
+        store.grant(&id, now, "12:05").unwrap();
+        store
+            .consume(
+                &id,
+                "calendar",
+                "delete_event",
+                &serde_json::json!({"id": "01a0c718-3931-7342-b9c7-8de36140ddb0"}),
+                now,
+            )
+            .expect("the name changes nothing the grant is bound to");
     }
 
     /// The card is a known number of lines, and nothing is hidden in silence.
@@ -1446,7 +1557,7 @@ mod approvals_tests {
     fn ask_studio(store: &mut Store, now: Instant, args: serde_json::Value) -> Card {
         let id = store
             .request("hermes", verified(), "studio", "set_backend", args, "sensitive",
-                SET_BACKEND_PURPOSE, now, "19:32")
+                SET_BACKEND_PURPOSE, "", now, "19:32")
             .unwrap()
             .id;
         store.pending(now).into_iter().find(|c| c.id == id).expect("the card")
@@ -1567,6 +1678,7 @@ mod approvals_tests {
                 args(serde_json::json!({"recipe": "writers-room"})),
                 "sensitive",
                 RUN_RECIPE_PURPOSE,
+                "",
                 now,
                 "12:03",
             )
@@ -1590,6 +1702,7 @@ mod approvals_tests {
                 "agent_run",
                 args(serde_json::json!({"command": "true"})),
                 "sensitive",
+                "",
                 "",
                 now,
                 "12:04",
@@ -1683,6 +1796,7 @@ mod approvals_tests {
                 "agent_run",
                 args(serde_json::json!({"command": "rm -rf build"})),
                 "sensitive",
+                "",
                 "",
                 now,
                 "12:03",

@@ -56,6 +56,8 @@ fn card(summary: &str) -> ApprovalRequest {
             "recipe: builtin_formation_council",
             "inputs: {\"question\": \"attack the plan to ship 0.4 on Friday\"}",
         ]),
+        // Both arguments name themselves; no handle on this card needs the app's words (#54).
+        target: "".into(),
         warning: "".into(),
         can_session: true,
         decision: "".into(),
