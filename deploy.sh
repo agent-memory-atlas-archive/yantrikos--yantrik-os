@@ -45,6 +45,21 @@ drop_shelved() {
     printf '%s' "$s" | tr -s ' ' | sed 's/^ *//; s/ *$//'
 }
 
+# ── Which apps this tree builds and deploys ──
+#
+# The app list used to be written down here twice — once in the packages to build and again in
+# the binaries to copy — and nothing checked either copy against the workspace. Arcade merged,
+# registered in every shell table, answered on its control surface, and `./deploy.sh` still
+# reported success without it: no package built it, and the copy loop skips a binary that is
+# not there. deploy/yantrik-os/app-bins.sh reads the apps/ members of Cargo.toml instead, so
+# an app added tomorrow is built and copied by this script with no edit to it.
+APP_BINS="$("$(cd "$(dirname "$0")" && pwd)/deploy/yantrik-os/app-bins.sh")" \
+    || fail "cannot determine which apps this tree builds"
+APPS="$(drop_shelved "$APP_BINS")"
+# The same set as cargo wants it: one `-p name` per app, shelf already dropped.
+APP_PACKAGES=""
+for app in $APPS; do APP_PACKAGES="$APP_PACKAGES -p $app"; done
+
 # Determine build profile
 PROFILE="release"
 PROFILE_FLAG="--release"
@@ -71,23 +86,17 @@ if [ "${1:-}" != "--skip-build" ]; then
             --exclude target --exclude .git/objects --exclude .claude/worktrees \
             --exclude '*.gguf' --exclude training/"
 
-    # Determine packages to build
+    # Determine packages to build. The apps come from APP_PACKAGES, derived above; what the
+    # two branches choose between is which services to add.
     if [ "${BUILD_ALL:-}" = "1" ]; then
         PACKAGES="-p yantrik-ui -p yantrik \
             -p weather-service -p system-monitor-service -p notes-service \
             -p notifications-service -p calendar-service -p network-service \
             -p email-service \
-            -p yantrik-notes -p yantrik-email -p yantrik-calendar \
-            -p yantrik-weather -p yantrik-system-monitor -p yantrik-terminal \
-            -p yantrik-music-player -p yantrik-text-editor -p yantrik-image-viewer \
-            -p yantrik-spreadsheet -p yantrik-document-editor -p yantrik-presentation \
-            -p yantrik-network-manager -p yantrik-container-manager \
-            -p yantrik-download-manager -p yantrik-snippet-manager"
-        PACKAGES="$(drop_shelved "$PACKAGES")"
+            $APP_PACKAGES"
         step "Building ALL packages ($PROFILE) via WSL2..."
     else
-        PACKAGES="-p yantrik-ui -p yantrik -p weather-service -p system-monitor-service -p notes-service -p notifications-service -p calendar-service -p network-service -p email-service -p a11y-service -p perception-service -p yantrik-notes -p yantrik-email -p yantrik-calendar -p yantrik-weather -p yantrik-music-player -p yantrik-network-manager -p yantrik-system-monitor -p yantrik-download-manager -p yantrik-snippet-manager -p yantrik-container-manager -p yantrik-spreadsheet -p yantrik-document-editor -p yantrik-presentation -p yantrik-terminal"
-        PACKAGES="$(drop_shelved "$PACKAGES")"
+        PACKAGES="-p yantrik-ui -p yantrik -p weather-service -p system-monitor-service -p notes-service -p notifications-service -p calendar-service -p network-service -p email-service -p a11y-service -p perception-service $APP_PACKAGES"
         step "Building core packages ($PROFILE) via WSL2... (set BUILD_ALL=1 for all)"
     fi
 
@@ -131,8 +140,6 @@ wsl.exe -d Ubuntu -- bash -lc "
 
 # Step 2a2: Deploy app binaries
 step "Deploying apps..."
-APPS="yantrik-notes yantrik-email yantrik-calendar yantrik-weather yantrik-system-monitor yantrik-terminal yantrik-music-player yantrik-text-editor yantrik-image-viewer yantrik-spreadsheet yantrik-document-editor yantrik-presentation yantrik-network-manager yantrik-container-manager yantrik-download-manager yantrik-snippet-manager"
-APPS="$(drop_shelved "$APPS")"
 wsl.exe -d Ubuntu -- bash -lc "
     for app in $APPS; do
         if [ -f $WSL_TARGET/$PROFILE/\$app ]; then

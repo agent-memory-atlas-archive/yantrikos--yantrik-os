@@ -66,24 +66,25 @@ declare -A SERVICE_COMPONENTS=(
     ["email-service"]="email-service"
 )
 
-declare -A APP_COMPONENTS=(
-    ["yantrik-notes"]="yantrik-notes"
-    ["yantrik-email"]="yantrik-email"
-    ["yantrik-calendar"]="yantrik-calendar"
-    ["yantrik-weather"]="yantrik-weather"
-    ["yantrik-system-monitor"]="yantrik-system-monitor"
-    ["yantrik-terminal"]="yantrik-terminal"
-    ["yantrik-music-player"]="yantrik-music-player"
-    ["yantrik-text-editor"]="yantrik-text-editor"
-    ["yantrik-image-viewer"]="yantrik-image-viewer"
-    ["yantrik-spreadsheet"]="yantrik-spreadsheet"
-    ["yantrik-document-editor"]="yantrik-document-editor"
-    ["yantrik-presentation"]="yantrik-presentation"
-    ["yantrik-network-manager"]="yantrik-network-manager"
-    ["yantrik-container-manager"]="yantrik-container-manager"
-    ["yantrik-download-manager"]="yantrik-download-manager"
-    ["yantrik-snippet-manager"]="yantrik-snippet-manager"
-)
+# ── Which apps this publishes ──
+#
+# The apps table used to be written down here, and it went stale the same way deploy.sh's
+# did: Arcade merged and answered on its control surface, but the registry never served it
+# and the channel manifest never listed it, because nothing checked this copy against the
+# workspace either. deploy/yantrik-os/app-bins.sh reads the apps/ members of Cargo.toml, so
+# the three shapes this script needs — the component table, the cargo `-p` flags and the
+# manifest's python dict — are all derived from one asking, shelf dropped as before.
+APP_BINS="$("$PROJECT_ROOT/deploy/yantrik-os/app-bins.sh")" \
+    || fail "cannot determine which apps this tree builds"
+declare -A APP_COMPONENTS=()
+APP_PACKAGES=""
+MANIFEST_APPS=""
+for b in $APP_BINS; do
+    if is_shelved "$b"; then continue; fi
+    APP_COMPONENTS["$b"]="$b"
+    APP_PACKAGES="$APP_PACKAGES -p $b"
+    MANIFEST_APPS="$MANIFEST_APPS'$b': '$b', "
+done
 
 # Get version from workspace Cargo.toml
 get_version() {
@@ -112,12 +113,7 @@ if [ "$SKIP_BUILD" = false ]; then
             -p weather-service -p system-monitor-service -p notes-service \
             -p notifications-service -p calendar-service -p network-service \
             -p email-service \
-            -p yantrik-notes -p yantrik-email -p yantrik-calendar \
-            -p yantrik-weather -p yantrik-system-monitor -p yantrik-terminal \
-            -p yantrik-text-editor -p yantrik-image-viewer \
-            -p yantrik-document-editor -p yantrik-presentation \
-            -p yantrik-network-manager -p yantrik-container-manager \
-            -p yantrik-download-manager -p yantrik-snippet-manager \
+            $APP_PACKAGES \
          2>&1" || fail "Build failed!"
 fi
 
@@ -216,13 +212,7 @@ binary_names = {
     'notes-service': 'notes-service', 'notifications-service': 'notifications-service',
     'calendar-service': 'calendar-service', 'network-service': 'network-service',
     'email-service': 'email-service',
-    'yantrik-notes': 'yantrik-notes', 'yantrik-email': 'yantrik-email',
-    'yantrik-calendar': 'yantrik-calendar', 'yantrik-weather': 'yantrik-weather',
-    'yantrik-system-monitor': 'yantrik-system-monitor', 'yantrik-terminal': 'yantrik-terminal',
-'yantrik-text-editor': 'yantrik-text-editor',
-    'yantrik-image-viewer': 'yantrik-image-viewer',     'yantrik-document-editor': 'yantrik-document-editor', 'yantrik-presentation': 'yantrik-presentation',
-    'yantrik-network-manager': 'yantrik-network-manager', 'yantrik-container-manager': 'yantrik-container-manager',
-    'yantrik-download-manager': 'yantrik-download-manager', 'yantrik-snippet-manager': 'yantrik-snippet-manager',
+    $MANIFEST_APPS
 }
 
 target = 'x86_64-unknown-linux-gnu'
