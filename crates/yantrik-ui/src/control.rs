@@ -618,14 +618,17 @@ pub fn publish(
                 // that reached it a reader has no other way to see a turn being counted.
                 .with("bond_interactions", bond.interactions)
                 .with("active_project", ui.get_active_project().to_string())
-                // The date and time in full — weekday, UTC offset and zone name — so a mind
+                // The time told in full — date, weekday, time, UTC offset, zone — so a mind
                 // learning what day it is is a read rather than an act: `agent_run date` is
                 // graded sensitive, and "what's on my calendar today" used to raise an
-                // approval card just to answer it (#207). The `clock` and `date` below are
-                // what the top bar draws ("11:55", "Wed 23 Sep"); neither carries a year, an
-                // offset or a zone, and "today" cannot be worked out without all three.
-                .with("now", crate::app_context::current_now_text())
-                .with("clock", ui.get_clock_text().to_string())
+                // approval card just to answer it (#207). Under `clock` rather than a key of
+                // its own: `yos` renders the state sorted and minds condense a description
+                // to its header plus the first ~900 characters, so a separate key sorting
+                // after `conversation` was clipped out of what a mind ever saw, and `clock`
+                // sorts near the top. The string the top bar drew ("11:55") is the object's
+                // `time`; nothing read it as a string, and it carried no year, offset or
+                // zone — "today" cannot be worked out without them.
+                .with("clock", crate::app_context::clock_for_describe())
                 .with("date", ui.get_date_text().to_string())
                 .with("cpu_percent", ui.get_bar_cpu_percent())
                 .with("memory", ui.get_bar_mem_text().to_string())
@@ -1654,27 +1657,36 @@ mod do_not_disturb_tests {
 }
 
 #[cfg(test)]
-mod describe_now_tests {
+mod describe_clock_tests {
     use std::path::Path;
 
-    /// Learning what day it is has to be a read of the shell, not an act on it.
+    /// Learning what day it is has to be a read of the shell, not an act on it — and a read
+    /// that survives the condensation: `yos` renders describe state sorted and minds keep
+    /// the header plus the first ~900 characters, which is why this extends `clock` rather
+    /// than adding a key of its own that sorts after `conversation`.
     ///
     /// The describe closure needs a live Slint window, so the wiring is pinned against the
-    /// source the way `do_not_disturb_tests` pins its handler; the line itself — its shape,
-    /// its offsets, the order the zone name is resolved in — is tested for real in
-    /// `app_context::now_tests`.
+    /// source the way `do_not_disturb_tests` pins its handler; the object itself — its
+    /// keys, its offsets, the zone the machine names or does not — is tested for real in
+    /// `app_context::clock_tests`.
     #[test]
-    fn describe_carries_the_date_and_time_with_their_zone() {
+    fn describe_carries_the_clock_as_an_object_a_mind_can_read_the_day_off() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
         let whole = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
         assert!(
-            src.contains(".with(\"now\", crate::app_context::current_now_text())"),
-            "`describe shell` must carry `now`: the local date and time with weekday, UTC \
-             offset and zone name. Without it the only way for a mind to learn today's date \
-             was `shell.agent_run date`, which is graded sensitive and raised an approval \
-             card just to answer \"what's on my calendar today\" (#207)."
+            src.contains(".with(\"clock\", crate::app_context::clock_for_describe())"),
+            "`describe shell` must carry `clock` as the full date-and-time object: date, \
+             weekday, time, UTC offset and zone. Without it the only way for a mind to \
+             learn today's date was `shell.agent_run date`, which is graded sensitive and \
+             raised an approval card just to answer \"what's on my calendar today\" (#207)."
+        );
+        assert!(
+            !src.contains(".with(\"now\""),
+            "the full time belongs under `clock`, not a `now` key of its own: `yos` sorts \
+             state keys and minds condense a description to its first ~900 characters, so \
+             `now` sorted after `conversation` and was clipped out of what a mind saw."
         );
     }
 }
