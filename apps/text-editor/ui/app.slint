@@ -1,19 +1,27 @@
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
 import { AppIdentity } from "app_color.slint";
-import { AppHeader } from "app_header.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { YButton, YIconButton } from "y_button.slint";
 import { YInput } from "y_input.slint";
 import { Icon, Icons } from "icon.slint";
 import { ScrollView } from "std-widgets.slint";
 export { ThemeMode, AccentPreset }
 export struct DocumentTab { title: string, active: bool, modified: bool }
-export component TextEditorApp inherits Window {
+export component TextEditorApp inherits AppWindow {
     title: "Editor";
     preferred-width: 1100px; preferred-height: 760px;
     min-width: 640px; min-height: 440px;
-    default-font-family: Theme.font-ui;
-    background: Theme.bg-deep;
     init => { AppIdentity.id = "editor"; }
+    app-id: "editor";
+    header-icon: Icons.editor;
+    header-subtitle: root.busy ? "Working…" : root.modified ? "Unsaved changes" : "Ready";
+    header-actions: [
+        {id:"open",icon:Icons.folder,label:"Open"},
+        {id:"find",icon:Icons.search,label:"Find",active:root.show-find},
+        {id:"save",icon:Icons.save,label:"Save",emphasis:2}
+    ];
+    header-action(id) => { if(id == "find") {root.show-find = !root.show-find; if(root.show-find){find-field.focus();}} else {root.action(id);} }
     in property <[DocumentTab]> tabs;
     in-out property <string> content;
     in property <string> document-title: "Untitled";
@@ -75,20 +83,9 @@ export component TextEditorApp inherits Window {
     }
     changed dialog => { if(root.dialog != 0 && root.dialog != 3) { path-field.focus(); } else if(root.dialog == 0) { editor.focus(); } }
     FocusScope {
-    width:root.width; height:root.height;
     key-pressed(event) => { return root.shortcut(event); }
     VerticalLayout {
         spacing: 0px;
-        AppHeader {
-            app-id: "editor"; icon: Icons.editor; title: "Text Editor";
-            subtitle: root.busy ? "Working…" : root.modified ? "Unsaved changes" : "Ready";
-            actions: [
-                {id:"open",icon:Icons.folder,label:"Open"},
-                {id:"find",icon:Icons.search,label:"Find",active:root.show-find},
-                {id:"save",icon:Icons.save,label:"Save",emphasis:2}
-            ];
-            action(id) => { if(id == "find") {root.show-find = !root.show-find; if(root.show-find){find-field.focus();}} else {root.action(id);} }
-        }
         Rectangle {
             height: 43px; background: Theme.bg-surface;
             HorizontalLayout {

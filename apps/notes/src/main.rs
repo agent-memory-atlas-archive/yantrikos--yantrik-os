@@ -74,6 +74,8 @@ fn main() {
         return;
     }
     let ui = NotesApp::new().unwrap();
+    // The bar is the app's own (#256): moving, minimising, maximising and closing from it.
+    yantrik_app_runtime::window_chrome!(ui);
     let prefs = theme::load();
     ui.global::<ThemeMode>().set_dark(prefs.dark);
     ui.global::<AccentPreset>().set_index(prefs.accent_index);

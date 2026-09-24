@@ -1,0 +1,152 @@
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// app_window.slint — the window every Yantrik app is
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//
+// An app window used to wear two bars. labwc drew one — the title, three buttons, one hover
+// colour for all three — and under it the app drew AppHeader: its glyph, its title again, its
+// actions. Twenty-eight pixels of the screen said the app's name twice, and the buttons that
+// close the window looked like nothing else in it.
+//
+// macOS, Windows and GNOME settled this the same way. The toolkit gives every app one base
+// window — NSWindow, WinUI's Window, AdwApplicationWindow — and the title bar and the toolbar are
+// one row. The app draws that row and says which of it can be dragged; the window server does
+// the moving, the resizing and the snapping. This is that base for Yantrik (#256):
+//
+//   import { AppWindow } from "app_window.slint";
+//   export { WindowChrome } from "app_window.slint";
+//
+//   export component NotesApp inherits AppWindow {
+//       title: "Notes";
+//       app-id: "notes";
+//       header-icon: Icons.notes;
+//       header-actions: [{ id: "new", icon: Icons.plus, label: "New note", emphasis: 2 }];
+//       header-action(id) => { root.action(id); }
+//       // …the app, which lands below the bar…
+//   }
+//
+// What it does, so no app has to:
+//
+//   - asks the compositor for no title bar of its own (`no-frame`), and draws the one bar:
+//     AppHeader, with the window's title, the app's glyph and actions, minimise, maximise and
+//     close;
+//   - moves the window when the bar is dragged, and maximises or restores it when the bar is
+//     double-clicked;
+//   - resizes from its edges (Slint's own frameless resize: the compositor does the resizing);
+//   - draws a hairline border, because a window with no frame and no shadow otherwise runs into
+//     whatever is behind it.
+//
+// The four requests the bar makes — move, minimise, maximise, close — cannot be carried out in
+// Slint's language. They go out through the `WindowChrome` global, which each app exports
+// (`export { WindowChrome } from "app_window.slint";`) and `yantrik_app_runtime::window_chrome!`
+// connects to the real window. A global and not callbacks on AppWindow, because Slint gives the
+// generated Rust type only what the exported component declares itself, not what it inherits.
+// Close goes through the window's close request, so an app that asks about unsaved work asks
+// here exactly as it did when labwc's button was pressed.
+//
+// The bar's names are `header-…` because apps already use the plain ones: Notes and the
+// Editor have `action`, `status`, `modified` of their own, and a derived component cannot declare
+// a name its base has.
+import { Theme } from "theme.slint";
+import { AppHeader, AppAction } from "app_header.slint";
+
+// What the bar asks of the window, and the one thing it needs to know back.
+export global WindowChrome {
+    // Kept true to the window by the runtime, which reads the window each time its size changes
+    // — the compositor maximises and restores it too (a keyboard shortcut, dragging it to an
+    // edge), and the button has to show the action it will do next.
+    in-out property <bool> maximized: false;
+    callback drag();
+    callback minimize();
+    callback toggle-maximize();
+    callback close();
+    callback resized();
+}
+
+export component AppWindow inherits Window {
+    // Which app this is: the tint of the glyph, and AppIdentity for everything below the bar.
+    in property <string> app-id: "";
+
+    // ── The bar ──
+    in property <string> header-icon: "";
+    in property <string> header-subtitle: "";
+    in property <string> header-status: "";
+    in property <bool> header-modified: false;
+    in property <[AppAction]> header-leading-actions: [];
+    in property <[AppAction]> header-actions: [];
+    in property <bool> header-show-search: false;
+    in property <string> header-search-placeholder: "Search";
+    in-out property <string> header-search-text: "";
+    in property <bool> header-show-back: false;
+    callback header-action(string);
+    callback header-back();
+    callback header-search-edited(string);
+    callback header-search-accepted(string);
+
+    no-frame: true;
+    // No edges to pull on a maximised window: the compositor would refuse the resize, and the
+    // pointer would still show that it was offered.
+    resize-border-width: WindowChrome.maximized ? 0px : 5px;
+    background: Theme.bg-deep;
+    default-font-family: Theme.font-ui;
+
+    changed width => { WindowChrome.resized(); }
+    changed height => { WindowChrome.resized(); }
+
+    bar := AppHeader {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        app-id: root.app-id;
+        title: root.title;
+        icon: root.header-icon;
+        subtitle: root.header-subtitle;
+        status: root.header-status;
+        modified: root.header-modified;
+        leading-actions: root.header-leading-actions;
+        actions: root.header-actions;
+        show-search: root.header-show-search;
+        search-placeholder: root.header-search-placeholder;
+        search-text <=> root.header-search-text;
+        show-back: root.header-show-back;
+        show-window-controls: true;
+        maximized: WindowChrome.maximized;
+        draggable: true;
+        action(id) => { root.header-action(id); }
+        back => { root.header-back(); }
+        search-edited(text) => { root.header-search-edited(text); }
+        search-accepted(text) => { root.header-search-accepted(text); }
+        drag => { WindowChrome.drag(); }
+        minimize => { WindowChrome.minimize(); }
+        toggle-maximize => { WindowChrome.toggle-maximize(); }
+        close-window => { WindowChrome.close(); }
+    }
+
+    // The app, below the bar. Not a layout: an app's own dialogs and overlays are drawn over
+    // the whole of it, and a layout would stack them underneath instead.
+    //
+    // An app's top-level elements fill this space by leaving their size unset. They must not
+    // say `parent.width` / `parent.height`: Slint resolves `parent` where it is written, and
+    // for a top-level element of a component that inherits AppWindow that is the whole window,
+    // bar included. Sized that way, the content comes out a bar taller than this space and is
+    // centred in it, half a bar up under the title and half a bar off the bottom, which is how
+    // Notes first looked on VM 520.
+    Rectangle {
+        x: 0px;
+        y: bar.height;
+        width: root.width;
+        height: root.height - bar.height;
+        @children
+    }
+
+    // The hairline. Last, so it is drawn over the app's own edge; a Rectangle takes no input,
+    // so it covers nothing a pointer could want. None when maximised: the edges are the
+    // screen's then.
+    if !WindowChrome.maximized : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        border-width: 1px;
+        border-color: Theme.border-default;
+    }
+}

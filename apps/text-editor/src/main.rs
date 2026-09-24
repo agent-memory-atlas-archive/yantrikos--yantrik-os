@@ -93,6 +93,8 @@ fn main() {
         return;
     }
     let ui = TextEditorApp::new().unwrap();
+    // The bar is the app's own (#256); its close goes through the unsaved-changes question below.
+    yantrik_app_runtime::window_chrome!(ui);
     let prefs = theme::load();
     ui.global::<ThemeMode>().set_dark(prefs.dark);
     ui.global::<AccentPreset>().set_index(prefs.accent_index);

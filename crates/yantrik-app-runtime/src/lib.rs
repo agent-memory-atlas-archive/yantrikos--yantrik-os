@@ -33,6 +33,7 @@ pub use yantrik_ipc_transport::SyncRpcClient;
 
 pub use event_loop::run_until_closed;
 
+pub mod chrome;
 pub mod companion;
 pub mod control;
 pub mod event_loop;
