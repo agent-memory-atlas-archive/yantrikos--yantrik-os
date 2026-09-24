@@ -264,8 +264,17 @@ fn send_message_via_service(
     .map(|_| ())
 }
 
-fn search_via_service(account: &str, query: &str) -> Result<Vec<EmailSummary>, String> {
-    call_typed(method::SEARCH, serde_json::json!({ "account_id": account, "query": query }))
+/// Search `folder` — the one on screen. Search ran in INBOX whichever folder was open, so a
+/// search from Spam answered with mail nobody was looking at (#288).
+fn search_via_service(
+    account: &str,
+    folder: &str,
+    query: &str,
+) -> Result<Vec<EmailSummary>, String> {
+    call_typed(
+        method::SEARCH,
+        serde_json::json!({ "account_id": account, "folder": folder, "query": query }),
+    )
 }
 
 /// Flag one message in `folder`, for [`get_message_via_service`]'s reason: the app marks a
@@ -289,28 +298,47 @@ fn mark_read_via_service(
     .map(|_| ())
 }
 
+/// Star one message in `folder`, for [`mark_read_via_service`]'s reason: starring ran in
+/// INBOX whatever folder the row was listed from, and moved the star on a stranger's message
+/// (#288).
 fn mark_starred_via_service(
     account: &str,
+    folder: &str,
     message_id: &str,
     starred: bool,
 ) -> Result<(), String> {
     call(
         method::MARK_STARRED,
-        serde_json::json!({ "account_id": account, "message_id": message_id, "starred": starred }),
+        serde_json::json!({
+            "account_id": account,
+            "folder": folder,
+            "message_id": message_id,
+            "starred": starred,
+        }),
     )
     .map(|_| ())
 }
 
-fn delete_message_via_service(account: &str, message_id: &str) -> Result<(), String> {
+/// Delete one message from `folder` — always the row's own, never omitted. This cannot be
+/// undone, and a UID with no folder beside it can destroy a different message in INBOX
+/// (#288).
+fn delete_message_via_service(
+    account: &str,
+    folder: &str,
+    message_id: &str,
+) -> Result<(), String> {
     call(
         method::DELETE_MESSAGE,
-        serde_json::json!({ "account_id": account, "message_id": message_id }),
+        serde_json::json!({ "account_id": account, "folder": folder, "message_id": message_id }),
     )
     .map(|_| ())
 }
 
+/// Move one message out of `folder` into `target_folder`. The source folder is never omitted
+/// either, for [`delete_message_via_service`]'s reason (#288).
 fn move_message_via_service(
     account: &str,
+    folder: &str,
     message_id: &str,
     target_folder: &str,
 ) -> Result<(), String> {
@@ -318,6 +346,7 @@ fn move_message_via_service(
         method::MOVE_MESSAGE,
         serde_json::json!({
             "account_id": account,
+            "folder": folder,
             "message_id": message_id,
             "target_folder": target_folder,
         }),
@@ -542,8 +571,9 @@ struct Mail {
     /// Every message the folder returned, before the triage tabs filter it. Held so that
     /// switching tabs is a filter over what is in hand rather than another question to the mail
     /// server. Each row is `(id, folder it was listed from, the row on screen)`: the folder
-    /// travels with the row because IMAP UIDs are per-mailbox, and search results come from
-    /// INBOX whichever folder is on screen — opening one has to ask INBOX for it (#275).
+    /// travels with the row because IMAP UIDs are per-mailbox, and the same id in another
+    /// mailbox is another message — everything done to a row has to ask the mailbox that
+    /// listed it (#275, #288).
     all_rows: RefCell<Vec<(String, String, EmailListItem)>>,
     /// The rows actually on screen, as `(id, folder it was listed from)`, parallel to the list
     /// model.
@@ -974,9 +1004,11 @@ fn set_read(ui: &EmailApp, mail: &Rc<Mail>, row: usize, read: bool) -> Result<bo
 
 fn set_flagged(ui: &EmailApp, mail: &Rc<Mail>, row: usize, flagged: bool) -> Result<bool, String> {
     let account = mail.account();
-    let (id, _folder) =
+    let (id, row_folder) =
         mail.row_at(row).ok_or_else(|| format!("there is no message at row {}", row + 1))?;
-    mark_starred_via_service(&account, &id, flagged).map_err(|e| {
+    // In the mailbox the row was listed from: the same UID starred in INBOX was a different
+    // message's star (#288).
+    mark_starred_via_service(&account, &row_folder, &id, flagged).map_err(|e| {
         let text = format!("Could not flag that message: {e}");
         say(ui, text.clone());
         text
@@ -1023,7 +1055,7 @@ fn mark_row_locally(mail: &Rc<Mail>, id: &str, change: impl Fn(&mut EmailListIte
 /// that worked.
 fn delete_message(ui: &EmailApp, mail: &Rc<Mail>, row: usize) -> Result<String, String> {
     let account = mail.account();
-    let (id, _folder) =
+    let (id, row_folder) =
         mail.row_at(row).ok_or_else(|| format!("there is no message at row {}", row + 1))?;
     let subject = mail
         .all_rows
@@ -1034,7 +1066,9 @@ fn delete_message(ui: &EmailApp, mail: &Rc<Mail>, row: usize) -> Result<String, 
         .unwrap_or_default();
 
     let was_read = row_flag(mail, &id, |it| it.is_read);
-    delete_message_via_service(&account, &id).map_err(|e| {
+    // From the mailbox the row was listed from, and never left to the service's INBOX
+    // default: deleting a Spam row could destroy a different INBOX message (#288).
+    delete_message_via_service(&account, &row_folder, &id).map_err(|e| {
         let text = format!("Could not delete \u{201c}{subject}\u{201d}: {e}");
         say(ui, text.clone());
         text
@@ -1053,7 +1087,7 @@ fn move_message(
     target: &str,
 ) -> Result<String, String> {
     let account = mail.account();
-    let (id, _folder) =
+    let (id, row_folder) =
         mail.row_at(row).ok_or_else(|| format!("there is no message at row {}", row + 1))?;
     let subject = mail
         .all_rows
@@ -1064,7 +1098,8 @@ fn move_message(
         .unwrap_or_default();
 
     let was_read = row_flag(mail, &id, |it| it.is_read);
-    move_message_via_service(&account, &id, target).map_err(|e| {
+    // Out of the mailbox the row was listed from, for delete's reason (#288).
+    move_message_via_service(&account, &row_folder, &id, target).map_err(|e| {
         let text = format!("Could not move \u{201c}{subject}\u{201d} to {target}: {e}");
         say(ui, text.clone());
         text
@@ -1136,7 +1171,10 @@ fn run_search(ui: &EmailApp, mail: &Rc<Mail>, query: &str) -> Result<usize, Stri
     }
 
     ui.set_email_search_active(true);
-    match search_via_service(&account, query) {
+    // The folder on screen is the folder searched: the results are shown beside it, and each
+    // row carries the folder it was found in for whatever is done to it next (#288).
+    let folder = mail.folder.borrow().clone();
+    match search_via_service(&account, &folder, query) {
         Ok(results) => {
             let count = results.len();
             set_rows(ui, mail, &results);
