@@ -19,8 +19,16 @@ pub mod store;
 #[path = "../../apps/calendar/src/views.rs"]
 pub mod views;
 
+/// The own-creation rule of #201: who made an event, and what that lets the maker delete
+/// without a person being asked. Also from the app side, and also pure — it is a comparison
+/// of two strings the machine established, with no socket, no `/proc` and no desktop in it,
+/// so it is tested here rather than against a live shell.
+#[path = "../../apps/calendar/src/ownership.rs"]
+pub mod ownership;
+
 #[cfg(test)]
 mod tests {
+    use super::ownership::{agent_identity, may_delete_unasked};
     use super::store::EventStore;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -62,7 +70,14 @@ mod tests {
             color: String::new(),
             is_all_day: false,
             attendees: Vec::new(),
+            creator: None,
         }
+    }
+
+    /// The same create, with a creator on it — what a surface sends when it verified who is
+    /// asking and that caller is allowed to be recorded as the maker of the event.
+    fn create_by(creator: &str, title: &str, start: &str, end: &str) -> CreateEventParams {
+        CreateEventParams { creator: Some(creator.into()), ..create(title, start, end) }
     }
 
     fn month(year: i32, m: u32, last: u32) -> EventsParams {
@@ -448,6 +463,7 @@ mod tests {
         let read: CreateEventParams = serde_json::from_value(bare).unwrap();
         assert!(!read.is_all_day);
         assert!(read.attendees.is_empty());
+        assert!(read.creator.is_none(), "a request that names no maker records none");
     }
 
     // ── What the store refuses ───────────────────────────────────────
@@ -614,6 +630,211 @@ mod tests {
         settle();
         store.create(&create("First", "2026-09-22T09:00:00", "2026-09-22T10:00:00")).unwrap();
         assert_ne!(store.revision(), empty);
+    }
+
+    // ── Who made an event, and what that lets the maker delete (#201) ──
+    //
+    // An unattended harness could put events on the calendar but never take them off again:
+    // `delete_event` is `sensitive` and its own description says the event is not recoverable,
+    // so every delete raised an approval card nobody was there to answer. The door #201 chose
+    // is `delete_own_event` — `standard`, and the handler only lets it through when the event
+    // is on record as created by exactly the identity this caller was verified to be. Both
+    // halves are tested here: the rule, as a table over strings, and the record, as something
+    // the store keeps and hands back untouched — including across a restart, because the arena
+    // creates in one run of the calendar and deletes in another.
+
+    #[test]
+    fn only_the_creator_may_delete_an_event_without_being_asked() {
+        // The reviewer's table, and then some. Neither side of this comparison ever comes
+        // from the request: the creator is what the store kept at creation, and the caller is
+        // what the machine established just now — a forged claim in the arguments reaches
+        // neither string, which is the row about somebody else's event.
+        let recorded = Some("forge.py");
+        assert!(
+            may_delete_unasked(recorded, Some("forge.py")),
+            "the caller that created an event may take it off unasked"
+        );
+        assert!(
+            !may_delete_unasked(recorded, Some("hermes_cli.main")),
+            "somebody else's event stays with `delete_event`, which asks — whatever the request claims"
+        );
+        assert!(
+            !may_delete_unasked(None, Some("forge.py")),
+            "an event older than the record has no creator to match, even against its true maker"
+        );
+        assert!(!may_delete_unasked(recorded, None), "a caller nothing could identify is nobody");
+        assert!(!may_delete_unasked(None, None), "and two absences are not the same somebody");
+        assert!(!may_delete_unasked(Some(""), Some("")), "two blanks are not the same somebody either");
+        assert!(
+            !may_delete_unasked(Some("  "), Some("  ")),
+            "nor are two strings with nothing in them"
+        );
+        assert!(!may_delete_unasked(recorded, Some("Forge.py")), "the comparison is exact");
+        assert!(!may_delete_unasked(recorded, Some("forge.py ")), "and not forgiving about edges");
+    }
+
+    #[test]
+    fn an_agent_is_one_identity_per_conversation_and_the_spelling_is_written_down_once() {
+        // The record side and the compare side must spell an agent the same way or the rule
+        // would never fire for agents at all — which is why there is one function that says
+        // `agent <mind>:<conversation>` and both sides call it.
+        let recorded = agent_identity("mind:42");
+        assert_eq!(recorded, "agent mind:42");
+        assert!(may_delete_unasked(Some(&recorded), Some(&agent_identity("mind:42"))));
+        assert!(
+            !may_delete_unasked(Some(&recorded), Some(&agent_identity("mind:43"))),
+            "another conversation is another somebody"
+        );
+        assert!(
+            !may_delete_unasked(Some(&recorded), Some("mind:42")),
+            "and a program is never an agent: the prefix is what keeps the kinds apart"
+        );
+    }
+
+    #[test]
+    fn the_store_keeps_the_creator_it_was_handed() {
+        let f = Fixture::new();
+        let store = f.store();
+        let saved = store
+            .create(&create_by("forge.py", "Harness run", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        assert_eq!(saved.creator.as_deref(), Some("forge.py"));
+        let read = store.get(&saved.id).unwrap();
+        assert_eq!(read.creator.as_deref(), Some("forge.py"));
+        assert!(may_delete_unasked(read.creator.as_deref(), Some("forge.py")));
+    }
+
+    #[test]
+    fn a_create_that_names_no_maker_stores_none() {
+        // The window's own form, a service's reminder, a machine where the caller could not
+        // be identified: the event exists, but it belongs to nobody, and nobody's is everybody's
+        // — which means `delete_event`, and a person asked.
+        let f = Fixture::new();
+        let store = f.store();
+        let saved =
+            store.create(&create("Dentist", "2026-09-22T10:00:00", "2026-09-22T11:00:00")).unwrap();
+        assert!(saved.creator.is_none());
+        assert!(store.get(&saved.id).unwrap().creator.is_none());
+        assert!(!may_delete_unasked(None, Some("forge.py")));
+    }
+
+    #[test]
+    fn the_record_survives_the_calendar_app_restarting() {
+        // The arena requirement: create and delete may happen with the app, and the service,
+        // restarted in between. The creator lives in the event's own file, so a fresh store
+        // over the same directory — which is what a restart is, from here — reads it back.
+        let f = Fixture::new();
+        let id = f
+            .store()
+            .create(&create_by("forge.py", "Harness run", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap()
+            .id;
+
+        let reopened = f.store();
+        let read = reopened.get(&id).unwrap();
+        assert_eq!(read.creator.as_deref(), Some("forge.py"), "the file kept it");
+        assert!(may_delete_unasked(read.creator.as_deref(), Some("forge.py")));
+    }
+
+    #[test]
+    fn an_event_file_from_before_the_record_existed_reads_as_having_no_creator() {
+        // Every event already on disk was stored by a service that had no `creator` field. The
+        // key is `#[serde(default)]`, so those files still parse — as None, which the rule
+        // refuses. Nobody's existing calendar becomes deletable by whoever asks.
+        let f = Fixture::new();
+        let store = f.store();
+        let saved = store
+            .create(&create_by("forge.py", "Old file", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        let path = f.0.join(format!("{}.json", saved.id));
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("creator");
+        std::fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+
+        let read = store.get(&saved.id).unwrap();
+        assert!(read.creator.is_none(), "the file without the key parses, with nothing in it");
+        assert!(
+            !may_delete_unasked(read.creator.as_deref(), Some("forge.py")),
+            "and even the caller that made it must ask, because nothing proves that any more"
+        );
+    }
+
+    #[test]
+    fn an_update_keeps_the_creator() {
+        // Editing an event is not adopting it. The update path reads the stored event and
+        // changes only the fields it was given, so the record rides along untouched.
+        let f = Fixture::new();
+        let store = f.store();
+        let saved = store
+            .create(&create_by("forge.py", "Harness run", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        let moved = store
+            .update(&UpdateEventParams {
+                id: saved.id.clone(),
+                start: Some("2026-09-22T15:00:00".into()),
+                end: Some("2026-09-22T16:00:00".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(moved.creator.as_deref(), Some("forge.py"));
+        assert_eq!(store.get(&saved.id).unwrap().creator.as_deref(), Some("forge.py"));
+    }
+
+    #[test]
+    fn a_re_sync_keeps_the_creator_the_event_was_stored_with() {
+        // `upsert_remote` rebuilds the whole event from the remote's copy of it, and a remote
+        // calendar has never heard of this field. Without the explicit carry-over, the first
+        // sync after a surface create would wipe the record — and with it the maker's right to
+        // delete unasked. The flow is the real one: a caller makes an event, pushes it out,
+        // the push notes the remote id, and the next sync finds the event by that id.
+        let f = Fixture::new();
+        let store = f.store();
+        let saved = store
+            .create(&create_by("forge.py", "Harness run", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        store
+            .update(&UpdateEventParams {
+                id: saved.id.clone(),
+                remote_id: Some("remote-1".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let synced = store
+            .upsert_remote(&UpsertRemoteEventParams {
+                remote_id: "remote-1".into(),
+                title: "Harness run (synced)".into(),
+                start: "2026-09-22T14:00:00".into(),
+                end: "2026-09-22T15:00:00".into(),
+                description: String::new(),
+                location: None,
+                is_all_day: false,
+                attendees: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(synced.id, saved.id, "the sync edited the event it already had");
+        assert_eq!(synced.title, "Harness run (synced)", "and the remote's copy of the fields won");
+        assert_eq!(
+            synced.creator.as_deref(),
+            Some("forge.py"),
+            "but a sync edits an event, it does not adopt it: the record stays"
+        );
+
+        // A remote nobody here ever made, arriving for the first time, has no verified maker.
+        let fresh = store
+            .upsert_remote(&UpsertRemoteEventParams {
+                remote_id: "remote-2".into(),
+                title: "Imported".into(),
+                start: "2026-09-23T14:00:00".into(),
+                end: "2026-09-23T15:00:00".into(),
+                description: String::new(),
+                location: None,
+                is_all_day: false,
+                attendees: Vec::new(),
+            })
+            .unwrap();
+        assert!(fresh.creator.is_none(), "a sync stores what a sync knows: nobody made this here");
     }
 }
 
