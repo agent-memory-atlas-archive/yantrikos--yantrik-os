@@ -2185,7 +2185,6 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
- "html2text",
  "imap",
  "lettre",
  "mailparse",
@@ -2194,6 +2193,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ureq 2.12.1",
+ "yantrik-email-text",
  "yantrik-ipc-contracts",
  "yantrik-service-sdk",
 ]
@@ -10434,7 +10434,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "crossbeam-channel",
- "html2text",
  "imap",
  "lettre",
  "mailparse",
@@ -10455,6 +10454,7 @@ dependencies = [
  "yantrik-companion-cortex",
  "yantrik-companion-instincts",
  "yantrik-companion-tools",
+ "yantrik-email-text",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ml",
@@ -10599,6 +10599,13 @@ dependencies = [
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ui-kit",
+]
+
+[[package]]
+name = "yantrik-email-text"
+version = "0.1.0"
+dependencies = [
+ "html2text",
 ]
 
 [[package]]

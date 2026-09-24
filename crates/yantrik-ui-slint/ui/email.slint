@@ -69,6 +69,7 @@ export struct EmailDetailData {
     has-attachment: bool,
     attachment-names: string,   // comma-separated list
     thread-count: int,
+    has-html: bool,             // sender delivered an HTML original; gates "Open original"
 }
 
 export struct EmailAttachmentData {
@@ -220,6 +221,11 @@ export component EmailClient inherits Rectangle {
     callback add-account();              // open setup for an additional account
     callback cancel-setup();             // leave the setup form without saving
     callback toggle-thread-message(int); // collapse/expand a thread message
+
+    // Open the open message's HTML original in a browser, for the mail whose layout the
+    // reading pane's text cannot carry. The app strips remote images from the file it writes
+    // first — a browser loading a sender's pixel is an open tracker — and its notice says so.
+    callback open-original();
 
     // V41: Enterprise callbacks
     //
@@ -1741,6 +1747,14 @@ export component EmailClient inherits Rectangle {
                             YIconButton { icon-path: Icons.trash; variant: 2; clicked => { root.delete-email(root.email-detail.id); } }
                             YIconButton { icon-path: root.email-detail.is-read ? Icons.mail : Icons.mail-open; variant: 2; clicked => { root.mark-read(root.email-detail.id); } }
                             YIconButton { icon-path: Icons.star; variant: root.email-detail.is-flagged ? 1 : 2; clicked => { root.mark-flagged(root.email-detail.id); } }
+
+                            // Only for a message that has an HTML original to open; a plain-text
+                            // mail's original is the text already on screen.
+                            if root.email-detail.has-html : YButton {
+                                label: "Open original";
+                                icon-path: Icons.browser; variant: 2; size: 0;
+                                clicked => { root.open-original(); }
+                            }
 
                             Rectangle { horizontal-stretch: 1; }
 

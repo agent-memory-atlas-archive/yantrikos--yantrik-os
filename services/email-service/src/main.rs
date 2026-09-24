@@ -12,13 +12,17 @@
 //!   email.oauth_cancel    { flow_id }                              → { cancelled }
 //!   email.list_folders    { account_id }                           → Vec<EmailFolder>
 //!   email.list_messages   { account_id, folder, page?, per_page? } → Vec<EmailSummary>
-//!   email.get_message     { account_id, message_id }               → EmailDetail
+//!   email.get_message     { account_id, folder?, message_id }      → EmailDetail
 //!   email.send_message    { account_id, to, subject, body, ... }   → ()
-//!   email.mark_read       { account_id, message_id, read }         → ()
+//!   email.mark_read       { account_id, folder?, message_id, read } → ()
 //!   email.mark_starred    { account_id, message_id, starred }      → ()
 //!   email.move_message    { account_id, message_id, target_folder } → ()
 //!   email.delete_message  { account_id, message_id }               → ()
 //!   email.search          { account_id, query }                    → Vec<EmailSummary>
+//!
+//! `get_message` and `mark_read` take an optional `folder`: IMAP UIDs are per-mailbox, so a
+//! message listed from Spam can only be fetched from Spam. Omitted means INBOX, which is all
+//! older callers ever asked about (#275).
 //!
 //! `email.accounts` is the one that had to exist. Everything else here needs a mail server, so
 //! the only question the app could ask was one whose failure meant three different things at
@@ -411,8 +415,9 @@ impl ServiceHandler for EmailHandler {
             }
             "email.get_message" => {
                 let account = self.get_account(account_id)?;
+                let folder = folder_or_inbox(&params);
                 let message_id = require_str(&params, "message_id")?;
-                let detail = imap_get_message(&account, message_id)?;
+                let detail = imap_get_message(&account, folder, message_id)?;
                 Ok(serde_json::to_value(detail).unwrap())
             }
             "email.send_message" => {
@@ -427,9 +432,10 @@ impl ServiceHandler for EmailHandler {
             }
             "email.mark_read" => {
                 let account = self.get_account(account_id)?;
+                let folder = folder_or_inbox(&params);
                 let message_id = require_str(&params, "message_id")?;
                 let read = params["read"].as_bool().unwrap_or(true);
-                imap_mark_read(&account, message_id, read)?;
+                imap_mark_read(&account, folder, message_id, read)?;
                 Ok(serde_json::json!(null))
             }
             "email.mark_starred" => {
@@ -771,6 +777,7 @@ fn imap_list_messages(
 
 fn imap_get_message(
     account: &Account,
+    folder: &str,
     message_id: &str,
 ) -> Result<EmailDetail, ServiceError> {
     let uid: u32 = message_id.parse().map_err(|_| ServiceError {
@@ -779,7 +786,13 @@ fn imap_get_message(
     })?;
 
     let mut session = imap_connect(account)?;
-    session.select("INBOX").ok();
+    // The message's own folder, not INBOX, and a refused SELECT is an error rather than
+    // something to shrug off: UIDs are per-mailbox, so opening a message that was listed from
+    // Spam fetched whatever wore this UID in INBOX — the wrong message, or none at all (#275).
+    session.select(folder).map_err(|e| ServiceError {
+        code: -32000,
+        message: format!("IMAP SELECT {folder} failed: {e}"),
+    })?;
 
     let messages = session
         .uid_fetch(uid.to_string(), "(RFC822 FLAGS)")
@@ -847,10 +860,7 @@ fn imap_get_message(
 
     extract_parts(&parsed, &mut body_text, &mut body_html, &mut attachments);
 
-    // If only HTML, convert to text
-    if body_text.is_empty() && !body_html.is_empty() {
-        body_text = html2text::from_read(body_html.as_bytes(), 80);
-    }
+    let body_text = plain_body(&body_text, &body_html);
 
     let _ = session.logout();
 
@@ -869,6 +879,20 @@ fn imap_get_message(
         is_read,
         is_starred,
     })
+}
+
+/// The body the reading pane shows: the sender's own plain text when the mail has one, and
+/// otherwise the HTML turned into text by the reading-pane rule in `yantrik-email-text`.
+///
+/// The rule used to be html2text's defaults, which render for a fixed-width terminal: layout
+/// tables came back drawn in box characters, every link left a `[1]` footnote, every logo
+/// became `[Subreddit Icon]`, and lines were hard-wrapped at column 80 — in a proportional-font
+/// pane that wraps on its own, so it showed mail broken in places the sender never chose (#275).
+fn plain_body(body_text: &str, body_html: &str) -> String {
+    if !body_text.is_empty() {
+        return body_text.to_string();
+    }
+    yantrik_email_text::readable_text(body_html)
 }
 
 fn extract_parts(
@@ -1032,6 +1056,7 @@ fn smtp_transport(
 
 fn imap_mark_read(
     account: &Account,
+    folder: &str,
     message_id: &str,
     read: bool,
 ) -> Result<(), ServiceError> {
@@ -1041,7 +1066,12 @@ fn imap_mark_read(
     })?;
 
     let mut session = imap_connect(account)?;
-    session.select("INBOX").ok();
+    // The message's own folder, for get_message's reason: the app marks a message read right
+    // after opening it, and flagging INBOX's UID would touch a stranger's mail (#275).
+    session.select(folder).map_err(|e| ServiceError {
+        code: -32000,
+        message: format!("IMAP SELECT {folder} failed: {e}"),
+    })?;
 
     let flag = "+FLAGS (\\Seen)";
     let unflag = "-FLAGS (\\Seen)";
@@ -1225,4 +1255,62 @@ fn imap_search(
 
     let _ = session.logout();
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_parts, plain_body};
+    use yantrik_ipc_contracts::email::EmailAttachment;
+
+    /// A mail whose sender supplied both parts, the way multipart/alternative is meant to be
+    /// read: the plain text is the sender's own words for this reader, so it wins and no
+    /// conversion runs.
+    const ALTERNATIVE: &[u8] = b"From: sender@example.com\r\nSubject: Both parts\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"BOUND\"\r\n\r\n--BOUND\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nThe sender wrote this plain text for people; it is not a conversion of the HTML.\r\n--BOUND\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p>The <b>HTML</b> version of the same words.</p></body></html>\r\n--BOUND--\r\n";
+
+    /// A table-laid-out newsletter with no plain part: the shape that reached the reading pane
+    /// drawn in box characters with `[1]` footnotes under it (#275).
+    const HTML_ONLY: &[u8] = b"From: news@example.com\r\nSubject: Newsletter\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<table border=\"1\" cellpadding=\"4\"><tr><td><a href=\"https://news.example/home\"><img src=\"https://news.example/logo.png\" alt=\"Company Logo\"></a></td></tr><tr><td><a href=\"https://news.example/story\">The story everyone is reading this week</a></td></tr><tr><td><p>It arrived as a table-laid-out newsletter, and this sentence in its cell is far longer than eighty columns so a terminal-width conversion would have to break it somewhere.</p></td></tr><tr><td><a href=\"https://news.example/up\">24 upvotes</a> <a href=\"https://news.example/c\">21 comments</a></td></tr></table>";
+
+    fn parts(raw: &[u8]) -> (String, String, Vec<EmailAttachment>) {
+        let parsed = mailparse::parse_mail(raw).unwrap();
+        let mut body_text = String::new();
+        let mut body_html = String::new();
+        let mut attachments = Vec::new();
+        extract_parts(&parsed, &mut body_text, &mut body_html, &mut attachments);
+        (body_text, body_html, attachments)
+    }
+
+    #[test]
+    fn multipart_alternative_prefers_the_senders_plain_text() {
+        let (body_text, body_html, _) = parts(ALTERNATIVE);
+        assert!(body_text.contains("The sender wrote this plain text"), "plain part missing: {body_text:?}");
+        assert!(body_html.contains("<b>HTML</b>"), "html part missing: {body_html:?}");
+        let shown = plain_body(&body_text, &body_html);
+        assert_eq!(shown, body_text, "the sender's own plain text must win over any conversion");
+    }
+
+    #[test]
+    fn html_only_mail_is_converted_for_the_reading_pane() {
+        let (body_text, body_html, _) = parts(HTML_ONLY);
+        assert!(body_text.is_empty(), "an HTML-only mail has no plain part");
+        assert!(!body_html.is_empty());
+
+        let shown = plain_body(&body_text, &body_html);
+        for c in "─│┼┬┐└├┤┴┘".chars() {
+            assert!(!shown.contains(c), "table border {c:?} in:\n{shown}");
+        }
+        // Every bracket the old conversion produced was a footnote reference, a link target or
+        // an image alt; nothing in this mail's words has one.
+        assert!(!shown.contains('[') && !shown.contains(']'), "bracket in:\n{shown}");
+        assert!(!shown.contains("Company Logo"), "image alt in:\n{shown}");
+        assert!(!shown.contains("https://"), "footnote URL in:\n{shown}");
+
+        let title = shown.find("The story everyone is reading this week").expect("title missing");
+        let body = shown.find("It arrived as a table-laid-out newsletter").expect("body missing");
+        assert!(title < body, "cells out of order in:\n{shown}");
+        assert!(shown.contains("24 upvotes") && shown.contains("21 comments"), "footer cells missing:\n{shown}");
+
+        let sentence = "this sentence in its cell is far longer than eighty columns so a terminal-width conversion would have to break it somewhere.";
+        assert!(shown.lines().any(|l| l.contains(sentence)), "sentence hard-wrapped in:\n{shown}");
+    }
 }
