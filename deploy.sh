@@ -60,6 +60,24 @@ APPS="$(drop_shelved "$APP_BINS")"
 APP_PACKAGES=""
 for app in $APPS; do APP_PACKAGES="$APP_PACKAGES -p $app"; done
 
+# ── Which services this tree builds and deploys ──
+#
+# The service list was written down here too — once in the packages to build, twice
+# because BUILD_ALL=1 chose its own longer-sounding list, and a third time in the copy
+# loop below — and the copies disagreed: BUILD_ALL, the branch meant to build more,
+# built two services fewer than the default. A deploy that ran it left the shell
+# registering services whose binaries were never built, and nothing said so, because
+# the copy loop skips a binary that is not there. deploy/yantrik-os/service-bins.sh
+# reads the services' own yantrik.toml manifests — the same ones start_services scans —
+# so a service added tomorrow is built and copied with no edit to this script, and
+# BUILD_ALL has no shorter list left to choose.
+SERVICE_BINS="$("$(cd "$(dirname "$0")" && pwd)/deploy/yantrik-os/service-bins.sh")" \
+    || fail "cannot determine which services this tree builds"
+SERVICES="$(drop_shelved "$SERVICE_BINS")"
+# The same set as cargo wants it: one `-p name` per service, shelf already dropped.
+SERVICE_PACKAGES=""
+for svc in $SERVICES; do SERVICE_PACKAGES="$SERVICE_PACKAGES -p $svc"; done
+
 # Determine build profile
 PROFILE="release"
 PROFILE_FLAG="--release"
@@ -86,19 +104,13 @@ if [ "${1:-}" != "--skip-build" ]; then
             --exclude target --exclude .git/objects --exclude .claude/worktrees \
             --exclude '*.gguf' --exclude training/"
 
-    # Determine packages to build. The apps come from APP_PACKAGES, derived above; what the
-    # two branches choose between is which services to add.
-    if [ "${BUILD_ALL:-}" = "1" ]; then
-        PACKAGES="-p yantrik-ui -p yantrik \
-            -p weather-service -p system-monitor-service -p notes-service \
-            -p notifications-service -p calendar-service -p network-service \
-            -p email-service \
-            $APP_PACKAGES"
-        step "Building ALL packages ($PROFILE) via WSL2..."
-    else
-        PACKAGES="-p yantrik-ui -p yantrik -p weather-service -p system-monitor-service -p notes-service -p notifications-service -p calendar-service -p network-service -p email-service -p a11y-service -p perception-service $APP_PACKAGES"
-        step "Building core packages ($PROFILE) via WSL2... (set BUILD_ALL=1 for all)"
-    fi
+    # Determine packages to build. The apps come from APP_PACKAGES and the services from
+    # SERVICE_PACKAGES, both derived above. BUILD_ALL=1 used to switch to a hand-written
+    # "everything" list of services that was in fact shorter than the default list beside
+    # it; with one list asked of the tree, every build builds the same full set and the
+    # flag has nothing left to choose.
+    PACKAGES="-p yantrik-ui -p yantrik $SERVICE_PACKAGES $APP_PACKAGES"
+    step "Building all packages ($PROFILE) via WSL2..."
 
     wsl.exe -d Ubuntu -- bash -lc \
         "cd $WSL_SRC && \
@@ -126,9 +138,8 @@ wsl.exe -d Ubuntu -- bash -lc "
     sudo chmod +x $REMOTE_BIN/yantrik-ui $REMOTE_BIN/yantrik
 " || fail "Failed to deploy binaries."
 
-# Step 2a: Deploy service binaries
+# Step 2a: Deploy service binaries — the SERVICES list derived above, shelf dropped
 step "Deploying services..."
-SERVICES="weather-service system-monitor-service notes-service notifications-service calendar-service network-service email-service a11y-service perception-service"
 wsl.exe -d Ubuntu -- bash -lc "
     for svc in $SERVICES; do
         if [ -f $WSL_TARGET/$PROFILE/\$svc ]; then
