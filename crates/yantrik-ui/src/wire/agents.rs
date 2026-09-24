@@ -22,7 +22,7 @@ use std::time::Duration;
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
 use crate::agents::model::{
-    bytes, now, Agent, Approval, ApprovalOutcome, CallState, Card, Details, Item, Mark, OutputKind, Provenance, State, Tab,
+    bytes, now, Agent, Approval, ApprovalOutcome, CallState, Card, Details, Item, Mark, OutputKind, Provenance, State, Tab, Turn,
 };
 use crate::agents::{self, feed, launch, AgentId, Store};
 use crate::app_context::AppContext;
@@ -240,6 +240,26 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             agents::store().upsert_agent(feed::meta_for(&agent));
             ui.set_lens_open(false);
             show_agent(&ui, &state, agent);
+        }
+    });
+    // The Lens's History: every conversation with any mind, on the All tab, where each opens with
+    // its whole session and can be carried on (#246).
+    ui.on_lens_open_history({
+        let (weak, state) = (weak.clone(), state.clone());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut st = state.borrow_mut();
+                st.tab = Tab::All;
+                st.order.clear();
+            }
+            let g = ui.global::<AgentsState>();
+            g.set_tab(Tab::All.key().into());
+            g.set_view("list".into());
+            ui.set_lens_open(false);
+            ui.set_current_screen(SCREEN);
+            ui.invoke_navigate(SCREEN);
+            refresh(&ui, &state, true);
         }
     });
 
@@ -681,13 +701,43 @@ fn row_of(a: &Agent) -> AgentRowData {
     AgentRowData {
         id: a.meta.id.0.as_str().into(),
         mind: a.meta.mind.as_str().into(),
-        title: a.meta.title.as_str().into(),
+        title: latest_request(&a.turns, &a.meta.title).into(),
         state: a.state.key().into(),
         label: a.state.label().into(),
         since: since(a).into(),
         parent: a.meta.parent.as_ref().map(|p| p.0.clone()).unwrap_or_default().into(),
         role: a.meta.role.as_ref().map(|r| r.name.clone()).unwrap_or_default().into(),
         origin: a.meta.recipe.as_ref().map(|r| r.label()).unwrap_or_default().into(),
+    }
+}
+
+/// What an agent was last asked, which is what its row is about now.
+///
+/// The row used to carry the conversation's first prompt for ever. The Lens's conversation with a
+/// mind is one long-lived agent, so every request a person made there sat under whatever they
+/// asked first, hours before: on VM 520, "Release check: reply with exactly one word, READY."
+/// over a town model, a daily briefing and a game (#234, #246).
+fn latest_request<'a>(turns: &'a [Turn], first: &'a str) -> &'a str {
+    turns.iter().rev().map(|t| t.prompt.trim()).find(|p| !p.is_empty()).unwrap_or(first)
+}
+
+#[cfg(test)]
+mod latest_request_tests {
+    use super::*;
+
+    fn asked(n: u64, prompt: &str) -> Turn {
+        Turn { n, prompt: prompt.into(), started: n, ended: Some(n + 1), ok: Some(true), items: vec![], events: false, trail_seq: 0 }
+    }
+
+    #[test]
+    fn a_row_is_titled_by_what_it_was_last_asked() {
+        let first = "Release check: reply with exactly one word, READY.";
+        let turns = vec![asked(1, first), asked(2, "create a small town model with people, homes, roads")];
+        assert_eq!(latest_request(&turns, first), "create a small town model with people, homes, roads");
+        // A turn with no prompt (one the shell opened itself) does not blank the title.
+        let turns = vec![asked(1, "tidy the photos folder"), asked(2, "   ")];
+        assert_eq!(latest_request(&turns, first), "tidy the photos folder");
+        assert_eq!(latest_request(&[], first), first, "no turns yet: the title it was started with");
     }
 }
 
@@ -746,7 +796,7 @@ fn header_of(a: &Agent, seen: &Seen) -> AgentHeaderData {
     AgentHeaderData {
         id: a.meta.id.0.as_str().into(),
         mind: a.meta.mind.as_str().into(),
-        title: a.meta.title.as_str().into(),
+        title: latest_request(&a.turns, &a.meta.title).into(),
         state: a.state.key().into(),
         label: a.state.label().into(),
         since: since(a).into(),

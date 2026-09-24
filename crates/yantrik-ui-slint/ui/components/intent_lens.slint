@@ -738,6 +738,8 @@ export component IntentLens inherits Rectangle {
     callback mic-pressed();
     // "open in Agents": the Agents screen, with this conversation's agent selected.
     callback open-in-agents();
+    // "History": every conversation, on the Agents screen's All tab (#246).
+    callback open-history();
 
     // Internal state
     in-out property <string> input-text: "";
@@ -920,6 +922,31 @@ export component IntentLens inherits Rectangle {
                     // The Lens is the quick question; the whole of the conversation — every call as
                     // a card, every command with its output — is this mind's agent on the Agents
                     // screen (design/agents-workspace-2026-09-23.md, "The shape").
+                    // Every earlier conversation, with any mind: the Agents screen's All tab, where
+                    // each opens with its whole session and can be carried on (#246).
+                    if root.can-open-in-agents : history-hit := TouchArea {
+                        width: history-label.preferred-width + 16px;
+                        height: 28px;
+                        y: (parent.height - 28px) / 2;
+                        mouse-cursor: pointer;
+                        clicked => { root.open-history(); }
+
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: 6px;
+                            background: history-hit.has-hover ? Theme.hover-fill : transparent;
+                        }
+                        history-label := Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "History";
+                            color: history-hit.has-hover ? Theme.text-primary : Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
                     if root.can-open-in-agents : agents-hit := TouchArea {
                         width: agents-label.preferred-width + 16px;
                         height: 28px;

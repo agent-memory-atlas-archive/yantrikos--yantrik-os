@@ -119,6 +119,7 @@ export component DesktopScreen inherits Rectangle {
     // The Lens's "open in Agents": whether the conversation is an agent's, and the press.
     in property <bool> lens-can-open-in-agents: false;
     callback lens-open-in-agents();
+    callback lens-open-history();
 
     // Urges (for quiet queue)
     in property <[UrgeCardData]> urges: [];
@@ -1018,6 +1019,7 @@ export component DesktopScreen inherits Rectangle {
         mind-name: root.active-harness-name;
         can-open-in-agents: root.lens-can-open-in-agents;
         open-in-agents => { root.lens-open-in-agents(); }
+        open-history => { root.lens-open-history(); }
         messages: root.messages;
         is-generating: root.is-generating;
         suggestions: root.lens-suggestions;
