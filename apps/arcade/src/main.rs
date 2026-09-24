@@ -250,7 +250,7 @@ fn run_action(
             }))
         }
         "build" => {
-            let game = game_arg(ui, args)?;
+            let game = game_arg(args)?;
             let (slug, path) = Library::open().build_game(&game).map_err(|e| refuse(ui, e))?;
             ui.set_game_name(slug.clone().into());
             refresh(ui, core);
@@ -261,25 +261,25 @@ fn run_action(
             }))
         }
         "play" => {
-            let game = game_arg(ui, args)?;
+            let game = game_arg(args)?;
             let id = spawn_play(ui, core, &game).map_err(|e| refuse(ui, e))?;
             refresh(ui, core);
             Ok(started("play", &game, id))
         }
         "verify" => {
-            let game = game_arg(ui, args)?;
+            let game = game_arg(args)?;
             let id = spawn_verify(ui, core, &game).map_err(|e| refuse(ui, e))?;
             refresh(ui, core);
             Ok(started("verify", &game, id))
         }
         "screenshot" => {
-            let game = game_arg(ui, args)?;
+            let game = game_arg(args)?;
             let id = spawn_screenshot(ui, core, &game).map_err(|e| refuse(ui, e))?;
             refresh(ui, core);
             Ok(started("screenshot", &game, id))
         }
         "delete" => {
-            let game = game_arg(ui, args)?;
+            let game = game_arg(args)?;
             let message = Library::open().delete_game(&game).map_err(|e| refuse(ui, e))?;
             ui.set_game_name(SharedString::default());
             refresh(ui, core);
@@ -316,17 +316,13 @@ fn arg_str(args: &serde_json::Value, name: &str, what: &str) -> Result<String, S
         .ok_or_else(|| format!("`{name}` is required: {what}"))
 }
 
-/// Which game an action means: the caller's `game` argument, or the window's
-/// selection. A missing selection is a sentence, not a guess at the first row.
-fn game_arg(ui: &ArcadeApp, args: &serde_json::Value) -> Result<String, String> {
-    if let Some(game) = args.get("game").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
-        return Ok(game.trim().to_string());
-    }
-    let selected = ui.get_game_name().to_string();
-    if selected.trim().is_empty() {
-        return Err("no game is selected; pass `game=` or pick one in the window's list".into());
-    }
-    Ok(selected.trim().to_string())
+/// Which game an action means: the `game` the caller sent, always. It used to fall back to the
+/// window's selection, which the caller cannot see and an approval card cannot bind — a card
+/// binds the arguments as sent, and a fallback decided afterwards is a move nobody approved,
+/// on `delete` above all. The window's buttons pass their selection explicitly, as they always
+/// have, so nothing that worked stops working.
+fn game_arg(args: &serde_json::Value) -> Result<String, String> {
+    arg_str(args, "game", "the title or slug of the game, as `describe` lists under `games`")
 }
 
 // ── The slow three: workers ────────────────────────────────────────
@@ -600,11 +596,64 @@ type Handler = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, Strin
 /// to redo). `play`, `verify` and `screenshot` reach a browser and defer to
 /// workers. `delete` goes to the Trash and is recoverable from Files, which keeps
 /// it standard rather than dangerous.
+///
+/// Declarations only, kept apart from the handlers so a test can read exactly what
+/// a caller is shown without a window to build them around.
+fn specs() -> Vec<Action> {
+    vec![
+        Action::new("new_character", "Save a character spec into the library")
+            .arg(Param::text("spec").describe(&format!(
+                "The character JSON. Required: name, archetype, proportions (head_body, limb_length, width). Optional: ears, tail, palette (base/belly/accent/nose/eye as #rrggbb), expression, stance. The enumerated fields take {}. Ranges and the rest are in `describe`'s spec_grammar. A value outside any of them is refused with a sentence naming the field.",
+                spec::vocabulary_line("character")
+            ))),
+        Action::new("new_game", "Save a game spec into the library")
+            .arg(Param::text("spec").describe(&format!(
+                "The game JSON. Required: title, arena (size, theme), player (character, speed), collectible (kind, count), hazards[] (kind, speed, count), lives, music. `player.character` may name a saved character or inline a whole one, in which case the character vocabulary applies to it too. The enumerated fields take {}. Ranges are in `describe`'s spec_grammar.",
+                spec::vocabulary_line("game")
+            ))),
+        // Standard, not sensitive like `delete`: iterating on a design is the
+        // ordinary use of a kit, the spec it replaces is kept one step back, and
+        // the build it drops is milliseconds to redo (#112).
+        Action::new("update_game", "Replace a saved game's spec; the old build, verdict and screenshot go with the old spec, and `build` runs again")
+            .arg(Param::text("spec").describe(
+                "The whole game JSON, same grammar as new_game; its title says which saved game it replaces. The spec it replaces is kept beside it as spec.previous.json.",
+            ))
+            // Optional as the handler has always read it: the spec's own title says
+            // which saved game to replace, and `game` is only for when the new spec
+            // changes the title.
+            .arg(Param::text("game").optional().describe(
+                "Optional: title or slug of the saved game to replace, for when the new spec changes the title",
+            )),
+        Action::new("update_character", "Replace a saved character's spec; games that cast it by name lose their builds and need `build` again")
+            .arg(Param::text("spec").describe(
+                "The whole character JSON, same grammar as new_character; its name says which saved character it replaces. Games that inline a copy are untouched.",
+            )),
+        Action::new("build", "Compile a saved game into its one HTML file")
+            .arg(Param::text("game").describe("Title or slug of a saved game")),
+        Action::new("play", "Open a built game in the desktop Browser and confirm it draws; if the Browser has no WebGL, say so and take a headless screenshot instead")
+            .defers()
+            .arg(Param::text("game").describe("Title or slug of a built game")),
+        Action::new("verify", "Run the headless gates: boots, clean console, frame renders, input moves, bot wins, bot loses, frame budget. Each gate ends passed, failed or inconclusive; inconclusive means this machine could not settle it (too slow to run a bot to the end of its simulated budget) and is not a verdict on the game, though it is not a pass either")
+            .defers()
+            .arg(Param::text("game").describe("Title or slug of a built game")),
+        Action::new("screenshot", "Take a headless PNG of a built game")
+            .defers()
+            .arg(Param::text("game").describe("Title or slug of a built game")),
+        // Sensitive, like Notes' own `trash` and unlike everything else here: a built game
+        // is work somebody asked for, and the Trash is a recovery a person has to know
+        // about. Not `dangerous` — that grade is for deleting a path the caller names,
+        // which is what Files does; this one can only reach Arcade's own library.
+        Action::new("delete", "Move a game to the Trash, where Files can bring it back")
+            .risk("sensitive")
+            .arg(Param::text("game").describe("Title or slug of a saved game")),
+    ]
+}
+
 fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
     fn handler(
         ui: &ArcadeApp,
         core: &Core,
-        name: &'static str,
+        name: String,
     ) -> Handler {
         let weak = ui.as_weak();
         let core = core.clone();
@@ -612,82 +661,18 @@ fn surface(ui: &ArcadeApp, core: Core) -> Vec<(Action, Handler)> {
             let Some(ui) = weak.upgrade() else {
                 return Err("the Arcade window is closing".into());
             };
-            let result = run_action(&ui, &core, name, args);
+            let result = run_action(&ui, &core, &name, args);
             settle(&ui, result)
         })
     }
 
-    vec![
-        (
-            Action::new("new_character", "Save a character spec into the library")
-                .arg(Param::text("spec").describe(&format!(
-                    "The character JSON. Required: name, archetype, proportions (head_body, limb_length, width). Optional: ears, tail, palette (base/belly/accent/nose/eye as #rrggbb), expression, stance. The enumerated fields take {}. Ranges and the rest are in `describe`'s spec_grammar. A value outside any of them is refused with a sentence naming the field.",
-                    spec::vocabulary_line("character")
-                ))),
-            handler(ui, &core, "new_character"),
-        ),
-        (
-            Action::new("new_game", "Save a game spec into the library")
-                .arg(Param::text("spec").describe(&format!(
-                    "The game JSON. Required: title, arena (size, theme), player (character, speed), collectible (kind, count), hazards[] (kind, speed, count), lives, music. `player.character` may name a saved character or inline a whole one, in which case the character vocabulary applies to it too. The enumerated fields take {}. Ranges are in `describe`'s spec_grammar.",
-                    spec::vocabulary_line("game")
-                ))),
-            handler(ui, &core, "new_game"),
-        ),
-        (
-            // Standard, not sensitive like `delete`: iterating on a design is the
-            // ordinary use of a kit, the spec it replaces is kept one step back, and
-            // the build it drops is milliseconds to redo (#112).
-            Action::new("update_game", "Replace a saved game's spec; the old build, verdict and screenshot go with the old spec, and `build` runs again")
-                .arg(Param::text("spec").describe(
-                    "The whole game JSON, same grammar as new_game; its title says which saved game it replaces. The spec it replaces is kept beside it as spec.previous.json.",
-                ))
-                .arg(Param::text("game").describe(
-                    "Optional: title or slug of the saved game to replace, for when the new spec changes the title",
-                )),
-            handler(ui, &core, "update_game"),
-        ),
-        (
-            Action::new("update_character", "Replace a saved character's spec; games that cast it by name lose their builds and need `build` again")
-                .arg(Param::text("spec").describe(
-                    "The whole character JSON, same grammar as new_character; its name says which saved character it replaces. Games that inline a copy are untouched.",
-                )),
-            handler(ui, &core, "update_character"),
-        ),
-        (
-            Action::new("build", "Compile a saved game into its one HTML file")
-                .arg(Param::text("game").describe("Title or slug of a saved game")),
-            handler(ui, &core, "build"),
-        ),
-        (
-            Action::new("play", "Open a built game in the desktop Browser and confirm it draws; if the Browser has no WebGL, say so and take a headless screenshot instead")
-                .defers()
-                .arg(Param::text("game").describe("Title or slug of a built game")),
-            handler(ui, &core, "play"),
-        ),
-        (
-            Action::new("verify", "Run the headless gates: boots, clean console, frame renders, input moves, bot wins, bot loses, frame budget. Each gate ends passed, failed or inconclusive; inconclusive means this machine could not settle it (too slow to run a bot to the end of its simulated budget) and is not a verdict on the game, though it is not a pass either")
-                .defers()
-                .arg(Param::text("game").describe("Title or slug of a built game")),
-            handler(ui, &core, "verify"),
-        ),
-        (
-            Action::new("screenshot", "Take a headless PNG of a built game")
-                .defers()
-                .arg(Param::text("game").describe("Title or slug of a built game")),
-            handler(ui, &core, "screenshot"),
-        ),
-        (
-            // Sensitive, like Notes' own `trash` and unlike everything else here: a built game
-            // is work somebody asked for, and the Trash is a recovery a person has to know
-            // about. Not `dangerous` — that grade is for deleting a path the caller names,
-            // which is what Files does; this one can only reach Arcade's own library.
-            Action::new("delete", "Move a game to the Trash, where Files can bring it back")
-                .risk("sensitive")
-                .arg(Param::text("game").describe("Title or slug of a saved game")),
-            handler(ui, &core, "delete"),
-        ),
-    ]
+    specs()
+        .into_iter()
+        .map(|spec| {
+            let handler = handler(ui, &core, spec.name.clone());
+            (spec, handler)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -760,5 +745,40 @@ mod tests {
         assert!(err.contains("`spec`"), "{err}");
         let err = arg_str(&serde_json::json!({"spec": "  "}), "spec", "the character JSON").unwrap_err();
         assert!(err.contains("`spec`"), "{err}");
+    }
+
+    /// A call that names no game is refused, whatever the window has selected. The fallback
+    /// was a default the caller could not see, and a grant binds the arguments as sent — so
+    /// the card a person approved could run against a game nobody named, on `delete` above all.
+    #[test]
+    fn a_call_with_no_game_is_refused_rather_than_answered_from_the_window() {
+        let err = game_arg(&serde_json::json!({})).unwrap_err();
+        assert!(err.contains("`game` is required"), "{err}");
+        let err = game_arg(&serde_json::json!({"game": "   "})).unwrap_err();
+        assert!(err.contains("`game` is required"), "{err}");
+        assert_eq!(game_arg(&serde_json::json!({"game": " meadow-run "})).unwrap(), "meadow-run");
+    }
+
+    /// The declarations say the same: `game` is required wherever the handler needs one, and
+    /// optional only where the handler has always coped without it (`update_game` reads the
+    /// game to replace off the spec's own title).
+    #[test]
+    fn the_published_game_argument_says_which_actions_need_one() {
+        let specs = specs();
+        let param = |action: &str| {
+            specs
+                .iter()
+                .find(|spec| spec.name == action)
+                .unwrap_or_else(|| panic!("no action `{action}`"))
+                .params
+                .iter()
+                .find(|param| param.name == "game")
+                .unwrap_or_else(|| panic!("`{action}` takes no `game`"))
+                .required
+        };
+        for action in ["build", "play", "verify", "screenshot", "delete"] {
+            assert!(param(action), "`{action}`'s `game` is optional again");
+        }
+        assert!(!param("update_game"), "update_game's own description says `game` is optional");
     }
 }
