@@ -564,6 +564,12 @@ export component DesktopScreen inherits Rectangle {
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                     }
+                    // The chip names the compositor's binding — Super+K in config/labwc/rc.xml
+                    // runs `yos act shell open_lens` — because that is the key that works from
+                    // inside any app. The shell's own Ctrl+K only arrives while the desktop
+                    // holds the keyboard; advertising that one sent people to a shortcut that
+                    // typed a literal "k" into their terminal. A test at the end of yantrik-ui's
+                    // lens.rs keeps this copy and rc.xml on the same key.
                     Rectangle {
                         width: kbd.preferred-width + 12px;
                         height: 20px;
@@ -571,7 +577,7 @@ export component DesktopScreen inherits Rectangle {
                         border-radius: 4px;
                         background: Theme.hover-fill;
                         kbd := Text {
-                            text: "Ctrl K";
+                            text: "Super K";
                             color: Theme.text-dim;
                             font-size: Theme.fs-micro;
                             horizontal-alignment: center;
@@ -819,7 +825,7 @@ export component DesktopScreen inherits Rectangle {
                         Text {
                             // No direction words. This said "open an app below" and the apps moved above it; copy
                             // that points at a place on the screen is copy the layout will make wrong.
-                            text: "Open a pinned app to get started, or press Ctrl K to ask a question, find a file, or run a command.";
+                            text: "Open a pinned app to get started, or press Super K to ask a question, find a file, or run a command.";
                             color: Theme.text-secondary;
                             font-size: Theme.fs-body;
                             wrap: word-wrap;

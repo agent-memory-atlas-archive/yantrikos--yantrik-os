@@ -151,11 +151,12 @@
     <!--
       The ask bar, from anywhere.
 
-      The shell handles Ctrl+K itself (app.slint, `global-keys`), and that is the binding the
-      desktop advertises — but it only works while the shell window has the keyboard. labwc gives
-      the keyboard to the focused toplevel, so with Notes or a terminal in front, Ctrl+K is that
-      app's key and the shell never sees it. A compositor binding is the only thing that works
-      from inside another window.
+      The shell handles Ctrl+K itself (app.slint, `global-keys`), but that only works while the
+      shell window has the keyboard. labwc gives the keyboard to the focused toplevel, so with
+      Notes or a terminal in front, Ctrl+K is that app's key and the shell never sees it. A
+      compositor binding is the only thing that works from inside another window, and it is the
+      one the desktop advertises: the ask bar hints say "Super K", and a test at the end of
+      yantrik-ui's lens.rs fails if this binding and those hints ever name different keys.
 
       Super+K rather than Ctrl+K, deliberately. A compositor binding is a global grab: binding
       Ctrl+K here would take it away from every application on the machine for good, and Ctrl+K
