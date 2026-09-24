@@ -10564,6 +10564,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "yantrik-file-follow",
 ]
 
 [[package]]
@@ -10571,7 +10572,6 @@ name = "yantrik-document-editor"
 version = "0.1.0"
 dependencies = [
  "libc",
- "notify",
  "pulldown-cmark",
  "regex",
  "serde",
@@ -10581,6 +10581,7 @@ dependencies = [
  "tracing",
  "yantrik-app-runtime",
  "yantrik-design-tokens",
+ "yantrik-file-follow",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ui-kit",
@@ -10645,6 +10646,14 @@ name = "yantrik-email-text"
 version = "0.1.0"
 dependencies = [
  "html2text",
+]
+
+[[package]]
+name = "yantrik-file-follow"
+version = "0.1.0"
+dependencies = [
+ "notify",
+ "tracing",
 ]
 
 [[package]]
@@ -11039,6 +11048,7 @@ dependencies = [
  "tracing",
  "yantrik-app-runtime",
  "yantrik-design-tokens",
+ "yantrik-file-follow",
  "yantrik-ipc-contracts",
  "yantrik-ipc-transport",
  "yantrik-ui-kit",

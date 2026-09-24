@@ -20,7 +20,6 @@
 //! backed by any of that are off the screen, each with the reason at the site it left.
 
 mod document;
-mod follow;
 
 use document::{Document, Format, Saved};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -32,6 +31,9 @@ use std::{
     time::Duration,
 };
 use yantrik_app_runtime::prelude::*;
+// The watch on the folder the document lives in, and the decisions behind following a move.
+// Shared with the Text Editor (#86); it was this app's own `follow.rs` until then.
+use yantrik_file_follow as follow;
 
 slint::include_modules!();
 
