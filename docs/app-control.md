@@ -253,6 +253,112 @@ the answer was noticing what `run_command` cannot do — run something in the wi
 **And some things should not have a surface yet.** The download manager had none while every
 button only logged a line, and got one once a real transfer engine was behind it.
 
+### Every action, and the grade it holds
+
+#48 asked the question of two actions in Weather: `add_location` and `set_units` wrote choices
+into `~/.config/yantrik/weather.json` that were still standing after a restart, and both were
+graded the same as opening a window. The fix is a rule, so the rule was walked across every
+published action on every app and service surface: **an action whose effect outlives the turn
+that made it — a persistent setting, stored configuration, anything a restart reads back — is at
+least `sensitive`; showing, reading and opening stay `standard` or `safe`.** Five actions moved:
+Weather's two, and the shell's `pin_app`, `use_harness` and `set_do_not_disturb`, each of which
+writes a setting into the shell's own settings file. This table is the record of the walk.
+
+One distinction the table leans on, because it is what kept the walk from regrading every save:
+**configuration against content**. A choice about how the app or the machine behaves from now on
+— which mind answers, which units readings arrive in, what sits on START — is configuration, and
+configuration asks first. A thing the person owns — a note, an event, a document, a scene — is
+content, and a content action a paired action takes back stays `standard` (`add_event` beside
+`delete_own_event`; [the grade guide](sdk/grades.md) argues the line).
+
+| Surface | Action | Grade | Why |
+| --- | --- | --- | --- |
+| shell | `read_message`, `open_lens`, `show_desktop` | safe | reads and showings; nothing written |
+| shell | `open_app`, `start_service`, `refresh_apps`, `send_message` | standard | launch, start, rescan, say a line to the desktop — undone by closing or stopping, nothing stored |
+| shell | `show_screen`, `show_app`, `focus_window`, `close_window`, `minimise_window`, `maximise_window` | standard | moving and placing windows; the state they change dies with the session |
+| shell | `pin_app` | sensitive | **regraded (#48)**: writes the START pin list into the shell's settings, and it is still pinned after a restart |
+| shell | `use_harness` | sensitive | **regraded (#48)**: writes the preferred mind into the shell's settings — a choice about who answers from now on, across restarts |
+| shell | `set_do_not_disturb` | sensitive | **regraded (#48)**: writes `dnd_mode` into the shell's settings; left on, it swallows every notification that follows, quietly, until somebody notices |
+| shell | `report_problem` | sensitive | sends what it carries out of the machine |
+| shell | `install_harness`, `start_harness` | sensitive | fetches software onto the machine; decides what it runs on every login |
+| shell | `set_mind_panel` | safe | showing: how much of one panel is drawn, remembered in the panel's own file; nothing sent, run or granted |
+| shell | `lock` | safe | only takes access away — Super+L must lock, not ask about locking (#215) |
+| shell | `files_go`, `files_enter`, `files_open`, `files_up`, `files_new_folder`, `files_new_file`, `files_select`, `files_view`, `files_rename`, `files_copy`, `files_cut`, `files_paste`, `files_trash_selected`, `files_undo_trash`, `files_toggle_trash`, `files_refresh`, `files_cancel`, `files_terminal` | standard | driving the Files screen; what they change is content, taken back by the paired verb or recovered from Trash |
+| shell | `files_delete` | dangerous | destroys without a trash |
+| shell | `check_update` | safe | reads |
+| shell | `set_update_channel` | sensitive | stored configuration: decides where every later update comes from |
+| shell | `apply_update` | dangerous | replaces the system |
+| shell | `installer_set`, `installer_go_to` | standard | driving the installer's own screens |
+| shell | `installer_install`, `installer_reboot` | dangerous | writes the disk; ends the session |
+| shell | `run_recipe` | sensitive | starts agents |
+| shell | `answer_recipe`, `pause_recipe`, `resume_recipe`, `cancel_recipe` | standard | steering a run already started |
+| shell | `new_agent`, `hand_off` | sensitive | starts an agent, with what that costs and whatever reach the role carries |
+| shell | `send_to_agent`, `stop_agent` | standard | talking to, or stopping, an agent the person started |
+| shell | `read_agent`, `show_agent` | safe | reads and showings |
+| shell | `agent_run`, `agent_input` | sensitive | arbitrary commands; typing into a live shell |
+| shell | `agent_job`, `agent_kill` | standard | reading a job's state; ending a job the caller's token owns |
+| shell | `request_approval`, `approval_status`, `consume_approval`, `set_mind_mode`, `record_unasked_action`, `show_mind_audit`, `close_mind_menu` | safe | the approval machinery itself, which must never act; `set_mind_mode` refuses every loosening, so it can only tighten |
+| arcade | `new_character`, `new_game`, `update_game`, `update_character`, `build`, `play`, `verify`, `screenshot` | standard | editing and building library content, editable again |
+| arcade | `delete` | sensitive | destroys the one named game |
+| calendar | `select_day`, `show_month`, `go_to_today`, `set_view` | standard | moving around the calendar |
+| calendar | `add_event`, `update_event`, `delete_own_event` | standard | content, paired: what `add_event` writes, `delete_own_event` takes back |
+| calendar | `delete_event` | sensitive | no trash — the file the event lives in is removed, and its description says it is not recoverable |
+| containers | `refresh`, `start`, `show_logs` | standard | reads, and starting what is stopped |
+| containers | `stop`, `restart` | sensitive | interrupts what the container was serving |
+| containers | `remove` | dangerous | the writable layer goes with it |
+| documents | `find`, `show` | safe | reads |
+| documents | `open`, `new`, `save`, `save_as`, `set_content`, `append`, `replace_all`, `export_markdown` | standard | content in the app's own library in ~/Documents, every step editable again |
+| download-manager | `add`, `pause`, `resume`, `retry`, `verify`, `pause_all`, `resume_all`, `clear_completed`, `open_folder` | standard | steering the queue |
+| download-manager | `cancel` | sensitive | ends a transfer in flight |
+| email | `open_message`, `select_folder`, `search`, `mark_read`, `flag`, `compose` | standard | reads and a draft; `send` is deliberately not published — mail that has gone cannot be taken back |
+| email | `begin_google_sign_in` | sensitive | puts a full-access consent screen in front of the person, unasked |
+| image-viewer | `open`, `show`, `next`, `previous`, `rotate`, `fit`, `toggle_info` | standard | showing pictures; `rotate` turns what is on screen, the file is unchanged |
+| network | `refresh`, `wifi_scan` | standard | reads that trigger a radio scan |
+| network | `wifi_connect`, `wifi_forget` | sensitive | changes what the machine joins; forgetting deletes a stored credential |
+| network | `wifi_disconnect`, `wifi_radio` | dangerous | on a machine reached over Wi-Fi, takes away the channel the undo would travel on |
+| notes | `new_note`, `open_note`, `set_title`, `append`, `search`, `set_folder`, `notebook`, `tags`, `save`, `restore`, `copy`, `reload`, `preview`, `focus`, `undo`, `redo` | standard | library content, with `undo` beside it |
+| notes | `set_content`, `trash`, `import`, `export` | sensitive | replaces a note's whole body; moves things in and out of the library and the filesystem |
+| presentation | `open`, `show`, `save`, `save_as`, `new_deck`, `add_slide`, `set_slide`, `move_slide`, `go_to`, `next`, `previous`, `present`, `export_markdown` | standard | deck content, editable again |
+| presentation | `delete_slide` | sensitive | takes the slide and its contents off the deck |
+| snippets | `open`, `search`, `show` | safe | reads |
+| snippets | `new`, `save`, `copy`, `toggle_favorite`, `import` | standard | library content, paired verbs |
+| snippets | `delete` | sensitive | no trash |
+| studio | `refresh` | safe | reads |
+| studio | `generate`, `variations` | standard ⇄ sensitive | regraded at runtime: `standard` to a model on the machine, `sensitive` when the backend sends the prompt to a hosted service |
+| studio | `set_backend` | sensitive | stored configuration: written into the settings file, it decides where every later prompt goes |
+| studio | `upscale`, `open`, `delete`, `cancel`, `cancel_all` | standard | library content and job steering |
+| system-monitor | `sort_processes`, `filter_processes` | standard | view state |
+| system-monitor | `kill_process` | dangerous | ends what somebody else is running |
+| terminal | `run`, `send_input`, `new_tab`, `open_directory` | sensitive | arbitrary commands in the window the person is looking at |
+| editor | `new`, `open`, `save`, `save_as`, `show`, `close`, `cancel`, `find`, `find-next`, `find-prev`, `replace_text`, `replace`, `replace-all`, `append`, `undo`, `redo`, `select_tab` | standard | buffer and file content, `undo` beside it; `close` refuses unsaved changes rather than deciding about them |
+| editor | `discard`, `set_content` | sensitive | throws work away; replaces the buffer wholesale |
+| weather | `refresh` | standard | fetches again, stores nothing |
+| weather | `show_location` | standard | a showing: moves an already-saved place onto the screen — the prefs line it touches is which place was being shown, not what is saved |
+| weather | `add_location` | sensitive | **regraded (#48)**: saves a place into `~/.config/yantrik/weather.json`, still saved after a restart |
+| weather | `set_units` | sensitive | **regraded (#48)**: the stored unit choice decides the units every future reading arrives in |
+| weather-service | `set_location` | standard | remembered in memory for this run only; the service writes no file — the app's `add_location` is the storing one |
+| system-monitor-service | `find_process` | safe | reads |
+| system-monitor-service | `kill_process` | dangerous | ends what somebody else is running |
+| notifications-service | `notify`, `dismiss`, `dismiss_all`, `mark_read` | standard | a notification changes nothing and reaches nowhere outside this machine |
+| blender | `new_scene`, `add_primitive`, `delete_object`, `transform`, `set_material`, `set_camera`, `set_light`, `import_model`, `set_render`, `screenshot` | standard | scene content, editable again |
+| blender | `render`, `save`, `open` | sensitive | writes files on the machine; `open` replaces the scene in front of the person |
+| blender | `run_python` | dangerous | arbitrary code can do anything the person can |
+| libreoffice | `read_text`, `read_cells` | safe | reads |
+| libreoffice | `open`, `write_text`, `write_cells`, `save_as`, `export_pdf`, `close` | standard | nothing reaches the disk until `save`; `save_as` and `export_pdf` refuse a path where a file already is, and `close` refuses unsaved changes |
+| libreoffice | `save` | sensitive | replaces the file the document came from |
+
+The walk also looked at, and left: `weather.show_location` (a showing — regrading it would make
+"show me London" a card, and the issue named only the two that store); `shell.set_mind_panel` and
+`shell.lock` (showing, and #215); the approvals surface (its seven `safe`s are the tested
+security property that the surface which asks can never act); and every first-party `save`
+(content in the app's own library, against LibreOffice's `save`, which replaces an outside file
+the document came from). Two places grade the same verb differently, and the walk left both:
+studio's `delete` stays `standard` while arcade's is `sensitive`, though both move to the Trash —
+arcade's author graded a built game as work somebody asked for, the way Notes grades its own
+`trash` — and `files_delete` (`dangerous`, no trash) sits beside `files_trash_selected`
+(`standard`, recoverable). None of the four writes configuration, so none is #48's rule; whether
+every trash-move of finished work deserves a card is a judgement for its own issue.
+
 ## Threading
 
 Both closures run on the UI thread, because that is the only thread allowed to touch a Slint
