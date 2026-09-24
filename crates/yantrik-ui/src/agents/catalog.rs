@@ -102,6 +102,45 @@ impl Reach {
     pub fn text(&self) -> String {
         format!("{} · at most {}", reach::surfaces_text(&self.surfaces), self.ceiling)
     }
+
+    /// "the Editor, Documents and Notes, and it may ask for safe acts" — [`reach_words`].
+    pub fn words(&self) -> String {
+        reach_words(&self.surfaces, &self.ceiling)
+    }
+}
+
+/// One surface pattern as a person reads it. A pattern with no words here is said as written:
+/// a person's own role may name an app this list has never seen, and an honest pattern beats a
+/// clever guess.
+fn surface_word(pattern: &str) -> String {
+    match pattern {
+        "shell.agent_*" => "its own terminal".into(),
+        "shell.open_app" => "opening apps".into(),
+        "editor" => "the Editor".into(),
+        "notes" => "Notes".into(),
+        "documents" => "Documents".into(),
+        "calendar" => "Calendar".into(),
+        "files" => "Files".into(),
+        "terminal" => "Terminal".into(),
+        _ => pattern.into(),
+    }
+}
+
+/// A reach as a sentence for a person (#212): "its own terminal and the Editor, and it may ask
+/// for sensitive acts". The raw patterns are what the doors enforce and what a reader comparing
+/// two roles needs; they stay one click away wherever this sentence is drawn, and the sentence
+/// itself is this one function, pinned by a table in the tests.
+pub fn reach_words(surfaces: &[String], ceiling: &str) -> String {
+    let touched = match surfaces {
+        [] => "nothing on this desktop".to_string(),
+        [one] => surface_word(one),
+        _ => {
+            let words: Vec<String> = surfaces.iter().map(|s| surface_word(s)).collect();
+            let (last, rest) = words.split_last().expect("two or more");
+            format!("{} and {last}", rest.join(", "))
+        }
+    };
+    format!("{touched}, and it may ask for {ceiling} acts")
 }
 
 /// How long a role's agent has: turns, and minutes from its start.
@@ -318,6 +357,7 @@ impl Role {
             id: self.id.clone(),
             name: self.name.clone(),
             reach: self.reach.text(),
+            reach_words: self.reach.words(),
             turns: self.budget.turns,
             minutes: self.budget.minutes,
         }
@@ -614,5 +654,50 @@ minutes = 5
         }
         assert!(!reviewer.first_turn("x", "  ").contains("Read this first"));
         assert_eq!(reviewer.meta().reach, "editor, documents and notes · at most safe");
+    }
+
+    /// #212: the dialog and the details column showed a role's reach as the patterns the doors
+    /// enforce — "May touch shell.agent_*, shell.editor_* and editor · at most sensitive" — and
+    /// a person could not read what its agent might do. The words are one function with one
+    /// table: every shipped reach reads as a sentence, an empty reach says so, and a pattern
+    /// with no words is said as written rather than guessed at.
+    #[test]
+    fn a_reach_reads_as_words_and_the_patterns_stay_one_click_away() {
+        let words = |surfaces: &[&str], ceiling: &str| {
+            reach_words(&surfaces.iter().map(|s| s.to_string()).collect::<Vec<_>>(), ceiling)
+        };
+        // The shipped roles' reaches, as the sentences a person reads.
+        assert_eq!(words(&["shell.open_app"], "standard"), "opening apps, and it may ask for standard acts");
+        assert_eq!(words(&["calendar", "notes"], "safe"), "Calendar and Notes, and it may ask for safe acts");
+        assert_eq!(
+            words(&["shell.agent_*", "editor"], "sensitive"),
+            "its own terminal and the Editor, and it may ask for sensitive acts"
+        );
+        assert_eq!(
+            words(&["editor", "documents", "notes"], "safe"),
+            "the Editor, Documents and Notes, and it may ask for safe acts"
+        );
+        assert_eq!(words(&[], "safe"), "nothing on this desktop, and it may ask for safe acts");
+        assert_eq!(
+            words(&["notes", "documents", "editor"], "standard"),
+            "Notes, Documents and the Editor, and it may ask for standard acts"
+        );
+        assert_eq!(words(&["notes"], "standard"), "Notes, and it may ask for standard acts");
+        // A person's own role may name an app this table has never seen: as written, never hidden.
+        assert_eq!(
+            words(&["files.delete", "browser"], "dangerous"),
+            "files.delete and browser, and it may ask for dangerous acts"
+        );
+        // The patterns are still there — the doors enforce them, and the screen keeps them one
+        // click away from the sentence.
+        let reach = Reach { surfaces: vec!["shell.agent_*".into(), "editor".into()], ceiling: "sensitive".into() };
+        assert_eq!(reach.text(), "shell.agent_* and editor · at most sensitive");
+        assert_eq!(reach.words(), words(&["shell.agent_*", "editor"], "sensitive"));
+        // An agent keeps both: the sentence for its row and details, the patterns for the click.
+        let catalog = shipped();
+        let reviewer = catalog.find("reviewer").unwrap();
+        let meta = reviewer.meta();
+        assert_eq!(meta.reach_words, "the Editor, Documents and Notes, and it may ask for safe acts");
+        assert_eq!(meta.reach, "editor, documents and notes · at most safe");
     }
 }
