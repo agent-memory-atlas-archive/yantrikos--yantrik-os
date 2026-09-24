@@ -290,8 +290,11 @@ impl Role {
         let mut text = format!(
             "You are the {name} on this desktop, started to do one piece of work and hand it back. \
              {purpose}\n\n{brief}\n\nWhat you hand back: {returns}\n\nYour reach: {surfaces}, at \
-             most `{ceiling}`. The desktop refuses anything else you try, so do not try it; say in \
-             your answer what else needs doing.\nYour budget: {turns} turns and {minutes} minutes. \
+             most `{ceiling}`. An app your reach names is closed until it is opened, and you may \
+             open it: `shell.open_app` with its name is within your reach, whatever your ceiling. \
+             Everything else the reach and the ceiling still decide — the desktop refuses anything \
+             else you try, so do not try it; say in your answer what else needs doing.\n\
+             Your budget: {turns} turns and {minutes} minutes. \
              After that you are stopped, so hand back what you have before then.\n\nThe task:\n{task}",
             name = self.name,
             purpose = self.purpose,
@@ -600,6 +603,9 @@ minutes = 5
             "Find what is wrong with a change",
             "What you hand back: A verdict",
             "Your reach: editor, documents and notes, at most `safe`",
+            // A reach that names an app names an app it may open (#195): the Reviewer was told to
+            // read Notes and could not, because Notes was closed and opening it was outside it.
+            "`shell.open_app` with its name is within your reach, whatever your ceiling",
             "Your budget: 4 turns and 15 minutes",
             "The task:\nreview the change in ~/src/app",
             "Read this first:\ndiff --git a/x b/x",
