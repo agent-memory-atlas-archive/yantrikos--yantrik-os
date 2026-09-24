@@ -117,6 +117,10 @@ packages:
   # leaves the interface alone until told otherwise — which is what makes adding it safe here
   # rather than a change that takes the network down on first boot.
   - network-manager
+  # The media player. Files opens every sound and video file in mpv's own window
+  # (crates/yantrik-ui/src/mime_dispatch.rs), so a machine without mpv plays no media at all —
+  # which was every machine, because no provisioning path installed it (#255).
+  - mpv
 
 write_files:
   - path: /etc/yantrik/install.env
