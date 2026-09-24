@@ -303,7 +303,9 @@ fn probe_runtime(configured: Option<&str>) -> bool {
 }
 
 /// Anthropic uses `x-api-key`; the rest of the presets are bearer-token.
-fn auth_type_for(provider: &str) -> &'static str {
+/// Shared with the installer, which rebuilds the wizard's provider entry for
+/// the installed user and must not guess the auth scheme differently.
+pub(crate) fn auth_type_for(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "x-api-key",
         _ if is_local_runtime(provider) => "none",
