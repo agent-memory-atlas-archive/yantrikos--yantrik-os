@@ -80,6 +80,14 @@ The shell reads `.desktop` files from `~/.local/share/applications`, `$XDG_DATA_
 every `applications` directory on `$XDG_DATA_DIRS` (by default `/usr/share/applications` and
 `/usr/local/share/applications`), and `/opt/yantrik/share/applications`. It finds the program an
 `Exec` or `X-Yantrik-Adapter` names by path, beside the shell, in `/opt/yantrik/bin`, or on `PATH`.
+
+An entry that says `TryExec=<program>` is listed only while that program can be found the same way
+— the standard freedesktop rule, and the one an adapter's entry cannot do without: its `Exec` runs
+the wrapper that ships with the adapter, which is installed whether or not the app it wraps is, so
+`TryExec` is what hides a LibreOffice tile, and the `libreoffice` row of `describe shell`, from a
+machine that has no LibreOffice. `yos ls` with no shell to ask, and the bridge's own tool
+descriptions, read the same key by the same rule.
+
 For a program of your own:
 
 ```sh

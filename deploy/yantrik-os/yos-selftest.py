@@ -843,6 +843,19 @@ def main():
         (apps_dir / "hidden.desktop").write_text(
             "[Desktop Entry]\nType=Application\nName=Hidden\nExec=h\nNoDisplay=true\n"
             "X-Yantrik-Surface=hidden\n", "utf-8")
+        # `TryExec` is the standard "only if this program is installed" rule, and the shell's
+        # catalogue applies it too (#214): Ghost names a program no machine has, so nothing
+        # lists it, however fine its Exec looks. Wrapped is an adapter's entry's shape — its
+        # Exec is a wrapper that is not here, but the app it names IS — and it is listed like
+        # any other.
+        (apps_dir / "org.example.Ghost.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=Ghost\nExec=/usr/bin/ghost-wrapper\n"
+            "TryExec=no-such-program-anywhere\nX-Yantrik-Surface=ghost\n"
+            "X-Yantrik-Purpose=an app whose program is not on this machine\n", "utf-8")
+        (apps_dir / "org.example.Wrapped.desktop").write_text(
+            "[Desktop Entry]\nType=Application\nName=Wrapped\nExec=/usr/bin/wrapped-wrapper\n"
+            "TryExec=/bin/sh\nX-Yantrik-Surface=wrapped\n"
+            "X-Yantrik-Purpose=an adapter's entry whose program is on this machine\n", "utf-8")
         declared = yos.declared_surfaces([str(apps_dir)])
         check("the .desktop keys are read the way the shell reads them",
               declared == [
@@ -852,8 +865,13 @@ def main():
                    "aliases": ["hush"], "entry": "org.example.Quiet"},
                   {"id": "system-monitor", "title": "System Monitor",
                    "purpose": "CPU, memory, disk and processes", "aliases": ["sysmonitor"],
-                   "entry": "yantrik-system-monitor"}],
+                   "entry": "yantrik-system-monitor"},
+                  {"id": "wrapped", "title": "Wrapped",
+                   "purpose": "an adapter's entry whose program is on this machine",
+                   "aliases": [], "entry": "org.example.Wrapped"}],
               declared)
+        check("an entry whose TryExec names a program this machine does not have is not listed",
+              not any(s["id"] == "ghost" for s in declared), declared)
         saved_dirs = yos.application_dirs
         yos.application_dirs = lambda: [str(apps_dir)]
         hello_up = FakeService(sockets / "app-howdy.sock", lambda _s, asked: (

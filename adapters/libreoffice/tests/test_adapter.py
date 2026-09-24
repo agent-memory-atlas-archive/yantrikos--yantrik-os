@@ -38,6 +38,12 @@ class TestTheDesktopEntry(unittest.TestCase):
         self.assertEqual(keys["X-Yantrik-Aliases"], "writer;calc")
         self.assertTrue(keys["X-Yantrik-Purpose"])
 
+    def test_it_names_the_program_it_wraps(self):
+        # Exec runs the wrapper this package ships, which is installed whether or not
+        # LibreOffice is, so only TryExec — naming the wrapped app — hides the entry from a
+        # machine that has nothing for it to open (#214).
+        self.assertEqual(desktop_keys()["TryExec"], "soffice")
+
     def test_the_commands_it_names_are_the_ones_this_package_ships(self):
         keys = desktop_keys()
         launcher = keys["Exec"].split()[0]

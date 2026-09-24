@@ -28,6 +28,7 @@ acts for" below.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -226,6 +227,18 @@ def application_dirs():
     return list(dict.fromkeys(dirs))
 
 
+def try_exec_found(program):
+    """Whether the program a `TryExec` key names is on this machine: by path as written, or in
+    /opt/yantrik/bin, or on PATH — the places the shell itself looks (`yantrik-ui`'s
+    `find_program`)."""
+    if os.path.sep in program:
+        return os.path.isfile(program) and os.access(program, os.X_OK)
+    deployed = os.path.join("/opt/yantrik/bin", program)
+    if os.path.isfile(deployed) and os.access(deployed, os.X_OK):
+        return True
+    return shutil.which(program) is not None
+
+
 def declared_surfaces(dirs=None):
     """`[{id, purpose, aliases}]` for every surface the installed .desktop files declare."""
     entries, seen = [], set()
@@ -252,6 +265,13 @@ def declared_surfaces(dirs=None):
                     keys[key.strip()] = value.strip()
             if (keys.get("Type") != "Application" or keys.get("NoDisplay") == "true"
                     or keys.get("Hidden") == "true" or not keys.get("Name") or not keys.get("Exec")):
+                continue
+            # `TryExec` is the standard "list it only if this program is installed" rule —
+            # yos's read_desktop_entry applies it too, and the selftest holds the copies
+            # together. It is what keeps an adapter for an app nobody installed out of the
+            # names os_describe offers a mind (#214).
+            try_exec = keys.get("TryExec", "").split()
+            if try_exec and not try_exec_found(try_exec[0]):
                 continue
             seen.add(filename[:-8])
             entries.append(keys)

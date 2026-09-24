@@ -6,6 +6,11 @@ Comment=Documents, spreadsheets and presentations in LibreOffice
 # LibreOffice, listening on its UNO pipe so the adapter below can reach it (bin/yantrik-libreoffice).
 # Found where the shell looks for programs: /opt/yantrik/bin, or anywhere on PATH.
 Exec=yantrik-libreoffice %U
+# TryExec names the program this entry is for — LibreOffice itself, not the wrapper the Exec
+# runs, which ships with this adapter and is therefore always installed. A machine without
+# `soffice` lists this entry nowhere: no tile, and no `libreoffice` row for a mind to try
+# `open_app` on (#214).
+TryExec=soffice
 Icon=libreoffice-startcenter
 Terminal=false
 Categories=Office;

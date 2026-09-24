@@ -30,6 +30,10 @@ Comment=3D modelling, animation and rendering
 # opens answer to `yos describe blender`. The dock route runs the same two pieces, and
 # availability() checks both before offering the tile.
 Exec=blender --python /opt/yantrik/share/blender/bootstrap.py
+# TryExec names the program this entry is for — the standard "list it only if installed" key.
+# A machine without Blender shows no tile, and `describe shell` leaves `blender` out of its
+# apps instead of offering a name `open_app` then refuses (#214).
+TryExec=blender
 ```
 
 The script finds the add-on beside it — in the source tree or in a release — and starts it:
@@ -111,7 +115,9 @@ its remote API. So [`adapters/libreoffice`](../../adapters/libreoffice/README.md
 separate program, built only on the public Python SDK, that drives LibreOffice over a UNO pipe.
 
 **Declare the adapter.** The `.desktop` entry's `Exec` starts LibreOffice listening on the pipe;
-`X-Yantrik-Adapter` names the program the shell starts beside it:
+`X-Yantrik-Adapter` names the program the shell starts beside it; `TryExec` names the program the
+entry is *for* — LibreOffice itself, not the wrapper — so a machine without LibreOffice lists it
+nowhere:
 
 <!-- from: adapters/libreoffice/yantrik-libreoffice.desktop -->
 ```ini
@@ -123,6 +129,11 @@ Comment=Documents, spreadsheets and presentations in LibreOffice
 # LibreOffice, listening on its UNO pipe so the adapter below can reach it (bin/yantrik-libreoffice).
 # Found where the shell looks for programs: /opt/yantrik/bin, or anywhere on PATH.
 Exec=yantrik-libreoffice %U
+# TryExec names the program this entry is for — LibreOffice itself, not the wrapper the Exec
+# runs, which ships with this adapter and is therefore always installed. A machine without
+# `soffice` lists this entry nowhere: no tile, and no `libreoffice` row for a mind to try
+# `open_app` on (#214).
+TryExec=soffice
 Icon=libreoffice-startcenter
 Terminal=false
 Categories=Office;

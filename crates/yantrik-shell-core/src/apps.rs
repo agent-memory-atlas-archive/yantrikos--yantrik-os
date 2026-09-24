@@ -63,6 +63,12 @@ pub struct DesktopEntry {
     pub name: String,
     /// Executable command (Exec= field, with field codes stripped).
     pub exec: String,
+    /// `TryExec`: a program that must be on this machine for the entry to be listed at all —
+    /// the standard freedesktop rule, carried as written; whoever lists entries asks it
+    /// (`yantrik-ui`'s `entry_is_launchable`). `None` when the file names none. An adapter's
+    /// entry names the app it wraps here, because its `Exec` runs the wrapper, which is
+    /// always installed (#214).
+    pub try_exec: Option<String>,
     /// Icon name or path (Icon= field).
     pub icon: String,
     /// Semicolon-separated categories (Categories= field).
@@ -398,6 +404,7 @@ fn parse_desktop_file(path: &Path) -> Option<DesktopEntry> {
 pub fn parse_desktop_text(stem: &str, content: &str) -> Option<DesktopEntry> {
     let mut name = String::new();
     let mut exec = String::new();
+    let mut try_exec = String::new();
     let mut icon = String::new();
     let mut categories = String::new();
     let mut comment = String::new();
@@ -433,6 +440,7 @@ pub fn parse_desktop_text(stem: &str, content: &str) -> Option<DesktopEntry> {
             match key {
                 "Name" => name = value.to_string(),
                 "Exec" => exec = strip_field_codes(value),
+                "TryExec" => try_exec = value.to_string(),
                 "Icon" => icon = value.to_string(),
                 "Categories" => categories = value.to_string(),
                 "Comment" => comment = value.to_string(),
@@ -459,6 +467,7 @@ pub fn parse_desktop_text(stem: &str, content: &str) -> Option<DesktopEntry> {
     Some(DesktopEntry {
         name,
         exec,
+        try_exec: (!try_exec.is_empty()).then_some(try_exec),
         icon,
         categories,
         comment,
@@ -670,6 +679,42 @@ X-Yantrik-Surface=not-this-one
             .expect("an app");
         assert_eq!(entry.surface, None);
         assert!(entry.purpose.is_empty() && entry.aliases.is_empty() && entry.adapter.is_none());
+    }
+
+    /// `TryExec` is read as written: the program the entry is FOR, which for an adapter's entry
+    /// is the app it wraps and not the wrapper its `Exec` runs (#214). Whether the program is on
+    /// this machine is asked by whoever lists entries (`yantrik-ui`'s `entry_is_launchable`); the
+    /// parser only carries the name.
+    #[test]
+    fn try_exec_names_the_program_the_entry_is_for() {
+        let entry = parse_desktop_text(
+            "yantrik-libreoffice",
+            "[Desktop Entry]\nType=Application\nName=LibreOffice\n\
+             Exec=yantrik-libreoffice %U\nTryExec=soffice\n",
+        )
+        .expect("an app");
+        assert_eq!(entry.exec, "yantrik-libreoffice");
+        assert_eq!(entry.try_exec.as_deref(), Some("soffice"));
+        // A file that names none carries none, and entries are listed exactly as before.
+        let plain =
+            parse_desktop_text("vim", "[Desktop Entry]\nType=Application\nName=Vim\nExec=vim %F\n")
+                .expect("an app");
+        assert_eq!(plain.try_exec, None);
+        // An empty value names nothing.
+        let empty = parse_desktop_text(
+            "x",
+            "[Desktop Entry]\nType=Application\nName=X\nExec=x\nTryExec=\n",
+        )
+        .expect("an app");
+        assert_eq!(empty.try_exec, None);
+        // Like every other key, it is the entry's group alone that is read.
+        let other_group = parse_desktop_text(
+            "y",
+            "[Desktop Entry]\nType=Application\nName=Y\nExec=y\n\n\
+             [Desktop Action new]\nTryExec=not-this-one\n",
+        )
+        .expect("an app");
+        assert_eq!(other_group.try_exec, None);
     }
 
     /// A surface id is folded the way every client folds a name, and one that is not a surface
