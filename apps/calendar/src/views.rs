@@ -400,6 +400,18 @@ pub fn timezone_label(utc_offset_seconds: i32) -> String {
     )
 }
 
+/// The date this machine calls today, as `describe` says it: "2026-09-23 Wednesday".
+///
+/// The describe already carried the month, the year and the selected day, but nothing that
+/// said which day today is — and "what is on my calendar today" is the question a calendar
+/// exists to answer. The mind that asked it used to run `date` through the shell, which is
+/// graded sensitive, so learning the day raised an approval card for the person (#207). The
+/// shell's describe carries the whole line as `now`; this is the part of it a caller of the
+/// calendar needs.
+pub fn today_line(date: NaiveDate) -> String {
+    format!("{} {}", date.format("%Y-%m-%d"), weekday_long(date))
+}
+
 // ── Placing events on a grid ─────────────────────────────────────────
 
 /// The blocks one event contributes to the days `first..=last`, one block per day it covers.

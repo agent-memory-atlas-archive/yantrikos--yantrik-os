@@ -612,6 +612,116 @@ pub fn current_date_short() -> String {
     format!("{day} {mday} {month}")
 }
 
+/// The `clock` object of `describe shell`: the top bar's time told in full —
+/// `{"date": "2026-09-23", "weekday": "Wednesday", "time": "18:31",
+/// "utc_offset": "-05:00", "zone": "America/Chicago"}`.
+///
+/// A mind that needed today's date used to run `shell.agent_run` with `date`, which is graded
+/// sensitive, so learning what day it is raised an approval card for the person (#207). The
+/// shell already knows the time — it draws the clock in the top bar — so here it is, said in
+/// full: the top bar's `clock` ("18:31") and `date` ("Wed 23 Sep") leave out the year, the
+/// offset and the zone, and a caller working out "today" cannot do without them.
+///
+/// The zone name reveals location. That is what the clock on the status bar already shows
+/// anyone at the screen, and describe only reaches local callers.
+pub fn clock_for_describe() -> serde_json::Value {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs as *const i64, &mut tm) };
+    clock_object(
+        &ClockParts {
+            year: i64::from(tm.tm_year) + 1900,
+            month: tm.tm_mon as u32 + 1,
+            day: tm.tm_mday as u32,
+            weekday: tm.tm_wday as u32,
+            hour: tm.tm_hour as u32,
+            minute: tm.tm_min as u32,
+            offset_secs: tm.tm_gmtoff as i64,
+        },
+        &zone_name(),
+    )
+}
+
+/// One instant as libc broke it down: the local date and time `localtime_r` resolved for a
+/// timestamp, and the offset it resolved along with them.
+struct ClockParts {
+    year: i64,
+    month: u32,
+    day: u32,
+    weekday: u32,
+    hour: u32,
+    minute: u32,
+    /// Seconds east of UTC, `tm_gmtoff`'s own convention. Read off the instant, never
+    /// derived from the zone name: the same zone is -05:00 in September and -06:00 in
+    /// January, and only libc knows which side of the switch a timestamp falls on.
+    offset_secs: i64,
+}
+
+/// The `clock` object from a timestamp's parts and a zone. Pure — nothing but the instant
+/// and the zone go in — so its shape is testable against a table of machines without
+/// waiting for a minute to come around on any of them.
+fn clock_object(parts: &ClockParts, zone: &str) -> serde_json::Value {
+    let day_names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    serde_json::json!({
+        "date": format!("{:04}-{:02}-{:02}", parts.year, parts.month, parts.day),
+        "weekday": day_names[(parts.weekday % 7) as usize],
+        "time": format!("{:02}:{:02}", parts.hour, parts.minute),
+        "utc_offset": offset_text(parts.offset_secs),
+        "zone": zone,
+    })
+}
+
+/// "±HH:MM" from seconds east of UTC — `tm_gmtoff`'s own sign convention, negative west of
+/// Greenwich. The minutes are computed rather than assumed zero because half-hour and
+/// three-quarter-hour zones are real: Asia/Kolkata is +05:30 and Asia/Kathmandu +05:45.
+fn offset_text(offset_secs: i64) -> String {
+    let sign = if offset_secs < 0 { '-' } else { '+' };
+    let magnitude = offset_secs.unsigned_abs();
+    format!("{sign}{:02}:{:02}", magnitude / 3600, (magnitude % 3600) / 60)
+}
+
+/// The IANA zone name this machine's clock runs on, or "" when the machine does not name
+/// one.
+fn zone_name() -> String {
+    let tz = std::env::var("TZ").ok();
+    let link = std::fs::read_link("/etc/localtime")
+        .ok()
+        .map(|target| target.to_string_lossy().into_owned());
+    zone_name_from(tz.as_deref(), link.as_deref())
+}
+
+/// Which of the machine's zone sayings wins — or that none does, and the answer is "".
+///
+/// The two sources are the ones libc itself resolves in order: `TZ` first, then the
+/// zoneinfo target of the `/etc/localtime` link, read the way `wire::location` reads it.
+/// Nothing else is asked, because nothing else says what the clock is on: `/etc/timezone`
+/// can lag — the live VM this issue was found on had it saying Etc/UTC while the link
+/// pointed at America/Chicago — and the abbreviation libc resolved ("CDT") is no IANA
+/// name. When the machine names no zone the honest answer is "", and the `utc_offset`
+/// beside it already tells a reader what the clock is on.
+fn zone_name_from(tz_env: Option<&str>, localtime_target: Option<&str>) -> String {
+    if let Some(tz) = tz_env {
+        // A leading ':' is how a shell says the rest is an IANA name; libc strips it, so
+        // this does too. A TZ may also point at a zone file rather than name one.
+        let name = tz.trim().trim_start_matches(':');
+        if name.is_empty() {
+            // glibc reads a set-but-empty TZ as UTC: the clock runs on UTC, the machine
+            // still names no zone, and the link beside it would name one the clock is not
+            // on.
+            return String::new();
+        }
+        return name.split("zoneinfo/").nth(1).unwrap_or(name).to_string();
+    }
+    localtime_target
+        .and_then(|target| target.split("zoneinfo/").nth(1))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Convert days since Unix epoch to (year, month, day).
 fn days_to_civil(days: i64) -> (i64, u32, u32) {
     let z = days + 719468;
@@ -721,5 +831,120 @@ fn parse_hex_color(hex: &str) -> Option<slint::Color> {
         Some(slint::Color::from_argb_u8(a, r, g, b))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::{clock_object, offset_text, zone_name_from, ClockParts};
+    use serde_json::json;
+
+    fn parts(
+        year: i64,
+        month: u32,
+        day: u32,
+        weekday: u32,
+        hour: u32,
+        minute: u32,
+        offset_secs: i64,
+    ) -> ClockParts {
+        ClockParts { year, month, day, weekday, hour, minute, offset_secs }
+    }
+
+    /// The object the issue asked for (#207), across a table of machines: one running UTC
+    /// and naming no zone, Chicago in summer and in winter — the same zone on two offsets,
+    /// because the offset is what libc resolved for the instant and never derived from the
+    /// name — and a half-hour zone. A mind reads this instead of running `date` through a
+    /// sensitive `agent_run` and raising a card to learn the day.
+    #[test]
+    fn the_clock_says_the_date_the_weekday_the_time_the_offset_and_the_zone() {
+        assert_eq!(
+            clock_object(&parts(2026, 9, 23, 3, 18, 31, 0), ""),
+            json!({
+                "date": "2026-09-23",
+                "weekday": "Wednesday",
+                "time": "18:31",
+                "utc_offset": "+00:00",
+                "zone": "",
+            }),
+            "a machine with no zone of its own says so rather than claiming one"
+        );
+        assert_eq!(
+            clock_object(&parts(2026, 9, 23, 3, 18, 31, -18_000), "America/Chicago"),
+            json!({
+                "date": "2026-09-23",
+                "weekday": "Wednesday",
+                "time": "18:31",
+                "utc_offset": "-05:00",
+                "zone": "America/Chicago",
+            })
+        );
+        assert_eq!(
+            clock_object(&parts(2026, 1, 4, 0, 9, 5, -21_600), "America/Chicago"),
+            json!({
+                "date": "2026-01-04",
+                "weekday": "Sunday",
+                "time": "09:05",
+                "utc_offset": "-06:00",
+                "zone": "America/Chicago",
+            }),
+            "the same zone, an hour further west in winter: single-digit months, days and \
+             hours keep their zeroes, and the offset follows the instant, not the name"
+        );
+        assert_eq!(
+            clock_object(&parts(2026, 9, 24, 4, 5, 1, 19_800), "Asia/Kolkata"),
+            json!({
+                "date": "2026-09-24",
+                "weekday": "Thursday",
+                "time": "05:01",
+                "utc_offset": "+05:30",
+                "zone": "Asia/Kolkata",
+            }),
+            "half-hour zones are real, so the offset's minutes are computed"
+        );
+    }
+
+    #[test]
+    fn the_offset_carries_its_sign_and_its_minutes() {
+        assert_eq!(offset_text(-18000), "-05:00");
+        assert_eq!(offset_text(19800), "+05:30", "Asia/Kolkata");
+        assert_eq!(offset_text(20700), "+05:45", "Asia/Kathmandu");
+        assert_eq!(offset_text(0), "+00:00");
+    }
+
+    /// The name has to tell the same zone the clock beside it is on, and when the machine
+    /// names none the object says "" rather than guess: the live VM this issue was found on
+    /// had /etc/localtime pointing at America/Chicago while /etc/timezone still said
+    /// Etc/UTC, so anything past the two sources libc resolves would have been a coin flip.
+    #[test]
+    fn the_zone_is_the_one_the_machine_names_and_never_a_guess() {
+        let chicago_link = Some("../usr/share/zoneinfo/America/Chicago");
+        assert_eq!(
+            zone_name_from(Some("Asia/Kolkata"), chicago_link),
+            "Asia/Kolkata",
+            "TZ is what libc consults first, so the name has to match it"
+        );
+        assert_eq!(
+            zone_name_from(Some(":America/Denver"), None),
+            "America/Denver",
+            "a leading ':' introduces an IANA name and is stripped"
+        );
+        assert_eq!(
+            zone_name_from(Some("/usr/share/zoneinfo/Asia/Kolkata"), None),
+            "Asia/Kolkata",
+            "a TZ pointing at a zone file names the zone it points at"
+        );
+        assert_eq!(
+            zone_name_from(None, chicago_link),
+            "America/Chicago",
+            "the zoneinfo target of the /etc/localtime link"
+        );
+        assert_eq!(
+            zone_name_from(Some(""), chicago_link),
+            "",
+            "an empty TZ runs the clock on UTC and names no zone; the link beside it \
+             would name a zone the clock is not on"
+        );
+        assert_eq!(zone_name_from(None, None), "", "a machine with no zone file says so");
     }
 }

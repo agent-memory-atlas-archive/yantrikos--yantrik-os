@@ -108,6 +108,13 @@ surface every app publishes — `app.describe` and `app.act`, or the `yos` comma
 graded `safe`/`standard`/`sensitive`/`dangerous` and enforced against your ceiling. See
 [app-control.md](app-control.md).
 
+What day it is, is a read. `describe shell` carries `clock` — an object with `date`,
+`weekday`, `time`, `utc_offset` and `zone`, like `2026-09-23`, `Wednesday`, `18:31`,
+`-05:00`, `America/Chicago` (`zone` is empty on a machine that names none) — and
+`describe calendar` carries `today`. A mind that needs the date reads it there rather than
+running `date` through `shell.agent_run`: that is graded sensitive, so learning the day
+raises an approval card for the person, and the desktop already knows the answer.
+
 Attaching is about the conversation. Driving is about the desktop. Keeping them apart means a
 harness can do either without the other: a mind that only talks never needs permissions, and a
 script that only acts never needs to attach.

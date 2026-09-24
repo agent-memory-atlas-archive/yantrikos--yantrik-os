@@ -48,6 +48,9 @@ What it is actually checking, in one line each:
     it), taints the session when it waited for the role's answer, and an agent held to a role's
     reach hears the reach's refusal as a policy answer and is never shown asking the person for an
     act outside it;
+  * the shell's describe carries `clock` as an object — date, weekday, time, UTC offset and
+    zone name — and it reaches a mind through os_describe untouched, so learning the day never
+    has to go through a sensitive `agent_run date` again (#207);
   * os_describe names the apps this machine declares in their .desktop files, with what each is
     for, and no list of its own; os_apps says closed apps are listed; and the bridge reads the
     keys exactly as `yos` does;
@@ -235,6 +238,17 @@ if argv[:1] == ["describe"]:
             die("shell is not open.")
         body = {
             "screen": "desktop",
+            # What time the shell says it is, in full (#207): the read that keeps a mind off
+            # `agent_run date`, which is sensitive and raised an approval card just to learn
+            # the day. An object under `clock` — a key of its own sorts past the cut in the
+            # condensed description minds read, and nothing read `clock` as the string it was.
+            "clock": {
+                "date": "2026-09-23",
+                "weekday": "Wednesday",
+                "time": "11:55",
+                "utc_offset": "-05:00",
+                "zone": "America/Chicago",
+            },
             "pending_approvals": [],
             # What the desktop says about who is answering. The last-resort source for the name
             # on an approval card, when the MCP client sent no clientInfo.
@@ -1160,6 +1174,20 @@ with tempfile.TemporaryDirectory() as d:
     grade, purpose = module.action_detail("calendar", "delete_event")
     check("and it still reads the purpose the card shows",
           grade == "sensitive" and "not recoverable" in purpose.lower(), (grade, purpose))
+
+    # 17b. The shell says what time it thinks it is (#207): `clock` as an object — date,
+    # weekday, time, UTC offset and zone name — is what keeps a mind off `shell.agent_run
+    # date`, which is graded sensitive and used to raise an approval card just to learn the
+    # day. The bridge has to hand every key of it to the mind untouched, folded like the
+    # rest of the state.
+    module, state = case(tmp, "clock")
+    text, is_error = module.run_tool(module.BY_NAME["os_describe"], {"app": "shell"})
+    check("os_describe shell carries the clock the shell already knows, keys and all",
+          not is_error
+          and all(key in text for key in
+                  ('"clock"', '"date"', '"weekday"', '"time"', '"utc_offset"', '"zone"'))
+          and '"utc_offset": "-05:00"' in text
+          and '"zone": "America/Chicago"' in text, text)
 
     # ── 18. The table, against the shell's own copy of it ───────────────────────────────
     #
