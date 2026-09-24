@@ -933,6 +933,39 @@ pub fn spawn_app_with_args(app_id: &str, bin: &str, args: &[&str]) {
     spawn_app_in(app_id, bin, args, None)
 }
 
+/// Open one file in one installed app: the app's desktop entry `Exec` line, the file as its
+/// last argument, through the same `spawn_launch` every other launch goes through — registry,
+/// reaper, session environment and the surface's adapter all present (#233). This is what
+/// Files' "Open with" does for an app the shell has no route of its own to, and what a
+/// `mimeapps.list` default naming such an app means at double-click time.
+pub fn launch_entry_with_file(entry: &DesktopEntry, installed: &[DesktopEntry], file: &str) {
+    if entry.exec.is_empty() || entry.exec == "__builtin__" {
+        tracing::error!(app = %entry.app_id, "Cannot open the file: the entry runs nothing");
+        return;
+    }
+    // Field codes were stripped when the entry was parsed, so the Exec line is the command
+    // and its flags, and the file goes after them.
+    let mut argv: Vec<String> = entry.exec.split_whitespace().map(str::to_string).collect();
+    let bin = argv.remove(0);
+    argv.push(file.to_string());
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    // The surface as the catalogue settled it, not merely as the file wrote it — the same rule
+    // `resolve` follows for a tile click, so an app opened with a file arrives the same way it
+    // arrives without one.
+    let surface = crate::surfaces::declared(installed)
+        .into_iter()
+        .find(|d| entry.surface.as_deref() == Some(d.id.as_str()))
+        .map(|d| d.id);
+    let adapter = surface.as_ref().and(entry.adapter.clone());
+    spawn_launch(
+        &super::app_grid::icon_id_for(&entry.app_id),
+        &bin,
+        &args,
+        None,
+        surface.as_deref().zip(adapter.as_deref()),
+    );
+}
+
 /// The same launcher, started in a particular directory.
 ///
 /// For "open a terminal here", where the directory IS the request. Goes through one body with
