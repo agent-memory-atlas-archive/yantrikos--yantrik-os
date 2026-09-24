@@ -514,10 +514,33 @@ fn extract_tool_arguments(
     }
 }
 
+/// Logs LLM reachability once per state change, not once per failed call (#30).
+///
+/// A desktop whose backend was down all day wrote a "LLM offline" warning for every
+/// message and every think cycle — 650+ identical lines — while the shell showed
+/// nothing. The transition is worth one warning; the repeats go to debug, and the
+/// moment the model answers again is worth one info line.
+#[derive(Default)]
+struct OfflineLogGate {
+    offline: bool,
+}
+
+impl OfflineLogGate {
+    /// Records a reachability observation. Returns `true` only when the state
+    /// changed — i.e. when this call is the transition worth a real log line.
+    fn note(&mut self, offline: bool) -> bool {
+        let changed = offline != self.offline;
+        self.offline = offline;
+        changed
+    }
+}
+
 /// The companion agent — memory + inference + instincts + bond + evolution in one struct.
 pub struct CompanionService {
     pub db: YantrikDB,
     pub llm: std::sync::Arc<dyn LLMBackend>,
+    /// Reachability of `llm`, so a dead backend logs once per state change (#30).
+    llm_offline_log: OfflineLogGate,
     pub config: CompanionConfig,
     pub urge_queue: UrgeQueue,
     instincts: Vec<Box<dyn Instinct>>,
@@ -879,6 +902,7 @@ impl CompanionService {
         Self {
             db,
             llm,
+            llm_offline_log: OfflineLogGate::default(),
             config,
             urge_queue,
             instincts,
@@ -1412,6 +1436,24 @@ impl CompanionService {
             tool_calls_made,
             offline_mode: false,
         })
+    }
+
+    /// Log a failed LLM call: a warning on the first failure after the model was
+    /// reachable, debug afterwards. The offline state itself belongs on the screen —
+    /// the status bar shows it — so the log only has to record the transitions (#30).
+    fn note_llm_offline(&mut self, ctx: &str, err: &impl std::fmt::Display) {
+        if self.llm_offline_log.note(true) {
+            tracing::warn!("LLM offline{ctx}: {err:#}");
+        } else {
+            tracing::debug!("LLM offline{ctx}: {err:#}");
+        }
+    }
+
+    /// Log the model answering again — one info line per recovery, not per call.
+    fn note_llm_reachable(&mut self) {
+        if self.llm_offline_log.note(false) {
+            tracing::info!("LLM reachable again");
+        }
     }
 
     /// The 9-step message pipeline.
@@ -1952,9 +1994,12 @@ impl CompanionService {
                 None
             };
             let llm_response = match self.llm.chat(&messages, &gen_config, tools_param) {
-                Ok(r) => r,
+                Ok(r) => {
+                    self.note_llm_reachable();
+                    r
+                }
                 Err(e) => {
-                    tracing::warn!("LLM offline: {e:#}");
+                    self.note_llm_offline("", &e);
                     response_text = OfflineResponder::respond(
                         &self.db,
                         user_text,
@@ -2753,6 +2798,7 @@ impl CompanionService {
 
         match llm_response {
             Ok(r) => {
+                self.note_llm_reachable();
                 let full_text = if !streamed_text.is_empty() { &streamed_text } else { &r.text };
 
                 // Use native tool_calls if available, fall back to text parsing.
@@ -2872,6 +2918,7 @@ impl CompanionService {
                         };
                         match self.llm.chat(&messages, &gen_config, tools_param) {
                             Ok(r2) => {
+                                self.note_llm_reachable();
                                 let tc2: Vec<ToolCall> = if !r2.tool_calls.is_empty() {
                                     r2.tool_calls.clone()
                                 } else {
@@ -2964,7 +3011,7 @@ impl CompanionService {
                             }
                             Err(_) if !response_text.is_empty() => break,
                             Err(e) => {
-                                tracing::warn!("LLM offline during tool follow-up: {e:#}");
+                                self.note_llm_offline(" during tool follow-up", &e);
                                 response_text = OfflineResponder::respond(
                                     &self.db, user_text, &self.system_context,
                                     &memories, &urges, &self.config.user_name,
@@ -3012,7 +3059,7 @@ impl CompanionService {
                 }
             }
             Err(e) => {
-                tracing::warn!("LLM offline: {e:#}");
+                self.note_llm_offline("", &e);
                 response_text = OfflineResponder::respond(
                     &self.db,
                     user_text,
@@ -5346,5 +5393,37 @@ mod proactive_queue_tests {
         assert_eq!(drained.len(), 32, "an undrained queue may not grow without limit");
         assert_eq!(drained[0], "message 8", "the oldest undelivered messages gave way");
         assert_eq!(drained[31], "message 39", "and the newest are all kept, in order");
+    }
+}
+
+#[cfg(test)]
+mod offline_log_gate_tests {
+    use super::OfflineLogGate;
+
+    #[test]
+    fn a_dead_backend_logs_once_per_state_change_not_every_call() {
+        // #30: a desktop with nothing listening on 8341 wrote "LLM offline" for
+        // every message and every think cycle — 650+ identical lines in a day —
+        // while the shell showed nothing. The log should carry the transitions,
+        // not the repeats.
+        let mut gate = OfflineLogGate::default();
+
+        assert!(gate.note(true), "the first failure is a state change — it warns");
+        assert!(!gate.note(true), "the next failure changes nothing — debug");
+        assert!(!gate.note(true), "a backend dead all day stays one line");
+
+        assert!(gate.note(false), "a model answering again is a state change — it infos");
+        assert!(!gate.note(false), "continued success does not re-log");
+
+        assert!(gate.note(true), "and a new outage warns again");
+    }
+
+    #[test]
+    fn a_healthy_backend_never_announces_itself() {
+        // The gate starts online: the first successful call must not log a
+        // "reachable again" recovery that never happened.
+        let mut gate = OfflineLogGate::default();
+        assert!(!gate.note(false));
+        assert!(!gate.note(false));
     }
 }

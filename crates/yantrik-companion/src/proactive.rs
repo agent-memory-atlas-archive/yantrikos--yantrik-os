@@ -113,22 +113,25 @@ impl ProactiveEngine {
 
         // V15 frequency governor: bond-based cooldown
         let cooldown_secs = self.effective_cooldown_secs();
-        let elapsed = now - self.last_delivery_ts;
-        if elapsed < cooldown_secs {
+        if let Some(elapsed) = cooldown_elapsed(now, self.last_delivery_ts) {
+            if elapsed < cooldown_secs {
+                // Per-cycle while the cooldown runs, so it is a debug line: a desktop
+                // whose backend was down all day filled the log with these (#30).
+                tracing::debug!(
+                    elapsed_secs = elapsed as u64,
+                    cooldown_secs = cooldown_secs as u64,
+                    bond = self.bond_level.name(),
+                    "Proactive cooldown active (bond-scaled)"
+                );
+                return None;
+            }
+
             tracing::info!(
                 elapsed_secs = elapsed as u64,
-                cooldown_secs = cooldown_secs as u64,
                 bond = self.bond_level.name(),
-                "Proactive cooldown active (bond-scaled)"
+                "Proactive cooldown expired, checking urges"
             );
-            return None;
         }
-
-        tracing::info!(
-            elapsed_secs = elapsed as u64,
-            bond = self.bond_level.name(),
-            "Proactive cooldown expired, checking urges"
-        );
 
         // Peek at top pending urge
         let pending = urge_queue.get_pending(conn, 1);
@@ -370,6 +373,21 @@ fn now_ts() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+/// How long the cooldown has been running: the time since the engine last delivered.
+///
+/// `None` when it has never delivered. `last_delivery_ts` starts at `0.0`, and reading an
+/// unset `0.0` as a real timestamp made `now - 0.0` the seconds since the Unix epoch — the
+/// `elapsed_secs=1789671372` a dead backend logged once a minute all day (#30). A cooldown
+/// is measured from the engine's own last delivery, so before the first one there is no
+/// elapsed to report and nothing to wait out.
+fn cooldown_elapsed(now: f64, last_delivery_ts: f64) -> Option<f64> {
+    if last_delivery_ts > 0.0 {
+        Some(now - last_delivery_ts)
+    } else {
+        None
+    }
 }
 
 // ── What is not a thought ───────────────────────────────────────────────────────────────────
@@ -810,6 +828,24 @@ mod tests {
         assert!(
             engine.check(&queue, &conn).is_none(),
             "a turn that ends in a raw tool call must file nothing"
+        );
+    }
+
+    #[test]
+    fn the_cooldown_measures_from_the_engines_own_last_delivery() {
+        // #30: a desktop whose backend never answered logged `elapsed_secs=1789671372`
+        // once a minute — the engine's delivery clock was never set, and an unset clock
+        // read as the seconds since the Unix epoch instead of "nothing delivered yet".
+        let now = 1_790_000_000.0; // a plausible "now" (September 2026)
+        assert_eq!(
+            cooldown_elapsed(now, 0.0),
+            None,
+            "a delivery clock that was never set has no elapsed to report"
+        );
+        assert_eq!(
+            cooldown_elapsed(now, now - 90.0),
+            Some(90.0),
+            "once something was delivered, the cooldown measures from that delivery"
         );
     }
 }

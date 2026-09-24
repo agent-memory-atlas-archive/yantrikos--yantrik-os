@@ -844,6 +844,17 @@ fn worker_loop(
         Err(why) => {
             tracing::error!(reason = %why, "Companion unavailable — answering every request with this");
             online.store(false, Ordering::Relaxed);
+            // #30: say so on screen, not only in the log. This path has no companion to
+            // push_state from, so it sets the status-bar notice itself.
+            let weak = ui_weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_companion_online(false);
+                    ui.set_assistant_offline_notice(
+                        assistant_offline_notice(false).unwrap_or_default().into(),
+                    );
+                }
+            });
             while let Ok(cmd) = cmd_rx.recv() {
                 if let CompanionCommand::SendMessage { token_tx, model, .. } = cmd {
                     let _ = token_tx.send(format!("__REPLACE__{why}"));
@@ -904,6 +915,11 @@ fn worker_loop(
     // Cooldown tracker for delivered proactive messages (key → last_delivered_ts)
     let mut delivered_cooldowns: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     const DELIVERED_COOLDOWN_SECS: f64 = 7200.0; // 2 hours between same proactive key
+
+    // "Suppressing EXECUTE urges — LLM offline" is logged once per outage, not once per
+    // think cycle: a backend that was down all day filled the log with these (#30).
+    // Reset whenever the LLM answers again.
+    let mut execute_suppression_logged = false;
 
     // The "when did a person last say something" clock is not here any more. It lived in this
     // worker and was bumped only in the `SendMessage` arm below, which only messages bound for
@@ -1161,6 +1177,9 @@ fn worker_loop(
                         if let Some(tx) = &model {
                             let _ = tx.send(ok);
                         }
+                        if ok {
+                            execute_suppression_logged = false;
+                        }
                         if response.offline_mode {
                             tracing::info!("Response served by offline responder");
                         }
@@ -1384,6 +1403,7 @@ fn worker_loop(
                 // Save config to disk
                 companion.save_config();
                 online.store(true, Ordering::Relaxed);
+                execute_suppression_logged = false;
                 tracing::info!("LLM reloaded successfully");
             }
             Ok(CompanionCommand::RecordSystemEvent { text, domain, importance }) => {
@@ -2003,10 +2023,14 @@ fn worker_loop(
 
                 // v4: Suppress EXECUTE urges when LLM is offline.
                 if !execute_urges.is_empty() && !online.load(Ordering::Relaxed) {
-                    tracing::info!(
-                        count = execute_urges.len(),
-                        "Suppressing EXECUTE urges — LLM offline"
-                    );
+                    // Once per outage (#30) — the status bar carries the visible side.
+                    if !execute_suppression_logged {
+                        tracing::info!(
+                            count = execute_urges.len(),
+                            "Suppressing EXECUTE urges — LLM offline"
+                        );
+                        execute_suppression_logged = true;
+                    }
                     execute_urges.clear();
                 }
 
@@ -2580,6 +2604,19 @@ fn worker_loop(
     }
 }
 
+/// What the status bar says when the assistant has no model to answer with (#30).
+///
+/// A desktop whose backend was down all day wrote 450+ log lines and showed nothing
+/// on screen; the failure belongs on the screen. Pure state: online is `None` (the
+/// chip hides itself), offline is one persistent line naming the way out — Settings → AI.
+pub fn assistant_offline_notice(companion_online: bool) -> Option<&'static str> {
+    if companion_online {
+        None
+    } else {
+        Some("The assistant has no model — set one up in Settings → AI")
+    }
+}
+
 /// Push current state to the Slint UI thread.
 fn push_state(companion: &CompanionService, ui_weak: &slint::Weak<App>, companion_online: bool) {
     let snapshot = build_snapshot(companion);
@@ -2589,6 +2626,9 @@ fn push_state(companion: &CompanionService, ui_weak: &slint::Weak<App>, companio
             ui.set_memory_count(snapshot.memory_count as i32);
             ui.set_has_urges(snapshot.has_pending_urges);
             ui.set_companion_online(companion_online);
+            ui.set_assistant_offline_notice(
+                assistant_offline_notice(companion_online).unwrap_or_default().into(),
+            );
         }
     });
 }
@@ -3149,5 +3189,57 @@ mod ask_tests {
             Err(AskError::Failed(reason)) => assert_eq!(reason, TURN_FAILED_REPLY),
             other => panic!("a turn with no model signal must not come back as an answer; got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod assistant_offline_notice_tests {
+    use std::path::Path;
+
+    /// This file above the tests, as written (the same slice `bond_property_tests` reads).
+    fn worker() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bridge.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        whole.split("#[cfg(test)]").next().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn the_shell_says_when_there_is_no_model_and_hushes_when_it_answers() {
+        // #30: the built-in companion had no model all day and the desktop never said
+        // so — 450+ log lines and nothing on screen. The status item is pure state:
+        // visible whenever the backend is offline, cleared the moment a model answers.
+        let notice = super::assistant_offline_notice(false);
+        assert!(notice.is_some(), "a backend that does not answer is visible on the shell");
+        let text = notice.unwrap();
+        assert!(text.contains("no model"), "the line says what is wrong: {text}");
+        assert!(text.contains("Settings → AI"), "and says where to fix it: {text}");
+        assert_eq!(
+            super::assistant_offline_notice(true),
+            None,
+            "the notice clears itself when the model answers again"
+        );
+    }
+
+    #[test]
+    fn the_notice_reaches_the_status_bar_from_every_offline_path() {
+        let src = worker();
+        let push = &src[src.find("fn push_state(").expect("push_state is in bridge.rs")..];
+        assert!(
+            push.contains("set_assistant_offline_notice("),
+            "the per-cycle state push carries the notice, so it appears and clears with the backend"
+        );
+        let from = "Companion unavailable — answering every request with this";
+        let start = src.find(from).expect("the build-failure path is in bridge.rs");
+        let build_fail = &src[start..start + 1200];
+        assert!(
+            build_fail.contains("set_assistant_offline_notice("),
+            "a worker whose companion could not even be built has no push_state — it says so itself. \
+             Path as written:\n{build_fail}"
+        );
+        assert!(
+            src.contains("if !execute_suppression_logged"),
+            "the EXECUTE suppression line is gated: once per outage, not once per think cycle (#30)"
+        );
     }
 }

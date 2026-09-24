@@ -115,6 +115,10 @@ export component App inherits Window {
     in property <bool> is-speaking: false;
     in property <bool> is-listening: false;
     in property <bool> companion-online: true;  // LLM backend reachable
+    // #30: a shell whose assistant has no model says so where the person can see it —
+    // one persistent status-bar line that clicks straight into Settings → AI. Rust sets
+    // it from `assistant_offline_notice` and clears it when a model answers again.
+    in property <string> assistant-offline-notice: "";
 
     // Chat state
     in property <[MessageData]> messages: [];
@@ -2410,6 +2414,7 @@ export component App inherits Window {
             notifications-clicked => { root.current-screen = 9; root.navigate(9); }
             companion-status: root.companion-status;
             companion-online: root.companion-online;
+            assistant-offline-notice: root.assistant-offline-notice;
             battery-available: root.battery-available;
             battery-level: root.battery-level;
             battery-charging: root.battery-charging;
@@ -2451,6 +2456,12 @@ export component App inherits Window {
             // Straight to the section, not to the front door of Settings.
             active-mind-clicked => {
                 root.settings-category = 8;
+                root.current-screen = 7;
+                root.navigate(7);
+            }
+            // The "no model" notice goes to the AI section, where a model is set up (#30).
+            assistant-offline-clicked => {
+                root.settings-category = 1;
                 root.current-screen = 7;
                 root.navigate(7);
             }
