@@ -850,6 +850,16 @@ impl CompanionService {
         // Load current bond state
         let bond_state = BondTracker::get_state(&db.conn());
 
+        // When the person was last here, from the newest `interaction` event in the bond
+        // store. This used to be `now_ts()` — the boot time — so after every restart,
+        // update or reboot the proactive engine read idle ≈ 0 and concluded the person
+        // had just been around, whether they had or not: a person away for two days came
+        // back to a companion that thought they had only just spoken (#156). When there
+        // is no event there is nothing to load and the clock stays unset (0.0) — the
+        // companion has never heard the person, and a startup must not stand in for a
+        // meeting that never happened.
+        let last_interaction_ts = BondTracker::last_interaction_at(&db.conn()).unwrap_or(0.0);
+
         // Load user interests and location from memory (before db moves)
         let user_interests = load_user_interests(&db.conn());
         let user_location = load_user_location(&db.conn());
@@ -871,7 +881,7 @@ impl CompanionService {
             urge_queue,
             instincts,
             conversation_history: Vec::new(),
-            last_interaction_ts: now_ts(),
+            last_interaction_ts,
             session_turn_count: 0,
             proactive_message: None,
             pending_triggers: Vec::new(),
@@ -3608,9 +3618,13 @@ impl CompanionService {
         );
     }
 
-    /// Seconds since last interaction.
-    pub fn idle_seconds(&self) -> f64 {
-        now_ts() - self.last_interaction_ts
+    /// Seconds since the person was last here — or `None` if they have never been.
+    ///
+    /// The bond clock stays unset until the first scored turn (#156); `None` is
+    /// the only honest reading of that. Callers must neither report the decades
+    /// since 1970 nor mistake "never met" for "just here".
+    pub fn idle_seconds(&self) -> Option<f64> {
+        crate::types::absence_seconds(self.last_interaction_ts, now_ts())
     }
 
     /// Count one conversation turn: the person said something and was answered.
@@ -3684,7 +3698,12 @@ impl CompanionService {
     }
 
     fn check_session_timeout(&mut self) {
-        let idle = self.idle_seconds();
+        // No absence known (#156): the clock is unset until a turn is scored, so
+        // a session whose turns never scored (incognito, bond off) or a fresh
+        // install has nothing to time out against — the history stays.
+        let Some(idle) = self.idle_seconds() else {
+            return;
+        };
         let timeout = self.config.conversation.session_timeout_minutes as f64 * 60.0;
 
         if idle > timeout && self.session_turn_count > 0 {
@@ -4422,14 +4441,26 @@ fn query_workflow_hints(conn: &rusqlite::Connection) -> Vec<serde_json::Value> {
     .unwrap_or_default()
 }
 
-/// Count interactions in the last hour from bond events.
+/// Count the person's interactions in the last hour from bond events.
+///
+/// Only `event_type = 'interaction'` rows count: the table also holds the humor and milestone
+/// rows the machine writes itself, which are not the person talking. The time column is
+/// `created_at` — this query used to ask for a `timestamp` column `bond_events` does not have,
+/// and `.unwrap_or(0)` turned the SQLite error into a silent 0 on every machine, so the
+/// instincts always saw an idle person. A count that still cannot be read is reported as 0,
+/// but now it says so in the log.
 fn count_recent_interactions(conn: &rusqlite::Connection, since_ts: f64) -> u32 {
-    conn.query_row(
-        "SELECT COUNT(*) FROM bond_events WHERE timestamp > ?1",
+    match conn.query_row(
+        "SELECT COUNT(*) FROM bond_events WHERE event_type = 'interaction' AND created_at > ?1",
         rusqlite::params![since_ts],
         |row| row.get::<_, u32>(0),
-    )
-    .unwrap_or(0)
+    ) {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::error!(error = %e, "recent interaction count could not be read; the instincts see 0");
+            0
+        }
+    }
 }
 
 /// Query recent maintenance log entries (last 24h, unreported first).
@@ -5092,6 +5123,59 @@ mod bond_scoring_tests {
         assert_eq!(c.bond_score(), score, "the cached score the status bar reads follows the store");
     }
 
+    /// A companion started over a store whose last interaction was `ago` seconds ago — the
+    /// restart case from #156: the shell went down and came back up over the bond store the
+    /// person's own turns were written to. `None` is a store the person never wrote to.
+    fn companion_over_store(ago: Option<f64>) -> CompanionService {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        if let Some(ago) = ago {
+            // One scored turn, as the shell records it where a conversation ends, then
+            // backdated. The guard goes out of scope before `new` locks again.
+            let conn = db.conn();
+            BondTracker::ensure_tables(&conn);
+            BondTracker::score_conversation_turn(&conn, "goodnight");
+            conn.execute(
+                "UPDATE bond_events SET created_at = created_at - ?1 WHERE event_type = 'interaction'",
+                rusqlite::params![ago],
+            )
+            .unwrap();
+        }
+        let mut config = CompanionConfig::default();
+        config.tools.enabled = false;
+        CompanionService::new(db, std::sync::Arc::new(Echo), config)
+    }
+
+    #[test]
+    fn a_restart_reports_when_the_person_was_last_here_not_that_they_just_left() {
+        // #156: `new` stamped the boot time into `last_interaction_ts`, so after every
+        // restart the proactive engine's clock read ~0 and it concluded the person had
+        // just been around, whether they had or not.
+        let two_days = 2.0 * 86400.0;
+        let c = companion_over_store(Some(two_days));
+        let idle = c
+            .idle_seconds()
+            .expect("the store holds the person's turn, so there is an absence to measure");
+        assert!(
+            (idle - two_days).abs() < 60.0,
+            "a person away for two days reads as two days after a restart, got {idle:.0}s"
+        );
+    }
+
+    #[test]
+    fn a_store_the_person_never_wrote_to_leaves_the_clock_unset() {
+        // The other half of #156: with no interaction event there is nothing to load,
+        // and the boot time must not stand in for a meeting that never happened.
+        let c = companion_over_store(None);
+        assert_eq!(
+            c.last_interaction_ts, 0.0,
+            "no interaction event means no last-interaction time"
+        );
+        assert!(
+            c.idle_seconds().is_none(),
+            "and the idle clock reports no absence to measure, not the decades since 1970"
+        );
+    }
+
     /// The property, pinned where it lives: no handler in this file scores. The defect was a
     /// call in the wrong place, which compiled perfectly and looked like engagement.
     #[test]
@@ -5110,5 +5194,54 @@ mod bond_scoring_tests {
             "`last_interaction_ts` may be bumped in one place, `score_conversation_turn`; \
              found {bumps}"
         );
+    }
+}
+
+#[cfg(test)]
+mod recent_interaction_count_tests {
+    //! The count that tells the instincts whether the person is busy asked `bond_events` for a
+    //! `timestamp` column the table does not have, and the SQLite error became a silent 0 — so
+    //! `interactions_last_hour` read 0 on every machine, however much the person had been
+    //! talking. Pure in-memory SQLite: no model, no embedder, no files.
+
+    use super::*;
+
+    /// A bond store with the given (event_id, event_type, created_at) rows already written.
+    fn store_with_events(events: &[(&str, &str, f64)]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        BondTracker::ensure_tables(&conn);
+        for (id, kind, ts) in events {
+            conn.execute(
+                "INSERT INTO bond_events (event_id, event_type, delta, context, created_at)
+                 VALUES (?1, ?2, 0.01, '{}', ?3)",
+                rusqlite::params![id, kind, ts],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn three_interactions_in_the_last_hour_count_three() {
+        let now = now_ts();
+        let conn = store_with_events(&[
+            ("e1", "interaction", now - 60.0),
+            ("e2", "interaction", now - 1800.0),
+            ("e3", "interaction", now - 3500.0),
+            // Two hours ago: real, but outside the window the count is named for.
+            ("e4", "interaction", now - 7200.0),
+        ]);
+        assert_eq!(count_recent_interactions(&conn, now - 3600.0), 3);
+    }
+
+    #[test]
+    fn rows_the_machine_wrote_itself_are_not_the_person_talking() {
+        let now = now_ts();
+        let conn = store_with_events(&[
+            ("e1", "interaction", now - 60.0),
+            ("e2", "humor_success", now - 60.0),
+            ("e3", "milestone", now - 60.0),
+        ]);
+        assert_eq!(count_recent_interactions(&conn, now - 3600.0), 1);
     }
 }
