@@ -841,9 +841,9 @@ mod tests {
 #[cfg(test)]
 mod view_tests {
     use super::views::{
-        added_clock, all_day_bounds, day_view, last_day_of_month, named_on, rescheduled,
-        selected_date, start_and_end, timezone_label, today_line, visible_range, week_bounds,
-        week_view, EventRef, Named, SourceEvent, ViewMode,
+        added_clock, all_day_bounds, day_view, last_day_of_month, name_event, named_on,
+        naming_index, rescheduled, selected_date, start_and_end, timezone_label, today_line,
+        visible_range, week_bounds, week_view, EventRef, NAMING_CAP, Named, SourceEvent, ViewMode,
     };
     use chrono::NaiveDate;
 
@@ -1365,5 +1365,103 @@ mod view_tests {
         let week = week_view(&[event], date(2026, 9, 22));
         assert!(week.events.is_empty(), "an all-day event is not on the hour grid");
         assert_eq!(week.all_day[2], vec!["Conference".to_string()], "Tuesday's column");
+    }
+
+    // ── The name an approval card asks permission with (#54) ─────────
+    //
+    // `delete_event` recommends the store's id and the grant is bound to it byte for byte —
+    // the reliable way in, and the one a person cannot read. `named_on` goes title and date
+    // to id; these go id back, which is what the describe's naming index is built from.
+
+    #[test]
+    fn a_timed_event_is_named_by_title_day_and_start() {
+        // The event from the issue: a Friday afternoon appointment, asked away by its uuid.
+        assert_eq!(
+            name_event(&stored(
+                "01a0c718-3931-7342-b9c7-8de36140ddb0",
+                "Dentist",
+                "2026-09-25T13:00:00",
+                "2026-09-25T13:45:00"
+            )),
+            "Dentist, Fri 25 Sep 13:00"
+        );
+        assert_eq!(
+            name_event(&stored("b", "Standup", "2026-09-22T09:00:00", "2026-09-22T09:15:00")),
+            "Standup, Tue 22 Sep 09:00"
+        );
+    }
+
+    #[test]
+    fn an_all_day_event_says_it_is_all_day() {
+        // The grids leave these to the day header; reading out the midnight an all-day row is
+        // stored at would be inventing a time nobody gave.
+        let mut holiday = stored("d", "Company holiday", "2026-09-23T00:00:00", "2026-09-23T23:59:00");
+        holiday.is_all_day = true;
+        assert_eq!(name_event(&holiday), "Company holiday, Wed 23 Sep, all day");
+    }
+
+    #[test]
+    fn a_start_that_will_not_parse_adds_no_time() {
+        // A file edited by hand can hold anything. The title alone is short; a made-up time
+        // inside the sentence a person decides on would be worse than that.
+        assert_eq!(name_event(&stored("m", "Mystery", "sometime", "whenever")), "Mystery");
+    }
+
+    #[test]
+    fn the_index_keeps_every_name_until_the_cap_then_drops_the_oldest() {
+        let day = a_day();
+        let whole = naming_index(&day);
+        assert_eq!(whole.len(), day.len(), "an ordinary range keeps every name");
+        assert!(
+            whole.contains(&(day[0].id.clone(), name_event(&day[0]))),
+            "and the values are `name_event`'s, not a second sentence for the same thing"
+        );
+
+        // A range far past the cap: one event an hour, oldest first, plus a hand-edited row
+        // whose start will not parse — which counts as oldest of all (see `naming_index`).
+        let mut events: Vec<EventRef> = (0..NAMING_CAP + 10)
+            .map(|i| {
+                stored(
+                    &format!("e{i}"),
+                    &format!("Event {i}"),
+                    &format!("2026-01-{:02}T{:02}:00:00", 1 + i / 24, i % 24),
+                    &format!("2026-01-{:02}T{:02}:00:00", 1 + i / 24, i % 24),
+                )
+            })
+            .collect();
+        events.push(stored("junk", "Hand-edited", "sometime", "whenever"));
+        let index = naming_index(&events);
+        assert_eq!(index.len(), NAMING_CAP, "the cap holds whatever the range");
+        for gone in (0..10).map(|i| format!("e{i}")).chain(["junk".to_string()]) {
+            assert!(
+                !index.iter().any(|(id, _)| *id == gone),
+                "{gone} is at the old end and was dropped"
+            );
+        }
+        let newest = &events[NAMING_CAP + 9];
+        assert!(
+            index.contains(&(newest.id.clone(), name_event(newest))),
+            "what an action taken now was read from keeps its name"
+        );
+    }
+
+    /// The index is worth only what the app actually publishes. Pinned against the source, as
+    /// `describe_says_which_day_today_is` pins the day line, because the closure needs a live
+    /// window — and dropping this key is exactly the quiet half of #54: the card keeps working,
+    /// it just stops saying what the thing is.
+    #[test]
+    fn the_describe_publishes_what_its_ids_stand_for() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/calendar/src/main.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        assert!(
+            src.contains(".with(\"naming\", serde_json::Value::Object(naming))"),
+            "the calendar's describe must carry the id→name index"
+        );
+        assert!(
+            src.contains("views::naming_index(&event_refs(&s.events))"),
+            "built by the capped index over the events in hand, not a second formatter in main.rs"
+        );
     }
 }

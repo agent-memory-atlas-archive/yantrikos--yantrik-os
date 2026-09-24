@@ -73,6 +73,13 @@ export struct ApprovalRequest {
     purpose: string,        // the action's own published description
     grade: string,          // safe | standard | sensitive | dangerous
     args: [string],         // one `key: value` per entry, each already cut to fit one line
+    // What one of those arguments stands for, in the app's own words:
+    // `id 01a0c718… is "Dentist, Fri 25 Sep 13:00"` (#54). The card for a delete asked BY ID
+    // showed only the uuid, which is nothing a person can answer a question about. This is a
+    // sentence about the arguments, drawn beside them — never one more thing the grant binds
+    // to — and empty when the app publishes no name index or names none of these values, in
+    // which case the card hides the row rather than drawing a blank.
+    target: string,
     warning: string,        // "" unless there is something that cannot be undone
     // Whether "Allow for this session" may be offered at all. False for `dangerous` and for any
     // action whose own published sentence says it cannot be undone — the same predicate that
@@ -498,6 +505,29 @@ export component ApprovalCard inherits Rectangle {
                 }
                 Text {
                     text: "asked for in this call · the grant is bound to exactly these";
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-micro;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
+
+            // What the handle in the box above means, in the words of the app that owns it
+            // (#54) — a line for each handle the app names, so a delete asked by id reads as
+            // the event itself. One Text, `no-wrap` and elided, like every other row: the
+            // card's height is arithmetic, and the line arrives already cut to fit (see
+            // `TARGET_CHARS` in approvals.rs). Hidden when empty, which is the ordinary case.
+            if root.data.target != "" : VerticalLayout {
+                spacing: 0px;
+                Text {
+                    text: root.data.target;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-caption;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+                Text {
+                    text: "says the app what its handle means · the grant binds to the arguments above, not to this line";
                     color: Theme.text-dim;
                     font-size: Theme.fs-micro;
                     wrap: no-wrap;

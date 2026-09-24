@@ -1035,6 +1035,24 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 }
             };
 
+            // What each event id in hand names, as a person would say it. The id is the
+            // reliable way to point at an event — `delete_event` recommends it and the
+            // approval grant is bound to it exactly — but a card that asks permission with a
+            // uuid alone asks a question nobody can answer (#54), and the shell reads this
+            // from the same `app.describe` it already reads the grade and the purpose from.
+            // Every event in hand, not just the selected day's: an id in an action was read
+            // from some view of the visible range, and the card cannot say what it has not
+            // been given. Bounded, because `describe` is read by agents and a full table in
+            // a reply is what describe replies are told to avoid: only the loaded visible
+            // range — the same events every other key below is derived from, never the whole
+            // store — and a fixed cap of `views::NAMING_CAP` entries, oldest dropped (see
+            // `views::naming_index`).
+            let naming: serde_json::Map<String, serde_json::Value> =
+                views::naming_index(&event_refs(&s.events))
+                    .into_iter()
+                    .map(|(id, name)| (id, serde_json::Value::String(name)))
+                    .collect();
+
             let mut out = View::new(summary)
                 .with("month", month)
                 .with("year", s.year)
@@ -1047,6 +1065,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 .with("today", views::today_line(chrono::Local::now().date_naive()))
                 .with("view", view.as_str())
                 .with("events_on_selected_day", serde_json::Value::Array(today))
+                .with("naming", serde_json::Value::Object(naming))
                 .with("days_with_events", serde_json::Value::Array(busy))
                 .with("events_this_month", events_in_month(&s.events, s.year, s.month) as i64)
                 // What the person is being told went wrong, if anything. A caller that just

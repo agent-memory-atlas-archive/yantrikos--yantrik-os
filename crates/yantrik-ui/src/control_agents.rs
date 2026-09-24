@@ -761,7 +761,11 @@ fn allowed_on_card(origin: &RecipeOrigin, call: &AgentCall<'_>, role: &catalog::
         role.budget.minutes,
         role.mind.join(" or ")
     );
-    match approvals::request(&origin.label(), verified, "shell", "hand_off", args, "sensitive", &purpose) {
+    // No naming line: the shell publishes no id→name index, and `hand_off`'s arguments name
+    // themselves — the recipe a person is being asked to start is in the `purpose` above.
+    match approvals::request(
+        &origin.label(), verified, "shell", "hand_off", args, "sensitive", &purpose, "",
+    ) {
         Ok(asked) => {
             asks.insert(key, asked.id);
             Err(AgentRefusal::Ask(waiting))

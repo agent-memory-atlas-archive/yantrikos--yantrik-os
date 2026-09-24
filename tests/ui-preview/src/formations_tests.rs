@@ -312,6 +312,8 @@ fn agents_row_and_card(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Bo
         purpose: "List the notes in a folder.".into(),
         grade: "safe".into(),
         args: lines(&["folder: release"]),
+        // `folder: release` is already the thing itself; no naming line to draw (#54).
+        target: "".into(),
         warning: "".into(),
         can_session: false,
         decision: "".into(),
