@@ -359,6 +359,111 @@ arcade's author graded a built game as work somebody asked for, the way Notes gr
 (`standard`, recoverable). None of the four writes configuration, so none is #48's rule; whether
 every trash-move of finished work deserves a card is a judgement for its own issue.
 
+### The methods a service answers beside the gate
+
+Every grade above is enforced in the `app.act` dispatch. A service also answers **its own**
+JSON-RPC methods on the same socket — `sysmon.kill_process`, `network.wifi_connect` — and those
+meet no gate at all: a caller that speaks JSON-RPC directly can use the method instead of the
+action, and the ceiling, the mind's mode and the grant are no part of it (#161). Beside the
+`dangerous` `kill_process` action, which nothing runs without a grant, the raw method signals any
+pid it is handed; beside the `sensitive` `wifi_connect` action, the raw method joins any network.
+
+Leaving them open is deliberate, and it ends at #43. These methods are not back doors somebody
+forgot; they are the doors the desktop itself walks in through. System Monitor's End button
+delivers its SIGTERM by calling `sysmon.kill_process`; every app that raises a notification goes
+through an app-runtime helper calling `notifications.add`; the shell's own notification wire
+polls `notifications.since`. Until a service can tell the person's own window from any other peer
+on the socket — which is what #43 gives it — gating the method would deny the person's own
+buttons. So each one is listed here instead: every method every service answers, whether it
+changes anything, and the graded `app.act` action that does the same thing where one exists.
+`tests/service-methods` walks each service's dispatch and fails when a method has no row here, or
+a row here has no method behind it, so a new method — mutating or not — cannot join a service
+until somebody has written down what it is beside the gate.
+
+<!-- service-methods: kept honest by `python3 -m unittest discover -s tests/service-methods`, which reads every service's dispatch and holds the two lists together. `read` changes nothing that outlives the call; `change` does. -->
+| Service | Method | | Gated `app.act` beside it | What it is, and who calls it |
+| --- | --- | --- | --- | --- |
+| system-monitor | `sysmon.snapshot` | read | — | the machine's numbers; the window polls, and the surface's `describe` reads the same |
+| system-monitor | `sysmon.processes` | read | — | the process list, sorted and capped; the window polls |
+| system-monitor | `sysmon.kill_process` | change | `kill_process` (service surface) — dangerous | SIGTERM to one pid. The window's End button calls the method; Force Kill is SIGKILL and goes local, because the method takes no signal |
+| network | `network.interfaces` | read | — | what the Network Manager window draws; it polls these six |
+| network | `network.status` | read | — | |
+| network | `network.dns` | read | — | |
+| network | `network.wifi_state` | read | — | |
+| network | `network.wifi_known` | read | — | |
+| network | `network.firewall` | read | — | |
+| network | `network.wifi_scan` | change | `wifi_scan` (app) — standard | asks the radio to rescan |
+| network | `network.wifi_radio` | change | `wifi_radio` (app) — dangerous | turns Wi-Fi off; on a machine reached over Wi-Fi, takes away the channel the undo would travel on |
+| network | `network.wifi_connect` | change | `wifi_connect` (app) — sensitive | joins a network, storing the credential |
+| network | `network.dns_set` | change | none | writes the machine's resolvers. The gated door is the companion's `network_dns_set` tool (sensitive), not an action |
+| network | `network.wifi_disconnect` | change | `wifi_disconnect` (app) — dangerous | leaves the joined network |
+| network | `network.wifi_forget` | change | `wifi_forget` (app) — sensitive | deletes a stored credential |
+| calendar | `calendar.events` | read | — | the Calendar app's model; it reads these three |
+| calendar | `calendar.get_event` | read | — | |
+| calendar | `calendar.revision` | read | — | |
+| calendar | `calendar.create_event` | change | `add_event` (app) — standard | writes an event file |
+| calendar | `calendar.update_event` | change | `update_event` (app) — standard | rewrites an event file |
+| calendar | `calendar.delete_event` | change | `delete_event` (app) — sensitive | removes the file the event lives in; no trash |
+| calendar | `calendar.upsert_remote` | change | none | stores what a CalDAV sync fetched; the companion's sync is the graded door in front of it |
+| notes | `notes.list` | read | — | the library, enumerated |
+| notes | `notes.get` | read | — | one note |
+| notes | `notes.search` | read | — | full-text over the library |
+| notes | `notes.create` | change | `new_note` (app) — standard | writes a note file. **No caller on the desktop**: the Notes app keeps its own library folder |
+| notes | `notes.update` | change | `set_content` (app) — sensitive | rewrites a note file. No caller on the desktop |
+| notes | `notes.delete` | change | none | removes the note file outright — no trash; the app's `trash` (sensitive) is the recoverable one. No caller on the desktop |
+| notes | `notes.set_pinned` | change | none | rewrites the note's pinned flag. No caller on the desktop |
+| notes | `notes.set_tags` | change | `tags` (app) — standard | rewrites the note's tags. No caller on the desktop |
+| notifications | `notifications.list` | read | — | the centre's contents |
+| notifications | `notifications.since` | read | — | what changed since a revision; the shell's notification wire polls it |
+| notifications | `notifications.add` | change | `notify` (service surface) — standard | stores and shows one notification. Every app's notify goes through an app-runtime helper that calls this method |
+| notifications | `notifications.dismiss` | change | `dismiss` (service surface) — standard | takes one off the screen |
+| notifications | `notifications.dismiss_all` | change | `dismiss_all` (service surface) — standard | takes them all off |
+| notifications | `notifications.mark_read` | change | `mark_read` (service surface) — standard | clears the unread badge |
+| notifications | `notifications.action` | change | none | invokes a notification's button and tells the sender. The shell calls it when the person clicks; the click is the authority, which is why there is no action |
+| email | `email.accounts` | read | — | the configured accounts, secrets stripped |
+| email | `email.oauth_status` | read | — | where a sign-in stands |
+| email | `email.test_account` | read | — | dials the account's server to check the credentials; changes nothing |
+| email | `email.list_folders` | read | — | the mailbox tree; the Email app reads these four |
+| email | `email.list_messages` | read | — | |
+| email | `email.get_message` | read | — | |
+| email | `email.search` | read | — | |
+| email | `email.save_account` | change | none | writes the account configuration, password included. The app's settings screen calls it |
+| email | `email.oauth_begin` | change | `begin_google_sign_in` (app) — sensitive | starts the OAuth dance: a browser opens on a full-access consent screen |
+| email | `email.oauth_cancel` | change | none | abandons a sign-in in flight |
+| email | `email.send_message` | change | none | **sends mail.** The app publishes `compose` and deliberately never `send` — mail that has gone cannot be taken back — but the method sends |
+| email | `email.mark_read` | change | `mark_read` (app) — standard | sets the read flag on the server |
+| email | `email.mark_starred` | change | `flag` (app) — standard | sets the star |
+| email | `email.move_message` | change | none | moves a message between folders on the server |
+| email | `email.delete_message` | change | none | deletes a message on the server |
+| a11y | `a11y.windows` | read | — | the foreign window list |
+| a11y | `a11y.describe` | read | — | one window's control tree |
+| a11y | `a11y.status` | read | — | whether AT-SPI is answering |
+| a11y | `a11y.act` | change | none | clicks and types in somebody else's window. The graded door is the companion's `window_action` tool (standard), not an action |
+| weather | `weather.current` | read | — | the forecast; the Weather app fetches these seven. `current`, `hourly` and `daily` remember the asked-for place in memory for this run — the same remembering the surface's `set_location` (standard) does |
+| weather | `weather.hourly` | read | — | |
+| weather | `weather.daily` | read | — | |
+| weather | `weather.alerts` | read | — | |
+| weather | `weather.air_quality` | read | — | |
+| weather | `weather.suggest` | read | — | |
+| weather | `weather.geocode` | read | — | |
+| perception | `perception.since` | read | — | the kernel's account of what is happening, long-polled; root-only socket |
+| perception | `perception.snapshot` | read | — | counts, sources, uptime |
+| perception | `perception.scope` | read | — | what it may see and what the kernel is enforcing |
+| perception-journal | `journal.status` | read | — | the stored-observation journal's state |
+| perception-journal | `journal.since` | read | — | stored observations since a sequence |
+<!-- /service-methods -->
+
+The `none`s are the point of the table, and they are not all the same `none`. `email.send_message`
+is a door the app deliberately does not have — `send` is unpublished because mail that has gone
+cannot be taken back — yet the method sends, and that is exactly the asymmetry #161 is about.
+`notes.delete` removes a file outright beside an app whose own deleting goes to Trash; and all
+five notes writers have no desktop caller at all, the Notes app keeping its library folder itself
+— they are candidates for deletion, or for a gate, the day #43 lands. `notifications.action` and
+`calendar.upsert_remote` are methods whose only caller is the desktop acting for the person — a
+click, a sync — and are listed so that when #43 can tell callers apart, the choice about each one
+is already written down. Nothing in this section changes a grade or a gate decision; it records
+what stands beside them until the methods themselves can be gated.
+
 ## Threading
 
 Both closures run on the UI thread, because that is the only thread allowed to touch a Slint
