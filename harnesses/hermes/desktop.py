@@ -95,6 +95,8 @@ class Turn:
     chat_id: str
     text: str
     opened: float = field(default_factory=time.monotonic)
+    # When anything was last streamed on this turn, so a quiet turn can be told from a dead one.
+    active: float = field(default_factory=time.monotonic)
     said_anything: bool = False
     started: bool = False
     # The gateway session working on it, and how many heartbeats in a row found it not running.
@@ -166,6 +168,7 @@ class Ledger:
             message_id = f"{turn.turn_id}.{self._counter}"
             delta = ("\n\n" if turn.said_anything else "") + content
             turn.said_anything = turn.said_anything or bool(content)
+            turn.active = time.monotonic()
             self._messages[message_id] = (turn.turn_id, content)
             return message_id, delta
 
@@ -196,4 +199,5 @@ class Ledger:
                     same += 1
                 delta = "\n" + "\n".join(new[same:]) if new[same:] else ""
             turn.said_anything = turn.said_anything or bool(delta)
+            turn.active = time.monotonic()
             return turn, delta

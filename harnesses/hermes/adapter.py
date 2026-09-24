@@ -26,6 +26,7 @@ import getpass
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -59,8 +60,12 @@ IDLE_SECONDS = 0.2
 RETRY_SECONDS = 5.0
 # A turn being worked on says so this often, well inside the desktop's 90-second window.
 HEARTBEAT_SECONDS = 20.0
-# A message the gateway has not started working on after this long will not be answered.
-PICKUP_SECONDS = 60.0
+# A message the gateway has not started working on after this long will not be answered. Generous,
+# because closing a turn early loses the answer: everything the gateway says afterwards has nowhere
+# to go, and the person is left looking at a dead conversation while Hermes works on.
+PICKUP_SECONDS = 180.0
+# How quiet a turn whose gateway session has ended must be before it is treated as abandoned.
+ABANDONED_QUIET_SECONDS = 90.0
 
 
 def check_requirements() -> bool:
@@ -203,7 +208,11 @@ class YantrikAdapter(BasePlatformAdapter):
                 for turn in self._ledger.open_turns():
                     if self._abandoned(turn):
                         logger.warning("[yantrik] turn %s outlived its session; closing it", turn.turn_id)
-                        await self._finish(turn.turn_id, error="Stopped before Hermes answered.")
+                        await self._finish(
+                            turn.turn_id,
+                            error="Stopped before Hermes answered.",
+                            why="its session ended and it went quiet",
+                        )
                         continue
                     await self._stream(turn, "")
             except asyncio.CancelledError:
@@ -223,6 +232,10 @@ class YantrikAdapter(BasePlatformAdapter):
             return False
         if turn.session_key in self._active_sessions:
             turn.idle_beats = 0
+            return False
+        # A session can leave the gateway's active list while its answer is still on the way, so
+        # the turn must also have gone quiet. Closing a live turn loses everything said next.
+        if time.monotonic() - turn.active < ABANDONED_QUIET_SECONDS:
             return False
         turn.idle_beats += 1
         return turn.idle_beats >= 2
@@ -276,13 +289,17 @@ class YantrikAdapter(BasePlatformAdapter):
             await self.handle_message(event)
             if not turn.said_anything:
                 await self._stream(turn, "Done.")
-            await self._finish(turn.turn_id)
+            await self._finish(turn.turn_id, why=f"/{command} answered inline")
             if command in {"stop", "new", "reset"}:
                 # These end the work in progress without its processing hook firing, so the turns
                 # it was answering are closed here rather than left waiting.
                 for other in self._ledger.open_turns():
                     if other.chat_id == turn.chat_id and other.started:
-                        await self._finish(other.turn_id, error="Stopped before Hermes answered.")
+                        await self._finish(
+                            other.turn_id,
+                            error="Stopped before Hermes answered.",
+                            why=f"ended by /{command}",
+                        )
             return
 
         working = [t for t in self._ledger.open_turns() if t.started and t.turn_id != turn.turn_id]
@@ -293,14 +310,18 @@ class YantrikAdapter(BasePlatformAdapter):
             lines.append("It is waiting for you to allow a command: send /approve or /deny.")
         lines.append("Send /stop to stop it. Anything else can wait until it has finished.")
         await self._stream(turn, " ".join(lines))
-        await self._finish(turn.turn_id)
+        await self._finish(turn.turn_id, why="told the person Hermes is busy")
 
     async def _watch_pickup(self, turn_id: str) -> None:
         await asyncio.sleep(PICKUP_SECONDS)
         turn = self._ledger.get(turn_id)
         if turn is not None and not turn.started and not turn.said_anything:
             logger.warning("[yantrik] turn %s was never picked up by the gateway", turn_id)
-            await self._finish(turn_id, error="Hermes did not take this message up. Try again.")
+            await self._finish(
+                turn_id,
+                error="Hermes did not take this message up. Try again.",
+                why="never picked up",
+            )
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         if event.message_id:
@@ -310,17 +331,20 @@ class YantrikAdapter(BasePlatformAdapter):
         if not event.message_id:
             return
         if outcome == ProcessingOutcome.SUCCESS:
-            await self._finish(event.message_id)
+            await self._finish(event.message_id, why="the gateway finished it")
         elif outcome == ProcessingOutcome.CANCELLED:
-            await self._finish(event.message_id, error="Stopped before Hermes answered.")
+            await self._finish(
+                event.message_id, error="Stopped before Hermes answered.", why="cancelled"
+            )
         else:
             await self._finish(
                 event.message_id,
                 error="Hermes could not answer this. Its log has the reason: "
                 "journalctl --user -u hermes-gateway",
+                why="the gateway failed it",
             )
 
-    async def _finish(self, turn_id: str, error: Optional[str] = None) -> None:
+    async def _finish(self, turn_id: str, error: Optional[str] = None, why: str = "answered") -> None:
         """Close a turn on the desktop, exactly once.
 
         A turn that already said something is completed even when the gateway reports a failure:
@@ -329,6 +353,15 @@ class YantrikAdapter(BasePlatformAdapter):
         turn = self._ledger.close(turn_id)
         if turn is None or not self._session:
             return
+        # Which path closed a turn is the first question when an answer goes missing: everything
+        # the gateway says after a turn closes has nowhere to land.
+        logger.info(
+            "[yantrik] turn %s closed (%s) after %.0fs%s",
+            turn_id,
+            why,
+            time.monotonic() - turn.opened,
+            "" if turn.said_anything else ", having said nothing",
+        )
         try:
             if error and not turn.said_anything:
                 await self._call(
