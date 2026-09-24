@@ -211,6 +211,49 @@ fn shell_screen_answer(
     answer
 }
 
+/// Whether the screen showing is one the desktop waits behind for the person: the lock screen
+/// (3) or the login screen (32).
+///
+/// The installed machine autologins on tty1 and starts the shell on the login screen, so the
+/// session is signed in and that screen is the only thing standing between anybody who can
+/// reach this process and the desktop (#203). Locked is therefore a STATE of the shell, read
+/// off the screen it is showing — nothing persists it, so a restart during the login screen
+/// comes back locked — and every door has to hold to it: the socket's dispatch (the state rule
+/// `publish` installs), the keybinds any process can trigger over D-Bus, the toasts that draw
+/// over every screen, the command palette and the morning brief's boot timer.
+pub(crate) fn locked_screen(screen: i32) -> bool {
+    screen == 3 || screen == 32
+}
+
+/// The one sentence every refused call gets while the desktop waits for the person. Exact, so
+/// a caller can branch on the prefix the way it branches on `GRANT:` or `CEILING:`.
+pub(crate) const LOCKED_REFUSAL: &str = "LOCKED: the desktop is waiting for the person to sign in";
+
+/// Whether `action` may run while the desktop is locked.
+///
+/// An allow-list, and the decision is a pure function so a test can ask it without a window:
+/// anything not named here is refused, which means an action added tomorrow is refused by
+/// default and its author has to come here — past a reader — to change that.
+///
+/// The list is empty on purpose. Neither locked screen needs anything from this surface: both
+/// are driven by Slint callbacks (`wire/login.rs` and `on_try_unlock` in `wire/callbacks.rs`),
+/// and `describe` is not an action. `lock` is refused too — at the login screen it would trade
+/// the password gate for the weaker PIN one.
+pub(crate) fn allowed_while_locked(action: &str) -> bool {
+    const ALLOWED: &[&str] = &[];
+    ALLOWED.contains(&action)
+}
+
+/// What the dispatch's state rule answers for `action` while `screen` is showing: the refusal
+/// when the call must not run, `None` when it passes. Pure, for the same reason.
+fn locked_refusal(screen: i32, action: &str) -> Option<String> {
+    if locked_screen(screen) && !allowed_while_locked(action) {
+        Some(LOCKED_REFUSAL.to_string())
+    } else {
+        None
+    }
+}
+
 /// Join names the way a person would read them out: "a", "a and b", "a, b and c".
 ///
 /// This line is the first thing anyone sees of the desktop, and "calendar and email and notes"
@@ -353,6 +396,23 @@ pub fn publish(
                 return View::new("Yantrik — shutting down");
             };
             let screen = ui.get_current_screen();
+
+            // A locked desktop still answers — a caller has to be able to learn that the
+            // machine is waiting for its person rather than hung — but about nothing else.
+            // The conversation, the window titles, the notifications, the agents and the rest
+            // are the person's, and the login screen exists precisely so that whoever is
+            // standing at the machine is not told them (#203). Reading is free, so this cannot
+            // be enforced by refusing the call; it is enforced by having nothing to say.
+            if locked_screen(screen) {
+                return View::new(format!(
+                    "Yantrik — {} screen, waiting for the person",
+                    screen_name(screen)
+                ))
+                .with("locked", true)
+                .with("screen", screen_name(screen))
+                .with("screen_id", screen);
+            }
+
             let bond = describe_bond(&ui.get_bond_data());
 
             // From the launch registry, not the Slint window-list model. The model is only
@@ -787,10 +847,27 @@ pub fn publish(
     let read_ui = ui_for.clone();
     let panel_ui = ui_for.clone();
     let desk_ui = ui_for.clone();
+    let rule_ui = ui_for.clone();
     let lock_ui = ui_for;
 
     let surface = ControlSurface::new("shell")
         .describe(describe)
+        // The locked-desktop rule, installed on the dispatch every action on this surface
+        // crosses rather than in the actions themselves (#203): the login screen used to be a
+        // picture over a signed-in session, and `yos act shell open_lens` walked the desktop
+        // straight past it. The rule reads the screen the shell is showing — the state IS the
+        // screen, so there is nothing to fall out of sync — and refuses every action the
+        // allow-list in `allowed_while_locked` does not name, which today names none. An
+        // action added to this surface tomorrow is held to it without its author doing
+        // anything; getting out from under it means editing the allow-list, past a reader.
+        .state_rule(move |action| {
+            // Fail closed: a rule that cannot read the screen cannot know the desktop is open.
+            let ui = rule_ui()?;
+            match locked_refusal(ui.get_current_screen(), action) {
+                Some(refusal) => Err(refusal),
+                None => Ok(()),
+            }
+        })
         .action(
             Action::new(
                 "report_problem",
@@ -2446,6 +2523,279 @@ mod open_app_answer_tests {
         assert!(
             note.contains("`about`") && note.contains("wlrctl: no compositor"),
             "the note does not say which screen is up, or why it could not be raised: {note}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod locked_state_tests {
+    //! The installed machine autologins on tty1, so the login screen is the only thing between
+    //! anybody who can reach this process and the desktop — and `yos act shell open_lens` walked
+    //! straight past it: `accepted: True, settled: True`, Lens open, conversation on screen (#203).
+    //! Locked is a state now, read off the screen the shell is showing, held at the dispatch
+    //! every action crosses. These tests are the state's: the pure decision (`locked_refusal`,
+    //! which the dispatch calls with the live screen), the allow-list's default, and — for the
+    //! wiring that needs a window to run — pins against the source, the way
+    //! `do_not_disturb_tests` and `lock_grade_tests` pin theirs.
+    use super::{LOCKED_REFUSAL, allowed_while_locked, locked_refusal, locked_screen};
+    use std::path::Path;
+
+    /// The lock screen and the login screen, and screens that are neither.
+    const LOCKED_SCREENS: &[i32] = &[3, 32];
+    const OPEN_SCREENS: &[i32] = &[0, 1, 2, 4, 8, 9, 16, 21, 34];
+
+    /// This file, without its tests.
+    fn source() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        whole.split("#[cfg(test)]").next().unwrap_or_default().to_string()
+    }
+
+    /// Every action name the shell's control modules publish, read off their declarations
+    /// rather than a list kept beside them — the scan `control_approvals` uses, minus its test
+    /// halves so a test's own quoting of `Action::new` cannot feed it.
+    fn published_actions() -> Vec<String> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("control") && n.ends_with(".rs"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        files.sort();
+        let mut out = Vec::new();
+        for path in files {
+            let whole = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
+            for (index, _) in src.match_indices("Action::new(") {
+                let rest = &src[index + "Action::new(".len()..];
+                // The name is the first string literal after the paren, possibly on the next
+                // line. Anything else is not an action declaration and is skipped.
+                let Some(open) = rest.find('"') else { continue };
+                if rest[..open].chars().any(|c| !c.is_whitespace()) {
+                    continue;
+                }
+                let Some(close) = rest[open + 1..].find('"') else { continue };
+                out.push(rest[open + 1..open + 1 + close].to_string());
+            }
+        }
+        out
+    }
+
+    /// Which screens the desktop waits behind — and the refusal's exact words, because a
+    /// caller branches on the `LOCKED:` prefix the way it branches on `GRANT:` or `CEILING:`,
+    /// and the release-check greps for it.
+    #[test]
+    fn locked_is_the_lock_screen_and_the_login_screen() {
+        for screen in LOCKED_SCREENS {
+            assert!(locked_screen(*screen), "screen {screen} is a locked screen");
+        }
+        for screen in OPEN_SCREENS {
+            assert!(!locked_screen(*screen), "screen {screen} is not a locked screen");
+        }
+        assert_eq!(
+            LOCKED_REFUSAL, "LOCKED: the desktop is waiting for the person to sign in",
+            "the refusal is one exact sentence so every door says the same thing"
+        );
+    }
+
+    /// While the desktop waits for the person, every action it publishes is refused — starting
+    /// with the two the bug report ran from a shell prompt.
+    #[test]
+    fn every_action_the_shell_publishes_is_refused_while_locked() {
+        for screen in LOCKED_SCREENS {
+            for action in ["open_lens", "show_screen"] {
+                assert_eq!(
+                    locked_refusal(*screen, action).as_deref(),
+                    Some(LOCKED_REFUSAL),
+                    "`yos act shell {action}` walked the desktop past screen {screen} (#203)"
+                );
+            }
+        }
+
+        let actions = published_actions();
+        assert!(
+            actions.len() > 30,
+            "only {} actions were found — the scan is not reading the control modules any more, \
+             which would make this test pass by seeing nothing. Found: {actions:?}",
+            actions.len()
+        );
+        for screen in LOCKED_SCREENS {
+            for action in &actions {
+                assert_eq!(
+                    locked_refusal(*screen, action).as_deref(),
+                    Some(LOCKED_REFUSAL),
+                    "`{action}` is not on the allow-list, so screen {screen} must refuse it"
+                );
+            }
+        }
+    }
+
+    /// An action added tomorrow is refused by default: the rule is the surface's, not the
+    /// actions', so its author does not have to remember anything, and getting out from under
+    /// it means editing the allow-list, past a reader.
+    #[test]
+    fn an_action_added_tomorrow_is_refused_by_default() {
+        for screen in LOCKED_SCREENS {
+            assert_eq!(
+                locked_refusal(*screen, "an_action_added_tomorrow").as_deref(),
+                Some(LOCKED_REFUSAL),
+                "a name the allow-list has never seen must be refused on screen {screen}"
+            );
+        }
+        assert!(
+            !allowed_while_locked("lock"),
+            "`lock` while locked is refused too: at the login screen it would trade the \
+             password gate for the weaker PIN one"
+        );
+    }
+
+    /// And the rule holds nothing on an open desktop — it is the lock's rule, not a second
+    /// gate every call pays on the way through.
+    #[test]
+    fn the_rule_refuses_nothing_on_an_open_desktop() {
+        for screen in OPEN_SCREENS {
+            assert!(
+                locked_refusal(*screen, "open_lens").is_none()
+                    && locked_refusal(*screen, "an_action_added_tomorrow").is_none(),
+                "screen {screen} is open; the state rule must refuse nothing on it"
+            );
+        }
+    }
+
+    /// The rule lives on the dispatch — installed once in `publish`, reading the live screen —
+    /// not copied into handlers, where an action added beside them would miss it.
+    #[test]
+    fn the_rule_is_installed_on_the_dispatch() {
+        let src = source();
+        assert!(
+            src.contains(".state_rule(move |action| {"),
+            "`publish` must install the locked-desktop rule on the surface builder, so every \
+             action crosses it whether its handler remembers to or not (#203)"
+        );
+        assert!(
+            src.contains("locked_refusal(ui.get_current_screen(), action)"),
+            "the installed rule must decide with `locked_refusal` against the screen the shell \
+             is showing: the state IS the screen, so there is nothing to fall out of sync"
+        );
+    }
+
+    /// A locked desktop still answers `describe` — a caller must be able to tell "waiting for
+    /// the person" from "hung" — but says `locked: true` and nothing personal: no conversation,
+    /// no window titles, no notifications.
+    #[test]
+    fn describe_says_locked_and_nothing_personal_while_locked() {
+        let src = source();
+        let locked_at = src
+            .find("if locked_screen(screen) {")
+            .expect("the describe closure still cuts itself short while the desktop is locked");
+        let personal_at = src
+            .find(".with(\"conversation\"")
+            .expect("describe still reports the conversation on an open desktop");
+        assert!(
+            locked_at < personal_at,
+            "the locked early-return must sit before the conversation is read: reading is free, \
+             so a locked describe is enforced by having nothing to say, and that only works if \
+             it returns before anything personal is gathered"
+        );
+        let branch = &src[locked_at..personal_at];
+        assert!(
+            branch.contains("return View::new(") && branch.contains(".with(\"locked\", true)"),
+            "the locked describe must return early with `locked: true`. Branch as written:\n{branch}"
+        );
+    }
+
+    /// Nothing persists the state, so a restart during the login screen comes back locked —
+    /// as long as the rule exists before the shell is put on that screen. `main` applies
+    /// `YANTRIK_START_SCREEN` after `publish`, and this pins the order.
+    #[test]
+    fn a_restart_during_the_login_screen_comes_back_locked() {
+        assert!(locked_screen(32), "the login screen is a locked screen; there is no stored `unlocked` to read");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+        let main = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let publish = main.find("control::publish(").expect("main still publishes the control surface");
+        let start = main.find("YANTRIK_START_SCREEN").expect("main still honours the start screen");
+        assert!(
+            publish < start,
+            "the surface — and with it the locked rule — must be installed before the start \
+             screen is applied, or the shell sits on the login screen with no rule holding it"
+        );
+    }
+
+    /// The login screen has exactly one way off, and it sits under the verified-password
+    /// branch: a PAM-checked login here, or the lock screen's own unlock. No timer, no
+    /// fallback, no other call.
+    #[test]
+    fn only_a_verified_login_leaves_the_login_screen() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/wire/login.rs");
+        let login = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        assert_eq!(
+            login.matches("ui.set_current_screen(1);").count(),
+            1,
+            "login.rs must navigate to the desktop in exactly one place; a second one is a \
+             second way past the password"
+        );
+        let at = login.find("ui.set_current_screen(1);").unwrap();
+        assert!(
+            login[..at].contains("if authenticated {"),
+            "and that one place must sit under `if authenticated`, the branch `verify_password` \
+             opened. Login.rs before the navigation:\n{}",
+            &login[..at]
+        );
+    }
+
+    /// The socket's dispatch is the main door, but not the only one: keybinds any process can
+    /// trigger over D-Bus, toasts that draw over every screen, the palette, the morning brief's
+    /// boot timer and Ctrl+K in the markup all move the shell on their own, and #203 names
+    /// them. Each holds to the state through the same pure predicate; these handlers need a
+    /// live window to run, so the placement is pinned against the source.
+    #[test]
+    fn the_doors_that_are_not_the_socket_are_held_to_the_same_state() {
+        fn wire(rel: &str) -> String {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        }
+        let needle = "crate::control::locked_screen(ui.get_current_screen())";
+        // (file, how many of its own doors the predicate must hold) — notifications has two:
+        // the toast body and a toast button's action, which reaches an app's own surface.
+        for (file, doors) in [
+            ("src/wire/system_poll.rs", 1),
+            ("src/wire/command_palette.rs", 1),
+            ("src/wire/notifications.rs", 2),
+            ("src/wire/morning_brief.rs", 1),
+        ] {
+            let src = wire(file);
+            assert_eq!(
+                src.matches(needle).count(),
+                doors,
+                "{file} must hold its {doors} door(s) to `locked_screen` while the desktop \
+                 waits for the person (#203); it does so {} time(s)",
+                src.matches(needle).count()
+            );
+        }
+
+        // Ctrl+K in the markup: the arm that walks the shell to the desktop with the Lens open
+        // must give up on the lock and login screens before it navigates anywhere.
+        let app = wire("../yantrik-ui-slint/ui/app.slint");
+        let at = app
+            .find("event.modifiers.control && (event.text == \"k\" || event.text == \"K\")")
+            .expect("app.slint still captures Ctrl+K");
+        let arm = &app[at..];
+        let nav = arm.find("root.navigate(1);").expect("the Ctrl+K arm still goes to the desktop");
+        assert!(
+            arm[..nav].contains("root.current-screen == 3 || root.current-screen == 32"),
+            "Ctrl+K must not walk the shell off lock (3) or login (32) — it was one of the ways \
+             past the login screen (#203). Arm as written:\n{}",
+            &arm[..nav]
         );
     }
 }

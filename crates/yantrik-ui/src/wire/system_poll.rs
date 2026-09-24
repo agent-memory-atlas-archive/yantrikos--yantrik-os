@@ -422,6 +422,16 @@ fn wire_chart_history(ui: &App, ctx: &AppContext) {
 
 /// Handle a keybind action.
 fn handle_keybind(ui: &App, action: &str) {
+    // A keybind is not a keystroke: it arrives over the session D-Bus, which any process
+    // running as this user can send to, so this is a door onto the desktop like the socket and
+    // is held to the same rule (#203). While the login or lock screen is up, nothing here
+    // launches, navigates, screenshots or toggles — the arms below that check `screen == 1`
+    // only ever guarded the lens and the overlays, and the rest ran on the lock screen.
+    // Unlocking goes through the lock screen's own callbacks, never through a keybind.
+    if crate::control::locked_screen(ui.get_current_screen()) {
+        tracing::debug!(action, "Keybind dropped — the desktop is waiting for the person to sign in");
+        return;
+    }
     match action {
         "open-lens" => {
             if ui.get_current_screen() == 1 {
