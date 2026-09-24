@@ -26,7 +26,6 @@
 //! something, and it cannot go on showing what it read when it last navigated either. So it asks
 //! this instead: two numbers, a `stat` per file and no parse, and a listing only when they move.
 
-mod reminders;
 mod store;
 
 use std::path::PathBuf;
@@ -34,7 +33,7 @@ use std::path::PathBuf;
 use store::EventStore;
 use yantrik_ipc_contracts::calendar::{
     method, CreateEventParams, DeleteEventParams, EventsParams, GetEventParams, UpdateEventParams,
-    UpsertRemoteEventParams,
+    UpsertRemoteEventParams, DEFAULT_REMINDER_MINUTES,
 };
 use yantrik_ipc_contracts::control_surface::{describe_json, View};
 use yantrik_service_sdk::prelude::*;
@@ -43,9 +42,10 @@ fn main() {
     std::fs::create_dir_all(calendar_dir()).ok();
     yantrik_service_sdk::init_tracing("calendar");
 
-    // Before the server blocks. The events are here, so the reminder for one is here too — see
-    // `reminders`, which also says what it cannot promise.
-    reminders::spawn(calendar_dir());
+    // The reminder timer is not started here, and on purpose: this service is started on demand
+    // (`autostart = false`) and stopped freely, so a timer in it only ran while something
+    // happened to have opened the calendar. The timer lives in the notifications service, which
+    // the shell autostarts, and reads the event files this service writes — see its `reminders`.
 
     ServiceBuilder::new("calendar")
         .handler(CalendarHandler { store: EventStore::new(calendar_dir()) })
@@ -149,12 +149,13 @@ impl ServiceHandler for CalendarHandler {
 }
 
 impl CalendarHandler {
-    /// What this calendar holds, and the one thing about it that is easy to assume wrongly.
+    /// What this calendar holds, and how an event gets announced.
     ///
-    /// The reminder note is the point of this view. `autostart = false` in this service's
-    /// manifest means nothing is ticking on a machine where nothing has opened the calendar
-    /// since boot — so an event can pass without being announced, and a caller reading this is
-    /// told that rather than left to find out by missing a meeting.
+    /// The reminder note is the point of this view: the timer does not run here — this service
+    /// is on demand, so a timer in it would only tick while something had opened the calendar.
+    /// It runs in the notifications service, which is always up, and a caller reading this is
+    /// told where reminders live and what one is worth rather than left to assume the wrong
+    /// thing.
     fn describe_view(&self) -> View {
         let revision = self.store.revision();
         let now = chrono::Local::now().naive_local();
@@ -204,14 +205,15 @@ impl CalendarHandler {
             .with(
                 "reminders",
                 serde_json::json!({
-                    "lead_minutes": reminders::LEAD.num_minutes(),
-                    "running": true,
-                    "note": "An event is announced through the notifications service ten \
-                             minutes before it starts, once, and only while this service is \
-                             running. This service is started on demand, so on a machine where \
-                             nothing has opened the calendar since boot nothing is ticking and \
-                             an event can pass unannounced. All-day events are not announced: \
-                             there is no time of day to announce them at.",
+                    "default_minutes": DEFAULT_REMINDER_MINUTES,
+                    "hosted_by": "notifications",
+                    "note": "Every timed event is announced through the notifications \
+                             service, once, its own `reminder_minutes` before it starts — ten \
+                             when the event does not say. The timer runs in the notifications \
+                             service, which the shell keeps up from boot, so a reminder set for \
+                             tomorrow fires whether or not anything ever opens the calendar. \
+                             All-day events are not announced: there is no time of day to \
+                             announce them at.",
                 }),
             )
     }

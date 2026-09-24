@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDateTime;
 use yantrik_ipc_contracts::calendar::{
-    CalendarEvent, CalendarRevision, CreateEventParams, EventsParams, UpdateEventParams,
-    UpsertRemoteEventParams,
+    parse_stamp, CalendarEvent, CalendarRevision, CreateEventParams, EventsParams,
+    UpdateEventParams, UpsertRemoteEventParams, DEFAULT_REMINDER_MINUTES, MAX_REMINDER_MINUTES,
 };
 use yantrik_ipc_contracts::email::ServiceError;
 
@@ -22,15 +22,23 @@ fn bad_request(message: impl Into<String>) -> ServiceError {
 }
 
 /// Parse an ISO 8601 datetime. Accepts `2026-03-18T10:00:00` and bare `2026-03-18`,
-/// the latter as the start of that day.
+/// the latter as the start of that day. The one implementation lives in the contracts crate
+/// because the reminder timer reads these files too, from another service.
 pub fn parse_iso_datetime(s: &str) -> Option<NaiveDateTime> {
-    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return Some(dt);
+    parse_stamp(s)
+}
+
+/// What a requested reminder lead becomes on disk: the caller's value, the default when the
+/// caller did not say, and a refusal for a lead past the cap rather than a silently shortened
+/// one — the caller gets told what would not fit instead of finding out later.
+fn resolve_reminder(minutes: Option<u32>) -> Result<u32, ServiceError> {
+    match minutes {
+        Some(m) if m > MAX_REMINDER_MINUTES => Err(bad_request(format!(
+            "`reminder_minutes` ({m}) is longer than the cap of {MAX_REMINDER_MINUTES}"
+        ))),
+        Some(m) => Ok(m),
+        None => Ok(DEFAULT_REMINDER_MINUTES),
     }
-    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        return d.and_hms_opt(0, 0, 0);
-    }
-    None
 }
 
 /// A path's modification time in nanoseconds since the Unix epoch, or 0 when it has none.
@@ -57,10 +65,6 @@ impl EventStore {
         Self { dir }
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     fn event_path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.json"))
     }
@@ -77,8 +81,21 @@ impl EventStore {
             .map_err(|e| failed(format!("Cannot create {}: {e}", self.dir.display())))?;
         let data = serde_json::to_string_pretty(event)
             .map_err(|e| failed(format!("Failed to serialize event: {e}")))?;
-        std::fs::write(self.event_path(&event.id), data)
-            .map_err(|e| failed(format!("Failed to write event: {e}")))
+        // Temp file and rename, never a write in place: these files are a person's calendar,
+        // and an in-place write interrupted by a crash or a full disk leaves half an event
+        // where the whole one used to be. A rename either happens or does not, and the old
+        // file stays readable up to the instant the new one takes its place.
+        let path = self.event_path(&event.id);
+        let temp = path.with_extension(format!("tmp{}", std::process::id()));
+        std::fs::write(&temp, data)
+            .map_err(|e| failed(format!("Failed to write event: {e}")))?;
+        if let Err(e) = std::fs::rename(&temp, &path) {
+            // A failed rename must not leave the temp file behind to be mistaken for an
+            // event by anything scanning the directory.
+            let _ = std::fs::remove_file(&temp);
+            return Err(failed(format!("Failed to store event: {e}")));
+        }
+        Ok(())
     }
 
     /// One event by id, or `None` if nothing is stored under it.
@@ -193,6 +210,7 @@ impl EventStore {
                 params.end, params.start
             )));
         }
+        let reminder_minutes = resolve_reminder(params.reminder_minutes)?;
 
         let event = CalendarEvent {
             id: uuid7::uuid7().to_string(),
@@ -213,6 +231,7 @@ impl EventStore {
             // decides nothing from it — the rule sits in the surface, which is the only place
             // that knows who is asking right now.
             creator: params.creator.clone(),
+            reminder_minutes,
         };
         self.write_event(&event)?;
         Ok(event)
@@ -272,6 +291,13 @@ impl EventStore {
             // and later pushed out to a remote calendar keeps the creator it was stored with,
             // so a sync cannot hand somebody else's event to the syncer.
             creator: existing.as_ref().and_then(|e| e.creator.clone()),
+            // Same rule as the creator: the remote calendar has no opinion about this event's
+            // reminder — the wire does not even carry one — so a re-sync keeps the lead the
+            // person set here instead of resetting it to the default every time Google syncs.
+            reminder_minutes: existing
+                .as_ref()
+                .map(|e| e.reminder_minutes)
+                .unwrap_or(DEFAULT_REMINDER_MINUTES),
         };
         self.write_event(&event)?;
         Ok(event)
@@ -323,6 +349,9 @@ impl EventStore {
         // on the next sync as a duplicate rather than as the edit it was.
         if let Some(v) = &params.remote_id {
             event.remote_id = Some(v.clone());
+        }
+        if let Some(v) = params.reminder_minutes {
+            event.reminder_minutes = resolve_reminder(Some(v))?;
         }
 
         self.write_event(&event)?;
