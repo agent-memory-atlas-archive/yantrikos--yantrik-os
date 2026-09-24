@@ -140,3 +140,17 @@ Finished tab with the failed recipe opened, and the light theme beside the outpu
 ```sh
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/recipes.png 1280 1000 verify-recipes
 ```
+
+## Taskbar window menu
+
+`verify-taskbar-menu` draws the whole shell — app.slint's `App` — with two fixture windows on
+the taskbar and sends real pointer and key events (#232): a right press on an entry opens that
+window's menu without activating it, the menu draws above the bar, choosing Close fires the
+action callback under the control surface's own name for it (`close_window`), Escape puts the
+menu away, a left click still activates the window, and the Menu key and Shift+F10 open the
+focused entry's menu. It writes the shell with the menu open, and with it opened from the
+keyboard, beside the output path.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/taskbar-menu.png 1280 800 verify-taskbar-menu
+```

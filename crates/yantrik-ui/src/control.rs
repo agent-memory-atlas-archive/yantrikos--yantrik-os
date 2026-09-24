@@ -1345,6 +1345,38 @@ pub fn publish(
             },
         )
         .action(
+            // The third thing a person does with a window from its bar, and the verb this
+            // surface was missing while the taskbar's own menu (#232) needed it. The menu's
+            // row and this action are one path: both resolve the title the same way and both
+            // end in `windows::maximise`, so a mind and a pointer get the same behaviour and
+            // the same name for it.
+            //
+            // There is no restore half and no toggle, because wlrctl 0.2.2 has no unmaximize:
+            // a maximized window comes back by its app's own button or the compositor's
+            // Super+Up (config/labwc/rc.xml). Deferred because the compositor decides, like
+            // every other window verb here.
+            Action::new(
+                "maximise_window",
+                "Maximise an open window, as pressing its maximise button does. There is no \
+                 unmaximize here — the app's own button or Super+Up restores it",
+            )
+            .defers()
+            .arg(Param::text("title").describe("Window title, or part of one")),
+            move |args| {
+                let want = args["title"].as_str().unwrap_or_default();
+                let open = crate::windows::addressable_titles();
+                let title = crate::windows::window_named(want, &open)?;
+                crate::windows::maximise(&title)?;
+                Ok(serde_json::json!({
+                    "maximised": title,
+                    // Said because a caller looking for the other half of a toggle would
+                    // otherwise assume one exists and search the surface for it.
+                    "note": "the window fills the screen until its app's own button or \
+                             Super+Up restores it; wlrctl has no unmaximize to call.",
+                }))
+            },
+        )
+        .action(
             // The write is the action, and a failed write is a failed action.
             //
             // `settled` is not a field a handler fills in: this surface computes it as
@@ -1852,7 +1884,7 @@ mod window_action_tests {
     /// and for `focus` a match on nothing exits zero.
     #[test]
     fn the_window_verbs_resolve_the_title_before_asking_the_compositor() {
-        for name in ["focus_window", "close_window", "minimise_window"] {
+        for name in ["focus_window", "close_window", "minimise_window", "maximise_window"] {
             let handler = action(name);
             assert!(
                 handler.contains("windows::addressable_titles()"),
@@ -1861,6 +1893,26 @@ mod window_action_tests {
                  written:\n{handler}"
             );
         }
+    }
+
+    /// Maximise is the verb the taskbar's menu was missing (#232), and wlrctl 0.2.2 has no
+    /// unmaximize — so the answer has to say the window stays big until something else restores
+    /// it. A caller told only `maximised: <title>` would look for the restore half of a toggle
+    /// and never find it.
+    #[test]
+    fn maximise_window_says_there_is_no_other_half() {
+        let handler = action("maximise_window");
+        assert!(
+            handler.contains("windows::maximise(&title)"),
+            "`maximise_window` must go through `windows::maximise` — the same function the \
+             taskbar menu's row runs, so the menu adds no second path. Handler as \
+             written:\n{handler}"
+        );
+        assert!(
+            handler.contains("unmaximize"),
+            "`maximise_window` must say wlrctl has no unmaximize, so a caller knows the window \
+             stays maximized until its app or Super+Up restores it. Handler as written:\n{handler}"
+        );
     }
 }
 
