@@ -2,7 +2,7 @@
 use crate::app_context::AppContext;
 use crate::{
     filebrowser as fsview, fileops, App, BreadcrumbSegment, FileDetailData, FileEntry,
-    FilePlaceData, FileRecentData, FileTabData,
+    FilePlaceData, FileRecentData, FileTabData, OpenWithItem,
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
@@ -1129,13 +1129,100 @@ pub fn wire(ui: &App, ctx: &AppContext) {
             });
         }
     });
-    bind!(on_file_open_with, |u, s, app| {
-        if app == "editor" && !s.trash {
-            if let Some(item) = s.selected.iter().next().and_then(|i| s.visible.get(*i)) {
-                if !item.entry.is_dir {
-                    super::dock::spawn_app_with_args("editor", "yantrik-text-editor", &[&item.path.to_string_lossy()]);
-                }
+    // The "Open with" list, rebuilt every time the menu asks: what is installed and which app
+    // is the default can both change while Files stays open, and a stale row would promise a
+    // launch that cannot happen (#233). The list comes from the same rule the double-click
+    // follows, so its first row IS the default.
+    bind!(on_file_open_with_requested, |u, s| {
+        let rows = match s.selected.iter().next().and_then(|i| s.visible.get(*i)) {
+            Some(item) if !s.trash && !item.entry.is_dir => {
+                let defaults = crate::mime_dispatch::MimeDefaults::read();
+                let installed = crate::apps::Catalogue::shared().get();
+                // The machine's browser by the desktop id the defaults file would name, so a
+                // browser row and a written default speak the same language.
+                let browser =
+                    super::dock::find_browser().map(|(bin, _)| format!("{bin}.desktop"));
+                crate::mime_dispatch::open_with(
+                    &item.entry.name,
+                    &defaults,
+                    &installed,
+                    browser.as_deref(),
+                )
             }
+            // A folder or the Trash has nothing to open with; the menu shows the empty state.
+            _ => vec![],
+        };
+        u.set_file_open_with_apps(ModelRc::new(VecModel::from(
+            rows.into_iter()
+                .map(|r| OpenWithItem {
+                    name: r.name.into(),
+                    id: r.id.into(),
+                    is_default: r.is_default,
+                })
+                .collect::<Vec<_>>(),
+        )));
+    });
+    // One row of the list was clicked: open the file in the app the row names, through the
+    // one launcher, so a row and a double-click cannot start an app differently (#233).
+    bind!(on_file_open_with, |u, s, app| {
+        if s.trash {
+            return;
+        }
+        if let Some(item) = s.selected.iter().next().and_then(|i| s.visible.get(*i)) {
+            if !item.entry.is_dir {
+                super::open_with::launch_desktop_id(
+                    app.as_str(),
+                    &item.entry.name,
+                    &item.path,
+                    Some(&u),
+                );
+            }
+        }
+    });
+    // "Always use this app": write the default into the person's own mimeapps.list, say on
+    // the screen that it was remembered, and open the file they pointed at in the app they
+    // chose — the click that asked for the change should see the change (#233).
+    bind!(on_file_open_with_always, |u, s, app, name| {
+        if s.trash {
+            return;
+        }
+        if let Some(item) = s.selected.iter().next().and_then(|i| s.visible.get(*i)) {
+            if item.entry.is_dir {
+                return;
+            }
+            let app = app.to_string();
+            let display = name.to_string();
+            match crate::mime_dispatch::mime_for(&item.entry.name) {
+                Some(mime) => {
+                    match crate::mime_dispatch::MimeDefaults::set_default(mime, &app) {
+                        Ok(()) => {
+                            let ext = Path::new(&item.entry.name)
+                                .extension()
+                                .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+                                .unwrap_or_else(|| item.entry.name.clone());
+                            set_notice(
+                                &u,
+                                &format!("From now on, {ext} files open in {display}."),
+                                None,
+                            );
+                        }
+                        Err(e) => set_notice(
+                            &u,
+                            &format!("Could not remember the choice: {e}"),
+                            None,
+                        ),
+                    }
+                }
+                None => set_notice(
+                    &u,
+                    &format!(
+                        "{} has no file type the shell knows, so the choice cannot be remembered.",
+                        item.entry.name
+                    ),
+                    None,
+                ),
+            }
+            super::open_with::launch_desktop_id(&app, &item.entry.name, &item.path, Some(&u));
         }
     });
     set_places(ui);

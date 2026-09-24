@@ -52,6 +52,15 @@ export struct FileRecentData {
     icon-char: string,
 }
 
+/// One app in the "Open with" menu: what the shell offers for the selected file. `id` is the
+/// desktop entry id the launch and the written default both name; `is-default` marks the app a
+/// plain double-click uses (#233).
+export struct OpenWithItem {
+    name: string,
+    id: string,
+    is-default: bool,
+}
+
 // The words on a tile, in one place so the grid, the list and the recent row agree.
 global FileText {
     public pure function items(e: FileEntry) -> string {
@@ -498,6 +507,13 @@ export component FileBrowser inherits Rectangle {
     callback cancel-operation();
     callback undo-trash();
     callback open-with(string);
+    // "Always use this app": the desktop id and the name on screen, so the notice that says
+    // it was remembered can use the same words as the row that was clicked (#233).
+    callback open-with-always(string, string);
+    // Asked for the list behind the "Open with" menu, which is rebuilt per opening.
+    callback open-with-requested();
+    // The apps offered for the selected file, first row the one a double-click uses (#233).
+    in property <[OpenWithItem]> open-with-apps: [];
     callback dismiss-notice();
     property <bool> ctrl-held;
     property <bool> shift-held;
@@ -545,7 +561,7 @@ export component FileBrowser inherits Rectangle {
         else if id == "refresh" { root.refresh(); }
         else if id == "hidden" { root.toggle-hidden(); }
         else if id == "new-tab" { root.file-new-tab(); }
-        else if id == "open-with" { root.open-with-visible = true; }
+        else if id == "open-with" { root.open-with-requested(); root.open-with-visible = true; }
         else if id == "restore" { root.file-restore-from-trash(root.selected-index); }
         else if id == "empty-trash" { root.dialog-kind = "Empty Trash"; }
     }
@@ -762,7 +778,7 @@ export component FileBrowser inherits Rectangle {
                                     selected: entry.selected; focused: listing.has-focus && index == root.selected-index;
                                     clicked => { listing.focus(); root.multi-select-clicked(index, root.ctrl-held, root.shift-held); }
                                     activate => { root.selected-index = index; root.open-selected(); }
-                                    context => { root.multi-select-clicked(index, false, false); root.open-with-visible = true; }
+                                    context => { root.multi-select-clicked(index, false, false); root.open-with-requested(); root.open-with-visible = true; }
                                 }
                             }
                             // The recent strip is the grid's last row, so the two scroll as
@@ -888,7 +904,9 @@ export component FileBrowser inherits Rectangle {
             // the name field (issue #208). The body layout's preferred height already counts
             // its padding, its spacing and whichever of the conditional rows are showing.
             height: root.file-quick-look-open ? min(480px, root.height - 48px)
-                : root.open-with-visible ? 310px
+                // The "Open with" list has as many rows as this machine has apps for the
+                // type, so the dialog hugs the rows it actually got, up to the screen (#233).
+                : root.open-with-visible ? min(dlg-body.preferred-height, root.height - 48px)
                 : dlg-body.preferred-height;
             changed height => { root.dialog-height = self.height; }
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
@@ -901,8 +919,20 @@ export component FileBrowser inherits Rectangle {
                     preview := Text { width: parent.width; text: root.file-quick-look-content; color: Theme.text-secondary; font-family: Theme.font-mono; font-size: 13px; wrap: word-wrap; }
                 }
                 if root.open-with-visible : VerticalLayout { spacing: 8px;
-                    YButton { init => { self.focus(); } label: "Open with default app"; icon-path: Icons.link; variant: 1; clicked => { root.open-with-visible = false; root.open-selected(); } }
-                    YButton { label: "Open with Text Editor"; icon-path: Icons.editor; variant: 1; disabled: root.file-trash-mode || (root.selected-index >= 0 && root.entries[root.selected-index].is-dir); clicked => { root.open-with-visible = false; root.open-with("editor"); } }
+                    // The apps this machine has for the selected file, the one a double-click
+                    // uses first and marked as it. Folders and the Trash get no list, so they
+                    // get the empty state instead of a row that cannot launch (#233).
+                    if root.open-with-apps.length == 0 : Text { text: "No app is offered for this item."; color: Theme.text-secondary; font-size: 13px; wrap: word-wrap; }
+                    for app[index] in root.open-with-apps : HorizontalLayout { spacing: 8px;
+                        YButton {
+                            init => { if index == 0 { self.focus(); } }
+                            label: app.is-default ? "Open with " + app.name + " (default)" : "Open with " + app.name;
+                            icon-path: Icons.link; variant: 1; horizontal-stretch: 1;
+                            clicked => { root.open-with-visible = false; root.open-with(app.id); }
+                        }
+                        YButton { label: "Always use"; variant: 2; size: 0; disabled: root.file-trash-mode;
+                            clicked => { root.open-with-visible = false; root.open-with-always(app.id, app.name); } }
+                    }
                     YButton { label: "Rename"; icon-path: Icons.editor; variant: 2; disabled: root.file-trash-mode || root.operation-busy; clicked => { root.open-with-visible = false; root.command("rename"); } }
                     YButton { label: "Move to Trash"; icon-path: Icons.trash; variant: 2; disabled: root.file-trash-mode || root.operation-busy; clicked => { root.open-with-visible = false; root.delete-selected(); } }
                 }

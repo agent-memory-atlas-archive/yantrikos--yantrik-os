@@ -20,7 +20,7 @@ import { LoginScreen } from "login.slint";
 import { SettingsScreen, SettingsCategoryItem, AIProviderData, AIModelData, AIStatusData, HarnessData, HarnessRowData } from "settings.slint";
 import { SkillData } from "skill_store.slint";
 import { MemoryBrowser, MemoryItem } from "memory_browser.slint";
-import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem, FilePlaceData, FileRecentData } from "file_browser.slint";
+import { FileBrowser, FileEntry, BreadcrumbSegment, FileDetailData, FileTabData, FileOpItem, FilePlaceData, FileRecentData, OpenWithItem } from "file_browser.slint";
 import { NotificationCenter, NotificationData, NotifActionData } from "notification_center.slint";
 import { SystemDashboard, ProcessData } from "system_dashboard.slint";
 import { VoiceOverlay } from "voice_overlay.slint";
@@ -611,6 +611,11 @@ export component App inherits Window {
     callback file-cancel-operation();
     callback file-undo-trash();
     callback file-open-with(string);
+    // "Always use this app": the desktop id and the row's display name (#233).
+    callback file-open-with-always(string, string);
+    // The Files screen asks for the "Open with" list; the shell rebuilds it per opening.
+    callback file-open-with-requested();
+    in property <[OpenWithItem]> file-open-with-apps: [];
     callback file-dismiss-notice();
 
     in property <string> file-browser-path: "~";
@@ -1785,6 +1790,9 @@ export component App inherits Window {
                 cancel-operation => { root.file-cancel-operation(); }
                 undo-trash => { root.file-undo-trash(); }
                 open-with(app) => { root.file-open-with(app); }
+                open-with-apps: root.file-open-with-apps;
+                open-with-always(id, name) => { root.file-open-with-always(id, name); }
+                open-with-requested() => { root.file-open-with-requested(); }
                 dismiss-notice => { root.file-dismiss-notice(); }
                 current-path: root.file-browser-path;
                 entries: root.file-browser-entries;

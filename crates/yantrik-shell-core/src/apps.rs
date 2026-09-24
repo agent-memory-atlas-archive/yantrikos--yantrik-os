@@ -90,6 +90,10 @@ pub struct DesktopEntry {
     /// `X-Yantrik-Adapter`: the command that provides the surface for this app, when the app
     /// cannot host one. Only kept beside a declared surface: an adapter for nothing is nothing.
     pub adapter: Option<String>,
+    /// `MimeType=`: the file types the app says it opens, as the freedesktop `;`-separated list
+    /// states them. Files' "Open with" list reads these, and so does the answer for a file type
+    /// the shell's own table has no app for (#233). Empty when the file declares none.
+    pub mime_types: Vec<String>,
 }
 
 /// Built-in Yantrik apps that appear in the app grid alongside system apps.
@@ -403,6 +407,7 @@ pub fn parse_desktop_text(stem: &str, content: &str) -> Option<DesktopEntry> {
     let mut purpose = String::new();
     let mut aliases = String::new();
     let mut adapter = String::new();
+    let mut mime_types = String::new();
 
     for line in content.lines() {
         let line = line.trim();
@@ -438,6 +443,7 @@ pub fn parse_desktop_text(stem: &str, content: &str) -> Option<DesktopEntry> {
                 KEY_PURPOSE => purpose = value.to_string(),
                 KEY_ALIASES => aliases = value.to_string(),
                 KEY_ADAPTER => adapter = value.to_string(),
+                "MimeType" => mime_types = value.to_string(),
                 _ => {}
             }
         }
@@ -450,6 +456,15 @@ pub fn parse_desktop_text(stem: &str, content: &str) -> Option<DesktopEntry> {
     let app_id = stem.to_string();
     let icon_char = derive_icon_char(&categories, &name);
     let (surface, aliases, adapter) = surface_keys(&app_id, &surface, &aliases, &adapter);
+
+    // The freedesktop list, split the way every `;`-separated key splits: trimmed, empty items
+    // dropped, the order the file wrote kept.
+    let mime_types = mime_types
+        .split(';')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .collect();
 
     Some(DesktopEntry {
         name,
@@ -464,6 +479,7 @@ pub fn parse_desktop_text(stem: &str, content: &str) -> Option<DesktopEntry> {
         purpose,
         aliases,
         adapter,
+        mime_types,
     })
 }
 
@@ -807,5 +823,45 @@ X-Yantrik-Surface=not-this-one
         assert_eq!(dirs.last().map(PathBuf::as_path), Some(Path::new(YANTRIK_APPLICATIONS)));
         let unique: std::collections::HashSet<_> = dirs.iter().collect();
         assert_eq!(unique.len(), dirs.len(), "no directory is scanned twice");
+    }
+}
+
+#[cfg(test)]
+mod mime_type_tests {
+    use super::*;
+
+    /// `MimeType=` is read as the freedesktop list it is: trimmed, empties dropped, order kept,
+    /// and only from the entry's own group. Files' "Open with" offers an app exactly for the
+    /// types the app declared (#233).
+    #[test]
+    fn mime_types_are_read_as_a_list() {
+        let entry = parse_desktop_text(
+            "chromium",
+            "[Desktop Entry]\nType=Application\nName=Chromium\nExec=chromium %U\n\
+             MimeType=text/html;text/xml;; application/xhtml+xml ;\n",
+        )
+        .expect("an app");
+        assert_eq!(entry.mime_types, ["text/html", "text/xml", "application/xhtml+xml"]);
+
+        // A key in another group is not the entry's, like every other key.
+        let other_group = parse_desktop_text(
+            "y",
+            "[Desktop Entry]\nType=Application\nName=Y\nExec=y\n\n\
+             [Desktop Action new]\nMimeType=text/plain\n",
+        )
+        .expect("an app");
+        assert!(other_group.mime_types.is_empty());
+
+        // An entry that declares none opens nothing by type, and an empty value declares none.
+        let plain =
+            parse_desktop_text("vim", "[Desktop Entry]\nType=Application\nName=Vim\nExec=vim %F\n")
+                .expect("an app");
+        assert!(plain.mime_types.is_empty());
+        let empty = parse_desktop_text(
+            "x",
+            "[Desktop Entry]\nType=Application\nName=X\nExec=x\nMimeType=;;\n",
+        )
+        .expect("an app");
+        assert!(empty.mime_types.is_empty());
     }
 }
