@@ -163,6 +163,15 @@ jobs:
       - name: A shell that dies is started again
         run: sh deploy/yantrik-os/yantrik-shell selftest
 
+      # The services list the packaging scripts ship (#244), derived from the services' own
+      # yantrik.toml manifests the way the shell finds them. deploy.sh's BUILD_ALL branch built
+      # two services fewer than the default beside it, and publish-components.sh published
+      # channels whose shell registered a11y and perception with no binaries behind them —
+      # hand-written lists again, the #99 defect for services. The selftest holds the shell's
+      # registrations and both packaging scripts against the reader; no builds, no machine.
+      - name: The packaging scripts ask the tree which services they ship
+        run: bash deploy/yantrik-os/service-bins.sh selftest
+
       # The harnesses that ship as source (harnesses/lib, harnesses/pi, harnesses/deepseek).
       # Same shape as the two above: stdlib-only Python over a fake of everything it talks to —
       # a fake desktop socket, a fake yos-mcp, a fake chat-completions API and a fake `pi` — so

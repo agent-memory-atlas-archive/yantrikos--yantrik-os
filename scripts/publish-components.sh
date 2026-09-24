@@ -56,15 +56,28 @@ declare -A CORE_COMPONENTS=(
     ["yantrik"]="yantrik"
 )
 
-declare -A SERVICE_COMPONENTS=(
-    ["weather-service"]="weather-service"
-    ["system-monitor-service"]="system-monitor-service"
-    ["notes-service"]="notes-service"
-    ["notifications-service"]="notifications-service"
-    ["calendar-service"]="calendar-service"
-    ["network-service"]="network-service"
-    ["email-service"]="email-service"
-)
+# ── Which services this publishes ──
+#
+# The services table was written down here too, and it went stale the same way
+# deploy.sh's did: a11y and perception were missing from the table, from the build's
+# -p flags and from the manifest's binary_names, so a channel published with this
+# script shipped a shell that registers both (start_services in
+# crates/yantrik-ui/src/main.rs) with no binaries behind them — `yos describe`
+# promised services nothing on the machine could answer.
+# deploy/yantrik-os/service-bins.sh reads the services' own yantrik.toml manifests, so
+# the three shapes this script needs are derived from one asking, shelf dropped as
+# before.
+SERVICE_BINS="$("$PROJECT_ROOT/deploy/yantrik-os/service-bins.sh")" \
+    || fail "cannot determine which services this tree builds"
+declare -A SERVICE_COMPONENTS=()
+SERVICE_PACKAGES=""
+MANIFEST_SERVICES=""
+for b in $SERVICE_BINS; do
+    if is_shelved "$b"; then continue; fi
+    SERVICE_COMPONENTS["$b"]="$b"
+    SERVICE_PACKAGES="$SERVICE_PACKAGES -p $b"
+    MANIFEST_SERVICES="$MANIFEST_SERVICES'$b': '$b', "
+done
 
 # ── Which apps this publishes ──
 #
@@ -110,9 +123,7 @@ if [ "$SKIP_BUILD" = false ]; then
          RUSTFLAGS=\"-A warnings\" CARGO_TARGET_DIR=$WSL_TARGET \
          cargo build --release \
             -p yantrik-ui -p yantrik \
-            -p weather-service -p system-monitor-service -p notes-service \
-            -p notifications-service -p calendar-service -p network-service \
-            -p email-service \
+            $SERVICE_PACKAGES \
             $APP_PACKAGES \
          2>&1" || fail "Build failed!"
 fi
@@ -208,10 +219,7 @@ import json, subprocess, os
 components = {}
 binary_names = {
     'yantrik-ui': 'yantrik-ui', 'yantrik': 'yantrik',
-    'weather-service': 'weather-service', 'system-monitor-service': 'system-monitor-service',
-    'notes-service': 'notes-service', 'notifications-service': 'notifications-service',
-    'calendar-service': 'calendar-service', 'network-service': 'network-service',
-    'email-service': 'email-service',
+    $MANIFEST_SERVICES
     $MANIFEST_APPS
 }
 
