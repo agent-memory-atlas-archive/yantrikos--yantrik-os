@@ -279,7 +279,9 @@ pub fn launcher_id_in(name: &str, installed: &[DesktopEntry]) -> String {
 /// inventing things. Each entry is the name to pass, what opening it does, and, for an app, the
 /// name to `describe` it by, what it is for, the other names it answers to and whether it is
 /// running. Shelved apps are left out: they cannot be opened, and `open_app` says why if one is
-/// asked for by name.
+/// asked for by name. So is a route whose program this machine does not have — Blender on a
+/// fresh install (#214): this listing is what `open_app` accepts, and a row that would be
+/// refused sends minds to try names that fail.
 ///
 /// Every app whose `.desktop` file declares a surface is here, closed or open — this OS's own and
 /// anybody else's alike — listed by its surface id, so the name that opens it is the name that
@@ -307,6 +309,16 @@ pub fn openable_with(
         .filter_map(|(names, launch)| {
             let name = *names.first()?;
             if SHELVED.iter().any(|shelf| shelf.ids.contains(&name)) {
+                return None;
+            }
+            // A row here says `open_app` takes this name, and `open_app` asks `availability` —
+            // so the listing asks it too (#214). A fresh install has no Blender, and the row
+            // was listed anyway: `describe shell` offered `blender` with `opens: app`, and
+            // opening it was refused. This drops only the routes that run a program the
+            // machine may not have — the browser and Blender; a screen of the shell itself is
+            // always Ready. `launchable_app_ids`, the list a refusal offers, has always
+            // filtered this way; the two now answer the same question.
+            if availability(name, installed) != Availability::Ready {
                 return None;
             }
             let purpose = |id: &str| {
@@ -380,8 +392,9 @@ pub fn openable_with(
 
 /// Blender's declaration as this OS ships it, for a machine where its entry is not installed.
 ///
-/// The route is listed whether or not Blender is on the disk (`open_app` then says what is
-/// missing), and its row should still say what it is for. Read from the shipped file itself
+/// The route is listed only when Blender would really open (#214), but its `.desktop` entry can
+/// still be missing from the catalogue — a machine that installed Blender itself, a development
+/// tree — and the row should say what it is for even then. Read from the shipped file itself
 /// (`surfaces::SHIPPED_ENTRIES`) rather than copied here, so the purpose has one home.
 fn shipped_blender() -> Option<crate::surfaces::Declared> {
     crate::surfaces::declared(&crate::surfaces::shipped()).into_iter().find(|d| d.id == "blender")
@@ -413,13 +426,15 @@ pub enum Resolved {
     Route(Launch),
     /// A program from its .desktop entry: the id its window is registered under, the binary and
     /// its args — and, when the entry declares a surface, which one, and the adapter that
-    /// provides it if the app cannot.
+    /// provides it if the app cannot. `try_exec` is the program the entry is FOR when the file
+    /// names one — for an adapter's entry, the app it wraps (#214).
     Catalogue {
         id: String,
         bin: String,
         args: Vec<String>,
         surface: Option<String>,
         adapter: Option<String>,
+        try_exec: Option<String>,
     },
     /// Nothing answers to that name.
     Unknown,
@@ -470,6 +485,7 @@ pub fn resolve(app: &str, installed: &[DesktopEntry]) -> Resolved {
                     args: parts.collect(),
                     adapter: surface.as_ref().and(entry.adapter.clone()),
                     surface,
+                    try_exec: entry.try_exec.clone(),
                 };
             }
         }
@@ -512,7 +528,9 @@ pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
     let launch = match resolve(app, installed) {
         Resolved::Shelved(shelf) => return Availability::Shelved(shelf),
         Resolved::Unknown => return Availability::Unknown,
-        Resolved::Catalogue { bin, .. } => return program_availability(&bin),
+        Resolved::Catalogue { bin, try_exec, .. } => {
+            return program_availability(&bin, try_exec.as_deref())
+        }
         Resolved::Route(launch) => launch,
     };
     match launch {
@@ -544,8 +562,22 @@ pub fn availability(app: &str, installed: &[DesktopEntry]) -> Availability {
     }
 }
 
-/// Whether the program an Exec line runs is on this machine.
-fn program_availability(exec: &str) -> Availability {
+/// Whether the programs an entry needs are on this machine: the one its `TryExec` names, and
+/// the one its `Exec` line runs.
+///
+/// `TryExec` comes first because it names the program the entry is FOR, while `Exec` names what
+/// the shell would start. For an adapter's entry the two are not the same program: LibreOffice's
+/// `Exec` runs `yantrik-libreoffice`, the wrapper this OS ships beside the entry, so `Exec` alone
+/// answered "ready" on a machine with no LibreOffice — the tile stayed in the launcher, `open_app`
+/// answered "launching", and the wrapper exited with an error (#214). `TryExec=soffice` is the
+/// standard key that names the wrapped app, and the standard rule now decides: no `soffice`, no
+/// entry.
+fn program_availability(exec: &str, try_exec: Option<&str>) -> Availability {
+    if let Some(program) = try_exec.and_then(|p| p.split_whitespace().next()) {
+        if find_program(program).is_none() {
+            return Availability::Missing(program.to_string());
+        }
+    }
     let Some(bin) = exec.split_whitespace().next() else {
         return Availability::Missing("a program to run".to_string());
     };
@@ -576,6 +608,11 @@ pub fn is_launchable(app: &str, installed: &[DesktopEntry]) -> bool {
 /// .desktop entry from whatever release put them there, because the updater installs binaries
 /// over binaries and never removes one the new bundle does not carry. Matching the shelf by the
 /// program the Exec line runs is what keeps that stale pair out of the launcher.
+///
+/// The fourth case is an entry that names the program it is for with `TryExec`, the standard
+/// freedesktop key: the entry is listed only while that program is on the machine. An adapter's
+/// entry needs it — its `Exec` runs the wrapper, which is always installed, so nothing else
+/// would hide a LibreOffice tile on a machine with no LibreOffice (#214).
 pub fn entry_is_launchable(entry: &DesktopEntry) -> bool {
     if shelved(&entry.app_id).is_some() || shelved_exec(&entry.exec).is_some() {
         return false;
@@ -583,7 +620,7 @@ pub fn entry_is_launchable(entry: &DesktopEntry) -> bool {
     if entry.exec == "__builtin__" {
         return route(&entry.app_id).is_some();
     }
-    program_availability(&entry.exec) == Availability::Ready
+    program_availability(&entry.exec, entry.try_exec.as_deref()) == Availability::Ready
 }
 
 /// The names of the apps that will open on this machine, for telling a caller what it can ask for:
@@ -790,7 +827,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
                 );
                 return;
             }
-            Resolved::Catalogue { id, bin, args, surface, adapter } => {
+            Resolved::Catalogue { id, bin, args, surface, adapter, .. } => {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 // An app that cannot host its own surface has its adapter started beside it,
                 // and stopped with it.
@@ -1665,7 +1702,7 @@ mod tests {
         let there = PathBuf::from("/definitely/not/here/yantrik-notes");
         assert!(find_program(there.to_str().unwrap()).is_none());
         assert_eq!(
-            program_availability("/definitely/not/here/yantrik-notes --new"),
+            program_availability("/definitely/not/here/yantrik-notes --new", None),
             Availability::Missing("/definitely/not/here/yantrik-notes".to_string())
         );
         // Screens are compiled into the shell; they are always there.
@@ -1701,6 +1738,48 @@ mod tests {
         );
         assert!(!is_launchable("thing", &gone));
         assert!(is_known_app("thing", &gone), "known, so the caller hears 'not installed'");
+    }
+
+    /// An adapter's entry is listed by the program it wraps, not only by the one it runs (#214).
+    ///
+    /// LibreOffice's entry runs `yantrik-libreoffice`, the wrapper this OS ships beside the
+    /// entry, so the wrapper is always there — on a machine with no LibreOffice the entry
+    /// survived every filter, its tile was in the launcher, and `open_app` answered "launching"
+    /// before the wrapper exited with an error. `TryExec` names the wrapped app, and the
+    /// standard rule for the key now decides: no `soffice`, no entry.
+    #[test]
+    fn an_entry_is_listed_by_the_program_it_wraps_not_only_the_one_it_runs() {
+        let adapter_entry = |try_exec: &str| {
+            crate::apps::parse_desktop_text(
+                "yantrik-libreoffice",
+                &format!(
+                    "[Desktop Entry]\nType=Application\nName=LibreOffice\n\
+                     Exec=/bin/sh /opt/yantrik/bin/yantrik-libreoffice %U\nTryExec={try_exec}\n\
+                     X-Yantrik-Surface=libreoffice\nX-Yantrik-Purpose=office files\n"
+                ),
+            )
+            .expect("an app")
+        };
+        // The wrapper is present (/bin/sh stands in for it here); the app it wraps is not.
+        let gone = [adapter_entry("/opt/yantrik-test-nowhere/soffice")];
+        assert!(!entry_is_launchable(&gone[0]));
+        assert_eq!(
+            availability("libreoffice", &gone),
+            Availability::Missing("/opt/yantrik-test-nowhere/soffice".to_string())
+        );
+        assert!(!is_launchable("libreoffice", &gone));
+        assert!(is_known_app("libreoffice", &gone), "known, so asking by name hears what is missing");
+        // Name a program the machine has, and the entry opens as ever.
+        let there = [adapter_entry("/bin/sh")];
+        assert!(entry_is_launchable(&there[0]));
+        assert_eq!(availability("libreoffice", &there), Availability::Ready);
+        // An entry with no TryExec keeps the old rule: its Exec's program decides.
+        let bare = crate::apps::parse_desktop_text(
+            "plain",
+            "[Desktop Entry]\nType=Application\nName=Plain\nExec=/bin/sh\n",
+        )
+        .expect("an app");
+        assert!(entry_is_launchable(&bare));
     }
 
     /// A file that exists but cannot be executed is not a program.
@@ -1950,6 +2029,33 @@ mod tests {
         // "document" into Notes.
         for app in apps.iter().filter(|a| a["opens"] == "app") {
             assert!(app["for"].as_str().is_some_and(|s| s.len() > 8), "{} does not say what it is for", app["name"]);
+        }
+    }
+
+    /// The listing offers no route that `open_app` would refuse (#214).
+    ///
+    /// On a fresh install `describe shell` → `apps` listed `blender` with `opens: app`, as if it
+    /// would open, and `open_app blender` answered "`blender` is not installed on this machine".
+    /// The routes' rows were listed unconditionally — the shelf was the only exception — while
+    /// the list a refusal offers (`launchable_app_ids`) has always asked `availability`. The
+    /// apps' rows are filtered by `Catalogue::refresh`; this is the routes' half, which leaves
+    /// out the browser and Blender exactly where the machine has no program to run.
+    #[test]
+    fn the_listing_offers_no_route_open_app_would_refuse() {
+        let shipped = shipped();
+        let listed = openable_with(&shipped, &|_| false);
+        for (names, _) in ROUTES {
+            let name = names[0];
+            let row = listed.iter().any(|a| a["name"] == name);
+            let opens = is_launchable(name, &shipped);
+            assert_eq!(
+                row, opens,
+                "`{name}` is {} in the listing and `open_app` {} open it — the listing is what \
+                 `open_app` accepts, so the two cannot disagree (#214 was this row listed on a \
+                 machine that had no Blender)",
+                if row { "listed" } else { "not listed" },
+                if opens { "would" } else { "would not" }
+            );
         }
     }
 

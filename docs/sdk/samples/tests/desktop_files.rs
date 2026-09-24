@@ -41,6 +41,10 @@ fn libreoffice_names_the_adapter_that_serves_it() {
     assert_eq!(e.adapter.as_deref(), Some("yantrik-libreoffice-adapter"));
     // `%U` is LibreOffice's; the shell strips field codes before it runs the command.
     assert_eq!(e.exec, "yantrik-libreoffice");
+    // The wrapper the Exec runs ships with the adapter and is always installed, so only
+    // TryExec — naming the app it wraps — hides the entry from a machine with no LibreOffice
+    // (#214).
+    assert_eq!(e.try_exec.as_deref(), Some("soffice"));
 }
 
 #[test]
@@ -49,6 +53,9 @@ fn blender_hosts_its_own_surface_and_names_no_adapter() {
     assert_eq!(e.surface.as_deref(), Some("blender"));
     assert_eq!(e.adapter, None);
     assert!(e.exec.contains("--python"), "the add-on is loaded by the command itself: {}", e.exec);
+    // A machine without Blender must not be offered the tile — or the name in any listing a
+    // mind reads (#214).
+    assert_eq!(e.try_exec.as_deref(), Some("blender"));
 }
 
 #[test]

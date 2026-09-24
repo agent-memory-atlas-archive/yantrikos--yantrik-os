@@ -88,6 +88,7 @@ Conventions worth knowing:
 import json
 import os
 import re
+import shutil
 import socket
 import statistics
 import struct
@@ -163,6 +164,18 @@ def application_dirs():
     return ordered
 
 
+def try_exec_found(program):
+    """Whether the program a `TryExec` key names is on this machine: by path as written, or in
+    /opt/yantrik/bin, or on PATH — the places the shell itself looks (`yantrik-ui`'s
+    `find_program`)."""
+    if os.path.sep in program:
+        return os.path.isfile(program) and os.access(program, os.X_OK)
+    deployed = os.path.join("/opt/yantrik/bin", program)
+    if os.path.isfile(deployed) and os.access(deployed, os.X_OK):
+        return True
+    return shutil.which(program) is not None
+
+
 def read_desktop_entry(stem, text):
     """One `[Desktop Entry]` group, as the launcher reads it; None for anything it does not list."""
     keys, group = {}, None
@@ -177,6 +190,14 @@ def read_desktop_entry(stem, text):
         keys[key.strip()] = value.strip()
     if (keys.get("Type") != "Application" or keys.get("NoDisplay") == "true"
             or keys.get("Hidden") == "true" or not keys.get("Name") or not keys.get("Exec")):
+        return None
+    # `TryExec` is the standard "list it only if this program is installed" rule, and the
+    # shell's catalogue applies it too (`yantrik-ui`'s `entry_is_launchable`). It is the only
+    # key that can hide an adapter's entry: the wrapper its Exec runs ships with the adapter
+    # and is always there, so a machine without the wrapped app would otherwise keep naming
+    # it in `yos ls` and in the apps a mind is offered (#214).
+    try_exec = keys.get("TryExec", "").split()
+    if try_exec and not try_exec_found(try_exec[0]):
         return None
     surface = fold_name(keys.get("X-Yantrik-Surface", ""))
     if not SURFACE_NAME.match(surface):
@@ -195,8 +216,9 @@ def declared_surfaces(dirs=None):
     """Every surface the installed `.desktop` files declare, one per id: `{id, title, purpose,
     aliases, entry}`. The same rules as the shell's catalogue, less the ones only the shell knows
     (which names are its own screens): an entry id found twice is the first directory's, entries
-    are taken in the order of their names, ids are settled before aliases, and a name is given to
-    the first surface that claims it."""
+    are taken in the order of their names, ids are settled before aliases, a name is given to the
+    first surface that claims it, and an entry whose `TryExec` program this machine does not have
+    declares nothing (#214)."""
     entries, seen = [], set()
     for directory in (dirs if dirs is not None else application_dirs()):
         try:

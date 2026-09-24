@@ -1781,12 +1781,20 @@ with tempfile.TemporaryDirectory() as d:
         .read_text(encoding="utf-8"), encoding="utf-8")
     (apps_dir / "vim.desktop").write_text(
         "[Desktop Entry]\nType=Application\nName=Vim\nExec=vim %F\n", encoding="utf-8")
+    # An adapter's entry for an app this machine does not have: its Exec looks fine, but its
+    # TryExec names a program that is nowhere, so nothing may offer it (#214).
+    (apps_dir / "org.example.Ghost.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Ghost\nExec=/usr/bin/ghost-wrapper\n"
+        "TryExec=no-such-program-anywhere\nX-Yantrik-Surface=ghost\n"
+        "X-Yantrik-Purpose=an app whose program is not on this machine\n", encoding="utf-8")
     text = module.os_describe_text([str(apps_dir)])
     check("os_describe names each declared app with what it is for",
           "'howdy' (say hello to someone, by name)" in text
           and "'system-monitor' (CPU, memory, disk and processes)" in text, text)
     check("and still offers the desktop itself", "'shell' (the desktop" in text, text)
     check("and an app that declares nothing is not offered", "vim" not in text.lower(), text)
+    check("and neither is an adapter for an app this machine does not have",
+          "ghost" not in text.lower(), text)
     bare = module.os_describe_text([str(tmp / "nowhere")])
     check("with nothing declared it names no app at all — the old list is gone",
           not any(("'%s'" % name) in bare
@@ -1802,7 +1810,9 @@ with tempfile.TemporaryDirectory() as d:
           "'howdy' (say hello" in listed, listed)
     check("os_apps says a closed app is listed, marked as closed",
           "(closed)" in module.BY_NAME["os_apps"]["description"], module.BY_NAME["os_apps"]["description"])
-    # One reading of the keys, however many scripts carry it: the bridge's copy agrees with yos's.
+    # One reading of the keys, however many scripts carry it: the bridge's copy agrees with
+    # yos's — including hiding an entry whose TryExec program is not on this machine (#214),
+    # which is why Ghost is in neither reading and the count stays two.
     loader = SourceFileLoader("yos_for_surfaces", str(HERE / "yos"))
     spec = importlib.util.spec_from_loader("yos_for_surfaces", loader)
     real_yos = importlib.util.module_from_spec(spec)

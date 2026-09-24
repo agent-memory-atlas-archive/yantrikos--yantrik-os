@@ -6,6 +6,10 @@ Comment=3D modelling, animation and rendering
 # opens answer to `yos describe blender`. The dock route runs the same two pieces, and
 # availability() checks both before offering the tile.
 Exec=blender --python /opt/yantrik/share/blender/bootstrap.py
+# TryExec names the program this entry is for — the standard "list it only if installed" key.
+# A machine without Blender shows no tile, and `describe shell` leaves `blender` out of its
+# apps instead of offering a name `open_app` then refuses (#214).
+TryExec=blender
 # One mark for now: brand/yantrik-mark.svg, installed as hicolor `yantrik`.
 Icon=yantrik
 Categories=Graphics;3DGraphics;
