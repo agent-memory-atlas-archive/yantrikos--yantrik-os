@@ -2864,7 +2864,21 @@ export component App inherits Window {
                 companion-count: root.whisper-hint-count;
                 companion-online: root.companion-online;
                 companion-status: root.companion-status;
-                open-launcher => { root.app-grid-open = !root.app-grid-open; }
+                // The launcher is drawn on the desktop screen and nowhere else, so from Files,
+                // Recipes or any other screen this button flipped a property nothing drew (#219).
+                // Opening it goes to the desktop first, as open_lens does, and puts the Lens
+                // away, which would cover a third of it. The shell's handler for the grid opening
+                // brings the window forward over whatever app is in front.
+                open-launcher => {
+                    if (!root.app-grid-open) {
+                        if (root.current-screen != 1) {
+                            root.current-screen = 1;
+                            root.navigate(1);
+                        }
+                        root.lens-open = false;
+                    }
+                    root.app-grid-open = !root.app-grid-open;
+                }
                 activate-window(title) => { root.switch-window(title); }
                 open-companion => { root.lens-open = !root.lens-open; root.open-lens(); }
             }

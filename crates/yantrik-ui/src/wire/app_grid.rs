@@ -32,6 +32,13 @@ pub fn wire(ui: &App, ctx: &AppContext) {
         let category = category.clone();
         let weak = ui.as_weak();
         ui.on_app_grid_opened(move || {
+            // The launcher is part of the shell's own window, and with an app in front that
+            // window is behind it: from the Editor, the Apps button opened a launcher nobody
+            // could see (#219). Bring the shell forward; when the compositor will not, say so
+            // where a launcher that never appeared can be traced.
+            if let Err(why) = crate::windows::raise_shell() {
+                tracing::warn!(%why, "The launcher opened, but the shell could not be brought in front of the window over it");
+            }
             let count = catalogue.refresh();
             tracing::debug!(apps = count, "rescanned installed apps for the launcher");
             if let Some(ui) = weak.upgrade() {
@@ -192,6 +199,25 @@ pub(crate) fn icon_id_for(app_id: &str) -> String {
         other => other,
     };
     mapped.to_string()
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    /// With the Editor in front, the Apps button opened a launcher behind it (#219): the launcher
+    /// is part of the shell's own window, and a Wayland client cannot raise itself. The handler
+    /// for the grid opening has to ask the compositor, as `open_lens` and `show_screen` do.
+    #[test]
+    fn opening_the_launcher_brings_the_shell_forward() {
+        let source = include_str!("app_grid.rs");
+        // Split, so this test's own text is not what the search finds.
+        let start = source.find(concat!("ui.on_app_grid_", "opened(")).expect("the grid-opened handler");
+        let end = start + source[start..].find("\n        });").expect("its end");
+        let handler = &source[start..end];
+        assert!(
+            handler.contains(concat!("crate::windows::raise_", "shell()")),
+            "the launcher opening must bring the shell's window forward. Handler as written:\n{handler}"
+        );
+    }
 }
 
 #[cfg(test)]
