@@ -2609,11 +2609,17 @@ fn worker_loop(
 /// A desktop whose backend was down all day wrote 450+ log lines and showed nothing
 /// on screen; the failure belongs on the screen. Pure state: online is `None` (the
 /// chip hides itself), offline is one persistent line naming the way out — Settings → AI.
+///
+/// It says what is known and no more: the built-in assistant's model did not answer. On the
+/// machine that reported this a model WAS set up (Ollama on the host) and simply was not
+/// running, so "set one up" would have sent the person to fix the wrong thing; and an attached
+/// mind such as Hermes may be answering the chat meanwhile, so the line names which assistant
+/// it is about.
 pub fn assistant_offline_notice(companion_online: bool) -> Option<&'static str> {
     if companion_online {
         None
     } else {
-        Some("The assistant has no model — set one up in Settings → AI")
+        Some("The built-in assistant's model is not answering. Check Settings → AI")
     }
 }
 
@@ -3212,7 +3218,11 @@ mod assistant_offline_notice_tests {
         let notice = super::assistant_offline_notice(false);
         assert!(notice.is_some(), "a backend that does not answer is visible on the shell");
         let text = notice.unwrap();
-        assert!(text.contains("no model"), "the line says what is wrong: {text}");
+        assert!(text.contains("not answering"), "the line says what is wrong: {text}");
+        assert!(
+            text.contains("built-in"),
+            "and which assistant, since an attached mind may be answering the chat: {text}"
+        );
         assert!(text.contains("Settings → AI"), "and says where to fix it: {text}");
         assert_eq!(
             super::assistant_offline_notice(true),
