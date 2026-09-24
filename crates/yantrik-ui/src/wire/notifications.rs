@@ -808,6 +808,21 @@ pub fn companion_said(ui: &App, title: &str, text: &str) {
     );
 }
 
+/// The built-in companion said something *unprompted* while the Lens was closed, so the person
+/// would otherwise never see it.
+///
+/// This is the proactive sibling of [`companion_said`], and unlike it this one is gated: a thought
+/// nobody asked for becomes a notification only when the companion's rule allows it and today's cap
+/// is not reached (issue #216, when the companion filed 35 chatty notifications in a day). A
+/// result the person *did* ask for — a finished task, an agent that completed — goes through
+/// `companion_said` instead and is never gated; news somebody is waiting on is not chatter.
+pub fn companion_thought(ui: &App, text: &str) {
+    if ui.get_lens_open() {
+        return;
+    }
+    notify_companion_thought(text);
+}
+
 // ── Where a proactive message goes ──────────────────────────────────────────────────────────
 //
 // Observed live, and the reason this section exists. The desktop's answering mind was Hermes.
@@ -977,7 +992,26 @@ pub fn deliver_proactive(
     text: &str,
     push_to_transcript: impl FnOnce(bool),
 ) -> ProactiveDelivery {
-    deliver(text, route_proactive(situation_now()), push_to_transcript)
+    let route = route_proactive(situation_now());
+    match route {
+        ProactiveDelivery::Hold => {
+            tracing::info!(
+                text,
+                "held a proactive message: a mind is in the middle of an answer"
+            );
+        }
+        // The transcript is not ours to write in, so this thought is a notification or nothing.
+        // Issue #216: it becomes one only when the companion's rule allows it and today's cap is
+        // not reached. Small talk, machinery and empty findings are dropped here rather than
+        // filling the one interruptive channel with chatter.
+        ProactiveDelivery::NotifyOnly => {
+            notify_companion_thought(text);
+        }
+        // The Lens is ours: the thought is written into it either way, and the callback decides
+        // whether it also raises a notification (see `companion_thought`).
+        ProactiveDelivery::Transcript { notify } => push_to_transcript(notify),
+    }
+    route
 }
 
 /// The same, for a result the person is waiting on — see [`route_result`].
@@ -1011,6 +1045,80 @@ fn deliver(
         ProactiveDelivery::Transcript { notify } => push_to_transcript(notify),
     }
     route
+}
+
+// ── The gate on an unprompted companion notification ────────────────────────────────────────
+//
+// Issue #216. The one door every proactive companion notification goes through, so the rule and
+// the daily cap are applied once and cannot be bypassed by one delivery path or the other. The
+// content rule itself — actionable, or small talk, or machinery — is a pure function in the
+// companion crate (`yantrik_companion::proactive::judge_proactive`), which is where the proactive
+// path lives and where it is tested against the messages that were really filed. What is here is
+// the two things that belong to the store's side: the cap, which is state, and the send.
+
+/// How many unprompted companion notifications may interrupt in a day. The issue suggested 3; the
+/// companion filed 35. Results, approvals and bypass notices never come through here, so the one
+/// that matters is not competing with the cap — it only limits the companion's own chatter.
+const COMPANION_DAILY_CAP: u32 = 3;
+
+static COMPANION_NOTIF_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static COMPANION_NOTIF_DAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Count a companion notification against today's cap. True when it is within the cap (and now
+/// counted), false once the cap is reached. Resets itself when the day rolls over.
+fn companion_cap_record() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let today = now_secs() / 86400;
+    if COMPANION_NOTIF_DAY.swap(today, Relaxed) != today {
+        COMPANION_NOTIF_COUNT.store(0, Relaxed);
+    }
+    let mut count = COMPANION_NOTIF_COUNT.load(Relaxed);
+    while count < COMPANION_DAILY_CAP {
+        match COMPANION_NOTIF_COUNT.compare_exchange_weak(count, count + 1, Relaxed, Relaxed) {
+            Ok(_) => return true,
+            Err(actual) => count = actual,
+        }
+    }
+    false
+}
+
+/// The text of a proactive companion notification, if this thought may become one — cleaned of the
+/// markers and emoji a persona adds. `None` when the rule refuses it: small talk, a raw tool call,
+/// an internal marker it cannot strip, or idle thinking that found nothing. Pure; the daily cap is
+/// the caller's, because the cap is state.
+fn companion_notification_text(text: &str) -> Option<String> {
+    use yantrik_companion::proactive::{judge_proactive, NotificationVerdict};
+    match judge_proactive(text) {
+        NotificationVerdict::Notify(cleaned) => Some(cleaned),
+        NotificationVerdict::LensOnly | NotificationVerdict::Refuse(_) => None,
+    }
+}
+
+/// File an unprompted companion thought as a notification, if it may become one. Returns whether a
+/// notification was filed. Both delivery routes — the notification-only route and the Lens-closed
+/// transcript route — come through here, so the rule and the cap are applied exactly once.
+fn notify_companion_thought(text: &str) -> bool {
+    let Some(cleaned) = companion_notification_text(text) else {
+        tracing::info!(
+            text,
+            "an unprompted companion thought may not become a notification; leaving it to the Lens"
+        );
+        return false;
+    };
+    if !companion_cap_record() {
+        tracing::info!(
+            cap = COMPANION_DAILY_CAP,
+            "companion notification cap reached for today; not filing another"
+        );
+        return false;
+    }
+    let (title, body) = headline_and_rest(&cleaned);
+    notify::send(
+        notify::Notification::new("Yantrik Companion", title)
+            .body(body)
+            .urgency(Urgency::Low),
+    );
+    true
 }
 
 /// How long a headline may be before it is cut at a word.
@@ -1356,6 +1464,57 @@ mod tests {
             std::sync::atomic::Ordering::Relaxed,
         );
         assert!(!answer_in_flight(), "an answer older than the ceiling is not in flight");
+    }
+
+    #[test]
+    fn a_raw_tool_call_or_an_empty_finding_never_becomes_a_notification() {
+        // Issue #216, verbatim: the companion filed its own tool call, and a toast that said
+        // there was nothing to say. The rule refuses both, so nothing reaches the store.
+        assert_eq!(
+            companion_notification_text(
+                "recall(query=\"interesting memory connection past conversation event\") → \
+                 Nothing to surface right now."
+            ),
+            None
+        );
+        assert_eq!(
+            companion_notification_text("Nothing actionable right now — no pending tasks."),
+            None
+        );
+        // Small talk is refused too — it belongs in the Lens, not the one interruptive channel.
+        assert_eq!(
+            companion_notification_text("Hey — how's your day going? Coffee still in hand?"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_actionable_notification_arrives_without_markers_or_emoji() {
+        // The tool-call shape is refused; an actionable sentence is kept, cleaned of the internal
+        // marker the firewall adds and the emoji the persona adds.
+        assert_eq!(
+            companion_notification_text("The nightly backup failed [unverified]. ☕"),
+            Some("The nightly backup failed.".to_string())
+        );
+        assert_eq!(
+            companion_notification_text("Your meeting starts in 15 minutes ☕"),
+            Some("Your meeting starts in 15 minutes".to_string())
+        );
+    }
+
+    #[test]
+    fn companion_notifications_stop_at_the_daily_cap() {
+        // 35 chatty notifications in one day was the fault; the cap is the backstop on volume, and
+        // it counts only the companion's own unprompted thoughts, never a result or an approval.
+        COMPANION_NOTIF_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+        COMPANION_NOTIF_DAY.store(now_secs() / 86400, std::sync::atomic::Ordering::Relaxed);
+        assert!(companion_cap_record());
+        assert!(companion_cap_record());
+        assert!(companion_cap_record());
+        assert!(
+            !companion_cap_record(),
+            "the fourth companion notification of the day is over the cap of {COMPANION_DAILY_CAP}"
+        );
     }
 }
 
