@@ -113,13 +113,24 @@ impl MimeDefaults {
     /// "Always use this app": make `desktop_id` the default for `mime` in the person's own
     /// `mimeapps.list`, the file [`MimeDefaults::read`] reads, so the next double-click follows
     /// it. A file that does not exist yet is created with just this default.
+    ///
+    /// The file is the person's, and other tools write it too, so it is never lost to this: a
+    /// file that exists but cannot be read is an error, not an empty file to write over, and the
+    /// new contents go to a temporary file beside it that is renamed into place, so a crash
+    /// mid-write leaves the old file whole.
     pub fn set_default(mime: &str, desktop_id: &str) -> std::io::Result<()> {
         let path = Self::path();
-        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, with_default(&contents, mime, desktop_id))
+        let staged = path.with_extension("list.yantrik-tmp");
+        std::fs::write(&staged, with_default(&contents, mime, desktop_id))?;
+        std::fs::rename(&staged, &path)
     }
 }
 
