@@ -598,6 +598,10 @@ export component App inherits Window {
 
     // File browser state (screen 8)
     in property <string> file-notice;
+    // When the notice is about something just created, its name and whether it is a
+    // folder, so the Files footer can offer Open and Rename for it.
+    in property <string> file-notice-created;
+    in property <bool> file-notice-created-dir;
     in property <bool> file-operation-busy;
     in property <string> file-operation-text;
     in property <float> file-operation-progress;
@@ -1771,6 +1775,8 @@ export component App inherits Window {
             FileBrowser {
                 width: 100%; height: 100%;
                 notice: root.file-notice;
+                notice-created: root.file-notice-created;
+                notice-created-dir: root.file-notice-created-dir;
                 operation-busy: root.file-operation-busy;
                 operation-text: root.file-operation-text;
                 operation-progress: root.file-operation-progress;
