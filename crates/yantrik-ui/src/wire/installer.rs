@@ -1039,14 +1039,17 @@ fn list_block_devices() -> String {
         .unwrap_or_else(|_| "lsblk unavailable".into())
 }
 
-struct DiskInfo {
-    name: String,
+pub(crate) struct DiskInfo {
+    /// Kernel name, e.g. "sda" — the picker shows it and the installer takes it.
+    pub(crate) name: String,
     size: String,
     model: String,
 }
 
-/// Detect available disks and return structured info.
-fn detect_disks() -> Vec<DiskInfo> {
+/// Detect available disks and return structured info. Also what the onboarding
+/// hardware scan measures its Disk row against, so the scan and the picker can
+/// never disagree about which disks are candidates.
+pub(crate) fn detect_disks() -> Vec<DiskInfo> {
     // Use lsblk with JSON output for reliable parsing
     let output = Command::new("lsblk")
         .args(["-dn", "-o", "NAME,SIZE,MODEL,TYPE,RO,RM", "--json", "-e", "7,11"])

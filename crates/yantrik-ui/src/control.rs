@@ -1345,6 +1345,38 @@ pub fn publish(
             },
         )
         .action(
+            // The third thing a person does with a window from its bar, and the verb this
+            // surface was missing while the taskbar's own menu (#232) needed it. The menu's
+            // row and this action are one path: both resolve the title the same way and both
+            // end in `windows::maximise`, so a mind and a pointer get the same behaviour and
+            // the same name for it.
+            //
+            // There is no restore half and no toggle, because wlrctl 0.2.2 has no unmaximize:
+            // a maximized window comes back by its app's own button or the compositor's
+            // Super+Up (config/labwc/rc.xml). Deferred because the compositor decides, like
+            // every other window verb here.
+            Action::new(
+                "maximise_window",
+                "Maximise an open window, as pressing its maximise button does. There is no \
+                 unmaximize here — the app's own button or Super+Up restores it",
+            )
+            .defers()
+            .arg(Param::text("title").describe("Window title, or part of one")),
+            move |args| {
+                let want = args["title"].as_str().unwrap_or_default();
+                let open = crate::windows::addressable_titles();
+                let title = crate::windows::window_named(want, &open)?;
+                crate::windows::maximise(&title)?;
+                Ok(serde_json::json!({
+                    "maximised": title,
+                    // Said because a caller looking for the other half of a toggle would
+                    // otherwise assume one exists and search the surface for it.
+                    "note": "the window fills the screen until its app's own button or \
+                             Super+Up restores it; wlrctl has no unmaximize to call.",
+                }))
+            },
+        )
+        .action(
             // The write is the action, and a failed write is a failed action.
             //
             // `settled` is not a field a handler fills in: this surface computes it as
@@ -1405,8 +1437,19 @@ pub fn publish(
         )
         .action(
             // Locking is not a view change: the person has to type their way back in. It gets its
-            // own action and its own risk rather than hiding inside `show_screen`.
-            Action::new("lock", "Lock the session").risk("sensitive"),
+            // own action rather than hiding inside `show_screen`.
+            //
+            // `safe`, because locking only takes access away — a caller that may do anything at
+            // all may do this, and asking adds a way for the lock to fail: Super+L, which labwc
+            // binds to `yos act shell lock`, raised an approval card and left the desktop open
+            // for whoever walked past, and the card then moved from the Lens to the popup when
+            // the screen changed, so the click aimed at where it had been missed (#215). What
+            // unlocking costs is the description's job to say, not a grant's to decide.
+            Action::new(
+                "lock",
+                "Lock the screen now; unlocking needs the person's password or PIN",
+            )
+            .risk("safe"),
             move |_| {
                 let ui = lock_ui()?;
                 ui.invoke_lock_screen();
@@ -1841,7 +1884,7 @@ mod window_action_tests {
     /// and for `focus` a match on nothing exits zero.
     #[test]
     fn the_window_verbs_resolve_the_title_before_asking_the_compositor() {
-        for name in ["focus_window", "close_window", "minimise_window"] {
+        for name in ["focus_window", "close_window", "minimise_window", "maximise_window"] {
             let handler = action(name);
             assert!(
                 handler.contains("windows::addressable_titles()"),
@@ -1850,6 +1893,26 @@ mod window_action_tests {
                  written:\n{handler}"
             );
         }
+    }
+
+    /// Maximise is the verb the taskbar's menu was missing (#232), and wlrctl 0.2.2 has no
+    /// unmaximize — so the answer has to say the window stays big until something else restores
+    /// it. A caller told only `maximised: <title>` would look for the restore half of a toggle
+    /// and never find it.
+    #[test]
+    fn maximise_window_says_there_is_no_other_half() {
+        let handler = action("maximise_window");
+        assert!(
+            handler.contains("windows::maximise(&title)"),
+            "`maximise_window` must go through `windows::maximise` — the same function the \
+             taskbar menu's row runs, so the menu adds no second path. Handler as \
+             written:\n{handler}"
+        );
+        assert!(
+            handler.contains("unmaximize"),
+            "`maximise_window` must say wlrctl has no unmaximize, so a caller knows the window \
+             stays maximized until its app or Super+Up restores it. Handler as written:\n{handler}"
+        );
     }
 }
 
@@ -1996,5 +2059,62 @@ mod conversation_tests {
         assert_eq!(calls[0]["target"], "studio.generate");
         assert_eq!(calls[0]["arguments"]["args"]["prompt"], "a red kite");
         assert_eq!(calls[0]["summary"], "os_act studio.generate prompt=\"a red kite\"");
+    }
+}
+
+#[cfg(test)]
+mod lock_grade_tests {
+    use std::path::Path;
+
+    /// The `lock` action's declaration and the head of its handler, as written above the tests.
+    ///
+    /// The handler needs a live Slint window to run, so the grade and the description are
+    /// pinned against the source the way `do_not_disturb_tests` pins its handler. Found from
+    /// the handler's one call — unique in this file — back to the `Action::new` above it,
+    /// because `"lock"` on its own first appears in `screen_name`, which is not this action.
+    fn declaration() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
+        let handler = src
+            .find("invoke_lock_screen()")
+            .expect("the shell still locks the screen through invoke_lock_screen");
+        let start = src[..handler]
+            .rfind("Action::new(")
+            .expect("the lock action is still declared with Action::new");
+        src[start..handler].to_string()
+    }
+
+    /// Pressing Super+L has to lock the screen, not ask about locking it.
+    ///
+    /// labwc binds Super+L to `yos act shell lock`, and while this action was graded sensitive
+    /// that press put an approval card on the screen and left the desktop unlocked: the person
+    /// who walked away left the machine open, and the card moved from the Lens to the popup
+    /// when the screen changed, so the click aimed at where it had been missed (#215).
+    /// Locking only takes access away, so it is graded `safe` — the one grade every mode runs
+    /// unasked — and its description says what getting back in will cost.
+    #[test]
+    fn locking_the_screen_locks_without_asking() {
+        let declaration = declaration();
+        assert!(
+            declaration.contains(".risk(\"safe\")"),
+            "`shell.lock` must be graded safe. Locking only takes access away, and while it \
+             was graded sensitive, Super+L raised an approval card and left the screen \
+             unlocked until somebody clicked Allow (#215). Declaration as written:\n{declaration}"
+        );
+        assert!(
+            !declaration.contains("sensitive"),
+            "`shell.lock` is graded sensitive again: in `ask` mode every lock — Super+L, the \
+             power menu, \"lock my screen in 5 minutes\" — becomes a card, and the desktop \
+             stays open until somebody answers it. Declaration as written:\n{declaration}"
+        );
+        assert!(
+            declaration.contains("unlocking needs the person's password or PIN"),
+            "`shell.lock` carries a description, and it says what unlocking will need: a card, \
+             `yos ls` and a mind reading `describe` all show this sentence, and \"(the app \
+             publishes no description for this action)\" is what the card in #215 said. \
+             Declaration as written:\n{declaration}"
+        );
     }
 }

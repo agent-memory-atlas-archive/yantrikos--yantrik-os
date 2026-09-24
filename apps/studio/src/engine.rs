@@ -977,7 +977,7 @@ impl Engine {
     }
 
     /// Stop one job, or every job. `None` means every job, which is what a person pressing Stop in the
-    /// window means and what a mind saying `cancel` with no argument means.
+    /// window means and what a mind asking for `cancel_all` means.
     pub fn cancel(&self, job: Option<i32>) -> Result<String, String> {
         let mut state = lock(&self.state);
         let targets: Vec<i32> = match job {

@@ -37,7 +37,7 @@ a Rust panic: a segfault in a native library, an abort, a kill).
 | `version`, `git` | what BUILD says | `yantrik_version` |
 | `message` | the panic payload or exit status | scrubbed |
 | `location` | `crates/yantrik-app-runtime/src/control.rs:533` | scrubbed |
-| `backtrace` | if `RUST_BACKTRACE` produced one | scrubbed |
+| `backtrace` | the stack at the panic, cut at 16 KiB | forced by the hook, scrubbed |
 | `log_tail` | the last 40 lines this process logged | scrubbed |
 | `machine` | cores, RAM (GB), GPU yes/no, virtualised yes/no, kernel | `/proc`, `/sys` |
 | `when` | unix seconds | |

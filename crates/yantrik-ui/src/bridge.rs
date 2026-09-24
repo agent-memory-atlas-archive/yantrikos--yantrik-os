@@ -1363,10 +1363,30 @@ fn worker_loop(
                 }
 
                 // Buffer event for automation matching in think cycle
-                companion.push_event(&safe_domain, serde_json::json!({
+                let event_data = serde_json::json!({
                     "text": safe_text,
                     "importance": safe_importance,
-                }));
+                });
+                companion.push_event(&safe_domain, event_data.clone());
+
+                // Recipes whose Event trigger names this event start here, where the event is
+                // born — the stored triggers never fired (#187). The worker's clock picks the
+                // started runs up on its next tick, like any recipe set running.
+                let started = {
+                    let at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs_f64();
+                    yantrik_companion::recipe::RecipeStore::fire_event_triggers(
+                        &companion.db.conn(),
+                        &safe_domain,
+                        &event_data,
+                        at,
+                    )
+                };
+                for run in started {
+                    tracing::info!(recipe = %run, event = %safe_domain, "Recipe event trigger fired");
+                }
                 }
             }
             Ok(CompanionCommand::SetSystemContext { context }) => {
@@ -2056,22 +2076,24 @@ fn worker_loop(
                         companion.record_suppressed_urge(&delivery_key, reason);
                     }
 
-                    // Machinery talking, not the companion. Checked before every other gate
-                    // because the others all ask WHEN this should be said, and this one says it
-                    // must not be said at all. An EXECUTE urge reaches here without passing
-                    // through `ProactiveEngine::check`, which is why the same rule is applied
-                    // in both places — and this is the path notification 68 took.
-                    if let Some(why) = yantrik_companion::proactive::looks_like_tool_error(&msg.text) {
+                    // Machinery talking, a raw tool call, or idle thinking that found nothing —
+                    // not the companion. Checked before every other gate because the others all
+                    // ask WHEN this should be said, and this one says it must not be said at all.
+                    // An EXECUTE urge reaches here without passing through `ProactiveEngine::check`,
+                    // which is why the same rule is applied in both places — and that is the path
+                    // notification 68 took. Small talk is not refused here: it may still reach the
+                    // Lens, and `deliver_proactive` keeps it out of the notification store.
+                    if let Some(why) = yantrik_companion::proactive::must_not_be_said(&msg.text) {
                         tracing::warn!(
                             reason = why,
                             text = msg.text,
                             urges = ?msg.urge_ids,
-                            "Refused a proactive message: it is a tool error, not a thought"
+                            "Refused a proactive message: it is not something to say"
                         );
-                        companion.record_suppressed_urge(&delivery_key, "the message was a tool error");
+                        companion.record_suppressed_urge(&delivery_key, why);
                         event_bus.emit(
                             yantrik_os::EventKind::ProactiveSuppressed {
-                                reason: "the message was a tool error".into(),
+                                reason: why.into(),
                                 urge_ids: msg.urge_ids.clone(),
                             },
                             yantrik_os::EventSource::ProactiveEngine,
@@ -2187,12 +2209,15 @@ fn worker_loop(
                                             is_streaming: false,
                                             blocks: ModelRc::default(),
                                         });
-                                        // Kept, and only raised when the Lens is closed — and
-                                        // re-checked here on the UI thread, which is the one
-                                        // place that reading is exact.
-                                        crate::wire::notifications::companion_said(
+                                        // Raised only when the Lens is closed — re-checked here on
+                                        // the UI thread, which is the one place that reading is
+                                        // exact — and only when the thought is actionable and
+                                        // today's cap is not reached. `companion_thought` is the
+                                        // gated sibling of `companion_said`; the message is already
+                                        // in the transcript above either way, so small talk still
+                                        // reaches the Lens (issue #216).
+                                        crate::wire::notifications::companion_thought(
                                             &ui,
-                                            "The mind said something",
                                             &notif_text,
                                         );
                                     }
@@ -2228,8 +2253,12 @@ fn worker_loop(
                             yantrik_os::EventSource::ProactiveEngine,
                         );
 
-                        // Record per-key cooldown after delivery
+                        // Record per-key cooldown after delivery. Recipe messages key on their
+                        // own delivery (#187), so keys pile up that will never be looked up
+                        // again; one whose cooldown has long expired makes way for the new one,
+                        // which keeps this map from growing without limit.
                         if !delivery_key.is_empty() {
+                            delivered_cooldowns.retain(|_, ts| now_ts - *ts < 2.0 * DELIVERED_COOLDOWN_SECS);
                             delivered_cooldowns.insert(delivery_key, now_ts);
                         }
                     }
@@ -2962,6 +2991,24 @@ mod bond_property_tests {
         assert!(
             waiting.contains("recv_timeout(") && waiting.contains("recipe_executor::due("),
             "the worker's wait for its next command is also the recipes' clock, so a timer fires on an idle desktop. Loop head as written:\n{waiting}"
+        );
+    }
+
+    /// An event the shell records also reaches the recipe triggers waiting on it (#187). The
+    /// worker's clock picks up cron and completion triggers, but an event only exists at the
+    /// moment it is pushed, so this arm is the one place an Event trigger can fire.
+    #[test]
+    fn an_event_the_shell_records_reaches_the_recipe_triggers_waiting_on_it() {
+        let src = worker();
+        let record = arm(&src, "RecordSystemEvent");
+        assert!(
+            record.contains("push_event("),
+            "the event still reaches the companion. Arm as written:\n{record}"
+        );
+        assert!(
+            record.contains("fire_event_triggers("),
+            "a recorded event must also fire the recipe triggers naming it, or Event triggers \
+             are stored and never happen. Arm as written:\n{record}"
         );
     }
 }

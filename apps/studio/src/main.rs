@@ -701,13 +701,23 @@ fn surface(engine: Engine) -> Vec<(Action, Handler)> {
     add(
         act(
             "cancel",
-            "Stop a job. With no `job`, stops everything in the queue. A picture already saved stays \
-             saved, and there is no half-written file to clean up: Studio writes nothing until a \
-             whole picture has arrived.",
+            "Stop one job. A picture already saved stays saved, and there is no half-written file \
+             to clean up: Studio writes nothing until a whole picture has arrived. To stop \
+             everything in the queue, ask for `cancel_all`.",
         )
         .arg(num("job", "The job id from `generate`, `variations` or `upscale`, as `describe` lists \
-             under `queue`. Left out means every job.").optional()),
+             under `queue`: a whole number of 1 or more.")),
         do_cancel,
+    );
+
+    add(
+        act(
+            "cancel_all",
+            "Stop every job in the queue, which is what the window's Cancel button asks for. A \
+             picture already saved stays saved, as with `cancel`: Studio writes nothing until a \
+             whole picture has arrived.",
+        ),
+        do_cancel_all,
     );
 
     add(
@@ -822,12 +832,28 @@ fn do_set_backend(engine: &Engine, args: &Value) -> Result<Value, String> {
 }
 
 fn do_cancel(engine: &Engine, args: &Value) -> Result<Value, String> {
-    // Job ids start at 1, so a 0 here can only mean "no job was named", which is the ask to stop
-    // everything — the thing a person means when they press the window's Cancel.
-    let id = number(args, "job");
+    // An id nobody was ever issued is a mistake about which job was meant, and is refused as that:
+    // `-1` once read as 0 through a saturating float cast, 0 meant "no job was named", and the
+    // whole queue stopped. Stopping everything is a real ask with its own action, `cancel_all`.
+    let Some(id) = job_id(args) else {
+        return Err(refuse(
+            engine,
+            match args.get("job") {
+                None => "`cancel` needs `job`, an id from `describe`'s `queue`. To stop every job, \
+                         ask for `cancel_all`.",
+                Some(_) => "`cancel` was given a `job` that is not an id: an id is a whole number \
+                            of 1 or more. To stop every job, ask for `cancel_all`.",
+            },
+        ));
+    };
     let line = engine
-        .cancel(if id == 0 { None } else { Some(id as i32) })
+        .cancel(Some(id))
         .map_err(|problem| refuse(engine, problem))?;
+    Ok(json!({ "cancelled": line }))
+}
+
+fn do_cancel_all(engine: &Engine, _args: &Value) -> Result<Value, String> {
+    let line = engine.cancel(None).map_err(|problem| refuse(engine, problem))?;
     Ok(json!({ "cancelled": line }))
 }
 
@@ -924,4 +950,24 @@ fn wide(args: &Value, name: &str) -> Option<u64> {
         .as_u64()
         .or_else(|| value.as_f64().map(|number| number as u64))
         .or_else(|| value.as_str().and_then(|text| text.trim().parse::<u64>().ok()))
+}
+
+/// A job id the way `engine.cancel` takes it: a whole number of 1 or more, whether it arrived as a
+/// number or as its digits. Anything else is `None`, and the caller is told about `cancel_all`.
+///
+/// Deliberately not `wide()`, which casts through a float in which `-1` saturates to `0`: for a
+/// width that is a rounding, but for a job id it turned "cancel the job before the first one" into
+/// "cancel everything".
+fn job_id(args: &Value) -> Option<i32> {
+    let value = args.get("job")?;
+    let whole = value
+        .as_i64()
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite() && number.fract() == 0.0)
+                .map(|number| number as i64)
+        })
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse::<i64>().ok()))?;
+    i32::try_from(whole).ok().filter(|id| *id >= 1)
 }

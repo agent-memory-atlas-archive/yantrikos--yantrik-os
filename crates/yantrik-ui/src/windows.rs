@@ -475,6 +475,19 @@ pub fn minimise(title: &str) -> Result<(), String> {
     ask_compositor(commands_for("minimize", &matchspecs(title, &shell_windows())))
 }
 
+/// Fill the screen with the window called `title`, the way its own maximise button does.
+///
+/// wlrctl 0.2.2 has no unmaximize — `maximize` is the whole of what it can do to a window's
+/// size — so there is no restore half to offer beside this: the window stays maximized until
+/// its app or the compositor's own binding (Super+Up, config/labwc/rc.xml) says otherwise.
+/// Callers that would like a Maximise/Restore toggle cannot have one honestly, because
+/// `toplevel list` does not carry the state to read the toggle back from. On a minimized
+/// window `maximize` is also what brings it back (see `restore_command`), so this doubles
+/// as restore-and-fill.
+pub fn maximise(title: &str) -> Result<(), String> {
+    ask_compositor(commands_for("maximize", &matchspecs(title, &shell_windows())))
+}
+
 // ── Which window a person meant ─────────────────────────────────────
 
 /// Every window a caller may name, the shell's own included.
@@ -1006,6 +1019,18 @@ mod tests {
         assert_eq!(
             toplevel_args("minimize", "Calendar"),
             ["toplevel", "minimize", "title:Calendar"]
+        );
+    }
+
+    /// The same rendezvous for the taskbar menu's Maximise row (#232) and the `maximise_window`
+    /// action beside `minimise_window`. No `state:` on the end, unlike [`restore_args`]: this
+    /// maximizes whatever window answers to the title, minimized or not — and there is no
+    /// unmaximize command line to pin here, because wlrctl 0.2.2 has no such verb.
+    #[test]
+    fn maximise_asks_the_compositor_to_maximize() {
+        assert_eq!(
+            toplevel_args("maximize", "Files"),
+            ["toplevel", "maximize", "title:Files"]
         );
     }
 
