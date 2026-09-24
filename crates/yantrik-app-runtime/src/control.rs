@@ -532,7 +532,7 @@ impl ControlRpc {
                 call.spend_grant(&mut authority, &self.app_id, || {
                     let (name, args, reach) = (call.action.clone(), call.args.clone(), reach.clone());
                     on_ui_thread(who, move |reg| {
-                        reg.within_reach(reach.as_ref(), &name).and_then(|()| reg.check_call(&name, &args))
+                        reg.within_reach(reach.as_ref(), &name, &args).and_then(|()| reg.check_call(&name, &args))
                     })
                     .map_err(unanswered)?
                     .map_err(refusal)
@@ -543,7 +543,7 @@ impl ControlRpc {
                 on_ui_thread(who, move |reg| {
                     let _agent = AgentTokenScope::enter(agent_token);
                     // The reach, on the grade this surface publishes now — the one `act` decides on.
-                    reg.within_reach(reach.as_ref(), &action).and_then(|()| {
+                    reg.within_reach(reach.as_ref(), &action, &args).and_then(|()| {
                         reg.act(&action, &args, expect_revision.as_deref(), &action_id, &authority)
                     })
                 })

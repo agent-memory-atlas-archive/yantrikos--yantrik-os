@@ -167,12 +167,16 @@ impl<D: ?Sized, H: ?Sized> Registry<D, H> {
     /// handler. `None` — no token, or no reach for it — holds nothing. An action this surface does
     /// not have is answered as that.
     ///
+    /// The arguments are the ones the call arrived with, and the reach reads one act's: which app
+    /// a `shell.open_app` opens decides whether a reach that names that app covers it (#195).
+    /// Wrong arguments of any other kind are refused by the check that follows this one.
+    ///
     /// A second rule beside the gate's, not part of it, so it is called beside [`Registry::act`]
     /// rather than inside it: the gate asks whether the machine and the person allow an act, this
     /// asks whether this agent was given it, and both must say yes.
-    pub fn within_reach(&self, reach: Option<&Reach>, name: &str) -> Result<(), String> {
+    pub fn within_reach(&self, reach: Option<&Reach>, name: &str, args: &Value) -> Result<(), String> {
         let Some(reach) = reach else { return Ok(()) };
-        reach::within(reach, &self.app_id, name, self.grade_of(name)?)
+        reach::within(reach, &self.app_id, name, self.grade_of(name)?, args)
     }
 
     /// Everything about a call that must hold before a person's grant is spent on it: the action
@@ -1073,5 +1077,41 @@ mod tests {
             );
         }
         assert_eq!(shared.act("nope", &json!({}), None, "n#1", &open()), local.act("nope", &json!({}), None, "n#1", &open()));
+    }
+
+    /// A door holds the reach on the arguments the call arrived with, because one act is decided
+    /// by them: `shell.open_app` is within a reach that names the app it opens (#195). A Planner,
+    /// whose reach is two apps to read at `safe`, opens Notes through the shell's own registry and
+    /// does not open the Terminal.
+    #[test]
+    fn a_door_holds_the_reach_on_the_arguments_the_call_arrived_with() {
+        let shell = surface(
+            "shell",
+            None,
+            vec![(
+                Action::new("open_app", "Launch an app, or focus it if it is already running")
+                    .arg(Param::text("name")),
+                Box::new(|_| Ok(json!({ "launching": "notes" }))),
+            )],
+        );
+        let planner = Reach {
+            agent: "deepseek:c-7a1f02".into(),
+            role: "planner".into(),
+            name: "Planner".into(),
+            surfaces: vec!["calendar".into(), "notes".into()],
+            ceiling: "safe".into(),
+        };
+        assert_eq!(shell.published_grade("open_app"), Some("standard"), "the grade this reach is below");
+
+        let held = |args: &Value| shell.within_reach(Some(&planner), "open_app", args);
+        assert!(held(&json!({ "name": "notes" })).is_ok(), "an app its reach names");
+        let err = held(&json!({ "name": "terminal" })).unwrap_err();
+        assert!(err.starts_with("REACH: shell.open_app opens `terminal`, an app the Planner's reach does not name"), "{err}");
+
+        // A call with no reach is held to nothing, and an action this surface does not have is
+        // answered as that rather than passed to the rule.
+        assert!(shell.within_reach(None, "open_app", &json!({ "name": "terminal" })).is_ok());
+        let err = shell.within_reach(Some(&planner), "launch", &json!({})).unwrap_err();
+        assert!(err.starts_with("unknown action `launch`"), "{err}");
     }
 }
