@@ -234,9 +234,16 @@ fn same_program(binary: &str, wayland_app_id: &str) -> bool {
 /// cost before: the registry answer, which is what this returned in the first place.
 ///
 /// The window the last reading found activated is listed first — see `merge_windows`.
+///
+/// An app drawing in Mind View (#239) is not one of them: it is on the mind's display, inside the
+/// one Mind View window, and a taskbar entry for it would be a button that switches to nothing.
+/// The Mind View window itself is listed, as the compositor sees it.
 pub fn shell_windows() -> Vec<WindowEntry> {
     let (discovered, front) = compositor_snapshot();
-    merge_windows(&crate::running::running(), discovered, front.as_deref())
+    let in_mind_view = crate::mind_view::app_pids();
+    let mut launched = crate::running::running();
+    launched.retain(|app| !in_mind_view.contains(&app.pid));
+    merge_windows(&launched, discovered, front.as_deref())
 }
 
 /// The name one of our app ids goes by on screen.
@@ -736,7 +743,12 @@ fn toplevel_entry(line: &str) -> WindowEntry {
     // `images` — none of which is the id the dock keys its running mark by, so after a shell
     // restart those four tiles stayed dark with the apps plainly open on screen. Guessing is now
     // the last resort, for windows that are neither ours nor self-identifying.
-    let app_id = if !declared_id.is_empty() {
+    let app_id = if declared_id == crate::mind_view::NESTED_APP_ID {
+        // The window a nested compositor draws into, which is Mind View. wlroots names it
+        // itself ("wlroots - WL-1") and the title is kept as it is, because the title is what
+        // the taskbar hands `wlrctl` to find it again.
+        crate::mind_view::APP_ID.to_string()
+    } else if !declared_id.is_empty() {
         declared_id.to_lowercase()
     } else if let Some(id) = app_id_for_title(&title) {
         id.to_string()
@@ -804,6 +816,7 @@ pub fn icon_for_app(app_id: &str) -> &'static str {
         "documents" => "YD",
         "presentation" => "YP",
         "yantrik" => "Y",
+        "mind-view" => "\u{25CE}",
         _ => "?",
     }
 }
@@ -836,6 +849,8 @@ fn derive_context(title: &str, app_id: &str) -> String {
                 .unwrap_or("")
                 .to_string()
         }
+        // wlroots titles the window "wlroots - WL-1", which says nothing to a person.
+        "mind-view" => "Mind View".to_string(),
         "files" => {
             if title.contains('/') {
                 title.rsplit('/').next().unwrap_or("").to_string()
@@ -1077,6 +1092,14 @@ mod tests {
         assert_eq!(blender.app_id, "blender");
         assert_eq!(blender.wayland_app_id, "Blender");
         assert_eq!(toplevel_entry(": Notes").wayland_app_id, "");
+
+        // The nested compositor's window is Mind View (#239). Its title stays what wlroots
+        // declared, because that is what `wlrctl` finds it by; the subtitle says what it is.
+        let mind_view = toplevel_entry("wlroots: wlroots - WL-1");
+        assert_eq!(mind_view.app_id, "mind-view");
+        assert_eq!(mind_view.title, "wlroots - WL-1");
+        assert_eq!(mind_view.subtitle, "Mind View");
+        assert_eq!(mind_view.wayland_app_id, "wlroots");
         assert_eq!(toplevel_entry("Some Foreign Window").wayland_app_id, "");
     }
 

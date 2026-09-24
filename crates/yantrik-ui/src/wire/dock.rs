@@ -1095,12 +1095,49 @@ fn exit_verdict(lived_ms: u64, status_success: bool, owns_window: bool, brought_
 /// `adapter` is `(surface, command)`: started once the app process exists, told which process it
 /// serves, and stopped when that process exits — by the same reaper that already watches the app,
 /// so an adapter cannot outlive its app on one launch path and not another.
+///
+/// Where it opens is decided here, while the call that asked for it is still on this thread: an
+/// app a mind opens goes into Mind View (#239), a desktop of the mind's own inside one window,
+/// rather than over the person's work. Starting Mind View can take a moment the first time, so
+/// that launch finishes on a worker; every other launch is exactly what it was.
 fn spawn_launch(
     app_id: &str,
     bin: &str,
     args: &[&str],
     dir: Option<&std::path::Path>,
     adapter: Option<(&str, &str)>,
+) {
+    let route = crate::mind_view::route_now(app_id);
+    let Some(who) = route.mind_view else {
+        return launch(app_id, bin, args, dir, adapter, None, route.raise_on_handover);
+    };
+    let (app_id, bin) = (app_id.to_string(), bin.to_string());
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let dir = dir.map(std::path::Path::to_path_buf);
+    let adapter = adapter.map(|(surface, command)| (surface.to_string(), command.to_string()));
+    std::thread::spawn(move || {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let adapter = adapter.as_ref().map(|(s, c)| (s.as_str(), c.as_str()));
+        match crate::mind_view::ensure() {
+            Ok(seat) => {
+                tracing::info!(app = %app_id, mind = %who, display = %seat.wayland, "Opening in Mind View");
+                launch(&app_id, &bin, &args, dir.as_deref(), adapter, Some(&seat), false);
+            }
+            // Already logged, and published in `describe shell`. The app still opens.
+            Err(_) => launch(&app_id, &bin, &args, dir.as_deref(), adapter, None, true),
+        }
+    });
+}
+
+/// Start one app, on the person's desktop or on `seat`.
+fn launch(
+    app_id: &str,
+    bin: &str,
+    args: &[&str],
+    dir: Option<&std::path::Path>,
+    adapter: Option<(&str, &str)>,
+    seat: Option<&crate::mind_view::Seat>,
+    raise_on_handover: bool,
 ) {
     let path = resolve_app_binary(bin);
     let mut command = std::process::Command::new(&path);
@@ -1109,6 +1146,10 @@ fn spawn_launch(
     }
     command.args(args);
     for (key, value) in session_env() {
+        command.env(key, value);
+    }
+    // After the session's own, so the nested display wins over the person's.
+    for (key, value) in seat.map(crate::mind_view::Seat::env).unwrap_or_default() {
         command.env(key, value);
     }
     match command
@@ -1127,6 +1168,9 @@ fn spawn_launch(
             // before the reaper thread starts, so a describe that lands in the same instant sees
             // it.
             let owns_window = crate::running::mark_launched(app_id, pid, bin);
+            if seat.is_some() {
+                crate::mind_view::mark_launched(app_id, pid);
+            }
             if let Some((surface, command)) = adapter {
                 crate::surfaces::start_adapter(surface, command, pid);
             }
@@ -1156,6 +1200,7 @@ fn spawn_launch(
                         // and never for a crash or an app that lived its life.
                         let brought_forward = lived_ms < crate::running::LAUNCH_GRACE_MS
                             && success
+                            && raise_on_handover
                             && crate::windows::present_app(&id);
                         match exit_verdict(lived_ms, success, owns_window, brought_forward) {
                             ExitVerdict::SecondCopy => {
@@ -1188,6 +1233,7 @@ fn spawn_launch(
                 }
                 crate::surfaces::app_exited(pid, second_copy);
                 crate::running::mark_exited(&id, pid);
+                crate::mind_view::mark_exited(pid);
             });
         }
         Err(e) => tracing::error!(app = app_id, bin, path = %path.display(), error = %e, "Failed to launch app"),

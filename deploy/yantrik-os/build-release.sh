@@ -229,6 +229,10 @@ cp "$PROJECT_ROOT/config/labwc/"*.png "$ROOT/share/labwc/" 2>/dev/null \
 # What starts with the desktop: the polkit agent, and the note saying why no notification
 # daemon is started beside it — the notifications service holds that bus name.
 cp "$PROJECT_ROOT/config/labwc/autostart" "$ROOT/share/labwc/autostart"
+# Mind View's own compositor (#239): the nested labwc a mind's apps are drawn in. yantrik-ui runs
+# it with -C on this directory; without it, a mind's apps open on the person's desktop as before.
+mkdir -p "$ROOT/share/labwc-mind"
+cp "$PROJECT_ROOT/config/labwc-mind/rc.xml" "$ROOT/share/labwc-mind/rc.xml"
 # Barlow is embedded in each app binary, which the compositor cannot read a font out of, so the
 # same files also ship loose for fontconfig.
 cp "$PROJECT_ROOT/crates/yantrik-design-tokens/slint/fonts/"*.ttf "$ROOT/share/fonts/"

@@ -1164,6 +1164,20 @@ pub fn wire(ui: &App) {
         }
     });
 
+    // Where a mind's apps open (#239). A pointer's choice, wired here beside the modes for the
+    // same reason they are: nothing on the socket reaches it.
+    let mind_view_ui = ui.as_weak();
+    ui.on_mind_view_chosen(move |on| {
+        if let Err(e) = crate::wire::settings::set_minds_open_in_mind_view(on) {
+            tracing::warn!(error = %e, on, "where minds open apps was not saved");
+        }
+        tracing::info!(on, "a person chose where a mind's apps open");
+        if let Some(ui) = mind_view_ui.upgrade() {
+            ui.set_mind_view_on(crate::wire::settings::minds_open_in_mind_view());
+        }
+    });
+    ui.set_mind_view_on(crate::wire::settings::minds_open_in_mind_view());
+
     publish_mode(ui);
 
     let tick_ui = ui.as_weak();
