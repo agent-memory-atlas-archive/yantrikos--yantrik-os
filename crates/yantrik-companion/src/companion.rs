@@ -526,7 +526,9 @@ pub struct CompanionService {
     conversation_history: Vec<ChatMessage>,
     last_interaction_ts: f64,
     session_turn_count: usize,
-    proactive_message: Option<ProactiveMessage>,
+    // Pending messages queue up instead of sharing one slot: a recipe's Notify step and its
+    // completion message used to overwrite each other, and only the last was ever said (#187).
+    proactive_messages: std::collections::VecDeque<ProactiveMessage>,
 
     // Cached from last think()
     pending_triggers: Vec<serde_json::Value>,
@@ -883,7 +885,7 @@ impl CompanionService {
             conversation_history: Vec::new(),
             last_interaction_ts,
             session_turn_count: 0,
-            proactive_message: None,
+            proactive_messages: std::collections::VecDeque::new(),
             pending_triggers: Vec::new(),
             active_patterns: Vec::new(),
             open_conflicts_count: 0,
@@ -3355,14 +3357,21 @@ impl CompanionService {
         self.silence_policy.dampening_for(source)
     }
 
-    /// Take the pending proactive message (if any).
+    /// Take the next pending proactive message (if any).
     pub fn take_proactive_message(&mut self) -> Option<ProactiveMessage> {
-        self.proactive_message.take()
+        self.proactive_messages.pop_front()
     }
 
-    /// Set a proactive message (called by background cognition).
+    /// Queue a proactive message (called by background cognition). The queue is bounded; when it
+    /// is full the oldest undelivered message gives way — nothing may grow without limit here.
     pub fn set_proactive_message(&mut self, msg: ProactiveMessage) {
-        self.proactive_message = Some(msg);
+        const MAX_PENDING: usize = 32;
+        if self.proactive_messages.len() >= MAX_PENDING {
+            if let Some(dropped) = self.proactive_messages.pop_front() {
+                tracing::warn!(pending = MAX_PENDING, text = %dropped.text.chars().take(40).collect::<String>(), "Proactive queue full, oldest message dropped");
+            }
+        }
+        self.proactive_messages.push_back(msg);
     }
 
     // ---- Natural Communication helpers ----
@@ -5243,5 +5252,99 @@ mod recent_interaction_count_tests {
             ("e3", "milestone", now - 60.0),
         ]);
         assert_eq!(count_recent_interactions(&conn, now - 3600.0), 1);
+    }
+}
+
+#[cfg(test)]
+mod proactive_queue_tests {
+    //! A recipe that notifies mid-run and then says its completion message produces two
+    //! proactive messages back to back, and the companion held only one: the second
+    //! overwrote the first, so the person saw only the last thing any recipe had to say
+    //! (#187). Pending messages queue now. Pure in-memory: no model, no files.
+
+    use super::*;
+    use yantrik_ml::LLMResponse;
+
+    /// A mind that answers every prompt the same way; the queue itself needs no model.
+    struct Echo;
+
+    impl LLMBackend for Echo {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _config: &GenerationConfig,
+            _tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            Ok(LLMResponse {
+                text: "Noted.".into(),
+                prompt_tokens: 0,
+                completion_tokens: 1,
+                tool_calls: vec![],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+
+        fn chat_streaming(
+            &self,
+            messages: &[ChatMessage],
+            config: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+            on_token: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            on_token("Noted.");
+            self.chat(messages, config, tools)
+        }
+
+        fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+            Ok(text.len())
+        }
+
+        fn backend_name(&self) -> &str {
+            "echo"
+        }
+    }
+
+    fn companion() -> CompanionService {
+        let db = YantrikDB::new(":memory:", 384).expect("in-memory database");
+        let mut config = CompanionConfig::default();
+        config.tools.enabled = false;
+        CompanionService::new(db, std::sync::Arc::new(Echo), config)
+    }
+
+    fn msg(text: &str) -> ProactiveMessage {
+        ProactiveMessage { text: text.into(), urge_ids: vec![], generated_at: now_ts() }
+    }
+
+    #[test]
+    fn a_second_message_does_not_swallow_the_first() {
+        let mut c = companion();
+        c.set_proactive_message(msg("step says: backup finished"));
+        c.set_proactive_message(msg("recipe says: nightly backup done"));
+        assert_eq!(
+            c.take_proactive_message().map(|m| m.text),
+            Some("step says: backup finished".to_string()),
+            "the first message survives the second, and goes first"
+        );
+        assert_eq!(
+            c.take_proactive_message().map(|m| m.text),
+            Some("recipe says: nightly backup done".to_string())
+        );
+        assert!(c.take_proactive_message().is_none(), "and then the queue is empty");
+    }
+
+    #[test]
+    fn the_queue_is_bounded_and_the_oldest_gives_way() {
+        let mut c = companion();
+        for i in 0..40 {
+            c.set_proactive_message(msg(&format!("message {i}")));
+        }
+        let mut drained = Vec::new();
+        while let Some(m) = c.take_proactive_message() {
+            drained.push(m.text);
+        }
+        assert_eq!(drained.len(), 32, "an undrained queue may not grow without limit");
+        assert_eq!(drained[0], "message 8", "the oldest undelivered messages gave way");
+        assert_eq!(drained[31], "message 39", "and the newest are all kept, in order");
     }
 }

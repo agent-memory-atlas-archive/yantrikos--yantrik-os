@@ -829,8 +829,8 @@ fn condition_text(c: &Condition) -> String {
         Condition::VarExists { var } => format!("{var} is set"),
         Condition::VarGt { var, threshold } => format!("{var} > {threshold}"),
         Condition::VarEmpty { var } => format!("{var} is empty"),
-        Condition::TimeAfter { hour, minute } => format!("after {hour:02}:{minute:02} UTC"),
-        Condition::TimeBefore { hour, minute } => format!("before {hour:02}:{minute:02} UTC"),
+        Condition::TimeAfter { hour, minute } => format!("after {hour:02}:{minute:02}"),
+        Condition::TimeBefore { hour, minute } => format!("before {hour:02}:{minute:02}"),
         Condition::Not { inner } => format!("not {}", condition_text(inner)),
         Condition::And { conditions } => joined(conditions, " and "),
         Condition::Or { conditions } => joined(conditions, " or "),
@@ -838,7 +838,7 @@ fn condition_text(c: &Condition) -> String {
 }
 
 /// What a waiting timer waits for, and — once it is waiting — the time it wakes: "15m to pass,
-/// until 08:15 UTC". A time of day already says its time. The engine's clock is UTC.
+/// until 08:15". A time of day already says its time. The engine's clock is the machine's (#187).
 fn timer_text(condition: &WaitCondition, timeout: Option<u64>, until: Option<f64>) -> String {
     let base = wait_text(condition, timeout);
     match until.map(clock_text) {
@@ -847,11 +847,12 @@ fn timer_text(condition: &WaitCondition, timeout: Option<u64>, until: Option<f64
     }
 }
 
-/// What a WaitFor waits on. The executor reads time in UTC, so a time of day is said in UTC.
+/// What a WaitFor waits on. The executor reads time on the machine's clock, so a time of day is
+/// said as the person set it, with no zone to translate.
 fn wait_text(condition: &WaitCondition, timeout: Option<u64>) -> String {
     let base = match condition {
         WaitCondition::Duration { seconds } => format!("{} to pass", duration(*seconds)),
-        WaitCondition::Time { hour, minute } => format!("{hour:02}:{minute:02} UTC"),
+        WaitCondition::Time { hour, minute } => format!("{hour:02}:{minute:02}"),
     };
     match timeout {
         Some(t) => format!("{base}, {} at most", duration(t)),
@@ -1336,10 +1337,10 @@ mod tests {
         assert!(p.question.is_some());
         assert!(!p.can.answer && p.can.resume);
 
-        // A timer says what it counts.
+        // A timer says what it counts, as the person set it: the machine's own time of day.
         let timer = stored(vec![RecipeStep::WaitFor { condition: WaitCondition::Time { hour: 9, minute: 0 }, timeout_secs: None }, tool("x", json!({}), "x")], &["done"]);
         let t = view(&recipe(RecipeStatus::Waiting, 1), &timer, &Vars::new());
-        assert_eq!(t.waiting_for.as_deref(), Some("09:00 UTC"));
+        assert_eq!(t.waiting_for.as_deref(), Some("09:00"));
         assert!(t.question.is_none() && !t.can.answer);
     }
 
@@ -1593,10 +1594,12 @@ mod tests {
     /// 2026-09-23 08:00:00 UTC.
     const EIGHT_AM: f64 = 1_790_150_400.0;
 
-    /// A timer says when it wakes (#176): "waiting for 15m to pass, until 08:15 UTC" — on the row,
-    /// in the mind panel's line and in `describe`, all of which read `waiting_for`.
+    /// A timer says when it wakes (#176): "waiting for 15m to pass, until 08:15" — on the row,
+    /// in the mind panel's line and in `describe`, all of which read `waiting_for`. The wake time
+    /// is the engine's own clock reading (#187): the test does not hard-code the machine's zone.
     #[test]
     fn a_timer_says_when_it_wakes() {
+        let wake = clock_text(EIGHT_AM + 900.0);
         let steps = stored(
             vec![RecipeStep::WaitFor { condition: WaitCondition::Duration { seconds: 900 }, timeout_secs: None }, tool("send", json!({}), "x")],
             &["done"],
@@ -1604,13 +1607,13 @@ mod tests {
         let vars = Vars::from([("_wait".into(), json!({"step": 0, "since": EIGHT_AM, "until": EIGHT_AM + 900.0}))]);
         let v = view(&recipe(RecipeStatus::Waiting, 1), &steps, &vars);
         assert_eq!(states(&v), ["waiting", "pending"]);
-        assert_eq!(v.waiting_for.as_deref(), Some("15m to pass, until 08:15 UTC"));
-        assert_eq!(one_line(&v), "Tidy downloads — step 1 of 2, Wait, waiting for 15m to pass, until 08:15 UTC");
+        assert_eq!(v.waiting_for.as_deref(), Some(format!("15m to pass, until {wake}").as_str()));
+        assert_eq!(one_line(&v), format!("Tidy downloads — step 1 of 2, Wait, waiting for 15m to pass, until {wake}"));
 
-        // A time of day says just that time.
+        // A time of day says just that time, as the person set it.
         let at_nine = stored(vec![RecipeStep::WaitFor { condition: WaitCondition::Time { hour: 9, minute: 0 }, timeout_secs: None }], &["done"]);
         let vars = Vars::from([("_wait".into(), json!({"step": 0, "since": EIGHT_AM, "until": EIGHT_AM + 3600.0}))]);
-        assert_eq!(view(&recipe(RecipeStatus::Waiting, 1), &at_nine, &vars).waiting_for.as_deref(), Some("09:00 UTC"));
+        assert_eq!(view(&recipe(RecipeStatus::Waiting, 1), &at_nine, &vars).waiting_for.as_deref(), Some("09:00"));
     }
 
     /// A question asked inside a Branch is drawn where the recipe stands — at the Branch, which is

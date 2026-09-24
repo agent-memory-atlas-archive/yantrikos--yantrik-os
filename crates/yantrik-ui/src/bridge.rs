@@ -1363,10 +1363,30 @@ fn worker_loop(
                 }
 
                 // Buffer event for automation matching in think cycle
-                companion.push_event(&safe_domain, serde_json::json!({
+                let event_data = serde_json::json!({
                     "text": safe_text,
                     "importance": safe_importance,
-                }));
+                });
+                companion.push_event(&safe_domain, event_data.clone());
+
+                // Recipes whose Event trigger names this event start here, where the event is
+                // born — the stored triggers never fired (#187). The worker's clock picks the
+                // started runs up on its next tick, like any recipe set running.
+                let started = {
+                    let at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs_f64();
+                    yantrik_companion::recipe::RecipeStore::fire_event_triggers(
+                        &companion.db.conn(),
+                        &safe_domain,
+                        &event_data,
+                        at,
+                    )
+                };
+                for run in started {
+                    tracing::info!(recipe = %run, event = %safe_domain, "Recipe event trigger fired");
+                }
                 }
             }
             Ok(CompanionCommand::SetSystemContext { context }) => {
@@ -2228,8 +2248,12 @@ fn worker_loop(
                             yantrik_os::EventSource::ProactiveEngine,
                         );
 
-                        // Record per-key cooldown after delivery
+                        // Record per-key cooldown after delivery. Recipe messages key on their
+                        // own delivery (#187), so keys pile up that will never be looked up
+                        // again; one whose cooldown has long expired makes way for the new one,
+                        // which keeps this map from growing without limit.
                         if !delivery_key.is_empty() {
+                            delivered_cooldowns.retain(|_, ts| now_ts - *ts < 2.0 * DELIVERED_COOLDOWN_SECS);
                             delivered_cooldowns.insert(delivery_key, now_ts);
                         }
                     }
@@ -2962,6 +2986,24 @@ mod bond_property_tests {
         assert!(
             waiting.contains("recv_timeout(") && waiting.contains("recipe_executor::due("),
             "the worker's wait for its next command is also the recipes' clock, so a timer fires on an idle desktop. Loop head as written:\n{waiting}"
+        );
+    }
+
+    /// An event the shell records also reaches the recipe triggers waiting on it (#187). The
+    /// worker's clock picks up cron and completion triggers, but an event only exists at the
+    /// moment it is pushed, so this arm is the one place an Event trigger can fire.
+    #[test]
+    fn an_event_the_shell_records_reaches_the_recipe_triggers_waiting_on_it() {
+        let src = worker();
+        let record = arm(&src, "RecordSystemEvent");
+        assert!(
+            record.contains("push_event("),
+            "the event still reaches the companion. Arm as written:\n{record}"
+        );
+        assert!(
+            record.contains("fire_event_triggers("),
+            "a recorded event must also fire the recipe triggers naming it, or Event triggers \
+             are stored and never happen. Arm as written:\n{record}"
         );
     }
 }
