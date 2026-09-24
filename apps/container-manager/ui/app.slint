@@ -2,6 +2,8 @@
 // Wraps the shared ContainerManagerScreen component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
 import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
@@ -10,7 +12,9 @@ import { ContainerManagerScreen, ContainerData, ImageData, VolumeData } from "co
 export { ContainerData, ImageData, VolumeData, ThemeMode, AccentPreset }
 export { AgentContextItem, AgentSuggestion, AgentProposal }
 
-export component ContainerManagerApp inherits Window {
+export component ContainerManagerApp inherits AppWindow {
+    // The screen's own header is this window's title bar (#256).
+    show-bar: false;
     // ── The agent layer ──
     in property <[AgentContextItem]> agent-context <=> inner.agent-context;
     in property <[AgentSuggestion]> agent-suggestions <=> inner.agent-suggestions;
@@ -93,6 +97,7 @@ export component ContainerManagerApp inherits Window {
     callback ai-dismiss <=> inner.ai-dismiss;
 
     inner := ContainerManagerScreen {
+        window-bar: true;
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).
         // The screen's own layouts may report a bounded maximum (a stretch layout of fixed rows);
         // the window must still open at its preferred size and grow with the user.

@@ -15,6 +15,8 @@ fn main() {
     let Some(_instance) = instance::claim("music-player") else { return };
 
     let app = MusicPlayerApp::new().unwrap();
+    // The window's title bar is the app's own (#256).
+    yantrik_app_runtime::window_chrome!(app);
 
     // Same dark/accent choice as the shell, read from the shell's settings file.
     let theme = theme::load();

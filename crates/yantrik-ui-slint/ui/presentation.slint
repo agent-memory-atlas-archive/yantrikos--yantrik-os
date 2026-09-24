@@ -62,6 +62,9 @@ export struct PresentTheme {
 }
 
 export component PresentationScreen inherits Rectangle {
+    // The app's window-bar (#256): this screen's header is its window's one title bar when
+    // the screen fills an app window; the shell's copy leaves it off.
+    in property <bool> window-bar: false;
     background: transparent;
 
     // Slide data
@@ -410,6 +413,7 @@ export component PresentationScreen inherits Rectangle {
             // belong in one. The deck's name, whether it is saved, and the verbs that apply to
             // the whole file belong in the frame every app wears.
             AppHeader {
+                window-bar: root.window-bar;
                 app-id: "presentation";
                 icon: Icons.present;
                 title: root.presentation-title != "" ? root.presentation-title : "yPresent";

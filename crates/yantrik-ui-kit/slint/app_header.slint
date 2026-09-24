@@ -30,6 +30,7 @@ import { Icon, Icons } from "icon.slint";
 import { YButton } from "y_button.slint";
 import { WindowControls } from "window_controls.slint";
 import { AppColor, AppIdentity } from "app_color.slint";
+import { WindowChrome } from "window_chrome.slint";
 
 // ── One action in an app's header ───────────────────────────────────────────────────────
 //
@@ -102,8 +103,9 @@ export component AppHeader inherits Rectangle {
     // ── Window controls ──
     //
     // Off by default. On for a shell screen filling the display, where this header is the only
-    // chrome the surface has; off for a standalone app window, where the compositor draws the
-    // titlebar and these would be the second pair of every button.
+    // chrome the surface has, with the frame's own callbacks below. An app window does not use
+    // this: its bar is `window-bar` (further down), which brings the same buttons and sends them
+    // to the window itself.
     in property <bool> show-window-controls: false;
     in property <bool> maximized: true;
     in property <bool> can-minimize: true;
@@ -120,6 +122,14 @@ export component AppHeader inherits Rectangle {
     // only the bar's empty space and its title move the window.
     in property <bool> draggable: false;
     callback drag();
+
+    // This header IS the window's title bar (#256): its buttons, its drag and its double-click
+    // go to the window through WindowChrome, and the maximise button shows the window's own
+    // state. For an app whose screen draws this header, so that the screen's header is the one
+    // bar and nothing is drawn twice; AppWindow's own bar is one too. The in-shell frames still
+    // use `show-window-controls` with callbacks of their own.
+    in property <bool> window-bar: false;
+    property <bool> controls-shown: root.show-window-controls || root.window-bar;
 
     callback back();
     callback action(string);
@@ -162,22 +172,24 @@ export component AppHeader inherits Rectangle {
         // handed to the compositor at once would never arrive here as the second half of a
         // double-click.
         bar-drag := TouchArea {
-            enabled: root.draggable;
+            enabled: root.draggable || root.window-bar;
             width: parent.width;
             height: parent.height;
             moved => {
                 if (self.pressed
                     && (abs(self.mouse-x - self.pressed-x) > 4px
                         || abs(self.mouse-y - self.pressed-y) > 4px)) {
-                    root.drag();
+                    if (root.window-bar) { WindowChrome.drag(); } else { root.drag(); }
                 }
             }
-            double-clicked => { root.toggle-maximize(); }
+            double-clicked => {
+                if (root.window-bar) { WindowChrome.toggle-maximize(); } else { root.toggle-maximize(); }
+            }
         }
 
         HorizontalLayout {
             padding-left: root.show-back ? Theme.sp-2 : Theme.sp-4;
-            padding-right: root.show-window-controls ? 0px : Theme.sp-3;
+            padding-right: root.controls-shown ? 0px : Theme.sp-3;
             spacing: root.width < 1000px ? Theme.sp-2 : Theme.sp-3;
 
             // ── Back ──
@@ -402,16 +414,16 @@ export component AppHeader inherits Rectangle {
             // of a screen is an infinitely large target and giving it away to an 8px margin is the
             // one mistake a titlebar cannot afford. The layout's own padding-right is dropped for
             // the same reason when these are shown.
-            if root.show-window-controls : VerticalLayout {
+            if root.controls-shown : VerticalLayout {
                 alignment: start;
                 horizontal-stretch: 0;
                 WindowControls {
                     bar-height: Theme.h-app-header;
-                    maximized: root.maximized;
+                    maximized: root.window-bar ? WindowChrome.maximized : root.maximized;
                     show-minimize: root.can-minimize;
-                    minimize => { root.minimize(); }
-                    toggle-maximize => { root.toggle-maximize(); }
-                    close => { root.close-window(); }
+                    minimize => { if (root.window-bar) { WindowChrome.minimize(); } else { root.minimize(); } }
+                    toggle-maximize => { if (root.window-bar) { WindowChrome.toggle-maximize(); } else { root.toggle-maximize(); } }
+                    close => { if (root.window-bar) { WindowChrome.close(); } else { root.close-window(); } }
                 }
             }
         }
@@ -419,7 +431,7 @@ export component AppHeader inherits Rectangle {
 
     overflow-menu := PopupWindow {
         forward-focus: menu-keys;
-        x: max(0px, root.width - self.width - (root.show-window-controls ? 120px : 12px));
+        x: max(0px, root.width - self.width - (root.controls-shown ? 120px : 12px));
         y: root.height - 2px;
         width: 252px;
         height: min(420px, menu-items.preferred-height);

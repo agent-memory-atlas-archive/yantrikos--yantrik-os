@@ -608,11 +608,7 @@ mod every_app_is_an_app_window {
     /// The apps still drawn inside a plain `Window`, with labwc's title bar over their own
     /// header. This list only ever gets shorter: an app converted to `AppWindow` has to come off
     /// it, and a new app cannot go on it.
-    const NOT_YET: &[&str] = &[
-        "arcade", "calendar", "container-manager", "document-editor", "download-manager", "email",
-        "image-viewer", "music-player", "network-manager", "presentation", "snippet-manager",
-        "spreadsheet", "studio", "system-monitor", "terminal", "weather",
-    ];
+    const NOT_YET: &[&str] = &[];
 
     /// Every app's window is the base app window (#256).
     ///

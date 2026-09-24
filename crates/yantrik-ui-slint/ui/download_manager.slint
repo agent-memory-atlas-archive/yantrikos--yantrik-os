@@ -34,6 +34,9 @@ export struct DownloadItem {
 }
 
 export component DownloadManagerScreen inherits Rectangle {
+    // The app's window-bar (#256): this screen's header is its window's one title bar when
+    // the screen fills an app window; the shell's copy leaves it off.
+    in property <bool> window-bar: false;
     // ── The agent layer ──
     //
     // Filled from what this app and the companion actually hold; every row says where it came
@@ -115,6 +118,7 @@ export component DownloadManagerScreen inherits Rectangle {
         // subtitle now, on the line the frame reserves for exactly this: what the app is
         // currently doing, said quietly, under what the app is.
         AppHeader {
+            window-bar: root.window-bar;
             app-id: "downloads";
             icon: Icons.download;
             title: "Downloads";

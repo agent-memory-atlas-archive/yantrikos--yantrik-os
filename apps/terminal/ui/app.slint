@@ -1,8 +1,12 @@
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { AppIdentity } from "app_color.slint";
 import { TerminalWorkbench, SessionTab, TerminalRun } from "terminal_workbench.slint";
 export { ThemeMode, AccentPreset, SessionTab, TerminalRun }
-export component TerminalApp inherits Window {
+export component TerminalApp inherits AppWindow {
+    // The screen's own header is this window's title bar (#256).
+    show-bar: false;
     title: "Terminal";
     preferred-width: 1000px; preferred-height: 680px;
     min-width: 640px; min-height: 400px;
@@ -44,5 +48,5 @@ export component TerminalApp inherits Window {
     public function focus-terminal() { workbench.focus-terminal(); }
     public function copy-screen() { workbench.copy-screen(); }
     public function paste-clipboard() { workbench.paste-clipboard(); }
-    workbench := TerminalWorkbench { max-width: 100000px; max-height: 100000px; }
+    workbench := TerminalWorkbench { max-width: 100000px; max-height: 100000px; window-bar: true; }
 }

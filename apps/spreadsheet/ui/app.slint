@@ -2,12 +2,16 @@
 // Wraps the shared SpreadsheetScreen component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { AppIdentity } from "app_color.slint";
 import { SpreadsheetScreen, SpreadsheetCell, SheetTab, ChartData } from "spreadsheet.slint";
 
 export { SpreadsheetCell, SheetTab, ChartData, ThemeMode, AccentPreset }
 
-export component SpreadsheetApp inherits Window {
+export component SpreadsheetApp inherits AppWindow {
+    // The screen's own header is this window's title bar (#256).
+    show-bar: false;
     // What app this window is.
     //
     // Set on the WINDOW and not on AppHeader, which is where it lived first: a header covers
@@ -137,6 +141,7 @@ export component SpreadsheetApp inherits Window {
     callback sheet-show-formula-help <=> sheet.sheet-show-formula-help;
 
     sheet := SpreadsheetScreen {
+        window-bar: true;
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).
         // The screen's own layouts may report a bounded maximum (a stretch layout of fixed rows);
         // the window must still open at its preferred size and grow with the user.

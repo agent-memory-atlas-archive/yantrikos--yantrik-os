@@ -1,0 +1,27 @@
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// window_chrome.slint — what a window's own title bar asks of the window
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//
+// An app's title bar is its own (#256): AppWindow draws it, or, for an app whose screen already
+// draws an AppHeader, that header is the bar (`window-bar: true`). Either way the four things a
+// title bar does — move, minimise, maximise, close — cannot be done in Slint's language, so the
+// bar asks here and `yantrik_app_runtime::window_chrome!(ui)` does them to the real window.
+//
+// A global, and not callbacks on AppWindow, because Slint gives an app's generated Rust type
+// only what its exported component declares, not what it inherits — and because a header deep
+// inside a shared screen can reach a global where it could never reach the window's callbacks.
+// Each app exports it (`export { WindowChrome } from "app_window.slint";`) so the runtime can
+// find it.
+
+export global WindowChrome {
+    // Kept true to the window by the runtime, which reads the window each time its size changes
+    // — the compositor maximises and restores it too (a keyboard shortcut, dragging it to an
+    // edge, dragging a maximised window away), and the button has to show the action it will
+    // do next.
+    in-out property <bool> maximized: false;
+    callback drag();
+    callback minimize();
+    callback toggle-maximize();
+    callback close();
+    callback resized();
+}

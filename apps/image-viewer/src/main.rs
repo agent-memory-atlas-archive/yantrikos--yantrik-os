@@ -88,6 +88,8 @@ fn main() {
     };
 
     let app = ImageViewerApp::new().unwrap();
+    // The window's title bar is the app's own (#256).
+    yantrik_app_runtime::window_chrome!(app);
     let theme = theme::load();
     app.global::<ThemeMode>().set_dark(theme.dark);
     app.global::<AccentPreset>().set_index(theme.accent_index);

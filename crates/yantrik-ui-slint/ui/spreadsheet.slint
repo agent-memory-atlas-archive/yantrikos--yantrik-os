@@ -159,6 +159,9 @@ component ColorPalette inherits Rectangle {
 }
 
 export component SpreadsheetScreen inherits Rectangle {
+    // The app's window-bar (#256): this screen's header is its window's one title bar when
+    // the screen fills an app window; the shell's copy leaves it off.
+    in property <bool> window-bar: false;
     background: Theme.bg-deep;
 
     // Grid data — flat array, indexed as [row * col-count + col]
@@ -298,6 +301,7 @@ export component SpreadsheetScreen inherits Rectangle {
     VerticalLayout {
         // -- Header --
         AppHeader {
+            window-bar: root.window-bar;
             app-id: "spreadsheet";
             icon: Icons.sheets;
             title: "ySheets";

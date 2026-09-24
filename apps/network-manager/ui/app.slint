@@ -2,6 +2,8 @@
 // Wraps the shared NetworkManager component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
 import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
@@ -11,7 +13,9 @@ import { NetworkManager, WifiNetwork, EthernetInterface,
 export { WifiNetwork, EthernetInterface, FirewallRule, ThemeMode, AccentPreset }
 export { AgentContextItem, AgentSuggestion, AgentProposal }
 
-export component NetworkManagerApp inherits Window {
+export component NetworkManagerApp inherits AppWindow {
+    // The screen's own header is this window's title bar (#256).
+    show-bar: false;
     // ── The agent layer ──
     in property <[AgentContextItem]> agent-context <=> net.agent-context;
     in property <[AgentSuggestion]> agent-suggestions <=> net.agent-suggestions;
@@ -118,6 +122,7 @@ export component NetworkManagerApp inherits Window {
     callback ai-dismiss <=> net.ai-dismiss;
 
     net := NetworkManager {
+        window-bar: true;
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).
         // The screen's own layouts may report a bounded maximum (a stretch layout of fixed rows);
         // the window must still open at its preferred size and grow with the user.

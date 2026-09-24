@@ -2,6 +2,8 @@
 // Wraps the shared SystemMonitor component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
 import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
@@ -10,7 +12,9 @@ import { SystemMonitor, CpuCoreData, DiskData, NetworkInterfaceData, MonitorProc
 export { CpuCoreData, DiskData, NetworkInterfaceData, MonitorProcessData, ThemeMode, AccentPreset }
 export { AgentContextItem, AgentSuggestion, AgentProposal }
 
-export component SystemMonitorApp inherits Window {
+export component SystemMonitorApp inherits AppWindow {
+    // The screen's own header is this window's title bar (#256).
+    show-bar: false;
     // ── The agent layer ──
     in property <[AgentContextItem]> agent-context <=> inner.agent-context;
     in property <[AgentSuggestion]> agent-suggestions <=> inner.agent-suggestions;
@@ -108,6 +112,7 @@ export component SystemMonitorApp inherits Window {
     callback back-pressed <=> inner.back-pressed;
 
     inner := SystemMonitor {
+        window-bar: true;
         // No parent screen in a window of its own.
         show-back: false;
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).
