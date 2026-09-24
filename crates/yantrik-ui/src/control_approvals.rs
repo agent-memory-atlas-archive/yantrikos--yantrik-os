@@ -1128,45 +1128,8 @@ pub fn wire(ui: &App) {
 ///
 /// `None` means either nothing is waiting, or the compositor would not say unambiguously which
 /// window was in front — in which case the shell stays where it is rather than guessing at a
-/// window to throw the person into. See [`window_in_front`].
+/// window to throw the person into. See [`crate::windows::front_now`].
 static RESTORE_TO: Mutex<Option<String>> = Mutex::new(None);
-
-/// Which toplevel the compositor says is activated, if exactly one is and it is not the shell.
-///
-/// The shell does not track this itself: `wlrctl toplevel list` carries no focus flag, and the
-/// one place that treats "first in the list" as the foreground window (`wire::timers`, feeding
-/// the think cycle) is reading an ordering that means nothing — the list is the launch registry
-/// merged with the compositor's, in neither case in focus order.
-///
-/// `state:activated` is wlrctl's own matcher for the focused toplevel, and this trusts it only
-/// when it answers with exactly one line. Two lines or none means either the compositor has
-/// nothing activated or this wlrctl does not support the matcher and has listed everything — and
-/// both of those are "not knowable", not "probably the first one". Handing a person's screen to
-/// the wrong window is worse than leaving the shell in front, which is at least where the thing
-/// they just answered was.
-fn window_in_front() -> Option<String> {
-    let output = std::process::Command::new("wlrctl")
-        .args(["toplevel", "list", "state:activated"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if lines.len() != 1 {
-        return None;
-    }
-    // `wlrctl toplevel list` prints `app_id: title`, and our own windows declare no wayland
-    // app_id, so the line usually begins with the separator.
-    let line = lines[0];
-    let title = line.split_once(':').map(|(_, t)| t.trim()).unwrap_or(line).to_string();
-    if title.is_empty() || title == crate::windows::SHELL_WINDOW_TITLE {
-        // The person was already looking at the desktop. Nothing to give back.
-        return None;
-    }
-    Some(title)
-}
 
 /// Ask the compositor to bring one toplevel forward. Blocking; call it off the UI thread.
 fn focus_toplevel(title: &str) {
@@ -1187,14 +1150,16 @@ fn focus_toplevel(title: &str) {
 /// Note what the person was using, then put the shell in front of it.
 ///
 /// Both halves on one worker thread and in that order, because the reading has to happen before
-/// the raise or it reads the shell. Nothing is recorded if something is already waiting — the
+/// the raise or it reads the shell. It asks the compositor fresh rather than reading the taskbar's
+/// cached answer, because that one is up to `COMPOSITOR_TTL` old and the screen is being handed to
+/// the window in front NOW. Nothing is recorded if something is already waiting — the
 /// shell is already in front by then, so a second reading would capture the shell and the window
 /// the person actually came from would be lost.
 fn take_the_screen() {
     std::thread::spawn(|| {
         if let Ok(mut slot) = RESTORE_TO.lock() {
             if slot.is_none() {
-                *slot = window_in_front();
+                *slot = crate::windows::front_now();
             }
         }
         focus_toplevel(crate::windows::SHELL_WINDOW_TITLE);
