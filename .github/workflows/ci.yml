@@ -158,6 +158,11 @@ jobs:
       - name: The updater agrees with itself about channel and version
         run: bash deploy/yantrik-os/yantrik-update selftest
 
+      # The session's shell supervisor (#247): a crash brings the shell back, a crash loop stops,
+      # a logout ends it. Fake shells and a fake display socket; no compositor needed.
+      - name: A shell that dies is started again
+        run: sh deploy/yantrik-os/yantrik-shell selftest
+
       # The harnesses that ship as source (harnesses/lib, harnesses/pi, harnesses/deepseek).
       # Same shape as the two above: stdlib-only Python over a fake of everything it talks to —
       # a fake desktop socket, a fake yos-mcp, a fake chat-completions API and a fake `pi` — so

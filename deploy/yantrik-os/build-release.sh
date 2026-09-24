@@ -182,6 +182,10 @@ if [ -f "$SCRIPT_DIR/yantrik-session" ]; then
   cp "$SCRIPT_DIR/yantrik-session" "$ROOT/bin/yantrik-session"
   chmod +x "$ROOT/bin/yantrik-session"
   echo "   + yantrik-session"
+  # What the session runs in the shell's place, so a crash brings the shell back (#247).
+  cp "$SCRIPT_DIR/yantrik-shell" "$ROOT/bin/yantrik-shell"
+  chmod +x "$ROOT/bin/yantrik-shell"
+  echo "   + yantrik-shell"
 else
   fail "missing $SCRIPT_DIR/yantrik-session -- a release without a session does not boot"
 fi

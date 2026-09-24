@@ -1,0 +1,138 @@
+#!/bin/sh
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# yantrik-shell — runs the desktop shell, and brings it back when it dies
+# ═══════════════════════════════════════════════════════════════════════════════════════
+#
+# labwc starts the shell with `-s`, which runs a command once. yantrik-session used to hand it
+# the shell itself, and its header said "labwc supervises the shell". Nothing did. On VM 520 on
+# 23 September the shell panicked inside the renderer (#247), labwc kept running with nothing
+# drawing the desktop, and the person looked at a blank screen until someone relaunched it by
+# hand. A crash should cost two seconds, not the desktop.
+#
+# So labwc starts this, and this starts the shell, again whenever it ends while the display is
+# still there. It stops for good in two cases:
+#   - the display has gone: a logout, or labwc exiting, leaves nothing to start into;
+#   - the shell keeps dying: YANTRIK_SHELL_MAX_CRASHES exits inside YANTRIK_SHELL_WINDOW_SECS
+#     is a crash loop, and starting it a sixth time only burns the CPU. It says so and stops.
+#
+# A restart on purpose (a deploy replacing the binary) is `kill` of the shell: this brings the
+# new one up. It counts toward the loop limit like any other exit, which a person replacing
+# the binary five times in two minutes can live with.
+#
+#   yantrik-shell [config]    the session's shell, supervised
+#   yantrik-shell selftest    offline checks against fake shells; no display needed
+set -u
+
+BIN="${YANTRIK_SHELL_BIN:-/opt/yantrik/bin/yantrik-ui}"
+MAX_CRASHES="${YANTRIK_SHELL_MAX_CRASHES:-5}"
+WINDOW_SECS="${YANTRIK_SHELL_WINDOW_SECS:-120}"
+PAUSE_SECS="${YANTRIK_SHELL_PAUSE_SECS:-1}"
+
+# The compositor is gone when its socket is. With no WAYLAND_DISPLAY at all there is no way to
+# tell, and the shell is started again: the loop limit is the backstop.
+display_gone() {
+  [ -n "${WAYLAND_DISPLAY:-}" ] || return 1
+  case "$WAYLAND_DISPLAY" in
+    /*) sock="$WAYLAND_DISPLAY" ;;
+    *) sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$WAYLAND_DISPLAY" ;;
+  esac
+  [ ! -S "$sock" ]
+}
+
+supervise() {
+  exits=""
+  while :; do
+    "$BIN" "$@"
+    code=$?
+    if display_gone; then
+      echo "yantrik-shell: the shell ended ($code) and the display has gone with it; the session is over"
+      return 0
+    fi
+    now=$(date +%s)
+    recent=""
+    for t in $exits; do
+      [ $((now - t)) -lt "$WINDOW_SECS" ] && recent="$recent $t"
+    done
+    exits="$recent $now"
+    count=$(echo $exits | wc -w)
+    if [ "$count" -ge "$MAX_CRASHES" ]; then
+      echo "yantrik-shell: the shell ended $count times in ${WINDOW_SECS}s (last exit $code); not starting it again" >&2
+      return "$code"
+    fi
+    echo "yantrik-shell: the shell ended ($code) with the display still there; starting it again" >&2
+    sleep "$PAUSE_SECS"
+  done
+}
+
+# ── selftest ────────────────────────────────────────────────────────────────────────────
+#
+# Fake shells in a scratch directory: each records that it ran and exits the way the case
+# needs. The display is a socket the test makes (present) or a path that is not there (gone).
+selftest() {
+  root="$(mktemp -d)"
+  trap 'rm -rf "$root"' EXIT
+  fails=0
+  export YANTRIK_SHELL_PAUSE_SECS=0
+
+  # A shell that exits with the codes listed in $root/codes, one per run, then 0 when they run out.
+  cat >"$root/fake" <<'FAKE'
+#!/bin/sh
+dir="$(dirname "$0")"
+echo run >>"$dir/runs"
+code=$(head -n1 "$dir/codes" 2>/dev/null)
+sed -i '1d' "$dir/codes" 2>/dev/null
+[ -n "$code" ] || code=0
+[ -n "${GONE_AFTER:-}" ] && [ "$(wc -l <"$dir/runs")" -ge "$GONE_AFTER" ] && rm -f "$dir/display"
+exit "$code"
+FAKE
+  chmod +x "$root/fake"
+  python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" "$root/display" 2>/dev/null \
+    || { echo "  skip  no python3 to make a socket with"; return 0; }
+
+  check() { # name expected-runs expected-status actual-status
+    runs=$(wc -l <"$root/runs" 2>/dev/null || echo 0)
+    if [ "$runs" -eq "$2" ] && [ "$4" -eq "$3" ]; then
+      echo "  ok    $1"
+    else
+      echo "  FAIL  $1: ran $runs times (wanted $2), status $4 (wanted $3)"
+      fails=$((fails + 1))
+    fi
+    rm -f "$root/runs" "$root/codes"
+  }
+  run() { # display-gone-after-run max-exits
+    GONE_AFTER="$1" YANTRIK_SHELL_MAX_CRASHES="$2" YANTRIK_SHELL_BIN="$root/fake" \
+      WAYLAND_DISPLAY="$root/display" sh "$0" config >/dev/null 2>&1
+  }
+  display() { python3 -c "import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])" "$root/display"; }
+
+  # 1. The case this exists for: a panic (101) and a segfault (139), then it stays up and the
+  #    person logs out (the display goes, 0).
+  printf '101\n139\n0\n' >"$root/codes"
+  run 3 5; check "a shell that crashes is started again, twice, until the session ends" 3 0 $?
+  display
+
+  # 2. A crash loop stops rather than spinning: five exits inside the window, and no sixth start.
+  printf '101\n101\n101\n101\n101\n101\n101\n' >"$root/codes"
+  run "" 5; check "a shell that keeps dying is not started a sixth time" 5 101 $?
+
+  # 3. A logout: the shell ends because the display went away, and nothing is restarted.
+  printf '0\n' >"$root/codes"
+  run 1 5; check "an ending with the display gone ends the session" 1 0 $?
+  display
+
+  # 4. A deploy's `kill` (143) with the display still there brings the new binary up.
+  printf '143\n0\n' >"$root/codes"
+  run 2 5; check "a shell killed on purpose comes back" 2 0 $?
+
+  if [ "$fails" -eq 0 ]; then
+    echo "all selftest checks passed"
+    return 0
+  fi
+  echo "$fails selftest check(s) failed"
+  return 1
+}
+
+case "${1:-}" in
+  selftest) selftest ;;
+  *) supervise "$@" ;;
+esac
