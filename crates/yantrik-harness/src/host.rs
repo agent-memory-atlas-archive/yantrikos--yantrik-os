@@ -328,6 +328,11 @@ pub struct Entry {
     pub builtin: bool,
     pub active: bool,
     pub capabilities: Capabilities,
+    /// The process that attached, as the kernel reported it at accept (`SO_PEERCRED`). `None`
+    /// for a built-in, which never attaches, and for a harness that attached over a transport
+    /// the kernel could not speak for (the TCP dev path). The shell matches an approval's
+    /// caller against it: a caller descending from that process is that mind (#206).
+    pub pid: Option<u32>,
 }
 
 /// What an agent is doing, as far as the host can see from the wire.
@@ -483,6 +488,7 @@ impl Host {
                 builtin: true,
                 active: h.id() == active,
                 capabilities: h.capabilities(),
+                pid: None,
             })
             .collect();
 
@@ -500,6 +506,7 @@ impl Host {
                     tools: a.announced.tools,
                     memory: a.announced.memory,
                 },
+                pid: a.pid,
             });
         }
         rows
@@ -1547,6 +1554,7 @@ mod tests {
         assert!(!row.capabilities.memory);
         assert_eq!(row.detail.as_deref(), Some("qwen2.5"));
         assert!(!row.builtin);
+        assert_eq!(row.pid, None, "`handle` brings no peer for the kernel to name");
     }
 
     // ── Order: first in, first out, one at a time per conversation ─────
@@ -1945,6 +1953,9 @@ mod tests {
         assert_ne!(token_one, token_two);
         assert_eq!(host.agent_for_token(&token_one), Some((first.clone(), Some(4242))));
         assert_eq!(host.agent_for_token(&token_two), Some((second, Some(4242))));
+        // The picker's row carries the same pid: the shell matches an approval's caller
+        // against it, which is what told the real Pi apart from an impostor (#206).
+        assert_eq!(host.list().into_iter().find(|e| e.id == "pi").unwrap().pid, Some(4242));
 
         // Not a prefix, not a guess, not empty.
         assert_eq!(host.agent_for_token(&token_one[..31]), None);
