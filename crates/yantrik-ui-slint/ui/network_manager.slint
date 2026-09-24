@@ -176,6 +176,9 @@ component ActionButton inherits TouchArea {
 // ── Main component ──
 
 export component NetworkManager inherits Rectangle {
+    // The app's window-bar (#256): this screen's header is its window's one title bar when
+    // the screen fills an app window; the shell's copy leaves it off.
+    in property <bool> window-bar: false;
     // ── The agent layer ──
     //
     // Filled from what this app and the companion actually hold; every row says where it came
@@ -306,6 +309,7 @@ export component NetworkManager inherits Rectangle {
         // the line directly under the app name -- and the app gets the same top edge as the
         // other fifteen instead of a 56px status panel unique to itself.
         AppHeader {
+            window-bar: root.window-bar;
             app-id: "network";
             icon: root.status-connection-type == "Ethernet" ? Icons.network : Icons.wifi;
             title: "Network";

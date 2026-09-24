@@ -7,6 +7,9 @@ import { Icons } from "icon.slint";
 export struct SessionTab { title: string, active: bool, alive: bool }
 export struct TerminalRun { text: string, row: int, col: int, columns: int, fg: color, bg: color, bold: bool, underline: bool }
 export component TerminalWorkbench inherits Rectangle {
+    // The app's window-bar (#256): this screen's header is its window's one title bar when
+    // the screen fills an app window; the shell's copy leaves it off.
+    in property <bool> window-bar: false;
     in property <[SessionTab]> tabs;
     in property <[TerminalRun]> runs;
     in property <string> screen-text;
@@ -66,6 +69,7 @@ export component TerminalWorkbench inherits Rectangle {
         VerticalLayout {
             spacing: 0px;
             AppHeader {
+                window-bar: root.window-bar;
                 app-id: "terminal"; title: "Terminal"; icon: Icons.terminal; subtitle: root.directory;
                 actions: [
                     { id: "new", label: "New tab", icon: Icons.plus, emphasis: 2, disabled: root.tabs.length >= 8 },

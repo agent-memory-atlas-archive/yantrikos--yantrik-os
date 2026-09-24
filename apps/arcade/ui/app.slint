@@ -1,4 +1,6 @@
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { AppIdentity } from "app_color.slint";
 import { AppHeader } from "app_header.slint";
 import { YButton } from "y_button.slint";
@@ -9,7 +11,9 @@ export { ThemeMode, AccentPreset }
 export struct GameRow { slug:string, title:string, detail:string, selected:bool }
 export struct CharacterRow { slug:string, name:string, archetype:string, selected:bool }
 
-export component ArcadeApp inherits Window {
+export component ArcadeApp inherits AppWindow {
+    // The header below is this window's title bar (#256).
+    show-bar: false;
     title: "Arcade";
     preferred-width: 1020px;
     preferred-height: 680px;
@@ -36,6 +40,7 @@ export component ArcadeApp inherits Window {
     VerticalLayout {
         spacing: 0px;
         AppHeader {
+            window-bar: true;
             app-id: "arcade";
             icon: Icons.media;
             title: "Arcade";

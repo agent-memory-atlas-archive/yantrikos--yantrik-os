@@ -58,6 +58,9 @@ export struct CalendarTemplate {
 // ── Calendar Component ──
 
 export component CalendarScreen inherits Rectangle {
+    // The app's window-bar (#256): this screen's header is its window's one title bar when
+    // the screen fills an app window; the shell's copy leaves it off.
+    in property <bool> window-bar: false;
     background: Theme.bg-deep;
 
     // State
@@ -179,6 +182,7 @@ export component CalendarScreen inherits Rectangle {
         // The month and the three view modes used to live inside the left pane, which meant
         // the thing telling you where you are scrolled with the thing you were looking at.
         AppHeader {
+            window-bar: root.window-bar;
             app-id: "calendar";
             icon: Icons.calendar;
             title: "Calendar";

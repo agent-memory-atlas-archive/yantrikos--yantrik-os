@@ -10,6 +10,8 @@
 // reads here and what `yos describe studio` prints are built in the same place and cannot drift.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { AppIdentity } from "app_color.slint";
 import { AppHeader } from "app_header.slint";
 import { YButton, YIconButton } from "y_button.slint";
@@ -41,7 +43,9 @@ export struct JobRow {
     progress: string,
 }
 
-export component StudioApp inherits Window {
+export component StudioApp inherits AppWindow {
+    // The header below is this window's title bar (#256).
+    show-bar: false;
     title: "Studio";
     preferred-width: 1180px;
     preferred-height: 800px;
@@ -94,6 +98,7 @@ export component StudioApp inherits Window {
         spacing: 0px;
 
         AppHeader {
+            window-bar: true;
             app-id: "studio";
             icon: Icons.app("studio");
             title: "Studio";

@@ -337,6 +337,9 @@ component VolumeRow inherits Rectangle {
 // ── Main component ──
 
 export component ContainerManagerScreen inherits Rectangle {
+    // The app's window-bar (#256): this screen's header is its window's one title bar when
+    // the screen fills an app window; the shell's copy leaves it off.
+    in property <bool> window-bar: false;
     // ── The agent layer ──
     //
     // Filled from what this app and the companion actually hold; every row says where it came
@@ -420,6 +423,7 @@ export component ContainerManagerScreen inherits Rectangle {
         // The three tabs are leading-actions: they sit beside the title because they change
         // what you are looking at, rather than doing something to it. Verbs go on the right.
         AppHeader {
+            window-bar: root.window-bar;
             app-id: "containers";
             icon: Icons.packages;
             title: "Containers";

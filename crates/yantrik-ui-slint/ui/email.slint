@@ -81,6 +81,9 @@ export struct EmailAttachmentData {
 // ── Email Client Component ──
 
 export component EmailClient inherits Rectangle {
+    // The app's window-bar (#256): this screen's header is its window's one title bar when
+    // the screen fills an app window; the shell's copy leaves it off.
+    in property <bool> window-bar: false;
     background: Theme.bg-deep;
 
     // Data
@@ -260,6 +263,7 @@ export component EmailClient inherits Rectangle {
         spacing: 0px;
 
         AppHeader {
+            window-bar: root.window-bar;
             app-id: "email";
             icon: Icons.mail;
             title: "Email";
@@ -747,6 +751,7 @@ export component EmailClient inherits Rectangle {
     if (root.has-account && !root.setup-open) : VerticalLayout {
         // -- Header --
         AppHeader {
+            window-bar: root.window-bar;
             app-id: "email";
             icon: Icons.mail;
             title: "Email";

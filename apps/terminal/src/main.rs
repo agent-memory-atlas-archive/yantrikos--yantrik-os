@@ -267,6 +267,8 @@ fn main() {
         return;
     };
     let ui = TerminalApp::new().unwrap();
+    // The window's title bar is the app's own (#256).
+    yantrik_app_runtime::window_chrome!(ui);
     let saved = theme::load();
     ui.global::<ThemeMode>().set_dark(saved.dark);
     ui.global::<AccentPreset>().set_index(saved.accent_index);

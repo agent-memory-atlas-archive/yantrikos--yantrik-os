@@ -48,23 +48,18 @@
 // a name its base has.
 import { Theme } from "theme.slint";
 import { AppHeader, AppAction } from "app_header.slint";
+import { WindowChrome } from "window_chrome.slint";
 
-// What the bar asks of the window, and the one thing it needs to know back.
-export global WindowChrome {
-    // Kept true to the window by the runtime, which reads the window each time its size changes
-    // — the compositor maximises and restores it too (a keyboard shortcut, dragging it to an
-    // edge), and the button has to show the action it will do next.
-    in-out property <bool> maximized: false;
-    callback drag();
-    callback minimize();
-    callback toggle-maximize();
-    callback close();
-    callback resized();
-}
+export { WindowChrome }
 
 export component AppWindow inherits Window {
     // Which app this is: the tint of the glyph, and AppIdentity for everything below the bar.
     in property <string> app-id: "";
+
+    // Off for an app whose screen draws its own AppHeader: that header is the bar
+    // (`window-bar: true` on it), and this one would be a second. Everything else — no frame,
+    // the edges, the hairline, the runtime's wiring — is the same either way.
+    in property <bool> show-bar: true;
 
     // ── The bar ──
     in property <string> header-icon: "";
@@ -92,7 +87,7 @@ export component AppWindow inherits Window {
     changed width => { WindowChrome.resized(); }
     changed height => { WindowChrome.resized(); }
 
-    bar := AppHeader {
+    if root.show-bar : AppHeader {
         x: 0px;
         y: 0px;
         width: root.width;
@@ -108,17 +103,11 @@ export component AppWindow inherits Window {
         search-placeholder: root.header-search-placeholder;
         search-text <=> root.header-search-text;
         show-back: root.header-show-back;
-        show-window-controls: true;
-        maximized: WindowChrome.maximized;
-        draggable: true;
+        window-bar: true;
         action(id) => { root.header-action(id); }
         back => { root.header-back(); }
         search-edited(text) => { root.header-search-edited(text); }
         search-accepted(text) => { root.header-search-accepted(text); }
-        drag => { WindowChrome.drag(); }
-        minimize => { WindowChrome.minimize(); }
-        toggle-maximize => { WindowChrome.toggle-maximize(); }
-        close-window => { WindowChrome.close(); }
     }
 
     // The app, below the bar. Not a layout: an app's own dialogs and overlays are drawn over
@@ -132,9 +121,9 @@ export component AppWindow inherits Window {
     // Notes first looked on VM 520.
     Rectangle {
         x: 0px;
-        y: bar.height;
+        y: root.show-bar ? Theme.h-app-header : 0px;
         width: root.width;
-        height: root.height - bar.height;
+        height: root.height - self.y;
         @children
     }
 

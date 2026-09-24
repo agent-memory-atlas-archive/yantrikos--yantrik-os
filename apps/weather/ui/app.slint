@@ -2,6 +2,8 @@
 // Wraps the shared WeatherDashboard component in its own Window.
 
 import { Theme, ThemeMode, AccentPreset } from "theme.slint";
+import { AppWindow } from "app_window.slint";
+export { WindowChrome } from "app_window.slint";
 import { AgentContextItem, AgentSuggestion } from "components/agent_rail.slint";
 import { AgentProposal } from "components/agent_proposal.slint";
 import { AppIdentity } from "app_color.slint";
@@ -11,7 +13,9 @@ import { WeatherDashboard, WeatherCurrent, WeatherHourly, WeatherDaily,
 export { WeatherCurrent, WeatherHourly, WeatherDaily, WeatherSavedLocation, WeatherAlert, ThemeMode, AccentPreset }
 export { AgentContextItem, AgentSuggestion, AgentProposal }
 
-export component WeatherApp inherits Window {
+export component WeatherApp inherits AppWindow {
+    // The screen's own header is this window's title bar (#256).
+    show-bar: false;
     // ── The agent layer ──
     in property <[AgentContextItem]> agent-context <=> dash.agent-context;
     in property <[AgentSuggestion]> agent-suggestions <=> dash.agent-suggestions;
@@ -87,6 +91,7 @@ export component WeatherApp inherits Window {
     callback weather-toggle-units <=> dash.weather-toggle-units;
 
     dash := WeatherDashboard {
+        window-bar: true;
         // No parent screen in a window of its own.
         show-back: false;
         // Fills the window (no explicit size: Slint forbids width/height next to max-*).
