@@ -2407,6 +2407,7 @@ mod control_approvals_tests {
                 purpose: "Delete a file. It is not recoverable.".into(),
                 summary: crate::approvals::summary_of("Delete a file. It is not recoverable."),
                 args: vec![],
+                target: String::new(),
                 warning: String::new(),
                 can_session: false,
                 status,
