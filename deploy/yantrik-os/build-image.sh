@@ -122,8 +122,9 @@ echo "   verified: no cloud kernel left in /boot"
 
 say "Packages"
 # One layer, one apt run: the desktop, the eyes, the ears, and what yos needs to talk CDP.
+# mpv: Files opens sound and video in mpv's own window (#255); the image shipped no player.
 virt-customize -a "$IMAGE" \
-  --install labwc,seatd,mesa-utils,foot,chromium,pipewire-pulse,wireplumber,pulseaudio-utils,python3-websocket,qemu-guest-agent,curl,ca-certificates,fontconfig,grim,wlrctl,wlr-randr \
+  --install labwc,seatd,mesa-utils,foot,chromium,pipewire-pulse,wireplumber,pulseaudio-utils,python3-websocket,qemu-guest-agent,curl,ca-certificates,fontconfig,grim,wlrctl,wlr-randr,mpv \
 
 echo "   desktop, browser, audio, agent surface deps"
 
