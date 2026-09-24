@@ -166,3 +166,29 @@ keyboard, beside the output path.
 ```sh
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/taskbar-menu.png 1280 800 verify-taskbar-menu
 ```
+
+## System Monitor
+
+`verify-monitor` draws the production System Monitor screen from fixture data — four cores and
+two disks at part usage, three processes — and pins the layout a person complained about (#220):
+every bar fill (health, swap, each core, each disk) starts at x=0 of its track instead of being
+centred inside it, selecting a process does not grow the header or move the list under the
+pointer, an empty list echoes the filter word ("No process matches 'xylo'") and only a machine
+that reported nothing says "No process data", and the AI workloads card says plainly that nothing
+is measured while no source feeds it, and drops that line the moment a model name reports.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- verify-monitor
+```
+
+## Weather
+
+`verify-weather` draws the production Weather dashboard from fixture data with the context rail
+open, the way the running app has it, and measures the hero's stat-tile grid against the space
+the rail leaves (#220). At the app's default 1000×720 window the tiles' right edge must stay
+inside the content area — they used to run under the rail — while remaining wide enough to read;
+at 1400 wide the grid must return to its 499px design width.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- verify-weather
+```

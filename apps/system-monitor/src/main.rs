@@ -474,6 +474,28 @@ fn apply_processes(ui: &SystemMonitorApp, procs: &[ProcessInfo]) {
         })
         .collect();
     ui.set_processes(ModelRc::new(VecModel::from(items)));
+    // The list was just rebuilt under the selection, and the row the selection points at
+    // may not have survived it. Dropping a stale pid here is what hides End and Force Kill
+    // with the row they act on (#220).
+    ui.set_selected_process_pid(selection_after_refresh(
+        ui.get_selected_process_pid(),
+        procs,
+    ));
+}
+
+/// What the selection must be after the process list is refreshed.
+///
+/// End and Force Kill act on `selected-process-pid`, and the list under them is rebuilt
+/// every poll: the selected process can end — here, or anywhere else on the machine — or a
+/// filter can stop showing its row. The pid used to stay selected through all of it, so the
+/// buttons remained on screen aimed at a process that was gone (#220). The selection now
+/// lives exactly as long as the shown list does.
+fn selection_after_refresh(selected: i32, procs: &[ProcessInfo]) -> i32 {
+    if selected >= 0 && procs.iter().any(|p| p.pid as i32 == selected) {
+        selected
+    } else {
+        -1
+    }
 }
 
 // ── Ending a process ─────────────────────────────────────────────────
@@ -918,4 +940,50 @@ fn machine_question(ui: &SystemMonitorApp) -> String {
          anything needs attention and why. Use only these numbers; do not guess at causes \
          you cannot see."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn running(pid: u32, name: &str) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            name: name.to_string(),
+            cpu_percent: 1.0,
+            mem_percent: 1.0,
+            mem_bytes: 1024,
+            state: "S".to_string(),
+            user: "yantrik".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_selection_the_refreshed_list_still_shows_survives_it() {
+        let procs = vec![running(7, "pi"), running(9, "chromium")];
+        assert_eq!(selection_after_refresh(7, &procs), 7);
+    }
+
+    #[test]
+    fn a_selection_whose_process_is_gone_is_dropped() {
+        // The person selected a row and the process ended — here or anywhere else on the
+        // machine. The next poll rebuilds the list without it, and End and Force Kill must
+        // hide with the row they act on instead of staying aimed at a dead pid (#220).
+        let procs = vec![running(9, "chromium")];
+        assert_eq!(selection_after_refresh(7, &procs), -1);
+    }
+
+    #[test]
+    fn a_selection_a_filter_hides_is_dropped() {
+        // poll() filters before it applies, so a row the search stopped showing is gone
+        // from the list the buttons belong to.
+        let matching = vec![running(9, "chromium")];
+        assert_eq!(selection_after_refresh(7, &matching), -1);
+    }
+
+    #[test]
+    fn nothing_selected_stays_nothing_selected() {
+        assert_eq!(selection_after_refresh(-1, &[]), -1);
+        assert_eq!(selection_after_refresh(-1, &[running(7, "pi")]), -1);
+    }
 }

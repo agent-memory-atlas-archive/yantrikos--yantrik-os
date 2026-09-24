@@ -12,6 +12,8 @@ mod lens_tests;
 mod overview_tests;
 mod approval_tests;
 mod taskbar_menu_tests;
+mod monitor_tests;
+mod weather_tests;
 use slint::{
     platform::{
         software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
@@ -51,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-approval-card") { return approval_tests::run(&window, output); }
     if args.iter().any(|a| a == "lens-answer") { return lens_tests::run_lens(&window, output); }
     if args.iter().any(|a| a == "verify-agents-overview") { return overview_tests::run(&window, output); }
+    if args.iter().any(|a| a == "verify-monitor") { return monitor_tests::run(&window); }
+    if args.iter().any(|a| a == "verify-weather") { return weather_tests::run(&window); }
     if args.iter().any(|a| a == "verify-idle") {
         let probe = TerminalProbe::new()?;
         probe.show()?;
