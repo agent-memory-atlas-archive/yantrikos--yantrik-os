@@ -6,6 +6,7 @@ mod agents_tests;
 mod mind_panel_tests;
 mod recipes_tests;
 mod formations_tests;
+mod apps_button_tests;
 mod lens_tests;
 mod overview_tests;
 use slint::{
@@ -40,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-recipes") { return recipes_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-formations") { return formations_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-lens-agents") { return agents_tests::run_lens(&window, output); }
+    if args.iter().any(|a| a == "verify-apps-button") { return apps_button_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-lens-answers") { return lens_tests::run(&window, output); }
     if args.iter().any(|a| a == "lens-answer") { return lens_tests::run_lens(&window, output); }
     if args.iter().any(|a| a == "verify-agents-overview") { return overview_tests::run(&window, output); }
