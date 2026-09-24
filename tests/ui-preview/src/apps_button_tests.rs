@@ -70,8 +70,57 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
         }
     }
 
+    // Chat, from anywhere (#241): the button at the right of the taskbar, found by pressing
+    // leftward from the corner until the Lens opens. From Files and Settings it goes to the
+    // desktop, where the Lens is drawn, and puts the launcher away.
+    let shown: Rc<std::cell::Cell<u32>> = Rc::default();
+    {
+        let shown = shown.clone();
+        ui.on_show_desktop(move || shown.set(shown.get() + 1));
+    }
+    ui.set_active_harness_name("Hermes".into());
+    ui.set_app_grid_open(false);
+    ui.set_lens_open(false);
+    ui.set_current_screen(8);
+    draw();
+    let mut chat_x = None;
+    for x in (40..400).step_by(6).map(|dx| width as f32 - dx as f32) {
+        click(w, x, taskbar_y);
+        draw();
+        if ui.get_lens_open() {
+            chat_x = Some(x);
+            break;
+        }
+    }
+    let chat_x = chat_x.expect("the Chat button opens the Lens");
+    assert_eq!(ui.get_current_screen(), 1, "from Files, Chat goes to the desktop, where the Lens is drawn");
+    assert_eq!(shown.get(), 0, "finding Chat did not press Show desktop");
+    for (screen, name) in [(7, "Settings"), (35, "Recipes")] {
+        ui.set_lens_open(false);
+        ui.set_app_grid_open(true);
+        ui.set_current_screen(screen);
+        draw();
+        click(w, chat_x, taskbar_y);
+        draw();
+        assert!(ui.get_lens_open(), "Chat opens the Lens from {name}");
+        assert_eq!(ui.get_current_screen(), 1, "from {name}, on the desktop");
+        assert!(!ui.get_app_grid_open(), "and from {name} it puts the launcher away");
+    }
+
+    // Show desktop is the very corner: a pointer thrown there lands on the last pixel of both
+    // edges, and that press reaches it without touching Chat.
+    let lens_before = ui.get_lens_open();
+    click(w, width as f32 - 1.0, height as f32 - 1.0);
+    draw();
+    assert_eq!(shown.get(), 1, "a press on the bottom-right pixel is Show desktop");
+    assert_eq!(ui.get_lens_open(), lens_before, "and not Chat");
+    click(w, width as f32 - 6.0, taskbar_y);
+    draw();
+    assert_eq!(shown.get(), 2, "the strip is the corner's whole height, not just its last pixel");
+    save(&draw(), &output.replace(".png", "-chat.png"), width, height)?;
+
     println!(
-        "PASS: the Apps button opens the launcher from the desktop and closes it again; from Files, Notifications, Recipes and Settings it goes to the desktop, puts the Lens away and the launcher is drawn"
+        "PASS: the Apps button opens the launcher from the desktop and closes it again; from Files, Notifications, Recipes and Settings it goes to the desktop, puts the Lens away and the launcher is drawn; Chat opens the Lens on the desktop from Files, Settings and Recipes; Show desktop is the bottom-right corner"
     );
     Ok(())
 }

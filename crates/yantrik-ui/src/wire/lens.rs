@@ -415,6 +415,14 @@ fn wire_open_close(ui: &App, ctx: &AppContext) {
     ui.on_open_lens(move || {
         tracing::debug!("Lens opened");
         if let Some(ui) = ui_weak_open.upgrade() {
+            // The chat is part of the shell's own window, behind any app in front of it: from
+            // the Editor, the taskbar's Chat button opened a Lens nobody could see (#241, the
+            // same as the Apps button in #219). Bring the shell forward when it opens.
+            if ui.get_lens_open() {
+                if let Err(why) = crate::windows::raise_shell() {
+                    tracing::warn!(%why, "The chat opened, but the shell could not be brought in front of the window over it");
+                }
+            }
             // Restore chat mode if there are existing messages
             let messages = ui.get_messages();
             let msg_model = messages

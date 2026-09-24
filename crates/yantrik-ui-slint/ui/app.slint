@@ -1220,6 +1220,8 @@ export component App inherits Window {
     callback lens-submit(string);
     callback lens-result-selected(string);
     callback open-lens();
+    // Every app window away and the desktop shown; pressed again, the same windows back (#241).
+    callback show-desktop();
     callback close-lens();
     callback whisper-card-dismissed(string);
     callback whisper-card-action(string);
@@ -2881,7 +2883,23 @@ export component App inherits Window {
                     root.app-grid-open = !root.app-grid-open;
                 }
                 activate-window(title) => { root.switch-window(title); }
-                open-companion => { root.lens-open = !root.lens-open; root.open-lens(); }
+                // The chat, from anywhere. The Lens is drawn on the desktop screen, so from any
+                // other screen this used to open nothing a person could see; it goes to the
+                // desktop first, as Apps does (#219, #241). The shell's handler for the Lens
+                // opening brings the window forward over whatever app is in front.
+                chat-with: root.active-harness-name;
+                open-companion => {
+                    if (!root.lens-open) {
+                        if (root.current-screen != 1) {
+                            root.current-screen = 1;
+                            root.navigate(1);
+                        }
+                        root.app-grid-open = false;
+                    }
+                    root.lens-open = !root.lens-open;
+                    root.open-lens();
+                }
+                show-desktop => { root.show-desktop(); }
             }
 
             // The glow hint that used to sit here belonged to the auto-hide dock: a thin line

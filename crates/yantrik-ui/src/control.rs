@@ -701,6 +701,7 @@ pub fn publish(
     let pin_catalogue = ctx.installed_apps.clone();
     let read_ui = ui_for.clone();
     let panel_ui = ui_for.clone();
+    let desk_ui = ui_for.clone();
     let lock_ui = ui_for;
 
     let surface = ControlSurface::new("shell")
@@ -1109,6 +1110,19 @@ pub fn publish(
                     "watch": "describe the shell and read harnesses[] — the row says `starting` \
                               until the harness attaches, then `attached`; `use_harness` after that",
                 }))
+            },
+        )
+        .action(
+            // The taskbar's corner button and Super+D, for a caller that is not at the screen: the
+            // same press, with the same memory of what it put away (#241).
+            Action::new(
+                "show_desktop",
+                "Put every app window away and show the desktop; asked again with no window opened or closed in between, bring the same windows back",
+            )
+            .risk("safe"),
+            move |_args| {
+                let ui = desk_ui()?;
+                Ok(crate::wire::show_desktop::press(&ui))
             },
         )
         .action(

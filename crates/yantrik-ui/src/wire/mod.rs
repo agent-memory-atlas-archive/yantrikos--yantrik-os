@@ -48,6 +48,8 @@ pub mod location;
 pub mod pins;
 mod morning_brief;
 mod window_switcher;
+/// The taskbar's corner button, Super+D and `show_desktop`: every window away, then back (#241).
+pub mod show_desktop;
 pub mod entity_bridge;
 pub mod app_framework;
 pub mod cross_app;
@@ -75,6 +77,7 @@ pub fn wire_all(ui: &App, ctx: &AppContext) {
     power::wire(ui, ctx);
     app_grid::wire(ui, ctx);
     window_switcher::wire(ui, ctx);
+    show_desktop::wire(ui);
     voice_mode::wire(ui, ctx);
     settings::wire(ui, ctx);
     system_poll::wire(ui, ctx);
