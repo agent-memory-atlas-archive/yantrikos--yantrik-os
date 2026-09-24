@@ -475,6 +475,12 @@ pub enum NotificationVerdict {
 /// The rule for what a proactive companion thought may become. One pure function — see the
 /// comment above for why it exists and what it refuses.
 pub fn judge_proactive(text: &str) -> NotificationVerdict {
+    // Before anything else: a placeholder standing in for "nothing" is not a thought. The model
+    // was told to say nothing and wrote the word for nothing (#88 — "[empty]" was posted to the
+    // notification centre, with no body, three times).
+    if is_contentless(text) {
+        return NotificationVerdict::Refuse("a placeholder that says nothing");
+    }
     // Machinery first: a tool's own error wearing a sentence.
     if let Some(why) = looks_like_tool_error(text) {
         return NotificationVerdict::Refuse(why);
@@ -558,6 +564,30 @@ fn is_empty_finding(text: &str) -> bool {
         .trim_start_matches(['*', '_', '`', '>', '"', '\'', ' '])
         .to_lowercase();
     EMPTY_FINDING.iter().any(|opening| start.starts_with(opening))
+}
+
+/// Whole-message placeholders a model writes when it was told to say nothing (#88).
+///
+/// Observed on the VM, filed on 21 September 2026: notifications 7, 28 and 41 carried the titles
+/// "[empty]", "[empty]" and "(empty)" with an empty body. Matched against the WHOLE message —
+/// unlike the opening rules above — so a real sentence that happens to contain one of these words
+/// ("the inbox was empty") is not caught, only a message that is nothing but the placeholder.
+const CONTENTLESS: &[&str] = &[
+    "", "[empty]", "(empty)", "empty", "[]", "()", "[none]", "(none)", "none", "null",
+    "[nothing]", "(nothing)", "nothing", "[blank]", "(blank)", "blank", "no content",
+    "[no content]", "(no content)", "n/a", "na", "-", "—",
+];
+
+/// Is the whole message a placeholder standing in for "nothing"?
+fn is_contentless(text: &str) -> bool {
+    let whole = text
+        .trim()
+        .trim_matches(['*', '_', '`', '>', '"', '\'', ' '])
+        .trim_end_matches(['.', '!', '…'])
+        .trim()
+        .to_lowercase()
+        .replace('\u{2019}', "'");
+    CONTENTLESS.contains(&whole.as_str())
 }
 
 /// Words and phrases that mark a thought as something a person can act on: a reminder, a finding
@@ -829,6 +859,31 @@ mod tests {
             engine.check(&queue, &conn).is_none(),
             "a turn that ends in a raw tool call must file nothing"
         );
+    }
+
+    #[test]
+    fn a_placeholder_that_says_nothing_is_never_posted() {
+        use NotificationVerdict::*;
+
+        // Notifications 7, 28 and 41 on the VM, verbatim: titles "[empty]", "[empty]" and
+        // "(empty)" with no body (#88). The instruction had been "say nothing if nothing stands
+        // out", and the model wrote the word for nothing. That is not a thought, and this is its
+        // own rule — not an entry in the tool-error list, which is about machinery talking.
+        for placeholder in ["[empty]", "(empty)", "", "   ", "[none]", "None.", "*[empty]*", "\"(empty)\"", "n/a", "-"] {
+            assert_eq!(
+                judge_proactive(placeholder),
+                Refuse("a placeholder that says nothing"),
+                "a message that is nothing but a placeholder must not be said: {placeholder:?}"
+            );
+        }
+
+        // The rule matches the whole message: a real sentence that happens to contain one of
+        // these words is a real thought and is judged on its own merits.
+        assert_eq!(judge_proactive("The room was empty when I checked."), LensOnly);
+        assert!(matches!(
+            judge_proactive("The backup failed — the disk is almost full."),
+            Notify(_)
+        ));
     }
 
     #[test]
