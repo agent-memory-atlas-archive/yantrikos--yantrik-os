@@ -24,6 +24,11 @@ pub const KEEP: usize = 50;
 /// How many of the process's own most recent log lines a record carries.
 pub const LOG_TAIL: usize = 40;
 
+/// How many bytes of backtrace text a record carries. A frame runs to about a hundred and fifty
+/// bytes, so this holds close to a hundred frames — deeper than any stack this OS grows — and
+/// the record stays a small file, well inside the intake's body limit.
+pub const BACKTRACE_MAX: usize = 16 * 1024;
+
 /// Where records live: `$XDG_DATA_HOME/yantrik/problems`, or `~/.local/share/yantrik/problems`.
 pub fn dir() -> PathBuf {
     let data = std::env::var_os("XDG_DATA_HOME")
@@ -50,6 +55,8 @@ pub struct Problem {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// The stack at a panic, scrubbed and cut to [`BACKTRACE_MAX`]. Absent when the platform
+    /// cannot capture one, and on `crash` and `failure` records, which have no panic to walk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backtrace: Option<String>,
     pub log_tail: Vec<String>,
@@ -221,6 +228,20 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Cut backtrace text down to at most [`BACKTRACE_MAX`] bytes, on a character boundary, with
+/// the cut itself written into the text so nobody takes the last frame shown for the deepest.
+fn cap_backtrace(text: &str) -> String {
+    const CUT: &str = "\n[backtrace truncated]";
+    if text.len() <= BACKTRACE_MAX {
+        return text.to_string();
+    }
+    let mut end = BACKTRACE_MAX - CUT.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{CUT}", &text[..end])
+}
+
 /// Build a record with every text field scrubbed and the machine described.
 pub fn problem(
     kind: &str,
@@ -236,7 +257,9 @@ pub fn problem(
         git: git_of_build(),
         message: scrub(message),
         location: location.map(scrub),
-        backtrace: backtrace.map(scrub),
+        // Capped after scrubbing, so what is stored is what fits: scrubbing can make a line
+        // longer (a short username becomes `<user>`), and the bound must hold on the record.
+        backtrace: backtrace.map(|b| cap_backtrace(&scrub(b))),
         log_tail: recent_log().iter().map(|l| scrub(l)).collect(),
         machine: machine(),
         when: now(),
@@ -329,7 +352,12 @@ pub fn install_panic_hook(program: &str) {
             "panic with a non-string payload".to_string()
         };
         let location = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
-        let backtrace = std::backtrace::Backtrace::capture();
+        // Force the capture, whatever the environment says. `Backtrace::capture()` only records
+        // when RUST_BACKTRACE is set, and the session does not set it: the renderer panic of
+        // #247 left a record with a location, an empty log tail and no stack, so the element
+        // being drawn was never known. Capturing walks this process's own frames and resolves
+        // symbols in-process; it waits on nothing outside, and `problem()` caps the text.
+        let backtrace = std::backtrace::Backtrace::force_capture();
         let backtrace = match backtrace.status() {
             std::backtrace::BacktraceStatus::Captured => Some(backtrace.to_string()),
             _ => None,
@@ -465,5 +493,29 @@ mod tests {
         assert_eq!(records[0].1.message, "deliberate");
         assert!(records[0].1.location.as_deref().unwrap_or("").contains("problems.rs"));
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_record_carries_a_forced_backtrace_and_never_more_than_the_cap() {
+        // What the hook does at a real panic, minus the panic: RUST_BACKTRACE is not set here
+        // either, so this is exactly the case where `capture()` used to come back disabled and
+        // the record went out with no stack at all (#247). Forced, the field must be there.
+        let captured = std::backtrace::Backtrace::force_capture().to_string();
+        let record = problem("panic", "yantrik-test", "x", None, Some(&captured));
+        let back = record.backtrace.expect("the record carries the captured backtrace");
+        assert!(back.len() <= BACKTRACE_MAX, "{} bytes", back.len());
+
+        // A stack far deeper than the cap comes back cut to it, on a whole character, and the
+        // cut says so, so the last frame shown is not mistaken for the deepest.
+        let huge = "  17: some::very::deep::frame\n".repeat(BACKTRACE_MAX);
+        let record = problem("panic", "yantrik-test", "x", None, Some(&huge));
+        let back = record.backtrace.expect("cut, not dropped");
+        assert!(back.len() <= BACKTRACE_MAX, "{} bytes", back.len());
+        assert!(back.ends_with("[backtrace truncated]"), "…{}", &back[back.len().min(80)..]);
+
+        // A short stack survives whole, apart from the scrubbing every text field gets.
+        let short = "   0: some::frame\n   1: another::frame";
+        let record = problem("panic", "yantrik-test", "x", None, Some(short));
+        assert_eq!(record.backtrace, Some(scrub(short)));
     }
 }
