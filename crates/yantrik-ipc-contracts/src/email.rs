@@ -215,6 +215,12 @@ pub fn without_secrets(text: &str, secrets: &[&str]) -> String {
 /// was listed from. Callers that show a folder's own listing pass that folder; the default is
 /// INBOX because that is all earlier callers ever asked about, and their calls must keep
 /// working unchanged (#275).
+///
+/// Every per-message method takes the parameter, not only the two #275 added: star, move,
+/// delete and search all acted on INBOX whatever folder was on screen (#288). The default is
+/// kept for old callers of the two that cannot be undone — `delete_message` and `move_message`
+/// — and the service logs it whenever one leans on it, so a wrong-mailbox delete leaves a
+/// trace.
 pub fn folder_or_inbox(params: &serde_json::Value) -> &str {
     params["folder"]
         .as_str()
@@ -342,10 +348,18 @@ pub trait EmailService: Send + Sync {
     fn send_message(&self, account_id: &str, compose: ComposeRequest) -> Result<(), ServiceError>;
     /// Flag one message in `folder`, for the same reason [`EmailService::get_message`] takes it.
     fn mark_read(&self, account_id: &str, folder: &str, message_id: &str, read: bool) -> Result<(), ServiceError>;
-    fn mark_starred(&self, account_id: &str, message_id: &str, starred: bool) -> Result<(), ServiceError>;
-    fn move_message(&self, account_id: &str, message_id: &str, target_folder: &str) -> Result<(), ServiceError>;
-    fn delete_message(&self, account_id: &str, message_id: &str) -> Result<(), ServiceError>;
-    fn search(&self, account_id: &str, query: &str) -> Result<Vec<EmailSummary>, ServiceError>;
+    /// Star one message in `folder`, for the same reason [`EmailService::get_message`] takes
+    /// it: starring ran in INBOX whatever folder was on screen, so it moved the star on a
+    /// different message than the one that was clicked (#288).
+    fn mark_starred(&self, account_id: &str, folder: &str, message_id: &str, starred: bool) -> Result<(), ServiceError>;
+    /// Move one message out of `folder`, for the same reason — and destructively: a move of a
+    /// row listed from Spam moved whichever message wore this UID in INBOX (#288).
+    fn move_message(&self, account_id: &str, folder: &str, message_id: &str, target_folder: &str) -> Result<(), ServiceError>;
+    /// Delete one message from `folder`, for [`EmailService::move_message`]'s reason (#288).
+    fn delete_message(&self, account_id: &str, folder: &str, message_id: &str) -> Result<(), ServiceError>;
+    /// Search `folder` — the one on the caller's screen. Searching ran in INBOX whichever
+    /// folder was open (#288).
+    fn search(&self, account_id: &str, folder: &str, query: &str) -> Result<Vec<EmailSummary>, ServiceError>;
 }
 
 /// Shared error type for all services.
