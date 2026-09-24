@@ -3237,11 +3237,11 @@ impl CompanionService {
 
     /// Build a state snapshot for instinct evaluation.
     pub fn build_state(&self) -> CompanionState {
-        let memory_count = self
-            .db
-            .stats(None)
-            .map(|s| s.active_memories)
-            .unwrap_or(0);
+        // The person's memories, not the machine's telemetry (#31): the count
+        // the Memory screen, `describe shell` and the instincts all read used to
+        // be every active row in the store, and on the live machine 1 339 of
+        // 2 709 rows were one identical "Connected to network" line.
+        let memory_count = personal_memory_count(&self.db.conn());
 
         // Time fields
         let now = now_ts();
@@ -4519,6 +4519,34 @@ fn count_recent_interactions(conn: &rusqlite::Connection, since_ts: f64) -> u32 
     }
 }
 
+/// Count the person's memories: active rows that are not system telemetry (#31).
+///
+/// The store holds both what the companion learned about the person and what the
+/// machine observed about itself — network announcements, process lifecycle,
+/// hourly snapshots — written with `source = 'system'` and a `system/*` domain.
+/// The Memory screen's count, `describe shell`'s "memories", and the instincts'
+/// "does the companion know enough yet" gates all read this figure, and counting
+/// telemetry made it a measure of how chatty the network was: 1 339 of 2 709
+/// rows were one identical "Connected to network 'Wired connection 1'" line.
+/// "Active" matches the engine's own `stats().active_memories` exactly, so this
+/// is that count minus the telemetry, not a different idea of active. A count
+/// that cannot be read is reported as 0, and says so in the log.
+fn personal_memory_count(conn: &rusqlite::Connection) -> i64 {
+    match conn.query_row(
+        "SELECT COUNT(*) FROM memories \
+         WHERE consolidation_status = 'active' \
+         AND COALESCE(source, '') <> 'system'",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::error!(error = %e, "personal memory count could not be read; showing 0");
+            0
+        }
+    }
+}
+
 /// Query recent maintenance log entries (last 24h, unreported first).
 fn query_maintenance_log(conn: &rusqlite::Connection) -> Vec<serde_json::Value> {
     let mut stmt = match conn.prepare(
@@ -5299,6 +5327,79 @@ mod recent_interaction_count_tests {
             ("e3", "milestone", now - 60.0),
         ]);
         assert_eq!(count_recent_interactions(&conn, now - 3600.0), 1);
+    }
+}
+
+#[cfg(test)]
+mod personal_memory_count_tests {
+    //! The Memory screen's "memories" counted every active row in the store, and
+    //! the store was mostly the machine talking to itself: 1 339 of 2 709 rows
+    //! were one identical "Connected to network 'Wired connection 1'" line, and
+    //! nothing was about the person (#31). The count is the person's side of the
+    //! store. Pure in-memory SQLite: no model, no embedder, no files.
+
+    use super::*;
+
+    /// A `memories` table with the given (rid, consolidation_status, source) rows.
+    /// Only the columns the count reads are created; the engine's real schema has
+    /// more, but this is the whole of what `personal_memory_count` looks at.
+    fn store_with_memories(rows: &[(&str, &str, Option<&str>)]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                rid TEXT PRIMARY KEY,
+                consolidation_status TEXT,
+                source TEXT
+            );",
+        )
+        .unwrap();
+        for (rid, status, source) in rows {
+            conn.execute(
+                "INSERT INTO memories (rid, consolidation_status, source) VALUES (?1, ?2, ?3)",
+                rusqlite::params![rid, status, source],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn system_telemetry_is_not_counted_as_a_memory() {
+        // Two things the companion knows about the person, and one connection the
+        // network announced 136 times.
+        let conn = store_with_memories(&[
+            ("p1", "active", Some("user")),
+            ("p2", "active", Some("companion")),
+        ]);
+        for i in 0..136 {
+            conn.execute(
+                "INSERT INTO memories (rid, consolidation_status, source) \
+                 VALUES (?1, 'active', 'system')",
+                rusqlite::params![format!("s{i}")],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            personal_memory_count(&conn),
+            2,
+            "136 identical network rows must not count as memories"
+        );
+    }
+
+    #[test]
+    fn only_the_persons_active_rows_count() {
+        let conn = store_with_memories(&[
+            ("a1", "active", Some("user")),
+            ("a2", "active", Some("self")),
+            // Not active, so not counted whatever their source.
+            ("t1", "tombstoned", Some("user")),
+            ("c1", "consolidated", Some("companion")),
+            // Telemetry, active, still not the person's.
+            ("s1", "active", Some("system")),
+            // A row with no source is the person's until proven otherwise.
+            ("n1", "active", None),
+        ]);
+        assert_eq!(personal_memory_count(&conn), 3, "a1, a2 and n1");
     }
 }
 
