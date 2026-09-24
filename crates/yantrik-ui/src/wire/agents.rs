@@ -721,26 +721,6 @@ fn latest_request<'a>(turns: &'a [Turn], first: &'a str) -> &'a str {
     turns.iter().rev().map(|t| t.prompt.trim()).find(|p| !p.is_empty()).unwrap_or(first)
 }
 
-#[cfg(test)]
-mod latest_request_tests {
-    use super::*;
-
-    fn asked(n: u64, prompt: &str) -> Turn {
-        Turn { n, prompt: prompt.into(), started: n, ended: Some(n + 1), ok: Some(true), items: vec![], events: false, trail_seq: 0 }
-    }
-
-    #[test]
-    fn a_row_is_titled_by_what_it_was_last_asked() {
-        let first = "Release check: reply with exactly one word, READY.";
-        let turns = vec![asked(1, first), asked(2, "create a small town model with people, homes, roads")];
-        assert_eq!(latest_request(&turns, first), "create a small town model with people, homes, roads");
-        // A turn with no prompt (one the shell opened itself) does not blank the title.
-        let turns = vec![asked(1, "tidy the photos folder"), asked(2, "   ")];
-        assert_eq!(latest_request(&turns, first), "tidy the photos folder");
-        assert_eq!(latest_request(&[], first), first, "no turns yet: the title it was started with");
-    }
-}
-
 /// "2m" while it works, "21:02" once it has stopped.
 fn since(a: &Agent) -> String {
     if a.state.live() {
@@ -1916,5 +1896,25 @@ mod tests {
         assert_eq!(thousands(412), "412");
         assert_eq!(thousands(1_500), "1.5k");
         assert_eq!(thousands(41_000), "41k");
+    }
+}
+
+#[cfg(test)]
+mod latest_request_tests {
+    use super::*;
+
+    fn asked(n: u64, prompt: &str) -> Turn {
+        Turn { n, prompt: prompt.into(), started: n, ended: Some(n + 1), ok: Some(true), items: vec![], events: false, trail_seq: 0 }
+    }
+
+    #[test]
+    fn a_row_is_titled_by_what_it_was_last_asked() {
+        let first = "Release check: reply with exactly one word, READY.";
+        let turns = vec![asked(1, first), asked(2, "create a small town model with people, homes, roads")];
+        assert_eq!(latest_request(&turns, first), "create a small town model with people, homes, roads");
+        // A turn with no prompt (one the shell opened itself) does not blank the title.
+        let turns = vec![asked(1, "tidy the photos folder"), asked(2, "   ")];
+        assert_eq!(latest_request(&turns, first), "tidy the photos folder");
+        assert_eq!(latest_request(&[], first), first, "no turns yet: the title it was started with");
     }
 }
