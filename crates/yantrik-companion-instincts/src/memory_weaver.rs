@@ -112,6 +112,10 @@ impl Instinct for MemoryWeaverInstinct {
             let has_conflicts = state.open_conflicts_count > 0;
             let has_patterns = !state.active_patterns.is_empty();
 
+            // The prompt names the person it weaves for, from the config — the string this
+            // arm used to carry had lost the placeholder, so every weaving urge on the
+            // desktop read "Surface one interesting memory connection for ." (#30).
+            let user = &state.config_user_name;
                         let execute_msg = match state.model_tier {
                 ModelTier::Large => format!(
                     "EXECUTE Review my memory graph ({} memories{}{}). \
@@ -134,7 +138,7 @@ impl Instinct for MemoryWeaverInstinct {
                     "EXECUTE SKIP",
                 ),
                 _ => format!(
-                    "EXECUTE Task: Surface one interesting memory connection for .\n\
+                    "EXECUTE Task: Surface one interesting memory connection for {user}.\n\
              Tool: Use recall to find one relevant past memory.\n\
              Rule: Use only details explicitly stated by the user or returned by recall. Do not invent memories or connections.\n\
              Fallback: \"Nothing to surface right now.\"\n\
@@ -187,5 +191,27 @@ mod tests {
         assert_eq!(urges.len(), 1);
         assert_eq!(urges[0].cooldown_key, "weaver:digest");
         assert_eq!(urges[0].context["mode"], "weaving");
+    }
+
+    #[test]
+    fn the_weaving_prompt_names_the_configured_person() {
+        // #30: the desktop logged "Surface one interesting memory connection for ." all
+        // day — an empty name — because the medium-tier weaving prompt dropped the
+        // placeholder every other instinct carries. The name comes from config, so the
+        // prompt must say it.
+        let instinct = MemoryWeaverInstinct::new(30.0, 5);
+        let mut state = state_with_memories(Some(2.0 * 86400.0));
+        state.config_user_name = "Pranab".into();
+        let urges = instinct.evaluate(&state);
+        assert_eq!(urges.len(), 1);
+        let prompt = &urges[0].reason;
+        assert!(
+            prompt.contains("memory connection for Pranab."),
+            "the weaving prompt carries the configured name, got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("connection for ."),
+            "the empty-name form must not come back, got: {prompt}"
+        );
     }
 }
