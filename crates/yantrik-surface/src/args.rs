@@ -280,8 +280,9 @@ pub fn with_defaults<'a>(spec: &Action, args: &'a Value) -> Cow<'a, Value> {
 }
 
 /// What is wrong with the way `spec` declares itself, as sentences for its author: a type this
-/// dispatch does not know, an enum on something that is not a string, a default of the wrong
-/// type, a name declared twice, a grade off the ladder. Empty for a sound declaration.
+/// dispatch does not know, an enum on something that is not a string, an enum with no values
+/// listed, a default of the wrong type, a name declared twice, a grade off the ladder. Empty
+/// for a sound declaration.
 ///
 /// Nothing refuses on this — a call to a badly declared action is refused by the dispatch on its
 /// own terms, closed — but an author's test can assert it is empty, and a surface logs it once
@@ -309,6 +310,13 @@ pub fn declaration_problems(spec: &Action) -> Vec<String> {
             problems.push(format!(
                 "`{name}` argument `{}` lists values but is declared `{}`; only a string can be one of a list",
                 p.name, p.kind
+            ));
+        }
+        if p.enumerated && p.values.is_empty() {
+            // The sentence the Python SDK raises on, so an author meets the same words in both.
+            problems.push(format!(
+                "`{name}` argument `{}` lists no values, so nothing could be given",
+                p.name
             ));
         }
         match (p.kind, p.items) {
@@ -696,5 +704,17 @@ mod tests {
         let mut enum_on_a_number = Param::integer("n");
         enum_on_a_number.values = vec!["1".into()];
         assert!(!declaration_problems(&Action::new("x", "x").arg(enum_on_a_number)).is_empty());
+    }
+
+    /// `Param::one_of(name, &[])` publishes as a plain string, which quietly lets any string
+    /// through; the Python SDK refuses the same declaration outright, so the Rust side names
+    /// it for its author with the Python sentence.
+    #[test]
+    fn an_enum_with_no_values_is_named_for_its_author() {
+        let problems = declaration_problems(&Action::new("export", "Export").arg(Param::one_of("format", &[])));
+        assert_eq!(problems, ["`export` argument `format` lists no values, so nothing could be given"]);
+        // A plain string is not an empty enum, and a listed enum is not one either.
+        assert!(declaration_problems(&Action::new("export", "Export").arg(Param::text("format"))).is_empty());
+        assert!(declaration_problems(&Action::new("export", "Export").arg(Param::one_of("format", &["pdf"]))).is_empty());
     }
 }

@@ -152,7 +152,7 @@ fn one_picture(actions: &[(Action, Handler)], engine: &Engine, prompt: &str) -> 
 // ── what a caller is shown ────────────────────────────────────────────────
 
 #[test]
-fn the_surface_publishes_eight_actions_and_says_what_each_one_costs() {
+fn the_surface_publishes_nine_actions_and_says_what_each_one_costs() {
     let (dir, found) = world("surface");
     let engine = an_engine(r#"{"backend":{"kind":"fake"}}"#, &found);
     let actions = surface(engine.clone());
@@ -160,7 +160,7 @@ fn the_surface_publishes_eight_actions_and_says_what_each_one_costs() {
     let names: Vec<&str> = actions.iter().map(|(spec, _)| spec.name.as_str()).collect();
     assert_eq!(
         names,
-        ["generate", "variations", "upscale", "open", "delete", "set_backend", "cancel", "refresh"],
+        ["generate", "variations", "upscale", "open", "delete", "set_backend", "cancel", "cancel_all", "refresh"],
         "the surface a mind is offered changed shape"
     );
 
@@ -168,7 +168,7 @@ fn the_surface_publishes_eight_actions_and_says_what_each_one_costs() {
     // `generate` and `variations` are published at the grade a local backend deserves and move to
     // `sensitive` the moment a hosted one is configured — at startup and on every `set_backend` —
     // which is what `control::regrade` is for.
-    for name in ["generate", "variations", "upscale", "open", "delete", "cancel"] {
+    for name in ["generate", "variations", "upscale", "open", "delete", "cancel", "cancel_all"] {
         assert_eq!(spec_of(&actions, name).permission, "standard", "`{name}`");
     }
     assert_eq!(spec_of(&actions, "set_backend").permission, "sensitive");
@@ -179,20 +179,22 @@ fn the_surface_publishes_eight_actions_and_says_what_each_one_costs() {
     for name in ["generate", "variations", "upscale"] {
         assert!(spec_of(&actions, name).deferred, "`{name}` settles later and does not say so");
     }
-    for name in ["open", "delete", "set_backend", "cancel", "refresh"] {
+    for name in ["open", "delete", "set_backend", "cancel", "cancel_all", "refresh"] {
         assert!(!spec_of(&actions, name).deferred, "`{name}` is finished when it returns");
     }
 
-    // One required argument on the whole surface besides the two that name a file and the one that
-    // names a backend. Everything else has a default worth having, and an action that demands seven
-    // arguments is an action a mind gets wrong often enough to matter.
+    // One required argument on the whole surface besides the two that name a file, the one that
+    // names a backend and the one that names a job. Everything else has a default worth having,
+    // and an action that demands seven arguments is an action a mind gets wrong often enough to
+    // matter.
     assert_eq!(required_of(&actions, "generate"), ["prompt"]);
     assert_eq!(required_of(&actions, "variations"), ["of"]);
     assert_eq!(required_of(&actions, "upscale"), ["path"]);
     assert_eq!(required_of(&actions, "open"), ["path"]);
     assert_eq!(required_of(&actions, "delete"), ["path"]);
     assert_eq!(required_of(&actions, "set_backend"), ["kind"]);
-    assert!(required_of(&actions, "cancel").is_empty());
+    assert_eq!(required_of(&actions, "cancel"), ["job"]);
+    assert!(required_of(&actions, "cancel_all").is_empty());
     assert!(required_of(&actions, "refresh").is_empty());
 
     // The purposes. Each of these is a fact the caller has to be told, not decoration: what is sent
@@ -214,12 +216,12 @@ fn the_surface_publishes_eight_actions_and_says_what_each_one_costs() {
     // And the JSON that carries all of it, rendered by the function the socket answers with.
     let rendered = described(&engine, &actions);
     assert_eq!(rendered["app"], json!("studio"));
-    assert_eq!(rendered["actions"].as_array().unwrap().len(), 8);
+    assert_eq!(rendered["actions"].as_array().unwrap().len(), 9);
     assert_eq!(rendered["actions"][0]["name"], json!("generate"));
     assert_eq!(rendered["actions"][0]["permission"], json!("standard"));
     assert_eq!(rendered["actions"][0]["settles"], json!("later"));
     assert_eq!(rendered["actions"][0]["parameters"]["required"], json!(["prompt"]));
-    assert_eq!(rendered["actions"][7]["settles"], json!("on return"));
+    assert_eq!(rendered["actions"][8]["settles"], json!("on return"));
     // Every argument carries a sentence. A schema handed to a model with an empty description is a
     // schema the model guesses at, and the guess is what the person gets.
     for action in rendered["actions"].as_array().unwrap() {
@@ -607,10 +609,16 @@ fn a_call_that_cannot_work_is_refused_in_words_a_caller_can_act_on() {
 
     // Cancelling an empty queue is a refusal, not a success: a mind that reports "cancelled" when
     // nothing was running has been told something false.
-    let problem = call(&actions, "cancel", json!({})).unwrap_err();
+    let problem = call(&actions, "cancel_all", json!({})).unwrap_err();
     assert_eq!(problem, "nothing was queued or running");
     let problem = call(&actions, "cancel", json!({ "job": 999 })).unwrap_err();
     assert!(problem.contains("there is no job 999"), "{problem}");
+    // And an id nobody was ever issued is refused as that, with the action that really does stop
+    // everything named: `-1` once read as 0 through a float cast and cancelled the whole queue.
+    for not_a_job in [json!({}), json!({ "job": -1 }), json!({ "job": 0 }), json!({ "job": 2.5 }), json!({ "job": "two" })] {
+        let problem = call(&actions, "cancel", not_a_job.clone()).unwrap_err();
+        assert!(problem.contains("cancel_all"), "{not_a_job}: {problem}");
+    }
 
     // A backend this app does not have, and a hosted one with no model named.
     let problem = call(&actions, "set_backend", json!({ "kind": "midjourney" })).unwrap_err();
@@ -1243,6 +1251,17 @@ fn cancelling_tells_the_server_to_stop_rendering() {
     assert_eq!(running[0]["progress"], json!("0 of 2"));
     assert!(engine.snapshot().summary().contains("1 picture being made"), "{}", engine.snapshot().summary());
 
+    // A bad id must not reach the cancel-everything path: `-1` used to read as 0 through a float
+    // cast, and 0 meant "no job was named". The running job is still running after each refusal.
+    for not_a_job in [json!({}), json!({ "job": -1 }), json!({ "job": 0 }), json!({ "job": "two" })] {
+        let problem = call(&actions, "cancel", not_a_job.clone()).unwrap_err();
+        assert!(problem.contains("cancel_all"), "{not_a_job}: {problem}");
+        assert!(
+            !engine.snapshot().state()["queue"]["running"].as_array().unwrap().is_empty(),
+            "{not_a_job} stopped a job it did not name"
+        );
+    }
+
     let answer = call(&actions, "cancel", json!({ "job": job })).unwrap();
     assert_eq!(answer["cancelled"], json!(format!("asked job {job} to stop")));
     // "cancelling" rather than gone: the worker is still in the middle of something, and a queue
@@ -1279,6 +1298,45 @@ fn cancelling_tells_the_server_to_stop_rendering() {
     // promises.
     assert_eq!(engine.snapshot().gallery.len(), 0);
     assert!(!found.gallery.exists() || gallery::listing(&found.gallery, 12, false).is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// What the window's Cancel button asks for, published: every job in the queue stops, including
+/// the ones that had not started. An empty queue is a refusal, as it is for every other failure —
+/// tested above, where the rest of the surface's refusals are.
+#[test]
+fn cancel_all_stops_every_job_including_the_ones_not_started() {
+    let server = Server::start(Manners { never_finish: true, ..Manners::default() });
+    let (dir, found) = world("cancel-all");
+    let engine = an_engine(&server.config("comfyui"), &found);
+    let actions = surface(engine.clone());
+
+    call(&actions, "generate", json!({ "prompt": "one long render", "width": 64, "height": 64 })).unwrap();
+    call(&actions, "generate", json!({ "prompt": "another long render", "width": 64, "height": 64 })).unwrap();
+    let mut waited = 0;
+    loop {
+        let state = engine.snapshot().state();
+        let listed = state["queue"]["running"].as_array().unwrap().len()
+            + state["queue"]["pending"].as_array().unwrap().len();
+        if listed == 2 {
+            break;
+        }
+        assert!(waited < 200, "the two jobs never reached the queue");
+        waited += 1;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let answer = call(&actions, "cancel_all", json!({})).unwrap();
+    assert_eq!(answer["cancelled"], json!("asked 2 jobs to stop"));
+    assert!(settled(&engine).contains("Cancelled"), "{}", engine.snapshot().summary());
+    // The server is told about the render that was running; the one still pending never began.
+    let mut waited = 0;
+    while server.with(|recorded| recorded.interrupts) == 0 {
+        assert!(waited < 200, "the server was never told to stop");
+        waited += 1;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(engine.snapshot().gallery.len(), 0);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1672,7 +1730,7 @@ fn a_whole_session_runs_from_one_sentence_to_a_filed_picture() {
     // 1. What is this app?
     let rendered = described(&engine, &actions);
     assert!(rendered["summary"].as_str().unwrap().contains("nothing in the gallery yet"));
-    assert_eq!(rendered["actions"].as_array().unwrap().len(), 8);
+    assert_eq!(rendered["actions"].as_array().unwrap().len(), 9);
 
     // 2. Make two pictures from one sentence.
     call(&actions, "generate", json!({ "prompt": "a lighthouse in fog", "seed": 99, "count": 2, "width": 512, "height": 384 }))

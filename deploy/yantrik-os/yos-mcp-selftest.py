@@ -125,9 +125,16 @@ def declared(target, action):
         if head:
             seen = head.group(1)
             continue
-        arg = re.match(r"^ {8,}(\w+)\??:\s*(\S+)", line)
+        arg = re.match(r"^ {8,}(\w+)\??:\s*(\S+)\s*(.*)", line)
         if arg and seen == action:
-            types[arg.group(1)] = arg.group(2)
+            kind = arg.group(2)
+            if kind == "one" and arg.group(3).startswith("of "):
+                # An enum renders as `mode: one of a | b`, but the real CLI reads its type off
+                # the JSON describe, where an enum is published as "string" — so the fake has
+                # to read one as a string too, or the bridge's predictions get checked against
+                # a behaviour no real desktop has.
+                kind = "string"
+            types[arg.group(1)] = kind
     return types
 
 def canonical(value):
@@ -163,6 +170,10 @@ revision: c0ffee
   act: delete_event(id)  [sensitive, settles on return]
        Delete an event from the calendar. It is not recoverable.
          id: string - the event's id, as list_events reports it
+  act: repeat_event(id, mode)  [sensitive, settles on return]
+       Set how an event repeats. The rule it had, if any, is replaced.
+         id: string - the event's id, as list_events reports it
+         mode: one of 1 | true | weekly - the repeat rule, as the calendar spells it
 """
 # The shell's own actions, as `describe shell` lists them: opening an app, and an agent's terminal
 # (`agent_run` and `agent_input` sensitive, `agent_job` and `agent_kill` standard, as the shell
@@ -823,6 +834,31 @@ with tempfile.TemporaryDirectory() as d:
           yos_module.read_value("67", "string") == "67"
           and yos_module.read_value("67", "number") == 67
           and yos_module.read_value('"67"', "number") == "67", None)
+
+    # 3c. An enum value that looks like JSON stays the string the app published.
+    #
+    # An enum is published as `{"type": "string", "enum": [...]}`, and the CLI reads that JSON,
+    # so `mode=1` reaches the app as the text "1". The bridge reads the RENDERED describe, where
+    # the same parameter is spelled `mode: one of 1 | true | weekly` — words, not "string" — and
+    # used to hand those words to `read_value`, which parsed "1" as a number and "true" as a
+    # boolean: the card bound a value the app was never sent, and the grant with it.
+    module, state = case(tmp, "coercion-enum", answer="granted")
+    check("the bridge reads an enum parameter as the string the CLI reads it as",
+          module.action_parameters("calendar", "repeat_event") == {"id": "string", "mode": "string"},
+          module.action_parameters("calendar", "repeat_event"))
+    text, is_error = act(module, "calendar", "repeat_event", {"id": "evt-3", "mode": "1"})
+    s = read(state)
+    req = (s.get("requests") or [{}])[0]
+    check("an enum value that looks like a number is bound to the card as text",
+          req.get("args_json") == {"id": "evt-3", "mode": "1"}, req)
+    check("and reaches the app as the same text, so the grant matches",
+          not is_error and (s.get("acted") or [{}])[0].get("args") == {"id": "evt-3", "mode": "1"},
+          (text, s.get("acted")))
+    text, is_error = act(module, "calendar", "repeat_event", {"id": "evt-3", "mode": "true"})
+    s = read(state)
+    check("and one that looks like a boolean stays a string too",
+          not is_error and (s.get("acted") or [{}])[-1].get("args") == {"id": "evt-3", "mode": "true"},
+          (text, s.get("acted")))
 
     # 4. Denied: nothing runs, and the mind is told not to ask again.
     module, state = case(tmp, "denied", answer="denied")

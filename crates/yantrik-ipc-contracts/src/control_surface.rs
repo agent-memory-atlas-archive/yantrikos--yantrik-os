@@ -112,6 +112,11 @@ pub struct Param {
     pub description: String,
     /// The only values a `string` argument may take, published as `enum`. Empty for any string.
     pub values: Vec<String>,
+    /// Whether this argument was declared with [`Param::one_of`], even with no values listed.
+    /// `values` alone cannot say that: an `one_of` with an empty list is indistinguishable from
+    /// a plain string, and only this marker lets the surface tell its author that the list
+    /// leaves nothing to be given, the way the Python SDK refuses one at declaration.
+    pub enumerated: bool,
     /// The type of every item of an `array` argument, published as `items`. `None` otherwise.
     pub items: Option<&'static str>,
     /// What the handler is given when the caller leaves this argument out, published as
@@ -127,6 +132,7 @@ impl Param {
             required: true,
             description: String::new(),
             values: Vec::new(),
+            enumerated: false,
             items: None,
             default: None,
         }
@@ -150,6 +156,7 @@ impl Param {
     /// guesses anyway.
     pub fn one_of(name: &str, values: &[&str]) -> Self {
         let mut p = Self::of(name, "string");
+        p.enumerated = true;
         p.values = values.iter().map(|v| v.to_string()).collect();
         p
     }

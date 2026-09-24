@@ -1094,7 +1094,16 @@ def action_parameters(app, action):
                 break
             arg = re.match(r"^ {8,}([A-Za-z0-9_]+)\??:\s*(.+?)\s*(?:[-—]\s.*)?$", rest)
             if arg and arg.group(1) in found:
-                found[arg.group(1)] = arg.group(2).strip()
+                declared = arg.group(2).strip()
+                if declared.startswith("one of "):
+                    # `yos` renders an enum parameter as `mode: one of a | b`, but what the app
+                    # publishes is `{"type": "string", "enum": [...]}`, and the CLI's own
+                    # `declared_types` reads that JSON and says "string". Saying the same here
+                    # keeps an enum value like "1" the text the CLI will hand the app; the
+                    # rendered words would make `read_value` parse it as JSON instead, and the
+                    # card would bind a number no app ever receives.
+                    declared = "string"
+                found[arg.group(1)] = declared
         return found
     return {}
 
