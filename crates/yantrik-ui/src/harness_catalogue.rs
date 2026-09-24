@@ -876,6 +876,7 @@ setup:
             builtin: false,
             active,
             capabilities: Capabilities { streaming: true, tools: true, memory: false },
+            pid: None,
         }
     }
 
@@ -887,6 +888,7 @@ setup:
             builtin: true,
             active: true,
             capabilities: Capabilities { streaming: true, tools: true, memory: true },
+            pid: None,
         }
     }
 
