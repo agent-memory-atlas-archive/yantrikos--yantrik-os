@@ -1197,6 +1197,12 @@ fn pop_out(ui: &App, state: &Shared, agent: AgentId) {
             return;
         }
     };
+    // A window of its own, not a second desktop. The shell runs under SLINT_FULLSCREEN=1 so that
+    // its own window covers the display, and every window this process creates reads the same
+    // variable: the pop-out came up fullscreen, with no title bar and nothing to close, move or
+    // resize it by (#231). Said here, for this window, rather than by clearing the variable,
+    // which the shell's own window still needs.
+    window.window().set_fullscreen(false);
     let title = window_title(&mind, &title);
     window.set_agent_title(title.as_str().into());
     sync_theme(ui, &window);
@@ -1916,5 +1922,22 @@ mod latest_request_tests {
         let turns = vec![asked(1, "tidy the photos folder"), asked(2, "   ")];
         assert_eq!(latest_request(&turns, first), "tidy the photos folder");
         assert_eq!(latest_request(&[], first), first, "no turns yet: the title it was started with");
+    }
+}
+
+#[cfg(test)]
+mod pop_out_window_tests {
+    /// The pop-out came up fullscreen, with no title bar and nothing to close it by (#231): the
+    /// shell's SLINT_FULLSCREEN reached every window the process made. The pop-out says it is not
+    /// fullscreen, before it is first shown.
+    #[test]
+    fn a_popped_out_agent_opens_as_an_ordinary_window() {
+        let source = include_str!("agents.rs");
+        // Split, so this test's own text is not what the search finds.
+        let start = source.find(concat!("AgentWindow::", "new()")).expect("the pop-out is made here");
+        let rest = &source[start..];
+        let off = rest.find(concat!("set_fullscreen(", "false)")).expect("the pop-out says it is not fullscreen");
+        let shown = rest.find(concat!(".show", "()")).expect("and is shown");
+        assert!(off < shown, "it says so before it is first shown");
     }
 }
