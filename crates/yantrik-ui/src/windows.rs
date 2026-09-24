@@ -1277,4 +1277,125 @@ mod app_name_tests {
         assert_eq!(display_name("libreoffice-writer"), "Libreoffice writer");
         assert_eq!(display_name("chromium"), "Chromium");
     }
+
+    /// The `name = "…"` values inside one `[section]` of a manifest, in order.
+    fn names_in_section(text: &str, header: &str) -> Vec<String> {
+        let mut in_section = false;
+        let mut out = Vec::new();
+        for line in text.lines() {
+            if line.starts_with('[') {
+                in_section = line == header;
+                continue;
+            }
+            if !in_section {
+                continue;
+            }
+            let Some(rest) = line.trim_start().strip_prefix("name") else { continue };
+            let Some(rest) = rest.trim_start().strip_prefix('=') else { continue };
+            let value = rest.trim().trim_start_matches('"');
+            out.push(value.split('"').next().unwrap_or("").to_string());
+        }
+        out
+    }
+
+    /// The packaging scripts ask the tree which apps exist instead of writing a list down.
+    ///
+    /// deploy.sh carried a hand-written list of the apps it copies, its build step carried
+    /// another, and scripts/publish-components.sh carried a third; nothing checked any of
+    /// them against the workspace. Arcade merged, registered in every shell table, answered
+    /// on its control surface — and `./deploy.sh` reported success on a machine without it,
+    /// because no package built it and the copy loop skips a binary that is not there. The
+    /// #45 shape again: the desktop offers to launch something the machine does not have.
+    ///
+    /// All three ask deploy/yantrik-os/app-bins.sh now, which reads the apps/ members of
+    /// Cargo.toml. This is the guard the shell's tables have: it derives the same answer
+    /// from the manifests, runs the reader, and fails when a script stops asking or starts
+    /// naming apps by hand again — because a list nobody checks is a comment.
+    #[test]
+    fn the_packaging_scripts_ask_the_tree_which_apps_they_ship() {
+        let root = repo_root();
+        let deploy_dir = root.join("deploy/yantrik-os");
+        if !deploy_dir.join("shelved-bins.sh").exists() {
+            return; // Packaged source without the deploy tree; nothing to check against.
+        }
+
+        // The apps as the workspace defines them: every member under apps/, named by its
+        // [[bin]] targets, or by its package when it leaves the target to cargo.
+        let workspace =
+            std::fs::read_to_string(root.join("Cargo.toml")).expect("cannot read Cargo.toml");
+        let mut in_members = false;
+        let mut members = Vec::new();
+        for line in workspace.lines() {
+            if line.starts_with("members = [") {
+                in_members = true;
+                continue;
+            }
+            if in_members && line.starts_with(']') {
+                break;
+            }
+            if !in_members {
+                continue;
+            }
+            let name = line.trim().trim_start_matches('"').split('"').next().unwrap_or("");
+            if name.starts_with("apps/") {
+                members.push(name.to_string());
+            }
+        }
+        assert!(
+            !members.is_empty(),
+            "Cargo.toml lists no apps/ members in the shape this test reads"
+        );
+
+        let mut expected = Vec::new();
+        for member in &members {
+            let text = std::fs::read_to_string(root.join(member).join("Cargo.toml"))
+                .unwrap_or_else(|e| panic!("cannot read {member}/Cargo.toml: {e}"));
+            let mut bins = names_in_section(&text, "[[bin]]");
+            if bins.is_empty() {
+                bins = names_in_section(&text, "[package]");
+            }
+            assert!(!bins.is_empty(), "read no binary name out of {member}/Cargo.toml");
+            expected.extend(bins);
+        }
+        expected.sort();
+
+        // The reader the scripts ask agrees with the manifests this test just read.
+        let script = deploy_dir.join("app-bins.sh");
+        let Ok(out) = std::process::Command::new("bash").arg(&script).output() else {
+            return; // No bash to ask; the text checks below still hold the scripts to it.
+        };
+        assert!(
+            out.status.success(),
+            "app-bins.sh failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mut got: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        got.sort();
+        assert_eq!(
+            got, expected,
+            "app-bins.sh and the workspace manifests disagree about which apps exist"
+        );
+
+        // And each script asks the reader and writes no name down. An app named literally in
+        // a packaging script is a copy of the list, and a copy is what went stale.
+        for rel in ["deploy.sh", "scripts/publish-components.sh"] {
+            let text = std::fs::read_to_string(root.join(rel))
+                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
+            assert!(
+                text.contains("app-bins.sh"),
+                "{rel} no longer asks app-bins.sh which apps exist, so its list is \
+                 hand-written again and the next app under apps/ is silently not shipped"
+            );
+            for bin in &expected {
+                assert!(
+                    !text.contains(bin.as_str()),
+                    "{rel} writes {bin} down by hand — a name in the script is a copy that \
+                     can go stale; ask deploy/yantrik-os/app-bins.sh instead"
+                );
+            }
+        }
+    }
 }
