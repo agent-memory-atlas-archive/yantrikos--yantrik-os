@@ -612,6 +612,132 @@ pub fn current_date_short() -> String {
     format!("{day} {mday} {month}")
 }
 
+/// The local date and time `describe shell` carries as `now`, in one line:
+/// "2026-09-23 Wednesday 11:55 -05:00 America/Chicago".
+///
+/// A mind that needed today's date used to run `shell.agent_run` with `date`, which is graded
+/// sensitive, so learning what day it is raised an approval card for the person (#207). The
+/// shell already knows the time — it draws the clock in the top bar — so here it is, said in
+/// full: weekday, UTC offset and zone name, the three things the top bar's `clock` ("11:55")
+/// and `date` ("Wed 23 Sep") leave out and a caller working out "today" cannot do without.
+///
+/// The zone name reveals location. That is what the clock on the status bar already shows
+/// anyone at the screen, and describe only reaches local callers.
+pub fn current_now_text() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs as *const i64, &mut tm) };
+    // The abbreviation libc resolved for this instant ("CDT"): the last-resort zone name,
+    // used only when neither TZ nor the system's zone files say anything.
+    let abbr = if tm.tm_zone.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(tm.tm_zone) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    now_text(
+        i64::from(tm.tm_year) + 1900,
+        tm.tm_mon as u32 + 1,
+        tm.tm_mday as u32,
+        tm.tm_wday as u32,
+        tm.tm_hour as u32,
+        tm.tm_min as u32,
+        tm.tm_gmtoff as i64,
+        &zone_name(&abbr),
+    )
+}
+
+/// The `now` line from its parts. Pure, so its shape is testable without waiting for a
+/// minute to come around.
+fn now_text(
+    year: i64,
+    month: u32,
+    day: u32,
+    weekday: u32,
+    hour: u32,
+    minute: u32,
+    offset_secs: i64,
+    zone: &str,
+) -> String {
+    let day_names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    format!(
+        "{year:04}-{month:02}-{day:02} {} {hour:02}:{minute:02} {} {zone}",
+        day_names[(weekday % 7) as usize],
+        offset_text(offset_secs),
+    )
+}
+
+/// "±HH:MM" from seconds east of UTC — `tm_gmtoff`'s own sign convention, negative west of
+/// Greenwich. The minutes are computed rather than assumed zero because half-hour and
+/// three-quarter-hour zones are real: Asia/Kolkata is +05:30 and Asia/Kathmandu +05:45.
+fn offset_text(offset_secs: i64) -> String {
+    let sign = if offset_secs < 0 { '-' } else { '+' };
+    let magnitude = offset_secs.unsigned_abs();
+    format!("{sign}{:02}:{:02}", magnitude / 3600, (magnitude % 3600) / 60)
+}
+
+/// The zone name this machine's clock runs on, read from the places the system keeps one.
+fn zone_name(abbr: &str) -> String {
+    let tz = std::env::var("TZ").ok();
+    let link = std::fs::read_link("/etc/localtime")
+        .ok()
+        .map(|target| target.to_string_lossy().into_owned());
+    let etc = std::fs::read_to_string("/etc/timezone").ok();
+    zone_name_from(tz.as_deref(), link.as_deref(), etc.as_deref(), abbr)
+}
+
+/// Which of the system's zone sayings wins, in the order libc itself resolves them — the
+/// name has to tell the same zone the clock beside it is actually on, not whatever one file
+/// happens to claim.
+///
+/// `TZ` wins because libc consults it before anything on disk; a set-but-empty `TZ` still
+/// wins, because glibc reads that as UTC. `/etc/localtime` is the source of truth on disk,
+/// read the same way `wire::location` reads it; `/etc/timezone` is the fallback for systems
+/// where localtime is a copy rather than a link, and it can lag — the live VM this issue was
+/// found on had localtime pointing at America/Chicago while /etc/timezone still said Etc/UTC,
+/// so a reader in the other order would have named the wrong zone over a right time. With
+/// nothing on disk either, the abbreviation libc resolved ("CDT") is no IANA name, but it is
+/// still better than a guess.
+fn zone_name_from(
+    tz_env: Option<&str>,
+    localtime_target: Option<&str>,
+    etc_timezone: Option<&str>,
+    abbr: &str,
+) -> String {
+    if let Some(tz) = tz_env {
+        // A leading ':' is how a shell says the rest is an IANA name; libc strips it, so
+        // this does too. A TZ may also point at a zone file rather than name one.
+        let name = tz.trim().trim_start_matches(':');
+        if name.is_empty() {
+            return "Etc/UTC".to_string();
+        }
+        return name.split("zoneinfo/").nth(1).unwrap_or(name).to_string();
+    }
+    if let Some(target) = localtime_target {
+        if let Some(name) = target.split("zoneinfo/").nth(1) {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    if let Some(contents) = etc_timezone {
+        let name = contents.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    let abbr = abbr.trim();
+    if abbr.is_empty() {
+        "UTC".to_string()
+    } else {
+        abbr.to_string()
+    }
+}
+
 /// Convert days since Unix epoch to (year, month, day).
 fn days_to_civil(days: i64) -> (i64, u32, u32) {
     let z = days + 719468;
@@ -721,5 +847,73 @@ fn parse_hex_color(hex: &str) -> Option<slint::Color> {
         Some(slint::Color::from_argb_u8(a, r, g, b))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod now_tests {
+    use super::{now_text, offset_text, zone_name_from};
+
+    /// The line the issue asked for (#207), to the minute: a mind reads this instead of
+    /// running `date` through a sensitive `agent_run` and raising a card to learn the day.
+    #[test]
+    fn now_reads_as_the_date_the_weekday_the_time_the_offset_and_the_zone() {
+        assert_eq!(
+            now_text(2026, 9, 23, 3, 11, 55, -18000, "America/Chicago"),
+            "2026-09-23 Wednesday 11:55 -05:00 America/Chicago"
+        );
+        // Single-digit months, days and hours keep their leading zeroes, and a zone with no
+        // offset reads +00:00 rather than an empty sign.
+        assert_eq!(
+            now_text(2026, 1, 4, 0, 9, 5, 0, "Etc/UTC"),
+            "2026-01-04 Sunday 09:05 +00:00 Etc/UTC"
+        );
+    }
+
+    #[test]
+    fn the_offset_carries_its_sign_and_its_minutes() {
+        assert_eq!(offset_text(-18000), "-05:00");
+        assert_eq!(offset_text(19800), "+05:30", "Asia/Kolkata");
+        assert_eq!(offset_text(20700), "+05:45", "Asia/Kathmandu");
+        assert_eq!(offset_text(0), "+00:00");
+    }
+
+    /// The name has to tell the same zone the clock beside it is on, so the order is libc's.
+    /// The live VM this issue was found on had /etc/localtime pointing at America/Chicago
+    /// while /etc/timezone still said Etc/UTC — the files in the wrong order would name the
+    /// wrong zone over a right time.
+    #[test]
+    fn the_zone_name_follows_the_order_libc_resolves_in() {
+        let chicago_link = Some("../usr/share/zoneinfo/America/Chicago");
+        assert_eq!(
+            zone_name_from(Some("Asia/Kolkata"), chicago_link, Some("Etc/UTC\n"), "CDT"),
+            "Asia/Kolkata",
+            "TZ is what libc consults first"
+        );
+        assert_eq!(
+            zone_name_from(Some(":America/Denver"), None, None, "MDT"),
+            "America/Denver",
+            "a leading ':' introduces an IANA name and is stripped"
+        );
+        assert_eq!(
+            zone_name_from(None, chicago_link, Some("Etc/UTC\n"), "CDT"),
+            "America/Chicago",
+            "the /etc/localtime link wins over a stale /etc/timezone"
+        );
+        assert_eq!(
+            zone_name_from(None, None, Some("Etc/UTC\n"), "UTC"),
+            "Etc/UTC",
+            "/etc/timezone is the fallback where localtime is a copy, not a link"
+        );
+        assert_eq!(
+            zone_name_from(None, None, None, "CDT"),
+            "CDT",
+            "with nothing on disk, the abbreviation libc resolved is better than a guess"
+        );
+        assert_eq!(
+            zone_name_from(Some(""), chicago_link, None, "CDT"),
+            "Etc/UTC",
+            "a TZ that is set but empty runs the clock on UTC, so the line says UTC"
+        );
     }
 }

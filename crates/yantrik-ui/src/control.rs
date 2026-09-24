@@ -618,6 +618,13 @@ pub fn publish(
                 // that reached it a reader has no other way to see a turn being counted.
                 .with("bond_interactions", bond.interactions)
                 .with("active_project", ui.get_active_project().to_string())
+                // The date and time in full — weekday, UTC offset and zone name — so a mind
+                // learning what day it is is a read rather than an act: `agent_run date` is
+                // graded sensitive, and "what's on my calendar today" used to raise an
+                // approval card just to answer it (#207). The `clock` and `date` below are
+                // what the top bar draws ("11:55", "Wed 23 Sep"); neither carries a year, an
+                // offset or a zone, and "today" cannot be worked out without all three.
+                .with("now", crate::app_context::current_now_text())
                 .with("clock", ui.get_clock_text().to_string())
                 .with("date", ui.get_date_text().to_string())
                 .with("cpu_percent", ui.get_bar_cpu_percent())
@@ -1642,6 +1649,32 @@ mod do_not_disturb_tests {
             "`set_do_not_disturb` presses the settings screen's own toggle. That callback \
              flips the property and throws its save result away, which is how this action came \
              to report a durable preference it had never written. Handler as written:\n{handler}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod describe_now_tests {
+    use std::path::Path;
+
+    /// Learning what day it is has to be a read of the shell, not an act on it.
+    ///
+    /// The describe closure needs a live Slint window, so the wiring is pinned against the
+    /// source the way `do_not_disturb_tests` pins its handler; the line itself — its shape,
+    /// its offsets, the order the zone name is resolved in — is tested for real in
+    /// `app_context::now_tests`.
+    #[test]
+    fn describe_carries_the_date_and_time_with_their_zone() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control.rs");
+        let whole = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let src = whole.split("#[cfg(test)]").next().unwrap_or_default();
+        assert!(
+            src.contains(".with(\"now\", crate::app_context::current_now_text())"),
+            "`describe shell` must carry `now`: the local date and time with weekday, UTC \
+             offset and zone name. Without it the only way for a mind to learn today's date \
+             was `shell.agent_run date`, which is graded sensitive and raised an approval \
+             card just to answer \"what's on my calendar today\" (#207)."
         );
     }
 }

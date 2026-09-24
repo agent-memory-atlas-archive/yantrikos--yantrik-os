@@ -919,6 +919,11 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 .with("year", s.year)
                 .with("month_number", s.month as i64)
                 .with("selected_day", day)
+                // Which day today is — "2026-09-23 Wednesday". The month and the selected day
+                // above say where the screen is looking, not which day the machine is living
+                // in, and a mind that needed the second one ran `date` through the shell:
+                // sensitive, so learning the day raised an approval card (#207).
+                .with("today", views::today_line(chrono::Local::now().date_naive()))
                 .with("view", view.as_str())
                 .with("events_on_selected_day", serde_json::Value::Array(today))
                 .with("days_with_events", serde_json::Value::Array(busy))

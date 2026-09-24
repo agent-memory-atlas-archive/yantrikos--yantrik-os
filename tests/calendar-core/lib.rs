@@ -621,8 +621,8 @@ mod tests {
 mod view_tests {
     use super::views::{
         all_day_bounds, day_view, last_day_of_month, named_on, rescheduled, selected_date,
-        start_and_end, timezone_label, visible_range, week_bounds, week_view, EventRef, Named,
-        SourceEvent, ViewMode,
+        start_and_end, timezone_label, today_line, visible_range, week_bounds, week_view,
+        EventRef, Named, SourceEvent, ViewMode,
     };
     use chrono::NaiveDate;
 
@@ -885,6 +885,28 @@ mod view_tests {
         assert_eq!(timezone_label(5 * 3600 + 1800), "Times are local, UTC+05:30");
         assert_eq!(timezone_label(0), "Times are local, UTC+00:00");
         assert_eq!(timezone_label(-(7 * 3600 + 1800)), "Times are local, UTC-07:30");
+    }
+
+    /// "What is on my calendar today" is the question a calendar exists to answer, and the
+    /// mind that asked it used to run `date` through the shell to learn which day today even
+    /// is — sensitive, so knowing the day raised an approval card (#207). The describe now
+    /// says it: the date and its weekday, in the shape the issue asked for.
+    #[test]
+    fn describe_says_which_day_today_is() {
+        assert_eq!(today_line(date(2026, 9, 23)), "2026-09-23 Wednesday");
+        assert_eq!(today_line(date(2026, 1, 4)), "2026-01-04 Sunday");
+
+        // And the app really publishes it — the line above would keep passing if the field
+        // were dropped from the describe. Pinned against the source, as `control.rs` in the
+        // shell pins its own describe wiring, because the closure needs a live window.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/calendar/src/main.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        assert!(
+            src.contains(".with(\"today\", views::today_line("),
+            "the calendar's describe must carry `today`"
+        );
     }
 
     // ── Naming an event a caller did not store ───────────────────────
