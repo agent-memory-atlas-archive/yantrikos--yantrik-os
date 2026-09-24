@@ -1,5 +1,8 @@
-// Lock Screen — atmospheric lock with premium typography, clock, date, password.
-// Shown on idle timeout or manual lock (Super+L). Validates password to unlock.
+// Lock Screen — atmospheric lock with premium typography, clock, date, PIN.
+// Shown on idle timeout or manual lock (Super+L). Validates the screen PIN to unlock: lock.rs
+// compares against ~/.yantrik/lock_pin and a wrong entry says "Wrong PIN", so the screen asks
+// for the PIN and not for a password (#215) — the vault passphrase is a different secret with
+// a different prompt, and a person who typed what this label used to say got "Wrong PIN".
 
 import { Theme } from "theme.slint";
 
@@ -164,9 +167,9 @@ export component LockScreen inherits Rectangle {
 
         Rectangle { height: Theme.sp-6; }
 
-        // "Enter password" label
+        // "Enter PIN" label
         Text {
-            text: "Enter password to unlock";
+            text: "Enter PIN to unlock";
             color: Theme.text-dim;
             font-size: Theme.fs-caption;
             horizontal-alignment: center;
@@ -175,7 +178,7 @@ export component LockScreen inherits Rectangle {
 
         Rectangle { height: Theme.sp-2; }
 
-        // Password input — glass pill
+        // PIN input — glass pill
         HorizontalLayout {
             alignment: center;
 

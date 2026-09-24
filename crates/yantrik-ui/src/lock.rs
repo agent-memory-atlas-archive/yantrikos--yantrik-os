@@ -150,4 +150,29 @@ mod lock_tests {
         assert!(!check_pin("4822"));
         assert!(!check_pin(""));
     }
+
+    /// The screen asks for the secret `check_pin` actually checks.
+    ///
+    /// It said "Enter password to unlock" while `check_pin` compared against
+    /// `~/.yantrik/lock_pin` and a wrong entry answered "Wrong PIN" (#215): a person who took
+    /// the label at its word typed the one secret that was not wanted. The vault passphrase
+    /// really is a password, and it is a different secret with a different prompt
+    /// (`vault_unlock`); this screen's own field checks the PIN. The label is markup, so the
+    /// markup is read — the way `bond_not_loaded_tests` in control.rs reads app.slint.
+    #[test]
+    fn the_lock_screen_asks_for_the_pin_it_checks() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../yantrik-ui-slint/ui/lock.slint");
+        let slint = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        assert!(
+            slint.contains("Enter PIN to unlock"),
+            "the lock screen must ask for the PIN `check_pin` checks, not for a password"
+        );
+        assert!(
+            !slint.contains("password to unlock"),
+            "the lock screen says password again: what it checks is ~/.yantrik/lock_pin, and a \
+             wrong entry answers \"Wrong PIN\""
+        );
+    }
 }
