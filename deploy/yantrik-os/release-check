@@ -22,6 +22,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -135,6 +136,34 @@ def _mode_file():
         raise Failed("mode %r is not one this OS defines" % doc.get("mode"))
     BASELINE["mode"] = doc["mode"]
     return "mode %s" % doc["mode"]
+
+
+# The commands the image is built to ship, and what each one is for on a Yantrik machine.
+# An installed machine is kept current by yantrik-update, which replaces /opt/yantrik and
+# nothing else, so a package the image gained after an install never reaches the base system
+# until the updater reconciles it (#210: VM 520 had no `ip`, `ss` or `ping`). The names here
+# are commands, not packages — they are what the shipped code and the person at the keyboard
+# actually run — and they must stay in step with REQUIRED_PACKAGES in yantrik-update.
+IMAGE_COMMANDS = {
+    "ip": "the network tools and every `ip addr` a person types (iproute2)",
+    "ss": "socket listings the mind runs (iproute2)",
+    "ping": "the reachability check, and the first thing anyone tries on a broken network (iputils-ping)",
+    "grim": "every screenshot the desktop takes",
+    "curl": "the updater's downloads and the mind's fetches",
+    "python3": "yos itself is a python3 script",
+    "nano": "EDITOR, exported by yantrik-session",
+    "htop": "the process view beside the System Monitor app",
+}
+
+
+@check("every command the image ships is installed and answers on PATH")
+def _image_commands():
+    missing = [name for name in IMAGE_COMMANDS if not shutil.which(name)]
+    if missing:
+        raise Failed("not on PATH: %s — a machine from an older image is drifted; yantrik-update "
+                     "reconcile installs the packages behind them (%s)"
+                     % (", ".join(missing), "; ".join(IMAGE_COMMANDS[m] for m in missing)))
+    return "%d/%d present: %s" % (len(IMAGE_COMMANDS), len(IMAGE_COMMANDS), " ".join(sorted(IMAGE_COMMANDS)))
 
 
 @check("every action on every surface declares a grade")
