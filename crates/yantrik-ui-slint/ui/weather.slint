@@ -234,6 +234,17 @@ export component WeatherDashboard inherits Rectangle {
     // Last updated
     in property <string> weather-last-updated: "";
 
+    /// Whose local time the hourly strip shows, e.g. "London time".
+    ///
+    /// The hours arrive from Open-Meteo in the FORECAST LOCATION's timezone, not the machine's,
+    /// so a machine in one timezone looking at another city reads "19:00" while its own clock
+    /// says 12:14. Empty (the default) draws no label and the header reads as it always did;
+    /// the app sets it to the location's name whenever a reading with a known location arrives,
+    /// and leaves it alone when a refresh fails, beside the strip it describes. This says whose
+    /// time it is rather than guessing an offset — the service path carries no timezone, so the
+    /// honest thing to name is the location.
+    in property <string> hourly-tz-label: "";
+
     /// What went wrong with the last thing the person asked for, in their words.
     ///
     /// Empty when nothing has, which is also the default -- the shell embeds this same screen
@@ -262,6 +273,10 @@ export component WeatherDashboard inherits Rectangle {
     out property <length> hero-tiles-abs-right: content-flick.x + hero-card.x + hero-row.x
         + hero-tiles.x + hero-tiles.width;
     out property <length> content-space-right: content-flick.x + content-flick.width;
+    // The hourly timezone label's rendered width, mirrored out so a ui-preview check can pin
+    // that "London time" actually appears when set and draws nothing when not (#220). An empty
+    // label reads as zero rather than as the width of an empty text slot.
+    out property <length> hourly-tz-width: root.hourly-tz-label == "" ? 0px : tz-label.width;
 
     // The content, with the agent rail beside it.
     VerticalLayout {
@@ -837,6 +852,17 @@ export component WeatherDashboard inherits Rectangle {
                             font-size: Theme.fs-micro;
                             letter-spacing: 2px;
                             vertical-alignment: center;
+                        }
+                        // Whose local time the strip below reads in, when it is not the machine's.
+                        // Always instantiated so its width can be mirrored out for the ui-preview
+                        // check; empty text draws nothing.
+                        tz-label := Text {
+                            text: root.hourly-tz-label == "" ? "" : "· " + root.hourly-tz-label;
+                            color: Theme.text-dim;
+                            font-size: Theme.fs-micro;
+                            vertical-alignment: center;
+                            wrap: no-wrap;
+                            overflow: elide;
                         }
                     }
 

@@ -507,12 +507,14 @@ export component WeatherProbe inherits Window {
     in property <[WeatherHourly]> hourly;
     in property <[WeatherDaily]> daily;
     in property <[AgentContextItem]> agent-context;
+    in property <string> hourly-tz-label;
     // The hero geometry, mirrored out of the dashboard for the same reason.
     out property <length> hero-row-width: dash.hero-row-width;
     out property <length> hero-tiles-x: dash.hero-tiles-x;
     out property <length> hero-tiles-width: dash.hero-tiles-width;
     out property <length> hero-tiles-abs-right: dash.hero-tiles-abs-right;
     out property <length> content-space-right: dash.content-space-right;
+    out property <length> hourly-tz-width: dash.hourly-tz-width;
     dash := WeatherDashboard {
         width: 100%;
         height: 100%;
@@ -521,6 +523,7 @@ export component WeatherProbe inherits Window {
         hourly: root.hourly;
         daily: root.daily;
         agent-context: root.agent-context;
+        hourly-tz-label: root.hourly-tz-label;
         weather-last-updated: "Updated 4 min ago";
     }
 }

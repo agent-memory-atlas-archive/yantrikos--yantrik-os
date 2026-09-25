@@ -49,6 +49,8 @@ export component WeatherApp inherits AppWindow {
     in property <WeatherCurrent> current <=> dash.current;
     in property <[WeatherHourly]> hourly <=> dash.hourly;
     in property <[WeatherDaily]> daily <=> dash.daily;
+    // Whose local time the hourly strip reads in (#220).
+    in property <string> hourly-tz-label <=> dash.hourly-tz-label;
 
     // ── AI ──
     in property <bool> ai-is-working <=> dash.ai-is-working;
