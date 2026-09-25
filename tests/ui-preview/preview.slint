@@ -527,3 +527,27 @@ export component WeatherProbe inherits Window {
         weather-last-updated: "Updated 4 min ago";
     }
 }
+
+// ── Text Editor (#328) ──────────────────────────────────────────────────────
+
+import { TextEditorApp } from "../../apps/text-editor/ui/app.slint";
+
+// The production editor window with the very document from the crash report on it: the
+// software renderer casts every glyph coordinate to i16, and this file — plus the bigger
+// ones the VM had open beside it — used to abort the window mid-draw. It must render, not
+// panic. The runner fills `content`, `numbers` and `line-count` from the repro fixture.
+export component EditorProbe inherits TextEditorApp {
+    title: "build_briefing.py — Editor";
+    tabs: [{ title: "build_briefing.py", active: true, modified: false }];
+    document-title: "build_briefing.py";
+    path-label: "/tmp/build_briefing.py";
+    language: "Python";
+    // Declared here, not inherited: the Rust API of a derived component exposes the properties
+    // it declares itself, so the runner fills these and they feed the editor's own inputs.
+    in property <string> repro-content;
+    in property <string> repro-numbers;
+    in property <int> repro-lines;
+    content: root.repro-content;
+    numbers: root.repro-numbers;
+    line-count: root.repro-lines;
+}

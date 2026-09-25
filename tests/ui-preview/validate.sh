@@ -11,6 +11,7 @@ run verify-idle
 run verify-controls
 run verify-monitor
 run verify-weather
+run target/ui-validation/editor.png 1100 760 verify-editor
 run target/ui-validation/unused.png 800 600 verify-launcher
 run target/ui-validation/unused.png 1280 800 verify-apps
 run target/ui-validation/mind-panel.png 1280 800 verify-mind-panel

@@ -427,6 +427,14 @@ fn real_editor_keyboard_tabs_search_save_close_and_recovery() {
     the_editor_answers_with_what_it_wrote(&ui, &s, &published, &dir);
     a_missing_required_argument_is_refused_by_name(&ui, &s, &published);
     append_adds_to_the_end_and_takes_nothing_away(&s, &published);
+    a_document_too_big_to_draw_is_windowed_read_only_and_kept_whole(
+        &ui,
+        &s,
+        &queue,
+        &window,
+        &published,
+        &dir,
+    );
 
     let mut b = s.borrow_mut();
     b.recovery_timer.stop();
@@ -736,4 +744,131 @@ fn append_adds_to_the_end_and_takes_nothing_away(s: &State, published: &[(Action
     assert_eq!(fresh["modified"], true, "and it is unsaved until save_as: {fresh}");
     assert_eq!(fresh["path"], serde_json::Value::Null, "answer: {fresh}");
     assert_eq!(s.borrow().docs.len(), tabs + 1, "in a tab of its own");
+}
+
+/// #328: the crash at `euclid-0.22.13/src/vector.rs:688`. Slint's software renderer keeps
+/// every physical coordinate in an `i16` and casts glyph origins before clipping, so a
+/// document of ~2000 lines or a ~3900-character line — well inside the editor's own 1 MiB /
+/// 20,000-line input bounds — aborted the window mid-draw, and because tabs are restored at
+/// launch, every restart died the same way. The editor now draws a read-only leading window
+/// of such a document and keeps every byte: each `tick` below rendered, and before the fix
+/// the first one on an oversized document panicked.
+fn a_document_too_big_to_draw_is_windowed_read_only_and_kept_whole(
+    ui: &TextEditorApp,
+    s: &State,
+    queue: &Queue,
+    window: &MinimalSoftwareWindow,
+    published: &[(Action, Handler)],
+    dir: &Path,
+) {
+    let text = || s.borrow().docs[s.borrow().active].text.clone();
+    // Room for the three documents below: the checks above may have left eight tabs open.
+    while s.borrow().docs.len() > 5 {
+        let i = s.borrow().active as i32;
+        ui.invoke_close_tab(i);
+        if ui.get_dialog() == 3 {
+            act_on(published, "discard", serde_json::json!({})).ok();
+        }
+        tick(queue, window);
+    }
+
+    // The document from the report — the file Hermes wrote on the VM — draws whole, unrestricted
+    // and editable.
+    let repro = include_str!("../repro-328-content.py").to_string();
+    act_on(published, "new", serde_json::json!({ "text": repro.clone() }))
+        .expect("the repro document opens");
+    tick(queue, window);
+    tick(queue, window);
+    assert!(!ui.get_view_limited(), "the repro document fits in full");
+    assert_eq!(ui.get_content().as_str(), repro);
+    ui.invoke_focus_editor();
+    key(window, "#");
+    tick(queue, window);
+    assert!(text().starts_with('#'), "the repro document stays editable");
+    act_on(published, "undo", serde_json::json!({})).expect("undo the keystroke");
+    assert_eq!(text(), repro);
+
+    // One line longer than the renderer's i16 horizontal space: this panicked at vector.rs:688.
+    let long = "x".repeat(5_000);
+    act_on(published, "new", serde_json::json!({ "text": long.clone() }))
+        .expect("the wide document opens");
+    tick(queue, window);
+    tick(queue, window);
+    assert!(ui.get_view_limited(), "the wide document is windowed");
+    assert!(
+        ui.get_content().len() < long.len(),
+        "the view is shorter than the document"
+    );
+    assert_eq!(text(), long, "the document keeps every character");
+    assert!(
+        !ui.get_view_status().is_empty(),
+        "and the status bar says part is withheld"
+    );
+
+    // The windowed view is read-only: a keystroke cannot truncate the document to the view.
+    ui.invoke_focus_editor();
+    key(window, "y");
+    tick(queue, window);
+    assert_eq!(text(), long, "the read-only view takes no keystroke");
+
+    // Saving writes the whole document, not the window.
+    let path = dir.join("whole.txt");
+    act_on(
+        published,
+        "save_as",
+        serde_json::json!({ "path": path.display().to_string() }),
+    )
+    .expect("the wide document saves");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        long,
+        "the file on disk is the whole document"
+    );
+
+    // A document taller than the renderer's i16 vertical space.
+    let tall = format!("{}MARKER\n", "let value = 1;\n".repeat(19_000));
+    act_on(published, "new", serde_json::json!({ "text": tall.clone() }))
+        .expect("the tall document opens");
+    tick(queue, window);
+    tick(queue, window);
+    assert!(ui.get_view_limited(), "the tall document is windowed");
+    assert_eq!(text(), tall, "the document keeps all 19,001 lines");
+    assert!(
+        ui.get_content().lines().count() < 1_000,
+        "the view is a small window: {} lines",
+        ui.get_content().lines().count()
+    );
+
+    // A match beyond the window is still counted from the whole document, and selecting it is
+    // skipped rather than pointing the TextInput at an offset it does not hold.
+    let found = act_on(published, "find", serde_json::json!({ "text": "MARKER" }))
+        .expect("find in the tall document");
+    assert_eq!(found["matches"], 1, "the match is in the document: {found}");
+    tick(queue, window);
+
+    // A bigger font fits fewer lines inside the limit; the window follows without a restart.
+    ui.set_font_pixels(22);
+    tick(queue, window);
+    tick(queue, window);
+    let big = ui.get_content().lines().count();
+    assert!(big > 0 && big < 400, "22px window is {big} lines");
+    ui.set_font_pixels(14);
+    tick(queue, window);
+    assert!(
+        ui.get_content().lines().count() > big,
+        "14px window grows back: {} lines",
+        ui.get_content().lines().count()
+    );
+
+    // What a mind reads is the whole document, and says the person sees a window of it.
+    let summary = view(ui, s).summary;
+    let tall_lines = tall.bytes().filter(|b| *b == b'\n').count() + 1;
+    assert!(
+        summary.contains(&format!("{tall_lines} lines")),
+        "the summary counts the whole document: {summary:?}"
+    );
+    assert!(
+        summary.contains("Showing the first"),
+        "and says what the window withholds: {summary:?}"
+    );
 }

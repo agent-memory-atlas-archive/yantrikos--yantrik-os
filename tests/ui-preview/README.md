@@ -181,6 +181,18 @@ is measured while no source feeds it, and drops that line the moment a model nam
 cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- verify-monitor
 ```
 
+## Text Editor
+
+`verify-editor` draws the production text editor (`apps/text-editor/ui/app.slint`) holding the
+very document from issue #328 — the file whose rendering crashed the VM's window in euclid's
+i16 coordinate cast — and asserts it renders instead of panicking (#328). Oversized documents
+of the shapes that crashed are windowed by the editor's own logic and checked in
+`cargo test -p yantrik-text-editor`.
+
+```sh
+cargo run --manifest-path tests/ui-preview/Cargo.toml --profile fast -- target/editor.png 1100 760 verify-editor
+```
+
 ## Weather
 
 `verify-weather` draws the production Weather dashboard from fixture data with the context rail
