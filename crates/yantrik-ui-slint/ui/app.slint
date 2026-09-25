@@ -181,6 +181,8 @@ export component App inherits Window {
     in property <string> mind-mode-means: "";
     /// The machine's own wall, shown beside the mode because neither is understandable alone.
     in property <string> mind-ceiling: "sensitive";
+    /// Whether the apps a mind opens go into Mind View (#239) rather than onto this desktop.
+    in property <bool> mind-view-on: true;
     in property <[MindRule]> mind-session-rules: [];
     in property <[MindAuditEntry]> mind-audit: [];
     in-out property <bool> mind-menu-open: false;
@@ -206,6 +208,8 @@ export component App inherits Window {
     callback mind-mode-chosen(string);
     callback mind-bypass-chosen(string);
     callback mind-rule-revoked(string, string);
+    /// Where a mind's apps open. A person's choice, reached by a pointer like the three above.
+    callback mind-view-chosen(bool);
 
     // ── The mind panel: where it is drawn, how open, and the room it takes ──
     //
@@ -2951,6 +2955,8 @@ export component App inherits Window {
                 mode-chosen(m) => { root.mind-mode-chosen(m); root.mind-menu-open = false; }
                 bypass-chosen(d) => { root.mind-bypass-chosen(d); root.mind-menu-open = false; }
                 rule-revoked(app, action) => { root.mind-rule-revoked(app, action); }
+                mind-view-on: root.mind-view-on;
+                mind-view-chosen(on) => { root.mind-view-chosen(on); }
             }
         }
 

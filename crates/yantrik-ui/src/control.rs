@@ -650,6 +650,10 @@ pub fn publish(
                 .with("version", yantrik_version::version())
                 .with("windows", serde_json::Value::Array(open))
                 .with("failed_launches", serde_json::Value::Array(failed))
+                // Where the apps a mind opens are drawn (#239): whether minds open them in Mind
+                // View, whether it is up and on which display, what is in it, and why not if it
+                // could not start. Those apps are not in `windows` — they are not on this desktop.
+                .with("mind_view", crate::mind_view::for_describe())
                 // What is waiting on a person right now. Published so a second mind, or a
                 // test, can tell "the machine is waiting for someone to press a button" from
                 // "the machine is hung" — the two look identical from outside otherwise.
