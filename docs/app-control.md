@@ -458,7 +458,10 @@ is a door the app deliberately does not have — `send` is unpublished because m
 cannot be taken back — yet the method sends, and that is exactly the asymmetry #161 is about.
 `notes.delete` removes a file outright beside an app whose own deleting goes to Trash; and all
 five notes writers have no desktop caller at all, the Notes app keeping its library folder itself
-— they are candidates for deletion, or for a gate, the day #43 lands. `notifications.action` and
+— they are candidates for deletion, or for a gate, the day #43 lands. Until then they at least
+stay inside that folder: a note id is one plain file name there, and an id that is a path
+(`../../x`, `/home/…`) is refused, where it used to reach any `.md` file the person owns.
+`notifications.action` and
 `calendar.upsert_remote` are methods whose only caller is the desktop acting for the person — a
 click, a sync — and are listed so that when #43 can tell callers apart, the choice about each one
 is already written down. Nothing in this section changes a grade or a gate decision; it records
