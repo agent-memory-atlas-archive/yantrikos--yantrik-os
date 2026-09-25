@@ -159,7 +159,12 @@ pub fn ceiling_from(text: &str) -> String {
 //
 // So the mode is read here too, the way the ceiling is: the shell writes it to a small file
 // beside `settings.yaml` whenever it changes (`mind_mode::publish_policy_file` in the shell), and
-// every dispatch reads it per call. A call above what the mode allows must carry a GRANT — the
+// every dispatch reads it per call. The file also names the shell that wrote it — its pid, and
+// the start time the kernel gives that pid — and a file whose shell is not running reads as
+// `ask`: a shell that died in bypass, or with "allow for this session" rules, must not keep
+// either in force until the next shell start happens to rewrite the file (#154).
+//
+// A call above what the mode allows must carry a GRANT — the
 // `request_id` the shell's `request_approval` minted and a person's Allow turned into one — and
 // the dispatch spends it through the shell's `consume_approval` before the handler runs. The
 // bridge and `yos act` ask for the card on the caller's behalf; a raw client can do the same
@@ -244,18 +249,58 @@ fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// The start time of `pid` — field 22 of `/proc/<pid>/stat`, clock ticks since boot — or
+/// `None` when there is no such process or no `/proc` to ask.
+///
+/// A pid on its own says nothing: the kernel reuses them, and a recycled pid would resurrect a
+/// dead shell's mode. A pid and the start time it was recorded with name one process, because
+/// whatever reuses the pid does not also reuse the boot tick it started at.
+pub fn proc_start_ticks(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Field 2, the command name, may hold spaces and parentheses — a shell called `(tmux)` is
+    // one field — so the fields are counted from the LAST `)`, which closes it. The token after
+    // that is field 3, and starttime is field 22: index 19 from there.
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Whether the shell that wrote `doc` is the process still running under that pid.
+///
+/// A file that names no shell — one an older shell wrote, or a program wrote by hand — reads as
+/// it always did: anybody who can write this file can write any mode into it, so demanding an
+/// identity from such a writer would close no door the same-uid limit leaves open (#154, item 5).
+/// A file that DOES name one is trusted only while that shell runs, and half an identity names
+/// no process anybody can find alive, so it fails closed like a dead one.
+fn names_a_live_shell(doc: &serde_json::Value) -> bool {
+    let pid = doc.get("shell_pid").and_then(|v| v.as_u64());
+    let start = doc.get("shell_start_ticks").and_then(|v| v.as_u64());
+    let (Some(pid), Some(start)) = (pid, start) else {
+        return pid.is_none() && start.is_none();
+    };
+    let Ok(pid) = u32::try_from(pid) else { return false };
+    proc_start_ticks(pid) == Some(start)
+}
+
 /// Read the mode out of what the shell wrote. Public so the shell's own test can prove that
 /// what it writes is what every app will read.
 ///
 /// `now_unix` is for a bypass. The shell folds an expired bypass back on its own tick and
 /// rewrites the file, but a shell that crashed mid-bypass leaves a file saying `bypass` with
 /// nobody left to fold it — so the file carries when the bypass ends and this honours it. A
-/// bypass "until restart" carries no end and is trusted until the next shell start rewrites it.
+/// bypass "until restart" carries no end and is trusted while the shell that wrote the file is
+/// running: the file names that shell, and this checks the name against the process table, so a
+/// shell that died leaves `ask` behind rather than its last mode (#154).
 pub fn mode_from(text: &str, now_unix: u64) -> Mode {
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else {
         tracing::warn!("{MODE_FILE} is not JSON; using {DEFAULT_MODE}");
         return Mode::named(DEFAULT_MODE);
     };
+    if !names_a_live_shell(&doc) {
+        // The rules go with the shell: "allow for this session" was an answer to cards a
+        // process that is gone will never raise again.
+        tracing::warn!("{MODE_FILE} names a shell that is not running; using {DEFAULT_MODE}");
+        return Mode::named(DEFAULT_MODE);
+    }
     let is_mode = |name: &str| MODES.iter().any(|(m, _)| *m == name);
     let mut name = doc["mode"].as_str().unwrap_or("").to_string();
     if !is_mode(&name) {
@@ -786,6 +831,50 @@ mod tests {
     fn the_mode_file_sits_beside_the_settings_file() {
         assert_eq!(mode_path().parent(), settings_path().parent());
         assert!(mode_path().ends_with(MODE_FILE));
+    }
+
+    /// #154, item 1: a shell that died in bypass — or with "allow for this session" rules —
+    /// left its last mode in the file, and nothing rewrote it until the next shell start. The
+    /// file names the shell that wrote it, and a name that is not running reads as `ask`.
+    #[test]
+    fn a_mode_file_that_names_a_dead_shell_reads_as_ask() {
+        // The dead pid is deterministic, not a guess at the process table: a child that has
+        // been waited is gone from /proc, and if the kernel hands the pid out again, the start
+        // time recorded here belongs to the child that was reaped, so the pair still names
+        // nothing alive. Nothing sleeps and nothing races.
+        let mut child = std::process::Command::new("true").spawn().expect("a child to reap");
+        let started = proc_start_ticks(child.id()).expect("a running child has a start time");
+        child.wait().expect("the child can be waited");
+
+        let dead = serde_json::json!({
+            "mode": "bypass",
+            "previous": "auto",
+            "bypass_expires_unix": null,
+            "shell_pid": child.id(),
+            "shell_start_ticks": started,
+            "session_rules": [{"app": "calendar", "action": "delete_event"}],
+        });
+        let read = mode_from(&dead.to_string(), 0);
+        assert_eq!(read.name, DEFAULT_MODE, "a dead shell's bypass is not in force");
+        assert!(read.session_rules.is_empty(), "and its session rules died with it");
+
+        // A live pid is not enough on its own: this process's own pid under a start time that
+        // is not the kernel's — what a reused pid would look like — also reads as `ask`.
+        let pid = std::process::id();
+        let real = proc_start_ticks(pid).expect("this test is itself running");
+        let reused =
+            serde_json::json!({"mode": "auto", "shell_pid": pid, "shell_start_ticks": real + 1});
+        assert_eq!(mode_from(&reused.to_string(), 0).name, DEFAULT_MODE);
+
+        // A live shell's own identity is honoured, and half an identity — a pid with no start
+        // time to check it against — names no process anybody can find alive.
+        let alive = serde_json::json!({"mode": "auto", "shell_pid": pid, "shell_start_ticks": real});
+        assert_eq!(mode_from(&alive.to_string(), 0).name, "auto");
+        let half = serde_json::json!({"mode": "auto", "shell_pid": pid});
+        assert_eq!(mode_from(&half.to_string(), 0).name, DEFAULT_MODE);
+
+        // A file that names no shell at all reads the way it always has.
+        assert_eq!(mode_from(r#"{"mode":"auto"}"#, 0).name, "auto");
     }
 
     // ── The vectors every other implementation replays ─────────────────
