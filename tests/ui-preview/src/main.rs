@@ -55,6 +55,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "verify-agents-overview") { return overview_tests::run(&window, output); }
     if args.iter().any(|a| a == "verify-monitor") { return monitor_tests::run(&window); }
     if args.iter().any(|a| a == "verify-weather") { return weather_tests::run(&window); }
+    if args.iter().any(|a| a == "verify-editor") {
+        // #328: the production text editor drawing the very document from the crash report.
+        // Slint's software renderer casts glyph coordinates to i16 without a guard; this used
+        // to abort the window mid-draw, and bigger documents on the VM made every restart die.
+        let probe = EditorProbe::new()?;
+        probe.show()?;
+        window.set_size(slint::PhysicalSize::new(width, height));
+        let content = include_str!("../../../apps/text-editor/repro-328-content.py");
+        probe.set_repro_content(content.into());
+        let lines = content.lines().count();
+        probe.set_repro_lines(lines as i32);
+        probe.set_repro_numbers(
+            (1..=lines)
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        );
+        slint::platform::update_timers_and_animations();
+        let mut pixels = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(width, height);
+        window.request_redraw();
+        assert!(
+            window.draw_if_needed(|renderer| {
+                renderer.render(pixels.make_mut_slice(), width as usize);
+            }),
+            "the editor scene drew nothing"
+        );
+        let mut encoder = png::Encoder::new(BufWriter::new(File::create(output)?), width, height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()?
+            .write_image_data(pixels.as_bytes())?;
+        println!("PASS: the production editor drew the #328 repro document ({lines} lines)");
+        return Ok(());
+    }
     if args.iter().any(|a| a == "verify-idle") {
         let probe = TerminalProbe::new()?;
         probe.show()?;

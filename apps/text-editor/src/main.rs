@@ -3,6 +3,7 @@ mod document;
 use document::{Document, MAX_TABS};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::{
+    borrow::Cow,
     cell::RefCell,
     path::{Path, PathBuf},
     rc::Rc,
@@ -278,6 +279,87 @@ fn wire(ui: &TextEditorApp, recovery_path: PathBuf, publish: bool) -> State {
     }
     state
 }
+/// The largest leading piece of `text` the software renderer can be handed safely (#328).
+///
+/// Slint's software renderer stores every physical coordinate in an `i16`: `draw_glyph_run`
+/// casts each glyph origin with an unchecked euclid `cast()` *before* clipping, so a document
+/// of ~2000 lines or a ~3900-character line — both well inside the 1 MiB / 20,000-line input
+/// bounds — aborts the process with `Vector2D::cast()` (vector.rs:688). Tabs are restored at
+/// launch, so an oversized document killed every restart in a loop.
+///
+/// The view is therefore bounded: whole leading lines up to `limit_px` at a worst-case 2em line
+/// height, and per line a worst-case 2em advance per character (tabs count 4). Both bounds are
+/// above any real font's metrics — parley pins line height and advances to fractions of the em
+/// box — and the fallback font is not known until layout time. When a line does not fit, the
+/// view stops at it so what is shown stays a leading slice of the document and the byte offsets
+/// inside it keep meaning what they mean. Returns `(view, lines in view, anything withheld)`.
+/// The full document lives on in `Document::text`: save, undo, describe and draft recovery all
+/// still see every byte.
+fn view_of(text: &str, limit_px: f32, font_px: i32) -> (Cow<'_, str>, usize, bool) {
+    let font = font_px.max(1) as f32;
+    // One budget for both axes: `limit / 2em` lines, and `limit / 2em` character units per line.
+    let budget = (limit_px / (font * 2.0)).max(1.0) as usize;
+    let mut end = 0;
+    let mut lines = 0;
+    for line in text.split_inclusive('\n') {
+        if lines == budget {
+            break;
+        }
+        let mut units = 0;
+        let mut take = line.len();
+        for (i, ch) in line.char_indices() {
+            let wide = if ch == '\t' { 4 } else { 1 };
+            if units + wide > budget {
+                take = i; // `char_indices` offsets are char boundaries, so this slices safely.
+                break;
+            }
+            units += wide;
+        }
+        end += take;
+        lines += 1;
+        if take < line.len() {
+            break; // width-capped: stop here and keep the view a leading slice.
+        }
+    }
+    let limited = end < text.len();
+    (
+        if limited {
+            Cow::Owned(text[..end].to_string())
+        } else {
+            Cow::Borrowed(text)
+        },
+        lines.max(1), // an empty document still shows as the one empty line the editor draws
+        limited,
+    )
+}
+
+/// Put the renderer-safe view of `text` into the TextInput and say on the status bar when part
+/// of the document is being withheld. Returns the number of lines the view shows, which is what
+/// the gutter and the highlight layers have to cover — never the document's own line count.
+fn show_view(ui: &TextEditorApp, text: &str) -> usize {
+    let (view, view_lines, limited) =
+        view_of(text, ui.get_render_limit(), ui.get_font_pixels());
+    ui.set_view_limited(limited);
+    // Only write when the view really changed: the binding is two-way, and setting the text the
+    // TextInput already shows would move the caret of the person typing on every keystroke.
+    if ui.get_content().as_str() != view.as_ref() {
+        ui.set_content(view.into_owned().into());
+    }
+    let total = text.bytes().filter(|b| *b == b'\n').count() + 1;
+    ui.set_view_status(
+        if limited {
+            format!(
+                "Showing the first {view_lines} of {total} lines — the whole document is kept \
+                 and saved"
+            )
+            .into()
+        } else {
+            "".into()
+        },
+    );
+    view_lines
+}
+
 fn paint(ui: &TextEditorApp, b: &mut Workbench, content: bool) {
     let d = &b.docs[b.active];
     ui.set_tabs(ModelRc::new(VecModel::from(
@@ -301,15 +383,20 @@ fn paint(ui: &TextEditorApp, b: &mut Workbench, content: bool) {
             .into(),
     );
     ui.set_language(document::language(d.path.as_deref()).into());
+    // The TextInput always gets the windowed view, on every paint, so no caller may hand the
+    // renderer the full document around this (#328). `content` still means "start over at the
+    // top-left", not "set the text".
+    let view_lines = show_view(ui, &d.text);
     if content {
-        ui.set_content(d.text.clone().into());
         ui.invoke_reset_position();
         ui.invoke_focus_editor();
     }
     let lines = d.text.bytes().filter(|b| *b == b'\n').count() + 1;
     ui.set_line_count(lines as i32);
+    // Gutter and highlight layers cover the view, not the document: a gutter taller than the
+    // clamped viewport would be laid out past the renderer's i16 coordinates all over again.
     ui.set_numbers(
-        (1..=lines)
+        (1..=view_lines)
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join("\n")
@@ -323,7 +410,7 @@ fn paint(ui: &TextEditorApp, b: &mut Workbench, content: bool) {
         }
         .into(),
     );
-    let (a, c, e) = highlight(&d.text, document::language(d.path.as_deref()));
+    let (a, c, e) = highlight(&ui.get_content(), document::language(d.path.as_deref()));
     ui.set_has_highlights(!a.is_empty());
     ui.set_keywords(a.into());
     ui.set_strings(c.into());
@@ -431,7 +518,8 @@ fn edit(ui: &TextEditorApp, s: &State, text: String) {
     }
     let mut b = s.borrow_mut();
     if let Err(e) = document::validate(&text) {
-        ui.set_content(b.docs[b.active].text.clone().into());
+        // Restore what is stored, windowed like every other view of it (#328).
+        show_view(ui, &b.docs[b.active].text);
         ui.set_notice(e.into());
         return;
     }
@@ -442,6 +530,12 @@ fn edit(ui: &TextEditorApp, s: &State, text: String) {
     search(ui, s, false);
     checkpoint(ui, s);
 }
+/// A match can only be selected when it lies inside the windowed view: match offsets are
+/// document-wide, and one past the view would point at text the TextInput does not hold (#328).
+/// The view is a leading slice of the document, so its byte length is the boundary.
+fn within_view(ui: &TextEditorApp, match_end: usize) -> bool {
+    !ui.get_view_limited() || match_end <= ui.get_content().len()
+}
 fn search(ui: &TextEditorApp, s: &State, select: bool) {
     let mut b = s.borrow_mut();
     b.matches = document::matches(&b.docs[b.active].text, &ui.get_query(), ui.get_match_case());
@@ -449,8 +543,11 @@ fn search(ui: &TextEditorApp, s: &State, select: bool) {
     ui.set_match_count(b.matches.len() as i32);
     ui.set_match_index(if b.matches.is_empty() { 0 } else { 1 });
     if select {
-        if let Some(&(a, z)) = b.matches.first() {
-            ui.invoke_select_range(a as i32, z as i32);
+        if let Some(&(_, z)) = b.matches.first() {
+            if within_view(ui, z) {
+                let (a, z) = b.matches[0];
+                ui.invoke_select_range(a as i32, z as i32);
+            }
         }
     }
 }
@@ -691,6 +788,15 @@ fn finish_close(ui: &TextEditorApp, s: &State) {
     }
 }
 fn action(ui: &TextEditorApp, s: &State, id: &str) {
+    // The font size decides how many lines fit inside the renderer-safe view (#328), so a font
+    // change re-windows the document even while a dialog is up or a job is running; the gates
+    // below protect document changes, not layout.
+    if id == "reflow" {
+        paint(ui, &mut s.borrow_mut(), false);
+        // The window may have shrunk under a viewport that was scrolled deep into it.
+        ui.invoke_reset_position();
+        return;
+    }
     if ui.get_busy() {
         return;
     }
@@ -806,7 +912,9 @@ fn action(ui: &TextEditorApp, s: &State, id: &str) {
             b.match_index = (b.match_index + if id == "find-next" { 1 } else { len - 1 }) % len;
             let (a, z) = b.matches[b.match_index];
             ui.set_match_index(b.match_index as i32 + 1);
-            ui.invoke_select_range(a as i32, z as i32);
+            if within_view(ui, z) {
+                ui.invoke_select_range(a as i32, z as i32);
+            }
         }
         "replace" | "replace-all" => {
             let b = s.borrow();
@@ -821,10 +929,10 @@ fn action(ui: &TextEditorApp, s: &State, id: &str) {
             let result = document::replace(&b.docs[b.active].text, ranges, &ui.get_replacement());
             drop(b);
             match result {
-                Ok(text) => {
-                    ui.set_content(text.clone().into());
-                    edit(ui, s, text);
-                }
+                // `edit` stores the whole replaced text and `paint` shows its windowed view;
+                // writing the full text to the TextInput here would feed the renderer the
+                // coordinates that killed it (#328).
+                Ok(text) => edit(ui, s, text),
                 Err(e) => ui.set_notice(e.into()),
             }
         }
@@ -968,6 +1076,9 @@ fn document_now(ui: &TextEditorApp, s: &State) -> serde_json::Value {
         "matches_disk": disk.as_deref() == Some(d.text.as_str()),
         "language": document::language(d.path.as_deref()),
         "notice": ui.get_notice().to_string(),
+        // Empty unless the window is too big to draw whole and the person sees only its first
+        // lines (#328); the counts above are the full document's either way.
+        "view_status": ui.get_view_status().to_string(),
     })
 }
 
@@ -1008,6 +1119,10 @@ fn view(ui: &TextEditorApp, s: &State) -> View {
     let notice = ui.get_notice().to_string();
     if !notice.is_empty() {
         summary.push_str(&format!(" · {notice}"));
+    }
+    let view_status = ui.get_view_status().to_string();
+    if !view_status.is_empty() {
+        summary.push_str(&format!(" · {view_status}"));
     }
     View::new(summary)
         .with("path", serde_json::json!(d.path))
@@ -1106,7 +1221,8 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
                 ));
             }
             if !text.is_empty() {
-                ui.set_content(text.clone().into());
+                // `edit` stores the text whole and `paint` hands the renderer only the
+                // windowed view of it (#328).
                 edit(ui, s, text.clone());
                 if s.borrow().docs[s.borrow().active].text != text {
                     return Err(refuse(ui, "The new tab is open but empty; the text was rejected."));
@@ -1452,7 +1568,8 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
                 .ok_or_else(|| refuse(ui, "`set_content` needs `text`: the tab's entire new text."))?
                 .to_string();
             document::validate(&text).map_err(|e| refuse(ui, e))?;
-            ui.set_content(text.clone().into());
+            // `edit` stores the text whole and `paint` hands the renderer only the windowed
+            // view of it (#328); the document check below reads the stored text, not the view.
             edit(ui, s, text.clone());
             let answer = document_now(ui, s);
             if s.borrow().docs[s.borrow().active].text != text {
@@ -1487,7 +1604,7 @@ fn surface(ui: &TextEditorApp, s: &State) -> Vec<(Action, Handler)> {
                 .ok_or_else(|| refuse(ui, "`append` needs `text`: what to add to the end of the tab."))?;
             let text = format!("{}{add}", s.borrow().docs[s.borrow().active].text);
             document::validate(&text).map_err(|e| refuse(ui, e))?;
-            ui.set_content(text.clone().into());
+            // `edit` stores the text whole and `paint` windows it for the renderer (#328).
             edit(ui, s, text.clone());
             if s.borrow().docs[s.borrow().active].text != text {
                 return Err(refuse(ui, "The tab was not changed; the text was rejected."));
