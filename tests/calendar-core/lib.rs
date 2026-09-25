@@ -34,7 +34,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use yantrik_ipc_contracts::calendar::{
         Attendee, AttendeeStatus, CreateEventParams, DeleteEventParams, EventsParams,
-        UpdateEventParams, UpsertRemoteEventParams,
+        UpdateEventParams, UpsertRemoteEventParams, DEFAULT_REMINDER_MINUTES,
+        MAX_REMINDER_MINUTES,
     };
 
     static ID: AtomicUsize = AtomicUsize::new(0);
@@ -71,7 +72,14 @@ mod tests {
             is_all_day: false,
             attendees: Vec::new(),
             creator: None,
+            reminder_minutes: None,
         }
+    }
+
+    /// The same create with a reminder lead on it — what a caller sends when the person said
+    /// "remind me an hour before".
+    fn create_reminding(minutes: u32, title: &str, start: &str, end: &str) -> CreateEventParams {
+        CreateEventParams { reminder_minutes: Some(minutes), ..create(title, start, end) }
     }
 
     /// The same create, with a creator on it — what a surface sends when it verified who is
@@ -835,6 +843,225 @@ mod tests {
             })
             .unwrap();
         assert!(fresh.creator.is_none(), "a sync stores what a sync knows: nobody made this here");
+    }
+
+    // ── The reminder an event carries (#78) ─────────────────────────
+    //
+    // "Remind me an hour before the flight" had nowhere to go: the reminder was a fixed ten
+    // minutes decided by a timer, not a fact about the event. These are the store's half — what
+    // it keeps and what it refuses. The timer's half, firing at the stored lead without the
+    // calendar service running, is tested in the notifications service where it now lives.
+
+    #[test]
+    fn an_event_carries_the_reminder_it_was_given_and_the_default_when_it_was_not() {
+        let f = Fixture::new();
+        let store = f.store();
+        let flight = store
+            .create(&create_reminding(60, "Flight", "2026-09-22T14:00:00", "2026-09-22T16:00:00"))
+            .unwrap();
+        assert_eq!(flight.reminder_minutes, 60);
+        let plain = store
+            .create(&create("Standup", "2026-09-22T09:00:00", "2026-09-22T09:15:00"))
+            .unwrap();
+        assert_eq!(
+            plain.reminder_minutes, DEFAULT_REMINDER_MINUTES,
+            "a caller that says nothing gets the ten minutes every event always had"
+        );
+
+        // Through a fresh store, which is the service restarting: the lead is in the file.
+        assert_eq!(f.store().get(&flight.id).unwrap().reminder_minutes, 60);
+        assert_eq!(
+            f.store().get(&plain.id).unwrap().reminder_minutes,
+            DEFAULT_REMINDER_MINUTES
+        );
+    }
+
+    #[test]
+    fn zero_is_a_reminder_at_the_start_and_the_cap_is_the_longest_one() {
+        let f = Fixture::new();
+        let store = f.store();
+        let at_start = store
+            .create(&create_reminding(0, "Bell", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        assert_eq!(at_start.reminder_minutes, 0, "no lead is a lead of none, not the default");
+        store
+            .create(&create_reminding(
+                MAX_REMINDER_MINUTES,
+                "A week out",
+                "2026-09-22T14:00:00",
+                "2026-09-22T15:00:00",
+            ))
+            .expect("the cap itself is a legal lead");
+    }
+
+    #[test]
+    fn a_reminder_past_the_cap_is_refused_rather_than_quietly_shortened() {
+        let f = Fixture::new();
+        let store = f.store();
+        let err = store
+            .create(&create_reminding(
+                MAX_REMINDER_MINUTES + 1,
+                "Absurd",
+                "2026-09-22T14:00:00",
+                "2026-09-22T15:00:00",
+            ))
+            .expect_err("a lead past the cap does not fit");
+        assert!(err.message.contains("reminder_minutes"), "it names the field: {}", err.message);
+        assert!(store.list(&month(2026, 9, 30)).unwrap().is_empty(), "nothing half-written");
+
+        // And on the update path, which is the other door into the same store.
+        let saved = store
+            .create(&create("Kept", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        assert!(store
+            .update(&UpdateEventParams {
+                id: saved.id.clone(),
+                reminder_minutes: Some(MAX_REMINDER_MINUTES + 1),
+                ..Default::default()
+            })
+            .is_err());
+        assert_eq!(
+            store.get(&saved.id).unwrap().reminder_minutes,
+            DEFAULT_REMINDER_MINUTES,
+            "a refused change left the event as it was"
+        );
+    }
+
+    #[test]
+    fn an_update_can_move_the_reminder_and_leaves_it_alone_when_it_does_not() {
+        let f = Fixture::new();
+        let store = f.store();
+        let saved = store
+            .create(&create_reminding(45, "Dentist", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+
+        let renamed = store
+            .update(&UpdateEventParams {
+                id: saved.id.clone(),
+                title: Some("Dentist (moved)".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(renamed.reminder_minutes, 45, "a rename says nothing about the reminder");
+
+        let moved = store
+            .update(&UpdateEventParams {
+                id: saved.id.clone(),
+                reminder_minutes: Some(15),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(moved.reminder_minutes, 15);
+        assert_eq!(moved.title, "Dentist (moved)", "and the reminder change moved nothing else");
+        assert_eq!(f.store().get(&saved.id).unwrap().reminder_minutes, 15);
+    }
+
+    #[test]
+    fn an_event_file_from_before_reminders_reads_back_with_the_default() {
+        // Every event already on disk was stored by a service with one fixed lead and no field
+        // for it. The key defaults on read, so a person's existing calendar keeps the ten
+        // minutes it has always had rather than falling back to zero — which would mean every
+        // old event announcing exactly as it starts, if at all.
+        let f = Fixture::new();
+        let store = f.store();
+        let saved = store
+            .create(&create("Old file", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        let path = f.0.join(format!("{}.json", saved.id));
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("reminder_minutes");
+        std::fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+
+        let read = store.get(&saved.id).unwrap();
+        assert_eq!(read.reminder_minutes, DEFAULT_REMINDER_MINUTES);
+    }
+
+    #[test]
+    fn a_re_sync_keeps_the_reminder_the_person_set() {
+        // `upsert_remote` rebuilds the event from the remote's copy, and the remote's wire
+        // carries no reminder at all. Without the explicit carry-over, the first Google sync
+        // after "remind me an hour before" would silently reset it to ten minutes.
+        let f = Fixture::new();
+        let store = f.store();
+        let saved = store
+            .create(&create_reminding(60, "Flight", "2026-09-22T14:00:00", "2026-09-22T16:00:00"))
+            .unwrap();
+        store
+            .update(&UpdateEventParams {
+                id: saved.id.clone(),
+                remote_id: Some("goog-1".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let synced = store
+            .upsert_remote(&upsert("goog-1", "Flight", "2026-09-22T14:00:00", "2026-09-22T16:00:00"))
+            .unwrap();
+        assert_eq!(synced.id, saved.id);
+        assert_eq!(synced.reminder_minutes, 60, "a sync edits an event, it does not re-decide it");
+
+        // A remote nobody here ever set a reminder on arrives with the default, like any new
+        // event.
+        let fresh = store
+            .upsert_remote(&upsert("goog-2", "Imported", "2026-09-23T14:00:00", "2026-09-23T15:00:00"))
+            .unwrap();
+        assert_eq!(fresh.reminder_minutes, DEFAULT_REMINDER_MINUTES);
+    }
+
+    #[test]
+    fn a_request_from_a_caller_that_never_heard_of_reminders_is_the_same_bytes_it_was() {
+        // The wire tolerance, both directions. A bare create parses with nothing said about a
+        // reminder, and an update that does not mention one serializes without the key at all —
+        // so an old service, which ignores unknown fields, and an old caller, which never sends
+        // one, both keep working against the new contract.
+        let bare = serde_json::json!({
+            "title": "Dentist", "start": "2026-09-22T10:00:00", "end": "2026-09-22T11:00:00"
+        });
+        let read: CreateEventParams = serde_json::from_value(bare).unwrap();
+        assert!(read.reminder_minutes.is_none(), "not said is not said, and the store defaults it");
+
+        let sent = serde_json::to_value(UpdateEventParams {
+            id: "abc".into(),
+            title: Some("Renamed".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            sent.get("reminder_minutes").is_none(),
+            "an update that does not move the reminder does not put the key on the wire"
+        );
+    }
+
+    #[test]
+    fn storing_an_event_leaves_nothing_in_the_directory_beside_the_event_file() {
+        // Events are written through a temp file and renamed, because these files are a
+        // person's calendar and an interrupted write must not leave half an event where the
+        // whole one was. The temp file is the part that could leak: if it did, the directory
+        // would grow a stray for every save.
+        let f = Fixture::new();
+        let store = f.store();
+        let saved = store
+            .create(&create_reminding(30, "Review", "2026-09-22T14:00:00", "2026-09-22T15:00:00"))
+            .unwrap();
+        store
+            .update(&UpdateEventParams {
+                id: saved.id.clone(),
+                title: Some("Release review".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let files: Vec<String> = std::fs::read_dir(&f.0)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files, vec![format!("{}.json", saved.id)]);
+        // And what is in the file is the whole, newest event — the rename replaced it.
+        let read = f.store().get(&saved.id).unwrap();
+        assert_eq!(read.title, "Release review");
+        assert_eq!(read.reminder_minutes, 30);
     }
 }
 

@@ -10,7 +10,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use yantrik_app_runtime::prelude::*;
 use yantrik_ipc_contracts::calendar::{
     method, CalendarRevision, CreateEventParams, DeleteEventParams, EventsParams, GetEventParams,
-    UpdateEventParams,
+    UpdateEventParams, MAX_REMINDER_MINUTES,
 };
 use yantrik_ipc_transport::{peer_identity, reach};
 
@@ -279,13 +279,18 @@ fn requester() -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
+/// Store a new event and answer with what the store kept: the id it gave the event and the
+/// reminder lead it recorded. `reminder_minutes` is `None` when the caller did not say, and the
+/// stored event is the one place the default that then applied can be read off rather than
+/// repeated from the contract at every answer.
 fn create_event_via_service(
     title: &str,
     start: &str,
     end: &str,
     notes: &str,
     is_all_day: bool,
-) -> Result<String, String> {
+    reminder_minutes: Option<u32>,
+) -> Result<(String, u32), String> {
     let client = service::client("calendar")?;
     let params = CreateEventParams {
         title: title.to_string(),
@@ -305,6 +310,7 @@ fn create_event_via_service(
         // and nothing is recorded, so an event a person typed into the form is nobody's
         // "own" but a person's.
         creator: requester(),
+        reminder_minutes,
     };
     let result = client
         .call(method::CREATE_EVENT, serde_json::to_value(params).map_err(|e| e.to_string())?)
@@ -312,7 +318,7 @@ fn create_event_via_service(
     // The stored event, with the id the store gave it — the proof it landed, not a hope.
     let event: yantrik_ipc_contracts::calendar::CalendarEvent =
         serde_json::from_value(result).map_err(|e| e.to_string())?;
-    Ok(event.id)
+    Ok((event.id, event.reminder_minutes))
 }
 
 fn delete_event_via_service(event_id: &str) -> Result<(), String> {
@@ -728,10 +734,18 @@ fn store_event(
     notes: &str,
     duration_min: Option<i32>,
     all_day: bool,
-) -> Result<String, String> {
+    reminder_minutes: Option<u32>,
+) -> Result<(String, u32), String> {
     let title = title.trim();
     if title.is_empty() {
         return Err("an event needs a title".into());
+    }
+    if let Some(m) = reminder_minutes {
+        if m > MAX_REMINDER_MINUTES {
+            return Err(format!(
+                "`reminder_minutes` cannot be longer than {MAX_REMINDER_MINUTES}, and was {m}"
+            ));
+        }
     }
     // How long it runs is the caller's if it said, and the state's otherwise: the form has no
     // duration field, and a template pressed a moment ago has already said 15 or 30 or 120. The
@@ -750,10 +764,29 @@ fn store_event(
             .ok_or_else(|| format!("`{date} {time}` is not a date and a time"))?
     };
 
-    let id = create_event_via_service(title, &start, &end, notes, all_day)?;
+    let stored = create_event_via_service(title, &start, &end, notes, all_day, reminder_minutes)?;
     state.borrow_mut().new_event_duration_min = DEFAULT_EVENT_MINUTES;
     reload(ui, state);
-    Ok(id)
+    Ok(stored)
+}
+
+/// The `reminder_minutes` argument as both surface actions read it: absent is "did not say",
+/// and anything present must be a number of minutes inside the contract's cap. Checked at the
+/// door rather than passed to the service to refuse, for the same reason `date` is checked
+/// here: the error a caller can act on names the range it should have stayed inside.
+fn reminder_arg(args: &serde_json::Value) -> Result<Option<u32>, String> {
+    match args.get("reminder_minutes") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => {
+            let m = v.as_i64().ok_or("`reminder_minutes` must be a number of minutes")?;
+            if !(0..=i64::from(MAX_REMINDER_MINUTES)).contains(&m) {
+                return Err(format!(
+                    "`reminder_minutes` must be between 0 and {MAX_REMINDER_MINUTES}, and was {m}"
+                ));
+            }
+            Ok(Some(m as u32))
+        }
+    }
 }
 
 /// Take something off the calendar, and show that it is gone — or say why it is not.
@@ -864,8 +897,10 @@ fn change_event(
     time: Option<&str>,
     duration_min: Option<i32>,
     notes: Option<&str>,
+    reminder_minutes: Option<u32>,
 ) -> Result<yantrik_ipc_contracts::calendar::CalendarEvent, String> {
-    let outcome = update_through_service(event_id, title, date, time, duration_min, notes);
+    let outcome =
+        update_through_service(event_id, title, date, time, duration_min, notes, reminder_minutes);
     reload(ui, state);
     outcome
 }
@@ -877,7 +912,15 @@ fn update_through_service(
     time: Option<&str>,
     duration_min: Option<i32>,
     notes: Option<&str>,
+    reminder_minutes: Option<u32>,
 ) -> Result<yantrik_ipc_contracts::calendar::CalendarEvent, String> {
+    if let Some(m) = reminder_minutes {
+        if m > MAX_REMINDER_MINUTES {
+            return Err(format!(
+                "`reminder_minutes` cannot be longer than {MAX_REMINDER_MINUTES}, and was {m}"
+            ));
+        }
+    }
     // Read before written, because moving an event has to know how long it already runs. The
     // caller said "10:00", not "10:00 for an hour".
     let current = get_event_via_service(event_id)?;
@@ -896,9 +939,10 @@ fn update_through_service(
             return Err("an event needs a title".into());
         }
     }
-    if title.is_none() && times.is_none() && notes.is_none() {
+    if title.is_none() && times.is_none() && notes.is_none() && reminder_minutes.is_none() {
         return Err(
-            "nothing to change: give a `title`, a `date`, a `time`, a `duration_min` or `notes`"
+            "nothing to change: give a `title`, a `date`, a `time`, a `duration_min`, `notes` \
+             or `reminder_minutes`"
                 .into(),
         );
     }
@@ -909,6 +953,7 @@ fn update_through_service(
         start: times.as_ref().map(|(start, _)| start.clone()),
         end: times.as_ref().map(|(_, end)| end.clone()),
         description: notes.map(|n| n.to_string()),
+        reminder_minutes,
         ..Default::default()
     };
     update_event_via_service(&params)?;
@@ -929,6 +974,14 @@ fn update_through_service(
                 "asked the calendar to call it “{}” and it kept “{}”",
                 t.trim(),
                 stored.title
+            ));
+        }
+    }
+    if let Some(m) = reminder_minutes {
+        if stored.reminder_minutes != m {
+            return Err(format!(
+                "asked the calendar to remind {m} minutes before it and it kept {}",
+                stored.reminder_minutes
             ));
         }
     }
@@ -1196,6 +1249,12 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 .arg(Param::flag("all_day")
                     .describe("A whole day rather than a time; `time` and `duration_min` are \
                                not used with it")
+                    .optional())
+                // The reminder is a fact about the event, stored with it and announced by the
+                // notifications service whether or not this window is ever opened again (#78).
+                .arg(Param::integer("reminder_minutes")
+                    .describe("How many minutes before it starts to announce it; ten when not \
+                               given. All-day events are not announced")
                     .optional()),
             move |args| {
                 let ui = add_ui()?;
@@ -1225,15 +1284,22 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                                 drop `all_day`"
                         .into());
                 }
+                let reminder_minutes = reminder_arg(args)?;
+                if all_day && reminder_minutes.is_some() {
+                    return Err("an all-day event is never announced; drop `reminder_minutes` \
+                                or drop `all_day`"
+                        .into());
+                }
                 let notes = args["notes"].as_str().unwrap_or_default().to_string();
                 // Stored before answering, and the answer carries the id it was stored under,
                 // so "added" cannot be a guess about what the window did next. A failure is put
                 // on screen as well as returned: when a mind tries to put something on the
                 // calendar and cannot, the person watching the window is owed the reason too.
-                let id = match store_event(
+                let (id, reminder) = match store_event(
                     &ui, &add_state, &title, &date, &time, &notes, duration_min, all_day,
+                    reminder_minutes,
                 ) {
-                    Ok(id) => id,
+                    Ok(stored) => stored,
                     Err(e) => {
                         ui.set_notice(format!("Could not save “{title}”: {e}").into());
                         return Err(e);
@@ -1241,9 +1307,16 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 };
                 ui.set_notice(SharedString::new());
                 let on = if all_day { date.clone() } else { format!("{date} {time}") };
-                Ok(serde_json::json!({
+                let mut answer = serde_json::json!({
                     "added": title, "on": on, "id": id, "all_day": all_day,
-                }))
+                });
+                if !all_day {
+                    // The lead the store recorded — what the caller asked for, or the default
+                    // when it did not say. Not reported for an all-day event, which is never
+                    // announced: a number there would describe a reminder that will not happen.
+                    answer["reminder_minutes"] = serde_json::json!(reminder);
+                }
+                Ok(answer)
             },
         )
         .action(
@@ -1372,7 +1445,11 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 .arg(Param::integer("duration_min")
                     .describe("How long it runs, in minutes; unchanged when not given")
                     .optional())
-                .arg(Param::text("notes").optional()),
+                .arg(Param::text("notes").optional())
+                .arg(Param::integer("reminder_minutes")
+                    .describe("How many minutes before it starts to announce it; unchanged \
+                               when not given")
+                    .optional()),
             move |args| {
                 let ui = update_ui()?;
                 let given = |key: &str| {
@@ -1400,6 +1477,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                 // `notes` is taken as given, empty string included: clearing the notes on an
                 // event is a thing a caller may mean, and `given` would read that as "not said".
                 let notes = args.get("notes").and_then(|v| v.as_str()).map(str::to_string);
+                let reminder_minutes = reminder_arg(args)?;
 
                 match change_event(
                     &ui,
@@ -1410,6 +1488,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                     time.as_deref(),
                     duration_min,
                     notes.as_deref(),
+                    reminder_minutes,
                 ) {
                     Ok(event) => {
                         ui.set_notice(SharedString::new());
@@ -1421,6 +1500,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                             "start": event.start,
                             "end": event.end,
                             "all_day": event.is_all_day,
+                            "reminder_minutes": event.reminder_minutes,
                         }))
                     }
                     Err(e) => {
@@ -1614,10 +1694,11 @@ fn wire(app: &CalendarApp) -> slint::Timer {
         let st = state.clone();
         app.on_save_event(move |title, date, time, notes| {
             let Some(ui) = weak.upgrade() else { return };
-            // The form has no duration field and no all-day switch, so it says nothing about
-            // either: the duration comes from the state, where a template left it, and an event
-            // typed into this form is a timed one.
-            match store_event(&ui, &st, &title, &date, &time, &notes, None, false) {
+            // The form has no duration field, no all-day switch and no reminder field, so it
+            // says nothing about any of them: the duration comes from the state, where a
+            // template left it; an event typed into this form is a timed one; and its reminder
+            // is the default the store applies.
+            match store_event(&ui, &st, &title, &date, &time, &notes, None, false, None) {
                 Ok(_) => {
                     ui.set_notice(SharedString::new());
                     ui.set_show_event_form(false);

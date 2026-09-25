@@ -1002,7 +1002,6 @@ dependencies = [
  "tracing",
  "uuid7",
  "yantrik-ipc-contracts",
- "yantrik-ipc-transport",
  "yantrik-service-sdk",
 ]
 
