@@ -683,7 +683,9 @@ export component WeatherDashboard inherits Rectangle {
                     // ══════ HERO SECTION — Current Conditions ══════
                     hero-card := Rectangle {
                         // A weather panel should have some air in it; a flat fill read as a form.
-                        background: @linear-gradient(160deg, Theme.bg-elevated 0%, Theme.bg-card 70%);
+                        // Solid: a gradient fill on a rounded card draws square corners under
+                        // the software renderer (#172).
+                        background: Theme.bg-elevated;
                         border-radius: Theme.r-lg;
                         border-width: 1px;
                         border-color: Theme.border-subtle;
@@ -1026,13 +1028,33 @@ export component WeatherDashboard inherits Rectangle {
                                             border-radius: 4px;
                                             background: Theme.bg-surface;
 
+                                            // The day's range, cold to warm. A gradient fill on a rounded
+                                            // bar draws square ends under the software renderer (#172),
+                                            // so the ends are solid round caps in the gradient's end colours
+                                            // and the gradient runs square between them.
                                             Rectangle {
                                                 x: parent.width * clamp(day.temp-range-min, 0, 1);
                                                 width: parent.width * clamp(day.temp-range-max - day.temp-range-min, 0.06, 1);
                                                 height: parent.height;
-                                                border-radius: 4px;
-                                                background: @linear-gradient(90deg,
-                                                    Theme.holo-blue 0%, Theme.accent 55%, Theme.amber 100%);
+
+                                                Rectangle {
+                                                    x: 0;
+                                                    width: min(parent.height, parent.width / 2);
+                                                    border-radius: self.width / 2;
+                                                    background: Theme.holo-blue;
+                                                }
+                                                Rectangle {
+                                                    x: parent.width - self.width;
+                                                    width: min(parent.height, parent.width / 2);
+                                                    border-radius: self.width / 2;
+                                                    background: Theme.amber;
+                                                }
+                                                Rectangle {
+                                                    x: parent.height / 2;
+                                                    width: max(0px, parent.width - parent.height);
+                                                    background: @linear-gradient(90deg,
+                                                        Theme.holo-blue 0%, Theme.accent 55%, Theme.amber 100%);
+                                                }
                                             }
                                         }
                                     }
