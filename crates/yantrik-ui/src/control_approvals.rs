@@ -1528,6 +1528,44 @@ fn publish_mode_if_changed(ui: &App) {
     }
 }
 
+/// One audit record as the mode menu draws it.
+///
+/// Pure and separate from the write so "the row names the actor" is a test that needs no shell
+/// (#220). The menu row used to show only the time, the action, its arguments and the outcome,
+/// so a list of unattended actions named everything except who did them. It now shows the
+/// verified mind, or the caller's claim marked as a claim — see [`audit_actor`].
+fn audit_row(e: &crate::mind_mode::AuditEntry) -> crate::MindAuditEntry {
+    crate::MindAuditEntry {
+        at: e.at.clone().into(),
+        what: format!("{}.{}", e.app, e.action).into(),
+        actor: audit_actor(e).into(),
+        // One line, already bounded the way the card bounds them. Joined with two spaces rather
+        // than newlines because this is a single elided `Text` in a menu, not a card. The grade
+        // and the mode it ran under stay in `describe shell` and in the file; see the struct.
+        args: e.args.join("  ").into(),
+        outcome: e.outcome.clone().into(),
+    }
+}
+
+/// Who did it, as this machine knows it: the verified mind or agent when there is one, and the
+/// caller's own claim only marked as a claim — `requester` is self-declared text that any mind
+/// can set to any name, including another mind's, and this row is what a person judges the
+/// unattended runs by. The same pairing as everywhere else a claimed name is shown ("says the
+/// caller": `intent_lens.slint`, the notifications after #134, `caller_identity.rs` / #43).
+fn audit_actor(e: &crate::mind_mode::AuditEntry) -> String {
+    let v = &e.verified;
+    if !v.attached_mind.is_empty() {
+        return v.attached_mind.clone();
+    }
+    if !v.agent.is_empty() {
+        return format!("agent {}", v.agent);
+    }
+    if e.requester.is_empty() {
+        return String::new();
+    }
+    format!("\u{201c}{}\u{201d} says the caller", e.requester)
+}
+
 fn publish_mode(ui: &App) {
     MODE_SHOWN.with(|shown| *shown.borrow_mut() = mode_fingerprint());
     // And to the apps, which enforce it (issue #116). Every change of mode or rule comes
@@ -1566,16 +1604,8 @@ fn publish_mode(ui: &App) {
     let mut audit: Vec<crate::MindAuditEntry> = crate::mind_mode::recent(
         crate::mind_mode::AUDIT_PUBLISHED,
     )
-    .into_iter()
-    .map(|e| crate::MindAuditEntry {
-        at: e.at.into(),
-        what: format!("{}.{}", e.app, e.action).into(),
-        // One line, already bounded the way the card bounds them. Joined with two spaces rather
-        // than newlines because this is a single elided `Text` in a menu, not a card. The grade
-        // and the mode it ran under stay in `describe shell` and in the file; see the struct.
-        args: e.args.join("  ").into(),
-        outcome: e.outcome.into(),
-    })
+    .iter()
+    .map(audit_row)
     .collect();
     audit.reverse();
     ui.set_mind_audit(ModelRc::new(VecModel::from(audit)));
@@ -2724,5 +2754,62 @@ mod target_line_tests {
             age_secs: 12,
         });
         assert_eq!(row.target.as_str(), line.as_str());
+    }
+}
+
+#[cfg(test)]
+mod audit_row_tests {
+    fn entry(requester: &str, verified: crate::approvals::Verified) -> crate::mind_mode::AuditEntry {
+        crate::mind_mode::AuditEntry {
+            at: "12:03".into(),
+            unix: 1_790_000_000,
+            mode: "auto".into(),
+            requester: requester.into(),
+            verified,
+            app: "files".into(),
+            action: "move".into(),
+            args: vec!["from: /a".into(), "to: /b".into()],
+            grade: "sensitive".into(),
+            outcome: "ok".into(),
+        }
+    }
+
+    /// An unattended run's row in the mode menu names who did it (#220) — and a name the caller
+    /// only CLAIMED is marked as a claim, because `requester` is self-declared text any mind can
+    /// set to anything, including another mind's name.
+    #[test]
+    fn the_menu_audit_row_names_the_actor() {
+        let row = super::audit_row(&entry("Coder · pi", crate::approvals::Verified::default()));
+        assert_eq!(
+            row.actor.as_str(),
+            "\u{201c}Coder · pi\u{201d} says the caller",
+            "nothing was established, so the row shows the claim as a claim"
+        );
+        // The rest of the row is unchanged: the actor is added beside what was already there.
+        assert_eq!(row.at.as_str(), "12:03");
+        assert_eq!(row.what.as_str(), "files.move");
+        assert_eq!(row.args.as_str(), "from: /a  to: /b");
+        assert_eq!(row.outcome.as_str(), "ok");
+
+        // What the machine established outranks the claim: a caller saying it is "Coder · pi"
+        // while the kernel's ancestry says Hermes Agent is shown as Hermes Agent.
+        let verified = crate::approvals::Verified {
+            attached_mind: "Hermes Agent".into(),
+            ..Default::default()
+        };
+        let row = super::audit_row(&entry("Coder · pi", verified));
+        assert_eq!(row.actor.as_str(), "Hermes Agent", "the verified mind is the actor");
+
+        // No mind, but an agent token the harness was checked against: name the agent.
+        let verified = crate::approvals::Verified {
+            agent: "pi:c-7f3a91".into(),
+            ..Default::default()
+        };
+        let row = super::audit_row(&entry("", verified));
+        assert_eq!(row.actor.as_str(), "agent pi:c-7f3a91");
+
+        // Nothing established and nothing claimed: no empty quoted claim on the row.
+        let row = super::audit_row(&entry("", crate::approvals::Verified::default()));
+        assert_eq!(row.actor.as_str(), "");
     }
 }
