@@ -902,6 +902,9 @@ fn items_of(a: &Agent, expanded: &HashSet<String>, pending: &[crate::approvals::
                 kind: "prompt".into(),
                 key: format!("t{}", turn.n).into(),
                 text: turn.prompt.as_str().into(),
+                // The first prompt says who sent it (#194) — the row's own attribution. The
+                // store keeps no sender per turn, so later prompts stay "you", as before.
+                sent_by: if turn.n == 1 { first_sender(&a.meta) } else { String::new() }.into(),
                 ..Default::default()
             });
         }
@@ -937,6 +940,16 @@ fn items_of(a: &Agent, expanded: &HashSet<String>, pending: &[crate::approvals::
         }
     }
     out
+}
+
+/// Whose voice a pane's first prompt speaks with — the same attribution its row shows: the
+/// recipe that sent it ("Council recipe"), else the agent that started this one (its id). "" for
+/// one the person typed, which the pane draws as "you".
+fn first_sender(meta: &agents::AgentMeta) -> String {
+    if let Some(recipe) = &meta.recipe {
+        return recipe.label();
+    }
+    meta.parent.as_ref().map(|p| p.0.clone()).unwrap_or_default()
 }
 
 /// One block of the mind's text as the pane draws it, one item per block: a paragraph or a list
@@ -1122,6 +1135,7 @@ fn card_of(c: &Card, key: String, open: bool) -> AgentItemData {
         kind: "card".into(),
         key: key.into(),
         text: Default::default(),
+        sent_by: Default::default(),
         call: ToolCallData {
             name: call.name.as_str().into(),
             target: call.target.as_str().into(),
@@ -2081,5 +2095,55 @@ mod rough_edges_tests {
             slint.matches("AgentsState.new-note-reach = \"\";").count() >= 2,
             "the chips clear the patterns with the note"
         );
+    }
+}
+
+/// A pane's first prompt said "you" even when a recipe or another agent sent it (#194). It now
+/// carries the row's own attribution, and "you" stays what one the person typed draws as.
+#[cfg(test)]
+mod first_prompt_attribution_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn read(relative: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    }
+
+    fn first_prompt(s: &Store, id: &AgentId) -> AgentItemData {
+        let items = items_of(s.agent(id).unwrap(), &HashSet::new(), &[]);
+        items.into_iter().find(|i| i.kind == "prompt").expect("the prompt")
+    }
+
+    #[test]
+    fn a_first_prompt_says_who_sent_it_and_only_the_persons_says_you() {
+        let mut s = Store::new();
+
+        // A council seat: the recipe sent its first prompt, so the label is the recipe's — the
+        // same "Council recipe" its row shows.
+        let seat = AgentId("deepseek:c-council1".into());
+        let mut meta = agents::AgentMeta::new(seat.clone(), "deepseek");
+        meta.recipe = Some(agents::RecipeOrigin { id: "rcp_council1".into(), name: "Council".into() });
+        s.upsert_agent(meta);
+        s.open_turn(&seat, "Should the desktop ship on Friday?");
+        assert_eq!(first_prompt(&s, &seat).sent_by.as_str(), "Council recipe");
+
+        // An agent another agent started: the starting agent's id, as the row's "started by".
+        let child = AgentId("deepseek:c-child01".into());
+        let mut meta = agents::AgentMeta::new(child.clone(), "deepseek");
+        meta.parent = Some(AgentId("pi:c-parent01".into()));
+        s.upsert_agent(meta);
+        s.open_turn(&child, "attack this plan");
+        assert_eq!(first_prompt(&s, &child).sent_by.as_str(), "pi:c-parent01");
+
+        // One the person typed: "" — which the pane draws as "you", as it always did.
+        let mine = AgentId("pi:c-mine001".into());
+        s.open_turn(&mine, "tidy the photos folder");
+        assert_eq!(first_prompt(&s, &mine).sent_by.as_str(), "");
+
+        // And the pane draws the sender it is given, falling back to "you" for the person's.
+        let slint = read("../yantrik-ui-slint/ui/agents.slint");
+        assert!(slint.contains("root.item.sent-by == \"\" ? \"you\" : root.item.sent-by"), "the pane draws the sender");
+        assert!(!slint.contains("text: \"you\";"), "and no longer hardcodes it for every prompt");
     }
 }

@@ -52,6 +52,9 @@ export struct AgentItemData {
     kind: string,          // prompt | text | thinking | note | card | approval
     key: string,           // stable across redraws; what `toggle` names
     text: string,
+    // For a prompt: who sent it — "Council recipe" or the starting agent's id (`deepseek:c-…`),
+    // the row's own attribution. "" for one the person typed, which draws as "you".
+    sent-by: string,
     call: ToolCallData,    // a card's call, as ToolCallCard draws it
     badge: string,         // "verified · exit 0" / "reported"
     explain: string,       // shown open: how it ended, or why the shell made the card itself
@@ -385,8 +388,12 @@ component ItemView inherits Rectangle {
                 padding-left: 12px;
                 spacing: 10px;
                 Text {
-                    text: "you";
-                    width: 30px;
+                    // Who sent this prompt (#194): a recipe's or a starting agent's name, or
+                    // "you" for one the person typed. A long id elides; the row says it in full.
+                    text: root.item.sent-by == "" ? "you" : root.item.sent-by;
+                    min-width: 30px;
+                    max-width: 150px;
+                    overflow: elide;
                     color: Theme.text-dim;
                     font-size: Theme.fs-caption;
                 }

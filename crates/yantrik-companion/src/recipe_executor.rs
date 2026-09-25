@@ -145,6 +145,10 @@ pub struct AgentCall<'a> {
     pub role: &'a str,
     pub task: &'a str,
     pub context: &'a str,
+    /// Why the previous try at this step was put off, when it was: the durable wait's own words,
+    /// which a restart keeps. The hook reads it to know a re-ask — a card it raised before a
+    /// desktop restart went down with the desktop, and the card it raises now should say so.
+    pub put_off: Option<&'a str>,
 }
 
 /// What the hook started.
@@ -278,7 +282,7 @@ pub fn step<H: RecipeHost>(host: &mut H, recipe_id: &str) -> Advance {
                     }
                     let here = steps.iter().find(|s| s.step_index == w.step).map(|s| s.step.clone());
                     if let Some(here @ RecipeStep::Agent { .. }) = here {
-                        return agent_step(host, &recipe, w.step, &here, &vars, now, Some(w.since));
+                        return agent_step(host, &recipe, w.step, &here, &vars, now, Some(w.since), Some(why.as_str()));
                     }
                 }
                 if blocked_on_agents(&steps, w.step, &vars).is_some() {
@@ -329,7 +333,7 @@ pub fn step<H: RecipeHost>(host: &mut H, recipe_id: &str) -> Advance {
         return branch(host, &recipe, &steps, cur, &here, &vars, now);
     }
     if matches!(here, RecipeStep::Agent { .. }) {
-        return agent_step(host, &recipe, cur, &here, &vars, now, None);
+        return agent_step(host, &recipe, cur, &here, &vars, now, None, None);
     }
 
     let mut trail = Trail::read(&vars);
@@ -520,8 +524,8 @@ fn perform<H: RecipeHost>(host: &mut H, id: &str, step: &RecipeStep, vars: &Vars
 // ── Agent: a turn handed to a catalog role ──
 
 /// Start the Agent step's agent through the hook and go on; its answer is waited for where it is
-/// read ([`blocked_on_agents`]). `put_off_since`: asked again from a wait the shell put it in,
-/// since then.
+/// read ([`blocked_on_agents`]). `put_off_since` and `put_off_why`: asked again from a wait the
+/// shell put it in — since then, and for the reason it gave, which outlives a restart.
 fn agent_step<H: RecipeHost>(
     host: &mut H,
     recipe: &Recipe,
@@ -530,6 +534,7 @@ fn agent_step<H: RecipeHost>(
     vars: &Vars,
     now: f64,
     put_off_since: Option<f64>,
+    put_off_why: Option<&str>,
 ) -> Advance {
     let RecipeStep::Agent { role, prompt, store_as, context } = here else {
         return fail(host, recipe, cur, "not an Agent step", "not an Agent step");
@@ -555,6 +560,7 @@ fn agent_step<H: RecipeHost>(
         role: &role,
         task: &task,
         context: &context,
+        put_off: put_off_why,
     };
     let started = match host.agent_hook() {
         Some(hook) => hook.start(&call),
@@ -1731,6 +1737,9 @@ mod tests {
         /// What each start was told the person agreed to, in order: attended, and the role's
         /// digest as agreed — refused ones included.
         told: Vec<(bool, Option<String>)>,
+        /// What each start heard the previous try was put off for, in order — refused ones
+        /// included.
+        heard_put_off: Vec<Option<String>>,
         /// What a role's agents come to, in turn, and the last one from then on. A role with no
         /// script answers "<role> answered: <the task's first line>".
         script: HashMap<String, VecDeque<AgentPoll>>,
@@ -1768,6 +1777,7 @@ mod tests {
     impl AgentHook for Hands {
         fn start(&mut self, call: &AgentCall<'_>) -> Result<AgentStarted, AgentRefusal> {
             self.told.push((call.attended, call.consented.map(str::to_string)));
+            self.heard_put_off.push(call.put_off.map(str::to_string));
             if let Some(refusal) = self.refuse.clone() {
                 return Err(refusal);
             }
@@ -2435,6 +2445,29 @@ mod tests {
             Some("Its Agent step waited 30m and was not started: it was waiting for your Allow on the card: Digest recipe → Reviewer.")
         );
         assert!(desk.var(&id, "out").is_none());
+    }
+
+    /// A start asked again from the wait the shell put it in hears why it was put off — all that
+    /// survives a desktop restart of the card that was on screen, and what lets the shell know
+    /// the card it raises now must say it asks again because of the restart (#194). A first ask
+    /// hears nothing behind it.
+    #[test]
+    fn a_start_asked_again_tells_the_hook_what_it_waited_for() {
+        let card = "your Allow on the card: Digest recipe → Reviewer";
+        let mut desk = Desk::new();
+        desk.hands().refuse = Some(AgentRefusal::Ask(card.into()));
+        let id = desk.start(&[agent("reviewer", "Review it", "review")]);
+        desk.tick();
+        assert_eq!(desk.hands().heard_put_off, vec![None], "a first ask has nothing behind it");
+        // The tick after the put-off — as after a desktop restart, when the durable wait is all
+        // that survives — asks again, with the wait's own reason.
+        desk.tick();
+        assert_eq!(desk.hands().heard_put_off, vec![None, Some(card.to_string())]);
+        // Allowed at last: the step starts on the reason it waited for, and the recipe goes on.
+        desk.hands().refuse = None;
+        desk.tick();
+        assert_eq!(desk.hands().heard_put_off[2], Some(card.to_string()));
+        assert_eq!(desk.status(&id).0, RecipeStatus::Done);
     }
 
     /// An agent waiting on the person in its own pane — a card it asked for — makes its recipe

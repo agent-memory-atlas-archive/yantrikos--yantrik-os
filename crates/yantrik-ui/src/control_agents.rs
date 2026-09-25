@@ -712,6 +712,11 @@ pub fn start_for_recipe(host: &Host, catalog: &Catalog, call: &AgentCall<'_>, as
     })
 }
 
+/// The start of an [`AgentRefusal::Ask`] that names a card on screen — the reason the durable
+/// wait holds, across a restart. A card this process raised itself keeps its request id in
+/// [`Asks`], so a wait naming one this process never raised is a card lost with the desktop.
+const CARD_WAITING: &str = "your Allow on the card:";
+
 /// A run nobody started at the desk asks the person before a role above `safe`: a card naming the
 /// recipe and the role — its reach, its minds — bound to the role's definition, so an Allow for
 /// one definition starts no other. `Ok` once the Allow is spent; [`AgentRefusal::Ask`] while the
@@ -721,7 +726,7 @@ fn allowed_on_card(origin: &RecipeOrigin, call: &AgentCall<'_>, role: &catalog::
     let key = (origin.id.clone(), call.step);
     let task: String = call.task.chars().take(200).collect();
     let args = json!({ "role": role.id, "recipe": origin.id, "task": task, "definition": digest });
-    let waiting = format!("your Allow on the card: {} → {} (it may touch {})", origin.label(), role.name, role.reach.text());
+    let waiting = format!("{CARD_WAITING} {} → {} (it may touch {})", origin.label(), role.name, role.reach.text());
     if let Some(id) = asks.get(&key).cloned() {
         return match approvals::outcome(&id) {
             None => Err(AgentRefusal::Ask(waiting)),
@@ -742,6 +747,12 @@ fn allowed_on_card(origin: &RecipeOrigin, call: &AgentCall<'_>, role: &catalog::
             }
         };
     }
+    // A card the durable wait names but this process never raised went down with the desktop:
+    // the card raised now says it asks again because of the restart (#194). A deferral inside
+    // one process — the cards on screen were full — raised no card either, but is no restart,
+    // and its own reason says so ("already waiting", appended below).
+    let asks_again_after_a_restart =
+        call.put_off.is_some_and(|why| why.starts_with(CARD_WAITING) && !why.contains("already waiting"));
     let verified = approvals::Verified {
         line: format!(
             "the shell's recipe executor, for the {} ({}), which started with nobody at the desk",
@@ -753,13 +764,19 @@ fn allowed_on_card(origin: &RecipeOrigin, call: &AgentCall<'_>, role: &catalog::
     let purpose = format!(
         "Hand work to the {} from the agent catalog, for the {} — which started with nobody at the \
          desk (a trigger or a timer), so nobody has agreed to this yet. The {} may touch {}, for up to \
-         {} minutes, on {}.",
+         {} minutes, on {}.{}",
         role.name,
         origin.label(),
         role.name,
         role.reach.text(),
         role.budget.minutes,
-        role.mind.join(" or ")
+        role.mind.join(" or "),
+        if asks_again_after_a_restart {
+            " It asks again: the desktop restarted while the earlier card for this was waiting, and \
+             that card went down with it — nothing was allowed or denied."
+        } else {
+            ""
+        }
     );
     // No naming line: the shell publishes no id→name index, and `hand_off`'s arguments name
     // themselves — the recipe a person is being asked to start is in the `purpose` above.
@@ -1420,6 +1437,7 @@ mod tests {
             role,
             task,
             context: "",
+            put_off: None,
         }
     }
 
@@ -1633,6 +1651,7 @@ mod tests {
             role,
             task: "tidy the build cache",
             context: "",
+            put_off: None,
         };
         let mut asks = Asks::default();
         let before = host.agents().len();
@@ -1689,6 +1708,70 @@ mod tests {
         for agent in [started.agent, chair.agent] {
             let _ = stop_agent(&host, &Caller::NoAgent, &AgentId(agent));
         }
+    }
+
+    /// A step re-asked after a desktop restart — the card it waited on went down with the
+    /// desktop, and only the durable wait's reason survives — raises a card that says it asks
+    /// again because of the restart (#194). A first ask, and a deferral because the cards on
+    /// screen were full, claim no restart.
+    #[test]
+    fn a_card_raised_after_a_restart_says_the_desktop_restarted() {
+        use crate::approvals;
+        let host = Host::new(vec![]);
+        attach(&host, "pi", true);
+        // Each case its own task: a denied card's exact arguments are not put in front of the
+        // person again for a while, and the cases deny their cards.
+        fn call_at<'a>(step: usize, task: &'a str, put_off: Option<&'a str>) -> AgentCall<'a> {
+            AgentCall {
+                recipe_id: "rcp_restart",
+                recipe_name: "Nightly",
+                step,
+                attended: false,
+                consented: None,
+                asked_by: None,
+                role: "coder",
+                task,
+                context: "",
+                put_off,
+            }
+        }
+        /// Raise the step's card — waiting out a moment with the cards on screen full, as other
+        /// tests ask too — and give back its request id.
+        fn raised(host: &Host, asks: &mut Asks, call: &AgentCall<'_>, key: &(String, usize)) -> String {
+            for _ in 0..50 {
+                match start_for_recipe(host, &shipped(), call, asks) {
+                    Err(AgentRefusal::Ask(_)) if asks.contains_key(key) => return asks[key].clone(),
+                    Err(AgentRefusal::Ask(_)) => std::thread::sleep(Duration::from_millis(100)),
+                    other => panic!("an above-safe role must be asked for: {other:?}"),
+                }
+            }
+            panic!("no card was raised")
+        }
+        let waiting = "your Allow on the card: Nightly recipe → Coder (it may touch the shell's acts)";
+
+        // The desktop restarted: the durable wait names a card this process never raised.
+        let mut asks = Asks::default();
+        let id = raised(&host, &mut asks, &call_at(1, "tidy the build cache", Some(waiting)), &("rcp_restart".to_string(), 1));
+        let card = approvals::card(&id).expect("the card");
+        assert!(card.purpose.contains("the desktop restarted"), "{}", card.purpose);
+        assert!(card.purpose.contains("Hand work to the Coder"), "and it still says what it asks for: {}", card.purpose);
+        approvals::deny(&id).unwrap();
+
+        // A first ask: nothing behind it, so no restart is claimed.
+        let mut asks = Asks::default();
+        let id = raised(&host, &mut asks, &call_at(2, "clear the font cache", None), &("rcp_restart".to_string(), 2));
+        let card = approvals::card(&id).expect("the card");
+        assert!(!card.purpose.contains("restarted"), "a first ask claims no restart: {}", card.purpose);
+        approvals::deny(&id).unwrap();
+
+        // A deferral inside one process — the cards on screen were full — raised no card either,
+        // but its reason says so: it is another ask, not one a restart lost.
+        let mut asks = Asks::default();
+        let deferred = format!("{waiting} — already waiting: three other cards are on screen");
+        let id = raised(&host, &mut asks, &call_at(3, "prune the thumbnail cache", Some(&deferred)), &("rcp_restart".to_string(), 3));
+        let card = approvals::card(&id).expect("the card");
+        assert!(!card.purpose.contains("restarted"), "a deferral is not a restart: {}", card.purpose);
+        approvals::deny(&id).unwrap();
     }
 
     /// An agent waiting on the person in its own pane makes its recipe need the person; a card of
