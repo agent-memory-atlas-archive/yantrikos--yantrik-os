@@ -416,8 +416,12 @@ mkdir -p "$ROOT/share"
   echo
   echo "_${CHANGE_SINCE}; built $(date -u +%Y-%m-%d), git $GITREV._"
   echo
+  # git stops at 200 itself rather than being cut off by `head`: under `set -o pipefail`, head
+  # closing the pipe early kills git with SIGPIPE, the pipeline exits 141 and `set -e` ends the
+  # whole build with no message, as soon as more than 200 changes lie since the previous tag
+  # (608 did on 24 September). A later `-n` in CHANGE_RANGE (the no-tag case) still wins.
   # shellcheck disable=SC2086
-  git -C "$PROJECT_ROOT" log --no-merges --format='- %s' $CHANGE_RANGE 2>/dev/null | head -200
+  git -C "$PROJECT_ROOT" log --no-merges --format='- %s' -n 200 $CHANGE_RANGE 2>/dev/null
 } > "$ROOT/share/CHANGELOG.md"
 echo "   + share/CHANGELOG.md ($(grep -c '^- ' "$ROOT/share/CHANGELOG.md") changes, $CHANGE_SINCE)"
 

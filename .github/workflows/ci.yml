@@ -181,13 +181,6 @@ jobs:
       - name: The attachable harnesses close every turn exactly once
         run: python3 -m unittest discover -s harnesses/tests -v
 
-      # A service answers its own methods beside its gated `app.act`, and those meet no ceiling,
-      # no mode and no grant (#161). Until a caller can be told from a person's button they stay
-      # open, so docs/app-control.md lists every one; this reads each service's dispatch and fails
-      # when a method is added without a row, or a row outlives its method. Stdlib-only.
-      - name: Every service method is in the guide's table of ungated doors
-        run: python3 -m unittest discover -s tests/service-methods -v
-
       # The Blender control surface's tests: the addon that answers for somebody else's
       # program, driven against a fake `bpy`. Stdlib-only, no Blender and no display needed,
       # like everything above. Among them is one vector the Rust side asserts too — the
@@ -217,3 +210,13 @@ jobs:
           python3 -m unittest discover -s templates/python-surface/tests -v
           python3 -m unittest discover -s adapters/libreoffice/tests -v
           python3 -m unittest discover -s docs/sdk/samples -v
+
+      # The record #161 asks for: a service's own JSON-RPC methods answer on the same socket
+      # beside its gated app.act and meet no gate until #43 can tell callers apart, so every one
+      # of them is listed in docs/app-control.md beside the graded action that does the same
+      # thing. This walks each services/*/src/main.rs dispatch — literal arms, and const arms
+      # resolved through yantrik-ipc-contracts — and holds the two lists together: a method with
+      # no row fails, a row with no method fails, and a `change` that names neither a grade nor
+      # `none` fails. Stdlib-only source text, like everything above; it runs no service.
+      - name: Every method a service answers stands in the guide beside its grade
+        run: python3 -m unittest discover -s tests/service-methods -v

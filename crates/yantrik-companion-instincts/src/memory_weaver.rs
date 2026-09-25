@@ -137,9 +137,13 @@ impl Instinct for MemoryWeaverInstinct {
                 ModelTier::Tiny => format!(
                     "EXECUTE SKIP",
                 ),
+                // The tool line says what to recall, not just to recall (#88): read bare, the
+                // reason planner planned `recall` with no query at all, the tool answered
+                // "Error: query is required", and the error was served to the person as a
+                // thought. The siblings (check_in, on_this_day above) name their queries.
                 _ => format!(
                     "EXECUTE Task: Surface one interesting memory connection for {user}.\n\
-             Tool: Use recall to find one relevant past memory.\n\
+             Tool: Use recall with a query naming what to look for — a project, topic, or person from {user}'s recent conversations — to find one relevant past memory.\n\
              Rule: Use only details explicitly stated by the user or returned by recall. Do not invent memories or connections.\n\
              Fallback: \"Nothing to surface right now.\"\n\
              Output: 1 sentence.",
@@ -212,6 +216,28 @@ mod tests {
         assert!(
             !prompt.contains("connection for ."),
             "the empty-name form must not come back, got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn the_weaving_prompt_says_what_to_recall() {
+        // #88: the tool line used to read "Use recall to find one relevant past memory" —
+        // no subject, no query — and the reason planner planned `recall` with empty args.
+        // The tool answered "Error: query is required" and the error was served to the
+        // person as a thought. The instruction has to give the planner something to pass.
+        let instinct = MemoryWeaverInstinct::new(30.0, 5);
+        let mut state = state_with_memories(Some(2.0 * 86400.0));
+        state.config_user_name = "Pranab".into();
+        let urges = instinct.evaluate(&state);
+        assert_eq!(urges.len(), 1);
+        let prompt = &urges[0].reason;
+        assert!(
+            prompt.contains("recall with a query naming what to look for"),
+            "the weaving prompt must say what to recall, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("from Pranab's recent conversations"),
+            "and the query subject comes from the person it weaves for, got: {prompt}"
         );
     }
 }
