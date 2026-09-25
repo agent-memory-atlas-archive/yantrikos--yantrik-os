@@ -254,8 +254,8 @@ pub fn other_names(app_id: &str) -> &'static [&'static str] {
 // the event loop as the handler.
 pub use yantrik_ipc_transport::gate::{
     configured_ceiling, configured_mode, decide, grant_of, mode_from, mode_path, permit,
-    spend_grants_with, unrecoverable, Authority, Mode, AGENT_TOKEN, DEFAULT_MODE, LADDER, MODES,
-    MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
+    proc_start_ticks, spend_grants_with, unrecoverable, Authority, Mode, AGENT_TOKEN, DEFAULT_MODE,
+    LADDER, MODES, MODE_FILE, SOCKET_FLOOR, UNRECOVERABLE_PHRASES,
 };
 #[cfg(test)]
 use yantrik_ipc_transport::gate::{agent_token_of, ceiling_from, DEFAULT_CEILING};

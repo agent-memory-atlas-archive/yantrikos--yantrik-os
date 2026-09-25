@@ -5,6 +5,8 @@ ceiling → grant → mode, a grant spent only past the ceiling (#154), and what
 import contextlib
 import io
 import json
+import os
+import subprocess
 import unittest
 
 import support
@@ -71,6 +73,45 @@ class TestReadingTheFiles(unittest.TestCase):
             self.assertEqual(gate.mode_path().rsplit("/", 1)[0],
                              gate.settings_path().rsplit("/", 1)[0])
             self.assertTrue(gate.mode_path().endswith("mind-mode.json"))
+
+    # #154, item 1: a shell that died in bypass left its last mode in the file, and nothing
+    # rewrote it until the next shell start. The file names the shell that wrote it, and a
+    # name that is not running reads as `ask`.
+    @unittest.skipUnless(os.path.isdir("/proc"), "the liveness check reads /proc")
+    def test_a_mode_file_that_names_a_dead_shell_reads_as_ask(self):
+        # The dead pid is deterministic, not a guess at the process table: a child that has
+        # been waited is gone from /proc, and if the kernel hands the pid out again, the
+        # start time recorded here belongs to the child that was reaped, so the pair still
+        # names nothing alive. Nothing sleeps and nothing races.
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            started = gate.proc_start_ticks(child.pid)
+            self.assertIsNotNone(started, "a running child has a start time")
+        finally:
+            child.kill()
+            child.wait()
+        dead = {"mode": "bypass", "previous": "auto", "bypass_expires_unix": None,
+                "shell_pid": child.pid, "shell_start_ticks": started,
+                "session_rules": [{"app": "calendar", "action": "delete_event"}]}
+        read = mode_from(json.dumps(dead), 0)
+        self.assertEqual(read.name, "ask", "a dead shell's bypass is not in force")
+        self.assertEqual(read.session_rules, frozenset(), "its session rules died with it")
+
+        # A live pid is not enough on its own: this process's own pid under a start time that
+        # is not the kernel's — what a reused pid would look like — also reads as `ask`.
+        live = gate.proc_start_ticks(os.getpid())
+        self.assertIsNotNone(live, "this test is itself running")
+        reused = {"mode": "auto", "shell_pid": os.getpid(), "shell_start_ticks": live + 1}
+        self.assertEqual(mode_from(json.dumps(reused), 0).name, "ask")
+
+        # A live shell's own identity is honoured, and half an identity fails closed.
+        alive = {"mode": "auto", "shell_pid": os.getpid(), "shell_start_ticks": live}
+        self.assertEqual(mode_from(json.dumps(alive), 0).name, "auto")
+        half = {"mode": "auto", "shell_pid": os.getpid()}
+        self.assertEqual(mode_from(json.dumps(half), 0).name, "ask")
+
+        # A file that names no shell at all reads the way it always has.
+        self.assertEqual(mode_from('{"mode":"auto"}', 0).name, "auto")
 
     def test_the_tables_are_the_rust_tables(self):
         support.quoted(self, G, 'pub const LADDER: [&str; 4] = ["safe", "standard", "sensitive", '

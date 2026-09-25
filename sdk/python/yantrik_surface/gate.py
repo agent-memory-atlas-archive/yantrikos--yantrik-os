@@ -148,13 +148,52 @@ def _as_u64(value):
     return None
 
 
+def proc_start_ticks(pid):
+    """`pid`'s start time — field 22 of `/proc/<pid>/stat`, clock ticks since boot — or None
+    when there is no such process or no `/proc` to ask.
+
+    A pid on its own says nothing: the kernel reuses them, and a recycled pid would resurrect
+    a dead shell's mode. A pid and the start time it was recorded with name one process,
+    because whatever reuses the pid does not also reuse the boot tick it started at.
+    """
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as f:
+            stat = f.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
+    # Field 2, the command name, may hold spaces and parentheses, so the fields are counted
+    # from the LAST `)`. The token after that is field 3, and starttime is field 22.
+    fields = stat.rpartition(")")[2].split()
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
+def _names_a_live_shell(doc):
+    """Whether the shell that wrote `doc` is the process still running under that pid —
+    `gate::names_a_live_shell`, whose comment carries the reasoning. A file that names no
+    shell reads as it always did; a file that names one is trusted only while it runs, and
+    half an identity fails closed like a dead one."""
+    pid = _as_u64(doc.get("shell_pid"))
+    start = _as_u64(doc.get("shell_start_ticks"))
+    if pid is None and start is None:
+        return True
+    if pid is None or start is None or pid > 0xFFFFFFFF:
+        return False
+    return proc_start_ticks(pid) == start
+
+
 def mode_from(text, now):
     """Read the mode out of what the shell wrote, the way `gate::mode_from` does.
 
     Anything unreadable is `ask`. A bypass whose deadline has passed reads as the mode before
     it (or `ask`), so a shell that died mid-bypass does not leave this app trusting it past the
-    minute the person was promised; a bypass with no deadline is trusted until the next shell
-    start rewrites the file.
+    minute the person was promised; a bypass with no deadline is trusted while the shell that
+    wrote the file is running — the file names it, and a name that is not running reads as
+    `ask`, session rules and all (#154).
     """
     try:
         doc = json.loads(text)
@@ -162,6 +201,8 @@ def mode_from(text, now):
         return Mode(DEFAULT_MODE, frozenset())
     if not isinstance(doc, dict):
         doc = {}
+    if not _names_a_live_shell(doc):
+        return Mode(DEFAULT_MODE, frozenset())
     name = doc.get("mode") if isinstance(doc.get("mode"), str) else ""
     if name not in MODES:
         name = DEFAULT_MODE

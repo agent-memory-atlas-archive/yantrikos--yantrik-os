@@ -840,20 +840,34 @@ fn persist(mode: Mode) {
 // Bypass IS written here, unlike in `settings.yaml`. This file is a fact about now, not a mode
 // to boot into, and the next shell start rewrites it before anything can read a stale one. A
 // bypass with a deadline carries it, so a shell that died mid-bypass leaves a file the apps stop
-// trusting at the minute the person was promised.
+// trusting at the minute the person was promised. A bypass "until restart" carries no minute,
+// so the file also names the shell that wrote it — its pid, and the start time the kernel gives
+// that pid — and the apps read a file whose shell is not running as `ask` (#154). The rules
+// ride under the same name: they were answers to cards a dead shell will never raise again.
+
+/// This process's pid and the start time the kernel gives it, read once: both are facts for
+/// the lifetime of the shell, and every publish writes the same pair.
+fn shell_identity() -> Option<(u32, u64)> {
+    static IDENTITY: OnceLock<Option<(u32, u64)>> = OnceLock::new();
+    *IDENTITY.get_or_init(|| {
+        let pid = std::process::id();
+        yantrik_app_runtime::control::proc_start_ticks(pid).map(|start| (pid, start))
+    })
+}
 
 /// The file's contents for this state.
 ///
-/// Pure, so the test can drive what is written through the runtime's own reader without a
-/// file, and separate from the write for the reason [`to_store`] is. The countdown is not in
-/// it — the deadline is — so a running bypass rewrites nothing on any tick.
+/// Separate from the write for the reason [`to_store`] is, and free of arguments this process
+/// cannot supply itself, so the test can drive what is written through the runtime's own reader
+/// without a file. The countdown is not in it — the deadline is — so a running bypass rewrites
+/// nothing on any tick.
 pub fn policy_json(modes: &Modes, now: Instant, now_unix: u64) -> String {
     let rules: Vec<serde_json::Value> = modes
         .rules()
         .iter()
         .map(|r| serde_json::json!({"app": r.app, "action": r.action}))
         .collect();
-    serde_json::to_string_pretty(&serde_json::json!({
+    let mut doc = serde_json::json!({
         "mode": modes.mode(now).as_str(),
         "previous": modes.previous(now).as_str(),
         "bypass_expires_unix": modes.bypass_left(now).map(|left| now_unix + left.as_secs()),
@@ -861,8 +875,21 @@ pub fn policy_json(modes: &Modes, now: Instant, now_unix: u64) -> String {
         "note": "Written by the shell whenever the mind mode or a session rule changes; every \
                  app's dispatch reads it before running an action. Editing it changes nothing \
                  the shell shows, and the next change overwrites it.",
-    }))
-    .unwrap_or_default()
+    });
+    match shell_identity() {
+        Some((pid, start)) => {
+            doc["shell_pid"] = serde_json::json!(pid);
+            doc["shell_start_ticks"] = serde_json::json!(start);
+        }
+        // No /proc to read a start time from, so the file names no shell and the apps read it
+        // the way they read one an older shell wrote. Said out loud: it means nothing on this
+        // machine bounds a dead shell's mode to its own lifetime.
+        None => tracing::warn!(
+            "could not read this shell's start time from /proc; the mode file will name no \
+             shell, and the apps cannot tell a dead shell's mode from a live one"
+        ),
+    }
+    serde_json::to_string_pretty(&doc).unwrap_or_default()
 }
 
 /// Write the file, if what it would say has changed.
@@ -1396,6 +1423,17 @@ mod mind_mode_tests {
         let text = policy_json(&modes, now, unix);
         assert!(text.contains("\"bypass_expires_unix\": null"), "{text}");
         assert_eq!(mode_from(&text, unix + 86_400).name, "bypass");
+
+        // It is trusted because the file names the shell that wrote it and that shell — this
+        // test's own process — is running. The same file left behind by a shell that DIED
+        // reads as `ask`, which is the whole of #154's first item: a pid under a start time
+        // the kernel does not give it names nothing alive.
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["shell_pid"].as_u64(), Some(std::process::id() as u64));
+        let start = doc["shell_start_ticks"].as_u64().expect("the file carries a start time");
+        let mut dead = doc.clone();
+        dead["shell_start_ticks"] = serde_json::json!(start + 1);
+        assert_eq!(mode_from(&dead.to_string(), unix).name, "ask");
     }
 
     /// Choosing bypass twice must not strand the machine there.
