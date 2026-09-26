@@ -1704,6 +1704,15 @@ impl CompanionService {
             } else {
                 None
             };
+            // What the other minds on this machine know about this, from the shared memory
+            // (#31). Not in incognito: nothing the person says then may leave the turn.
+            let shared_text = if self.incognito {
+                None
+            } else {
+                let hits = crate::shared_memory::SharedMemory::machine().recall(user_text, 5);
+                let known: Vec<String> = memories.iter().map(|m| m.text.clone()).collect();
+                crate::shared_memory::prompt_section(&hits, &known)
+            };
             let signals = ContextSignals {
                 self_memories: &self_memories,
                 narrative: &narrative_text,
@@ -1714,6 +1723,7 @@ impl CompanionService {
                 recall_confidence,
                 recall_hint: recall_hint.as_deref(),
                 ck5_awareness: ck5_text,
+                shared_memory: shared_text,
             };
             context::build_messages(
                 user_text, &self.config, &state, &memories, &urges,
@@ -2548,6 +2558,15 @@ impl CompanionService {
             } else {
                 None
             };
+            // What the other minds on this machine know about this, from the shared memory
+            // (#31). Not in incognito: nothing the person says then may leave the turn.
+            let shared_text = if self.incognito {
+                None
+            } else {
+                let hits = crate::shared_memory::SharedMemory::machine().recall(user_text, 5);
+                let known: Vec<String> = memories.iter().map(|m| m.text.clone()).collect();
+                crate::shared_memory::prompt_section(&hits, &known)
+            };
             let signals = ContextSignals {
                 self_memories: &self_memories,
                 narrative: &narrative_text,
@@ -2558,6 +2577,7 @@ impl CompanionService {
                 recall_confidence,
                 recall_hint: recall_hint.as_deref(),
                 ck5_awareness: ck5_text,
+                shared_memory: shared_text,
             };
             context::build_messages(
                 user_text, &self.config, &state, &memories, &urges,
