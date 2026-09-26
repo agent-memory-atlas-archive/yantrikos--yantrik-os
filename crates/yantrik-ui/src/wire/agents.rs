@@ -142,16 +142,16 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         refresh(ui, state, true);
     }));
     g.on_select(on(|ui, state, id| {
-        state.borrow_mut().selected = Some(AgentId(id));
+        state.borrow_mut().selected = Some(agent_of_row(&id));
         refresh(ui, state, true);
     }));
-    g.on_pop_out(on(|ui, state, id| pop_out(ui, state, AgentId(id))));
+    g.on_pop_out(on(|ui, state, id| pop_out(ui, state, agent_of_row(&id))));
     g.on_stop(on(|ui, state, id| {
-        notice(&ui.global::<AgentsState>(), launch::stop(&AgentId(id)));
+        notice(&ui.global::<AgentsState>(), launch::stop(&agent_of_row(&id)));
         refresh(ui, state, true);
     }));
-    g.on_close(on(|ui, state, id| close(ui, state, AgentId(id), false)));
-    g.on_close_confirmed(on(|ui, state, id| close(ui, state, AgentId(id), true)));
+    g.on_close(on(|ui, state, id| close(ui, state, agent_of_row(&id), false)));
+    g.on_close_confirmed(on(|ui, state, id| close(ui, state, agent_of_row(&id), true)));
     g.on_close_cancelled({
         let weak = weak.clone();
         move || {
@@ -502,23 +502,40 @@ fn refresh(ui: &App, state: &Shared, force: bool) {
     let mut st = state.borrow_mut();
     let st = &mut *st;
     agents::store().read(|s| {
+        let tasks = s.tasks(TASKS_SHOWN);
         let tabs: Vec<AgentTabData> = Tab::EVERY
             .iter()
             .zip(s.counts())
+            .chain(std::iter::once((&Tab::Tasks, tasks.len())))
             .map(|(tab, count)| AgentTabData { id: tab.key().into(), label: tab.label().into(), count: count as i32 })
             .collect();
         if let Some(model) = crate::models::changed(g.get_tabs(), tabs) {
             g.set_tabs(model);
         }
 
-        let empty = empty_note(st.tab, s.counts());
+        let empty = if st.tab == Tab::Tasks {
+            if tasks.is_empty() { "No tasks yet. Everything asked of a mind, in the Lens or from New agent, is listed here, newest first.".to_string() } else { String::new() }
+        } else {
+            empty_note(st.tab, s.counts())
+        };
         if g.get_empty_note() != empty.as_str() {
             g.set_empty_note(empty.into());
         }
 
-        let hold = (hovering && !st.order.is_empty()).then_some(st.order.as_slice());
-        let order = s.list(st.tab, hold);
-        let rows: Vec<AgentRowData> = order.iter().filter_map(|id| s.agent(id)).map(row_of).collect();
+        let (order, rows): (Vec<AgentId>, Vec<AgentRowData>) = if st.tab == Tab::Tasks {
+            // One row per request (#234), keyed `agent#turn` so each is its own row; picking
+            // one opens its agent, whose session holds the turn.
+            let rows = tasks
+                .iter()
+                .filter_map(|(id, n)| s.agent(id).and_then(|a| task_row(a, *n, now())))
+                .collect();
+            (tasks.iter().map(|(id, _)| id.clone()).collect(), rows)
+        } else {
+            let hold = (hovering && !st.order.is_empty()).then_some(st.order.as_slice());
+            let order = s.list(st.tab, hold);
+            let rows = order.iter().filter_map(|id| s.agent(id)).map(row_of).collect();
+            (order, rows)
+        };
         st.order = order;
         if let Some(model) = crate::models::changed(g.get_rows(), rows) {
             g.set_rows(model);
@@ -744,6 +761,34 @@ fn row_of(a: &Agent) -> AgentRowData {
         progress: progress.into(),
         stuck: stuck.into(),
     }
+}
+
+/// How many requests the Tasks tab lists, newest first.
+const TASKS_SHOWN: usize = 60;
+
+/// The agent a row is about: a Tasks row's id is `agent#turn`.
+fn agent_of_row(id: &str) -> AgentId {
+    AgentId(id.split_once('#').map_or(id, |(agent, _)| agent).to_string())
+}
+
+/// One request, as a Tasks row (#234): what was asked, which mind, how it stands, and, while it
+/// runs, the shell's own count of its calls and whether it looks stuck.
+fn task_row(a: &Agent, n: u64, now: u64) -> Option<AgentRowData> {
+    let turn = a.turns.iter().find(|t| t.n == n)?;
+    let mut row = row_of(a);
+    row.id = format!("{}#{}", a.meta.id.0, n).into();
+    row.title = crate::agents::progress::brief(&turn.prompt, 120).into();
+    if turn.open() {
+        row.since = duration(now.saturating_sub(turn.started)).into();
+    } else {
+        let (state, label) = if turn.ok == Some(false) { ("failed", "could not finish") } else { ("done", "done") };
+        row.state = state.into();
+        row.label = label.into();
+        row.since = clock(turn.ended.unwrap_or(turn.started)).into();
+        row.progress = format!("{} call{}", turn.cards().count(), if turn.cards().count() == 1 { "" } else { "s" }).into();
+        row.stuck = "".into();
+    }
+    Some(row)
 }
 
 /// A working agent's row line from the shell's own record (#234): its calls counted and when it
@@ -1040,6 +1085,8 @@ fn empty_note(tab: Tab, counts: [usize; 4]) -> String {
         Tab::Complete => format!("Nothing has finished yet. {going}."),
         // All holds every agent, so it is empty only when there are none, above.
         Tab::All => format!("{going}, {done}."),
+        // Tasks says its own sentence in `refresh`: it counts requests, not agents.
+        Tab::Tasks => String::new(),
     }
 }
 
@@ -2059,6 +2106,39 @@ mod tests {
         let slint = read("../yantrik-ui-slint/ui/agents.slint");
         assert!(slint.contains("text: AgentsState.empty-note;"), "agents.slint draws the shell's sentence");
         assert!(!slint.contains("No agents yet"), "and has no sentence of its own that could disagree");
+    }
+
+    /// #234: "I am not able to see the task list in the Agents section." Every request is its own
+    /// row, newest first, whichever conversation it was in, and says how it stood when it ended.
+    /// A row's buttons act on its agent.
+    #[test]
+    fn every_request_is_a_task_row_newest_first() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let at = clock.clone();
+        let mut s = Store::with_clock(Box::new(move || at.load(Ordering::SeqCst)));
+        let hermes = AgentId("hermes:main".into());
+        s.open_turn(&hermes, "a note for the market meeting");
+        s.close_turn(&hermes, true);
+        clock.store(2_000, Ordering::SeqCst);
+        s.open_turn(&hermes, "build a small game");
+        s.close_turn(&hermes, false);
+        clock.store(3_000, Ordering::SeqCst);
+        s.open_turn(&hermes, "build the town model");
+
+        let tasks = s.tasks(10);
+        let titles: Vec<String> = tasks
+            .iter()
+            .map(|(id, n)| task_row(s.agent(id).unwrap(), *n, 3_100).unwrap().title.to_string())
+            .collect();
+        assert_eq!(titles, ["build the town model", "build a small game", "a note for the market meeting"]);
+        let game = task_row(s.agent(&hermes).unwrap(), tasks[1].1, 3_100).unwrap();
+        assert_eq!((game.state.as_str(), game.label.as_str()), ("failed", "could not finish"));
+        let town = task_row(s.agent(&hermes).unwrap(), tasks[0].1, 3_100).unwrap();
+        assert_eq!(town.since.as_str(), "1m", "the working one says how long it has run");
+        assert_eq!(agent_of_row(&town.id), hermes, "its buttons act on its agent");
+        assert_eq!(agent_of_row("hermes:main"), hermes, "an agent row's id is the agent");
     }
 
     #[test]

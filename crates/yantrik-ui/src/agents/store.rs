@@ -574,6 +574,19 @@ impl Store {
         Tab::EVERY.map(|tab| self.agents.iter().filter(|a| tab.holds(a.state)).count())
     }
 
+    /// The Tasks tab's rows (#234): every request a person or an agent made, newest first, as
+    /// `(agent, turn)`, at most `limit`. A turn with no prompt is the shell's own account of
+    /// something outside any request, and is not a task.
+    pub fn tasks(&self, limit: usize) -> Vec<(AgentId, u64)> {
+        let mut all: Vec<(&Agent, &Turn)> = self
+            .agents
+            .iter()
+            .flat_map(|a| a.turns.iter().filter(|t| !t.prompt.trim().is_empty()).map(move |t| (a, t)))
+            .collect();
+        all.sort_by(|(a1, t1), (a2, t2)| t2.started.cmp(&t1.started).then(a2.seq.cmp(&a1.seq)).then(t2.n.cmp(&t1.n)));
+        all.into_iter().take(limit).map(|(a, t)| (a.meta.id.clone(), t.n)).collect()
+    }
+
     /// The rows of one tab, in the order to draw them.
     ///
     /// Newest first. Under Active, the rows waiting on the person come first — except while the

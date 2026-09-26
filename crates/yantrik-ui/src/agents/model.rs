@@ -103,10 +103,15 @@ pub enum Tab {
     NeedsYou,
     Complete,
     All,
+    /// Every request a person made, one row each, whichever conversation it was in (#234).
+    Tasks,
 }
 
 impl Tab {
+    /// The views over agents, which `Store::counts` counts.
     pub const EVERY: [Tab; 4] = [Tab::Active, Tab::NeedsYou, Tab::Complete, Tab::All];
+    /// Every tab the screen shows: the agent views, then Tasks.
+    pub const SHOWN: [Tab; 5] = [Tab::Active, Tab::NeedsYou, Tab::Complete, Tab::All, Tab::Tasks];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -114,6 +119,7 @@ impl Tab {
             Tab::NeedsYou => "needs_you",
             Tab::Complete => "complete",
             Tab::All => "all",
+            Tab::Tasks => "tasks",
         }
     }
 
@@ -123,11 +129,12 @@ impl Tab {
             Tab::NeedsYou => "Needs you",
             Tab::Complete => "Complete",
             Tab::All => "All",
+            Tab::Tasks => "Tasks",
         }
     }
 
     pub fn from_key(key: &str) -> Tab {
-        Tab::EVERY.into_iter().find(|t| t.key() == key).unwrap_or(Tab::Active)
+        Tab::SHOWN.into_iter().find(|t| t.key() == key).unwrap_or(Tab::Active)
     }
 
     /// Whether an agent in this state is listed under this tab.
@@ -141,7 +148,7 @@ impl Tab {
             Tab::Active => state.live(),
             Tab::NeedsYou => state == State::WaitingForYou,
             Tab::Complete => !state.live(),
-            Tab::All => true,
+            Tab::All | Tab::Tasks => true,
         }
     }
 }
