@@ -1304,7 +1304,23 @@ mod process_readings {
         std::os::unix::fs::symlink("/usr/bin/yes", &program)
             .expect("a `yes` that answers to a long name");
         let mut spinner = Command::new(&program);
-        (Ended::spawn(&mut spinner), program)
+        let child = Ended::spawn(&mut spinner);
+        published(child.pid());
+        (child, program)
+    }
+
+    /// Wait until the kernel has published `pid`'s arguments. `spawn` returns once the exec is
+    /// past closing the descriptors marked close-on-exec, which is before the new program's
+    /// argument pages are set. A list read inside that gap finds an empty `cmdline`, and names
+    /// the process by its fifteen-character `comm`. That is right for a kernel thread and wrong
+    /// here (a CI run on main read "yos-monitor-cur"). This waits for a state; it guesses no
+    /// time.
+    fn published(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::read(format!("/proc/{pid}/cmdline")).map_or(true, |c| c.is_empty()) {
+            assert!(Instant::now() < deadline, "pid {pid} never published its arguments");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// A process that keeps a spin going is named by its program, whole. The list used to
