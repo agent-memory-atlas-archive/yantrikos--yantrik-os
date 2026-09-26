@@ -3674,6 +3674,14 @@ impl CompanionService {
         &self.conversation_history
     }
 
+    /// Start a new conversation: the person pressed New chat (#246). What was said so far stops
+    /// being the context of the next turn, exactly as the idle timeout does it; nothing learned
+    /// from it is forgotten, since memory is not the conversation.
+    pub fn new_conversation(&mut self) {
+        self.conversation_history.clear();
+        self.session_turn_count = 0;
+    }
+
     /// Compress conversation history when it exceeds the configured limit.
     ///
     /// Instead of simply dropping old messages, summarizes the older half

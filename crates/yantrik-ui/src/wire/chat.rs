@@ -271,6 +271,65 @@ pub fn resume_in_lens(
 pub fn wire(ui: &App, ctx: &AppContext) {
     wire_send_message(ui, ctx);
     wire_lens_submit(ui, ctx);
+    wire_new_chat(ui, ctx);
+}
+
+/// New chat (#246): the Lens empties, and whichever mind is answering starts a new conversation.
+/// The built-in drops its conversation history; an attached mind is sent `/new`, which every
+/// harness answers itself (harnesses/lib/yantrik_harness.py `_command`, Hermes's own `/new`).
+/// Nothing is forgotten: the old conversation stays in Agents → History, and memory is not the
+/// conversation.
+fn wire_new_chat(ui: &App, ctx: &AppContext) {
+    let bridge = ctx.bridge.clone();
+    let ui_weak = ui.as_weak();
+    ui.on_lens_new_chat(move || {
+        use slint::Model as _;
+        let Some(ui) = ui_weak.upgrade() else { return };
+        // `/new` ends the work in progress as well as the conversation, in every harness. A mind
+        // at work is left at work: the desktop says so rather than stopping it on a press that
+        // looked like housekeeping.
+        if let Some(host) = super::harness::host() {
+            let agent = crate::agents::feed::main_agent(&host.active_id());
+            let busy = crate::agents::store().read(|s| {
+                let a = s.agent(&agent)?;
+                crate::agents::progress::of(a, crate::agents::model::now()).map(|p| (a.meta.mind.clone(), p.task))
+            });
+            if let Some((mind, task)) = busy {
+                streaming::say(
+                    &ui_weak,
+                    None,
+                    "desktop",
+                    &format!(
+                        "{mind} is still working on \u{201c}{}\u{201d}. A new chat would stop it, so this one \
+                         carries on; send /stop first if stopping it is what you want.",
+                        crate::agents::progress::brief(&task, 100)
+                    ),
+                );
+                return;
+            }
+        }
+        let messages = ui.get_messages();
+        if let Some(model) = messages.as_any().downcast_ref::<slint::VecModel<crate::MessageData>>() {
+            model.set_vec(Vec::new());
+        }
+        ui.set_lens_chat_mode(false);
+        let active = super::harness::host().map(|h| h.active_id());
+        match active.as_deref() {
+            None | Some(super::harness::BUILTIN_ID) => {
+                if let Err(e) = bridge.handle().new_conversation() {
+                    tracing::warn!(error = %e, "New chat: the companion was not told");
+                }
+            }
+            Some(_) => {
+                if let Some(host) = super::harness::host() {
+                    // The harness answers `/new` itself; its one-line reply is not news.
+                    let answer = host.send(yantrik_harness::Turn::new("/new".to_string()));
+                    std::thread::spawn(move || while answer.recv().is_ok() {});
+                }
+            }
+        }
+        tracing::info!(mind = ?active, "New chat");
+    });
 }
 
 /// Direct chat: send message → stream response.

@@ -90,6 +90,13 @@ fn line(text: &str) -> ContentBlock {
 /// none when the Lens already holds a conversation, when the built-in companion is answering (its
 /// conversation is not an agent's), or when the mind has said nothing yet.
 pub fn restore_if_empty(ui: &App) -> usize {
+    // Once per shell start: the empty Lens this is for is the one a start leaves. An empty Lens
+    // later is one the person emptied with New chat (#246), and filling it again would undo the
+    // press the next time the Lens opened.
+    static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if TRIED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return 0;
+    }
     let messages = ui.get_messages();
     let Some(model) = messages.as_any().downcast_ref::<VecModel<MessageData>>() else {
         return 0;

@@ -152,6 +152,7 @@ export component App inherits Window {
     in property <bool> lens-can-open-in-agents: false;
     callback lens-open-in-agents();
     callback lens-open-history();
+    callback lens-new-chat();
 
     // ── The vault, and the one way a passphrase gets into this machine ──
     //
@@ -1378,6 +1379,7 @@ export component App inherits Window {
             lens-can-open-in-agents: root.lens-can-open-in-agents;
             lens-open-in-agents => { root.lens-open-in-agents(); }
             lens-open-history => { root.lens-open-history(); }
+            lens-new-chat => { root.lens-new-chat(); }
             // Urges
             urges: root.urges;
             // Whisper Cards
