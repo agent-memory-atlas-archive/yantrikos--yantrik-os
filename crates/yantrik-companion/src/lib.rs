@@ -15,6 +15,7 @@
 //! Zero HTTP servers. Everything runs in a single process.
 
 pub mod agent_loop;
+pub mod shared_memory;
 pub mod audio_convert;
 pub mod embedder_bridge;
 pub mod automation;

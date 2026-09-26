@@ -30,6 +30,9 @@ pub struct ContextSignals<'a> {
     pub recall_hint: Option<&'a str>,
     /// CK-5 cognitive awareness — narrative arcs, patterns, beliefs, style.
     pub ck5_awareness: Option<String>,
+    /// What the machine's shared memory recalled — what the other minds on it know (#31),
+    /// already formatted by `shared_memory::prompt_section`.
+    pub shared_memory: Option<String>,
 }
 
 /// Build a minimal message array for degraded/fallback LLM (tiny model).
@@ -377,6 +380,16 @@ fn build_system_prompt(
                     prompt.push_str(&sanitize::escape_for_prompt(ck5));
                     prompt.push('\n');
                 }
+            }
+        }
+    }
+
+    // ── 7c. The machine's shared memory (#31) ──
+    if let Some(s) = signals {
+        if !over_budget(&prompt) {
+            if let Some(ref shared) = s.shared_memory {
+                prompt.push_str(&sanitize::escape_for_prompt(shared));
+                prompt.push('\n');
             }
         }
     }
