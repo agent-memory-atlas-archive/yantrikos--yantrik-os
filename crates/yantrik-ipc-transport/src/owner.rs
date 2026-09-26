@@ -60,6 +60,10 @@ pub fn is_shell_binary(exe: &str) -> bool {
 /// rule is the file name, not the directory — as in [`is_shell_binary`], so an installed binary
 /// and a developer's own build both pass. A test binary (`yantrik_ui-…`, underscore) is
 /// deliberately none of them: a test is a direct caller and is judged by its own pid.
+///
+/// A name, so it keeps agents apart and does not stop the person's own user: a program running
+/// as that user can copy a binary to `~/yantrik-x`, or exec a real one after connecting, and be
+/// taken for a forwarder — the same-user limit #154 records for the shell.
 pub fn is_own_binary(exe: &str) -> bool {
     let exe = exe.strip_suffix(DELETED).unwrap_or(exe);
     if !exe.starts_with('/') {

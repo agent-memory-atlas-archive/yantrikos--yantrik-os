@@ -214,8 +214,11 @@ refused. `consume_approval` binds a spend to the asking agent (#182): a caller t
 token spends only the grants asked for it, whichever door the spend comes through. A Rust app
 forwarding a spend sends the pid the kernel stamped on the call its token arrived in as
 `caller_pid`, because the peer of the forwarded call is the app itself — and the shell honours
-that pid only when the forwarding process is one of the desktop's own binaries, as the kernel
-says; a direct caller is judged by its own kernel pid, never by one it wrote. Python SDK spends
+that pid only when the forwarding process's executable, as `/proc` names it, is called like one
+of the desktop's own binaries (`yantrik-*` or `*-service`); a direct caller is judged by its own
+kernel pid, never by one it wrote. The check is a file name: it keeps one agent from spending
+another's grant, but code running as the person's own user can copy or exec a binary with such
+a name and forward a pid it chose — the same-user limit #154 describes. Python SDK spends
 (Blender, LibreOffice) do not forward the token and are unbound, as are spends that carry no
 token at all.
 
