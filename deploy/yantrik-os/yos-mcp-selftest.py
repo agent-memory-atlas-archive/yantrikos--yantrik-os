@@ -1960,6 +1960,33 @@ with tempfile.TemporaryDirectory() as d:
           describe_failed and "plumbing, not an app or a service" in described
           and "yos ls" in described, described)
 
+# A mind going round in circles is told so in the one place it reads while it works: the call's
+# own result (#234). The 23 September game: the editor refused four times, "Cannot open".
+with tempfile.TemporaryDirectory() as t:
+    module = load_mcp(HERE / "yos", pathlib.Path(t) / "loops.json")
+    call = {"app": "editor", "action": "open", "args": {"path": "~/Documents/Ridge-Runners/game.js"}}
+    refused = "refused: Cannot open: No such file"
+    said = [module.going_round("os_act", call, refused, True) for _ in range(5)]
+    check("the first two refusals come back as they were",
+          said[0] == refused and said[1] == refused, said[:2])
+    check("the third says, from the desktop, that it is going round and what to do instead",
+          said[2].startswith(refused + "\n\n[From the desktop: This call has now failed the same way 3 times")
+          and "os_describe" in said[2] and "tell the person" in said[2], said[2])
+    check("the fifth says stop", "Stop retrying it." in said[4], said[4])
+    check("a success in between starts the count again",
+          module.going_round("os_act", call, "done", False) == "done"
+          and module.going_round("os_act", call, refused, True) == refused)
+    other = dict(call, args={"path": "~/Documents/Ridge-Runners/index.html"})
+    for text in (refused, refused):
+        module.going_round("os_act", call, text, True)
+    check("a different call is a different attempt, not the same one again",
+          module.going_round("os_act", other, refused, True) == refused)
+    policy = "REFUSED — nothing was run. refused: the person denied this"
+    for _ in range(2):
+        module.going_round("os_act", call, policy, False)
+    check("a REFUSED policy answer counts as the same failure too, flagged or not",
+          "[From the desktop:" in module.going_round("os_act", call, policy, False))
+
 print()
 if failures:
     print("%d failed: %s" % (len(failures), ", ".join(failures)))
