@@ -712,6 +712,7 @@ fn publish_items(g: &AgentsState, surface: &mut Surface, items: Vec<AgentItemDat
 // ── From the store to what the screen draws ────────────────────────
 
 fn row_of(a: &Agent) -> AgentRowData {
+    let (progress, stuck) = row_progress(a, crate::agents::model::now());
     AgentRowData {
         id: a.meta.id.0.as_str().into(),
         mind: a.meta.mind.as_str().into(),
@@ -722,7 +723,21 @@ fn row_of(a: &Agent) -> AgentRowData {
         parent: a.meta.parent.as_ref().map(|p| p.0.clone()).unwrap_or_default().into(),
         role: a.meta.role.as_ref().map(|r| r.name.clone()).unwrap_or_default().into(),
         origin: a.meta.recipe.as_ref().map(|r| r.label()).unwrap_or_default().into(),
+        progress: progress.into(),
+        stuck: stuck.into(),
     }
+}
+
+/// A working agent's row line from the shell's own record (#234): its calls counted and when it
+/// was last heard from, and why it looks stuck when it does. Empty for an agent at rest.
+fn row_progress(a: &Agent, now: u64) -> (String, String) {
+    let Some(p) = crate::agents::progress::of(a, now) else { return (String::new(), String::new()) };
+    let mut line = format!("{} call{}", p.calls, if p.calls == 1 { "" } else { "s" });
+    if p.failed > 0 {
+        line.push_str(&format!(" · {} failed", p.failed));
+    }
+    line.push_str(&format!(" · heard {} ago", crate::agents::progress::span(p.quiet_secs)));
+    (line, p.stuck.unwrap_or_default())
 }
 
 /// What an agent was last asked, which is what its row is about now.
@@ -1383,12 +1398,14 @@ enum Notice {
     Finished { agent: AgentId, mind: String, title: String, ok: bool },
     /// A card of its waits on the person: an approval, or a command at a prompt.
     NeedsYou { agent: AgentId, mind: String, what: String },
+    /// Its turn is going round, or has gone quiet (#234): the shell's own reading, once a turn.
+    Stuck { agent: AgentId, mind: String, title: String, why: crate::agents::progress::Stuck },
 }
 
 impl Notice {
     fn agent(&self) -> &AgentId {
         match self {
-            Notice::Finished { agent, .. } | Notice::NeedsYou { agent, .. } => agent,
+            Notice::Finished { agent, .. } | Notice::NeedsYou { agent, .. } | Notice::Stuck { agent, .. } => agent,
         }
     }
 
@@ -1407,6 +1424,10 @@ impl Notice {
                 "Its turn ended without finishing. Open it to see where it stopped.".to_string(),
             ),
             Notice::NeedsYou { mind, what, .. } => (format!("{mind} needs you"), what.clone()),
+            Notice::Stuck { mind, title, why, .. } => (
+                format!("{mind} looks stuck: \u{201c}{}\u{201d}", one_line(title, 60)),
+                format!("{} Open it to see where, give it a hint, or stop it.", why.plain()),
+            ),
         };
         Notification::new("Yantrik", title)
             .body(body)
@@ -1430,11 +1451,13 @@ struct Watch {
     ended: HashMap<AgentId, (u64, u64)>,
     /// What each agent was already known to be waiting on: request ids and job ids.
     waiting: HashMap<AgentId, BTreeSet<String>>,
+    /// The turn each agent was last said to be stuck in: once a turn, not once a tick.
+    stuck: HashMap<AgentId, u64>,
 }
 
 impl Watch {
     /// `waiting_jobs` is the agent terminal's commands sitting at a prompt: `(agent, job)`.
-    fn changes(&mut self, s: &Store, waiting_jobs: &[(AgentId, String)]) -> Vec<Notice> {
+    fn changes(&mut self, s: &Store, waiting_jobs: &[(AgentId, String)], at: u64) -> Vec<Notice> {
         let mut out = Vec::new();
         for a in s.agents() {
             let id = &a.meta.id;
@@ -1474,6 +1497,19 @@ impl Watch {
                 };
                 out.push(Notice::NeedsYou { agent: id.clone(), mind: a.meta.mind.clone(), what });
             }
+            if let (Some(turn), Some(p)) = (a.open_turn(), crate::agents::progress::of(a, at)) {
+                if let Some(why) = p.stuck_kind {
+                    if self.stuck.get(id) != Some(&turn.n) {
+                        self.stuck.insert(id.clone(), turn.n);
+                        out.push(Notice::Stuck {
+                            agent: id.clone(),
+                            mind: a.meta.mind.clone(),
+                            title: turn.prompt.clone(),
+                            why,
+                        });
+                    }
+                }
+            }
         }
         self.primed = true;
         out
@@ -1501,7 +1537,8 @@ fn waiting_input_jobs() -> Vec<(AgentId, String)> {
 /// Lens's own mind, whose answer and cards are in front of them there. A "needs you" is also held
 /// while the Lens is open at all: its approval card is in the Lens, and a toast would land on it.
 fn tell_the_person(ui: &App, state: &Shared, watch: &mut Watch, waiting_jobs: &[(AgentId, String)]) {
-    let notices = agents::store().read(|s| watch.changes(s, waiting_jobs));
+    let now = crate::agents::model::now();
+    let notices = agents::store().read(|s| watch.changes(s, waiting_jobs, now));
     if notices.is_empty() {
         return;
     }
@@ -1801,28 +1838,56 @@ mod tests {
         s.open_turn(&ds, "release notes");
         s.close_turn(&ds, true);
         let mut watch = Watch::default();
-        assert!(watch.changes(&s, &[]).is_empty(), "a session loaded from disk is not news");
+        assert!(watch.changes(&s, &[], 0).is_empty(), "a session loaded from disk is not news");
 
         s.open_turn(&pi, "tidy the photos folder");
-        assert!(watch.changes(&s, &[]).is_empty());
+        assert!(watch.changes(&s, &[], 0).is_empty());
         s.approval_asked(&pi, "appr-3", "files.move");
-        let told = watch.changes(&s, &[]);
+        let told = watch.changes(&s, &[], 0);
         assert!(matches!(&told[..], [Notice::NeedsYou { what, .. }] if what.contains("files.move")), "{told:?}");
-        assert!(watch.changes(&s, &[]).is_empty(), "said once");
+        assert!(watch.changes(&s, &[], 0).is_empty(), "said once");
         let waiting = [(pi.clone(), "job-9".to_string())];
-        let told = watch.changes(&s, &waiting);
+        let told = watch.changes(&s, &waiting, 0);
         assert!(matches!(&told[..], [Notice::NeedsYou { what, .. }] if what.contains("waiting for input")), "{told:?}");
 
         s.approval_answered(&pi, "appr-3", true);
         s.close_turn(&pi, true);
-        let told = watch.changes(&s, &waiting);
+        let told = watch.changes(&s, &waiting, 0);
         assert_eq!(told, vec![Notice::Finished { agent: pi.clone(), mind: "pi".into(), title: "tidy the photos folder".into(), ok: true }]);
 
         // A turn the person stopped needs no telling.
         s.open_turn(&pi, "and the videos");
         s.note(&pi, "Stop asked.");
         s.close_turn(&pi, false);
-        assert!(watch.changes(&s, &waiting).is_empty());
+        assert!(watch.changes(&s, &waiting, 0).is_empty());
+    }
+
+    /// A task that goes quiet is said once a turn, in the desktop's words: not every tick, and
+    /// not quoting anything the mind wrote (#234, #139).
+    #[test]
+    fn a_stuck_turn_is_said_once_in_the_desktops_words() {
+        use crate::agents::progress::{Stuck, STUCK_QUIET_SECS};
+        let mut s = Store::new();
+        let hermes = AgentId("hermes:main".into());
+        let mut watch = Watch::default();
+        assert!(watch.changes(&s, &[], 0).is_empty());
+
+        s.open_turn(&hermes, "build a small game");
+        let later = crate::agents::model::now() + STUCK_QUIET_SECS + 30;
+        let told = watch.changes(&s, &[], later);
+        let [Notice::Stuck { why: Stuck::Quiet { .. }, title, .. }] = &told[..] else {
+            panic!("one stuck notice: {told:?}")
+        };
+        assert_eq!(title, "build a small game");
+        let words = told[0].notification();
+        assert!(format!("{words:?}").contains("Nothing has been heard from it for 2 min"), "{words:?}");
+        assert!(watch.changes(&s, &[], later + 60).is_empty(), "once a turn, not once a tick");
+
+        // The next task is news of its own.
+        s.close_turn(&hermes, false);
+        watch.changes(&s, &[], later);
+        s.open_turn(&hermes, "then the town model");
+        assert!(matches!(&watch.changes(&s, &[], later + 300)[..], [Notice::Stuck { .. }]));
     }
 
     /// Said as the desktop, with nothing the agent wrote in it, and a button that opens the agent.

@@ -117,6 +117,8 @@ pub fn run(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dyn std::e
                 parent: a.parent.as_str().into(),
                 role: a.role.as_str().into(),
                 origin: a.origin.as_str().into(),
+                progress: "".into(),
+                stuck: "".into(),
             })
             .collect::<Vec<_>>(),
     )));
