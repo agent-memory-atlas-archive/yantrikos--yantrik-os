@@ -89,6 +89,38 @@ pub fn stream_into(
     pump(ui_weak, token_rx, row, streams);
 }
 
+/// Put a finished message in the conversation: `asked` as the person's bubble first when given,
+/// then `said` under `role`. For words the desktop itself says (`"desktop"`), which the bubble
+/// labels as the desktop's so they are never read as the mind's.
+pub fn say(ui_weak: &slint::Weak<App>, asked: Option<&str>, role: &str, said: &str) {
+    let Some(ui) = ui_weak.upgrade() else { return };
+    let messages = ui.get_messages();
+    let Some(model) = messages.as_any().downcast_ref::<VecModel<MessageData>>() else { return };
+    if let Some(text) = asked {
+        model.push(MessageData {
+            role: "user".into(),
+            content: SharedString::from(text),
+            is_streaming: false,
+            blocks: ModelRc::default(),
+        });
+        ui.set_lens_chat_mode(true);
+    }
+    model.push(MessageData {
+        role: role.into(),
+        content: SharedString::from(said),
+        is_streaming: false,
+        blocks: ModelRc::default(),
+    });
+}
+
+/// Stream an answer into a bubble of its own, under a question already in the conversation.
+pub fn stream_answer(ui_weak: slint::Weak<App>, token_rx: crossbeam_channel::Receiver<String>, streams: &Streams) {
+    let Some(row) = open_bubbles(&ui_weak, None) else {
+        return;
+    };
+    pump(ui_weak, token_rx, row, streams);
+}
+
 /// Start a proactive AI stream — only the assistant's response is shown (no user bubble).
 /// Used for morning brief and other proactive messages where the AI speaks first.
 pub fn start_proactive_stream(
