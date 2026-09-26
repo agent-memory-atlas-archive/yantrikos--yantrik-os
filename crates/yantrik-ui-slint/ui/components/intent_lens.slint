@@ -971,6 +971,8 @@ export component IntentLens inherits Rectangle {
     callback open-in-agents();
     // "History": every conversation, on the Agents screen's All tab (#246).
     callback open-history();
+    // "New chat": the conversation starts again, for whichever mind is answering (#246).
+    callback new-chat();
 
     // Internal state
     in-out property <string> input-text: "";
@@ -1162,6 +1164,30 @@ export component IntentLens inherits Rectangle {
                     // screen (design/agents-workspace-2026-09-23.md, "The shape").
                     // Every earlier conversation, with any mind: the Agents screen's All tab, where
                     // each opens with its whole session and can be carried on (#246).
+                    // A new conversation is one press, not something only a restart did (#246).
+                    if root.messages.length > 0 : new-chat-hit := TouchArea {
+                        width: new-chat-label.preferred-width + 16px;
+                        height: 28px;
+                        y: (parent.height - 28px) / 2;
+                        mouse-cursor: pointer;
+                        clicked => { root.new-chat(); }
+
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: 6px;
+                            background: new-chat-hit.has-hover ? Theme.hover-fill : transparent;
+                        }
+                        new-chat-label := Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "New chat";
+                            color: new-chat-hit.has-hover ? Theme.text-primary : Theme.text-secondary;
+                            font-size: Theme.fs-caption;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
                     if root.can-open-in-agents : history-hit := TouchArea {
                         width: history-label.preferred-width + 16px;
                         height: 28px;

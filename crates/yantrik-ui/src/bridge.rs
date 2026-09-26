@@ -169,6 +169,8 @@ pub enum CompanionCommand {
     /// Read the recipes again and publish them to `crate::recipes`, which the Recipes screen,
     /// `describe shell` and the mind panel read without waiting on this thread.
     RefreshRecipes,
+    /// The person pressed New chat (#246): the built-in's next turn starts a new conversation.
+    NewConversation,
     /// A person's answer, pause, resume or cancel for one recipe. The outcome is published to
     /// `crate::recipes` with the recipes themselves.
     Recipe {
@@ -457,6 +459,13 @@ impl CompanionHandle {
             })
             .map_err(|_| "companion worker is not running".to_string())?;
         Ok(receipt)
+    }
+
+    /// Start the built-in's next turn in a new conversation (#246). Returns at once.
+    pub fn new_conversation(&self) -> Result<(), String> {
+        self.cmd_tx
+            .send(CompanionCommand::NewConversation)
+            .map_err(|_| "companion worker is not running".to_string())
     }
 
     /// Ask the worker to publish the recipes again. Returns at once; see `crate::recipes`.
@@ -993,6 +1002,7 @@ fn worker_loop(
         }
         match received {
             Ok(CompanionCommand::RefreshRecipes) => recipes_dirty = true,
+            Ok(CompanionCommand::NewConversation) => companion.new_conversation(),
             Ok(CompanionCommand::StartRecipe { recipe, variables, leave, reply_tx }) => {
                 let outcome = start_recipe_run(&companion.db.conn(), &recipe, &variables, leave.as_ref());
                 match &outcome {

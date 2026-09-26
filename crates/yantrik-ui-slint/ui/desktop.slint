@@ -120,6 +120,7 @@ export component DesktopScreen inherits Rectangle {
     in property <bool> lens-can-open-in-agents: false;
     callback lens-open-in-agents();
     callback lens-open-history();
+    callback lens-new-chat();
 
     // Urges (for quiet queue)
     in property <[UrgeCardData]> urges: [];
@@ -1026,6 +1027,7 @@ export component DesktopScreen inherits Rectangle {
         can-open-in-agents: root.lens-can-open-in-agents;
         open-in-agents => { root.lens-open-in-agents(); }
         open-history => { root.lens-open-history(); }
+        new-chat => { root.lens-new-chat(); }
         messages: root.messages;
         is-generating: root.is-generating;
         suggestions: root.lens-suggestions;
