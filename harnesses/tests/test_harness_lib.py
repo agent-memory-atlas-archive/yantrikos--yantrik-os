@@ -502,6 +502,31 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(minds.made, [("main", "a" * 32), ("main", "b" * 32)])
         self.assertTrue(wait_for(lambda: minds.closed == ["main"]))
 
+    def test_a_turn_open_across_a_shell_restart_is_finished_on_the_desktop_that_came_back(self):
+        # #246: the shell restarted mid-answer. The mind kept working; what it said while there
+        # was no desktop is held, the harness attaches again saying what it still holds, and
+        # the rest of the answer lands on the turn the new desktop gave back. The mind is not
+        # stopped and not made again: the same conversation goes on under the same token.
+        minds = Minds()
+        handler = yantrik_harness.PerConversation(minds.make)
+        self.start(handler)
+        turn = self.desktop.ask("slow", conversation="main", agent_token="a" * 32)
+        self.assertTrue(wait_for(lambda: handler.mind("main") is not None
+                                 and handler.mind("main").running.is_set()))
+        self.desktop.restart()
+        handler.mind("main").release.set()
+        self.assertTrue(wait_for(lambda: turn in self.desktop.resumed, timeout=5),
+                        self.desktop.attachments[-1])
+        again = self.desktop.resumed[turn]
+        self.assertEqual(self.desktop.attachments[-1]["resume"],
+                         [{"conversation": "main", "agent_token": "a" * 32,
+                           "turn_id": turn, "prompt": "slow"}])
+        closed = self.desktop.wait_closed(again)
+        self.assertEqual(closed[1], "complete", closed)
+        self.assertEqual(self.desktop.text(again), "main heard slow")
+        self.assertEqual(minds.made, [("main", "a" * 32)], "the same mind, not a new one")
+        self.assertEqual(minds.closed, [], "and not stopped")
+
     def test_attaching_again_ends_the_conversations_of_the_session_before(self):
         minds = Minds()
         handler = yantrik_harness.PerConversation(minds.make)

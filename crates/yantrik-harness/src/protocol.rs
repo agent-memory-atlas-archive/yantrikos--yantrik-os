@@ -151,6 +151,30 @@ pub struct Attach {
     /// turn is in the one conversation, `main`, and the desktop says so rather than pretending.
     #[serde(default)]
     pub conversations: bool,
+    /// What this harness was doing for a desktop it lost (#246): each conversation it still
+    /// holds, with the agent token the desktop gave it, and the turn it is still answering in
+    /// it, if any. A shell that restarted mid-answer used to fail every one of them, so the
+    /// answer had nowhere to go, the harness dropped the turn, and a library harness stopped
+    /// its mind. Given this, the desktop takes the conversations back under the same tokens and
+    /// re-opens the turns, and the harness carries on under the ids the reply maps them to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resume: Vec<Resume>,
+}
+
+/// One conversation a re-attaching harness still holds. See [`Attach::resume`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Resume {
+    /// `main`, or an id the desktop issued (`c-7f3a91`).
+    pub conversation: String,
+    /// The token the desktop gave this conversation's agent. It is taken back only when it is
+    /// one the desktop could have minted and no live agent holds it.
+    pub agent_token: String,
+    /// The turn this harness is still answering in it, under the id the lost desktop gave it.
+    #[serde(default)]
+    pub turn_id: Option<u64>,
+    /// What that turn asked, so the desktop can say what is being picked up.
+    #[serde(default)]
+    pub prompt: String,
 }
 
 /// One turn handed to a harness.
@@ -207,6 +231,7 @@ mod tests {
             tools: true,
             memory: true,
             conversations: true,
+            resume: Vec::new(),
         })
         .unwrap();
         let keys: Vec<&str> = json.as_object().unwrap().keys().map(|k| k.as_str()).collect();

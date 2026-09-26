@@ -403,6 +403,18 @@ struct State {
     /// Every conversation id this host has issued, so none is issued twice.
     issued: HashSet<String>,
     events: EventCounts,
+    /// Turns a re-attaching harness picked back up, waiting for the shell to take their
+    /// answers ([`Host::take_resumed`]).
+    resumed: Vec<Resumed>,
+}
+
+/// A turn a harness was still answering when it lost this desktop, taken back on its re-attach
+/// (#246). Its answer is new: whatever the harness says from here on arrives on it.
+pub struct Resumed {
+    pub agent: AgentId,
+    /// What the turn asked, as the harness remembered it.
+    pub prompt: String,
+    pub answer: Answer,
 }
 
 /// Everything the OS knows about the minds available to it.
@@ -430,6 +442,7 @@ impl Host {
                 next_session: 1,
                 issued: HashSet::new(),
                 events: EventCounts::default(),
+                resumed: Vec::new(),
             })),
             liveness: Arc::new(pid_alive),
         }
@@ -892,7 +905,17 @@ impl Host {
         // should get. Anything the old one owed is failed rather than abandoned — the turn it was
         // answering and the turns waiting behind it — and its agents end with it: their
         // conversations lived in the process that is gone.
-        if let Some(previous) = state.attached.remove(&announced.id) {
+        //
+        // Except what the harness says it is still answering (#246): those turns are kept, under
+        // the same ids and the same listeners, so a harness that only lost its connection
+        // carries on as though it had not.
+        let mut kept: HashMap<u64, Flight> = HashMap::new();
+        if let Some(mut previous) = state.attached.remove(&announced.id) {
+            for turn in announced.resume.iter().filter_map(|r| r.turn_id) {
+                if let Some(flight) = previous.in_flight.remove(&turn) {
+                    kept.insert(turn, flight);
+                }
+            }
             previous.fail_everything(
                 &format!("{} restarted mid-answer", announced.id),
                 &format!("{} restarted before it answered", announced.id),
@@ -916,12 +939,109 @@ impl Host {
             },
         );
 
+        let (resumed, refused) = Self::resume(&mut state, &id, kept);
+
         // The first mind to attach on a machine with no built-in becomes the one answering,
         // rather than leaving a desktop that has a harness and is not using it.
         if state.active.is_empty() {
             state.active = id;
         }
-        Ok(serde_json::json!({ "session": session }))
+        let mut reply = serde_json::json!({ "session": session });
+        if !resumed.is_empty() || !refused.is_empty() {
+            reply["resumed"] = resumed.into();
+            reply["refused"] = refused.into();
+        }
+        Ok(reply)
+    }
+
+    /// Take back what a re-attaching harness still holds (#246): each conversation under the
+    /// token it presents, and each turn it is still answering. A turn this host still has is
+    /// kept under its id and its listener. One a restarted shell never knew is re-opened under a
+    /// new id, and its answer waits for [`Host::take_resumed`]. Returns the turns as
+    /// `{"was", "turn_id"}` and what was not taken back as `{"conversation", "why"}`.
+    fn resume(
+        state: &mut State,
+        harness_id: &str,
+        mut kept: HashMap<u64, Flight>,
+    ) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+        let asked = state.attached.get(harness_id).map(|h| h.announced.resume.clone()).unwrap_or_default();
+        let one_conversation = state.attached.get(harness_id).is_some_and(|h| !h.announced.conversations);
+        let held_elsewhere: HashSet<String> = state
+            .attached
+            .iter()
+            .filter(|(id, _)| id.as_str() != harness_id)
+            .flat_map(|(_, h)| h.agents.values().map(|a| a.token.clone()))
+            .collect();
+        let (mut resumed, mut refused) = (Vec::new(), Vec::new());
+        let mut taken: HashSet<String> = HashSet::new();
+        for r in asked {
+            let why = if r.conversation != AgentId::MAIN
+                && (one_conversation || !well_formed_conversation(&r.conversation))
+            {
+                Some("not a conversation this desktop could have given it")
+            } else if !r.agent_token.is_empty() && !well_formed_token(&r.agent_token) {
+                Some("not a token this desktop could have minted")
+            } else if !r.agent_token.is_empty()
+                && (held_elsewhere.contains(&r.agent_token) || !taken.insert(r.agent_token.clone()))
+            {
+                Some("that token is held by another agent")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                refused.push(serde_json::json!({ "conversation": r.conversation, "why": why }));
+                continue;
+            }
+            // A harness that never used its token (Hermes) presents none: its conversation is
+            // taken back under a new one, since nothing it runs was holding the old.
+            let token = if r.agent_token.is_empty() {
+                match mint_token() {
+                    Ok(token) => token,
+                    Err(why) => {
+                        refused.push(serde_json::json!({ "conversation": r.conversation, "why": why }));
+                        continue;
+                    }
+                }
+            } else {
+                r.agent_token.clone()
+            };
+            state.issued.insert(r.conversation.clone());
+            let next = state.next_turn;
+            let Some(harness) = state.attached.get_mut(harness_id) else { break };
+            let mut agent = Agent::new(token);
+            let Some(was) = r.turn_id else {
+                harness.agents.insert(r.conversation.clone(), agent);
+                continue;
+            };
+            agent.turns = 1;
+            harness.agents.insert(r.conversation.clone(), agent);
+            if let Some(flight) = kept.remove(&was) {
+                harness.in_flight.insert(was, flight);
+                resumed.push(serde_json::json!({ "was": was, "turn_id": was }));
+                continue;
+            }
+            let (tx, rx) = mpsc::channel();
+            harness.in_flight.insert(next, Flight::new(r.conversation.clone(), tx));
+            state.next_turn += 1;
+            state.resumed.push(Resumed {
+                agent: AgentId::new(harness_id, &r.conversation),
+                prompt: r.prompt.clone(),
+                answer: rx,
+            });
+            resumed.push(serde_json::json!({ "was": was, "turn_id": next }));
+        }
+        // What was kept for a conversation that was then refused has nobody left to answer it.
+        for (_, mut flight) in kept {
+            flight.settle(Some("the harness came back without it".to_string()));
+        }
+        (resumed, refused)
+    }
+
+    /// The turns re-attaching harnesses picked back up since the last call, each with the answer
+    /// the rest of it will arrive on. The shell takes them to put them back in front of the
+    /// person (#246).
+    pub fn take_resumed(&self) -> Vec<Resumed> {
+        std::mem::take(&mut self.lock().resumed)
     }
 
     /// Find the harness holding this session, refreshing its presence.
@@ -1204,6 +1324,18 @@ fn mint_token() -> Result<String, String> {
     random_hex(TOKEN_HEX_LEN / 2)
 }
 
+/// A token this host could have minted: [`TOKEN_HEX_LEN`] lowercase hex digits.
+fn well_formed_token(token: &str) -> bool {
+    token.len() == TOKEN_HEX_LEN && token.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A conversation id this host could have issued: `c-` and six lowercase hex digits.
+fn well_formed_conversation(id: &str) -> bool {
+    id.strip_prefix("c-").is_some_and(|hex| {
+        hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
 /// A conversation id this host has never issued: `c-` and 24 random bits.
 fn issue_conversation(issued: &mut HashSet<String>) -> Result<String, String> {
     for _ in 0..64 {
@@ -1328,6 +1460,115 @@ mod tests {
         let answer = host.send_to(&agent, Turn::new("tidy the photos")).unwrap();
         let turn_id = poll(host, &session)["turn_id"].as_u64().unwrap();
         (session, agent, turn_id, answer)
+    }
+
+    /// A shell restarted mid-answer (#246). The new one never gave the turn, so it used to refuse
+    /// every chunk after the restart and the answer had nowhere to go. Now the harness says what
+    /// it still holds on re-attach: the conversation comes back under the same token, the turn is
+    /// re-opened under a new id, and what the harness says next reaches the shell.
+    #[test]
+    fn a_turn_open_across_a_shell_restart_is_picked_back_up_under_the_same_token() {
+        let old = host();
+        let (_, agent, was, _) = turn_in_flight(&old);
+        let token = old.lock().attached["pi"].agents[agent.conversation()].token.clone();
+        drop(old);
+
+        let fresh = host(); // the shell after its restart
+        let reply = fresh
+            .handle(
+                protocol::ATTACH,
+                &json!({ "id": "pi", "name": "pi", "conversations": true, "resume": [
+                    { "conversation": agent.conversation(), "agent_token": token, "turn_id": was,
+                      "prompt": "tidy the photos" },
+                ]}),
+            )
+            .unwrap();
+        let session = reply["session"].as_str().unwrap().to_string();
+        let now = reply["resumed"][0]["turn_id"].as_u64().expect("the turn is re-opened");
+        assert_eq!(reply["resumed"][0]["was"], was);
+        assert_eq!(reply["refused"], json!([]));
+        assert_eq!(fresh.agent_for_token(&token).map(|(id, _)| id), Some(agent.clone()), "the same agent, the same token");
+
+        let mut picked = fresh.take_resumed();
+        assert_eq!(picked.len(), 1);
+        let resumed = picked.remove(0);
+        assert_eq!((resumed.agent.clone(), resumed.prompt.as_str()), (agent, "tidy the photos"));
+        fresh.handle(protocol::CHUNK, &json!({ "session": session, "turn_id": now, "delta": "Done: 212 photos." })).unwrap();
+        complete(&fresh, &session, now);
+        let said: Vec<String> = resumed.answer.iter().filter_map(|c| match c { Chunk::Text(t) => Some(t), _ => None }).collect();
+        assert_eq!(said, vec!["Done: 212 photos.".to_string()], "the rest of the answer arrived");
+        assert!(fresh.take_resumed().is_empty(), "taken once");
+    }
+
+    /// A harness that lost only its connection, while the shell stayed up: the shell still holds
+    /// the turn and still listens on it. Re-attaching keeps it, under the same id and listener,
+    /// instead of failing it.
+    #[test]
+    fn a_harness_that_only_lost_its_connection_keeps_its_turn_and_listener() {
+        let host = host();
+        let (_, agent, was, answer) = turn_in_flight(&host);
+        let token = host.lock().attached["pi"].agents[agent.conversation()].token.clone();
+        let reply = host
+            .handle(
+                protocol::ATTACH,
+                &json!({ "id": "pi", "name": "pi", "conversations": true, "resume": [
+                    { "conversation": agent.conversation(), "agent_token": token, "turn_id": was },
+                ]}),
+            )
+            .unwrap();
+        assert_eq!(reply["resumed"][0], json!({ "was": was, "turn_id": was }));
+        assert!(host.take_resumed().is_empty(), "the shell is still listening; nothing to hand it");
+        let session = reply["session"].as_str().unwrap().to_string();
+        host.handle(protocol::CHUNK, &json!({ "session": session, "turn_id": was, "delta": "still here" })).unwrap();
+        complete(&host, &session, was);
+        let said: Vec<Chunk> = answer.iter().collect();
+        assert!(matches!(&said[..], [Chunk::Text(t)] if t == "still here"), "{said:?}");
+    }
+
+    /// Hermes carries no agent token: its one conversation is still taken back, under a new
+    /// token, and its open turn re-opened.
+    #[test]
+    fn a_harness_that_never_used_its_token_still_gets_its_turn_back() {
+        let host = host();
+        let reply = host
+            .handle(
+                protocol::ATTACH,
+                &json!({ "id": "hermes", "name": "Hermes", "resume": [
+                    { "conversation": "main", "agent_token": "", "turn_id": 18, "prompt": "build the town" },
+                ]}),
+            )
+            .unwrap();
+        assert_eq!(reply["refused"], json!([]));
+        assert_eq!(reply["resumed"][0]["was"], 18);
+        let picked = host.take_resumed();
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].agent, AgentId::new("hermes", AgentId::MAIN));
+    }
+
+    /// What is not taken back: a token this desktop could not have minted, one another agent
+    /// holds, and a conversation id a one-conversation harness never had.
+    #[test]
+    fn resume_takes_back_only_what_this_desktop_could_have_given() {
+        let host = host();
+        let (_, agent, _, _) = turn_in_flight(&host);
+        let pis = host.lock().attached["pi"].agents[agent.conversation()].token.clone();
+        let reply = host
+            .handle(
+                protocol::ATTACH,
+                &json!({ "id": "deepseek", "name": "deepseek", "resume": [
+                    { "conversation": "main", "agent_token": "not-a-token" },
+                    { "conversation": "main", "agent_token": pis },
+                    { "conversation": "c-abcdef", "agent_token": "a".repeat(32) },
+                ]}),
+            )
+            .unwrap();
+        let why: Vec<&str> = reply["refused"].as_array().unwrap().iter().map(|r| r["why"].as_str().unwrap()).collect();
+        assert_eq!(
+            why,
+            ["not a token this desktop could have minted", "that token is held by another agent",
+             "not a conversation this desktop could have given it"]
+        );
+        assert_eq!(host.agent_for_token(&pis).map(|(id, _)| id), Some(agent), "pi keeps its own agent");
     }
 
     #[test]
