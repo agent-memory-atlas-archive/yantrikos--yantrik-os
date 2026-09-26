@@ -1941,8 +1941,21 @@ with tempfile.TemporaryDirectory() as d:
                        "XDG_DATA_HOME": str(tmp / "no-apps")})
     try:
         module = load_mcp(HERE / "yos", tmp / "real-yos.json")
+        started = time.monotonic()
         listing, listing_failed = module.run_tool(module.BY_NAME["os_apps"], {})
         described, describe_failed = module.run_tool(module.BY_NAME["os_describe"], {"app": "harness"})
+        in_process_took = time.monotonic() - started
+        ran_in_process = bool(module._YOS_MODULE) and module._YOS_MODULE[0] is not None
+        started = time.monotonic()
+        module.run_tool(module.BY_NAME["os_apps"], {})
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "harness"})
+        warm_took = time.monotonic() - started
+        # The same two reads as processes, for the comparison #41 is about.
+        module.IN_PROCESS = set()
+        started = time.monotonic()
+        as_process = (module.run_tool(module.BY_NAME["os_apps"], {}),
+                      module.run_tool(module.BY_NAME["os_describe"], {"app": "harness"}))
+        as_process_took = time.monotonic() - started
     finally:
         for key, value in saved_env.items():
             if value is None:
@@ -1959,6 +1972,13 @@ with tempfile.TemporaryDirectory() as d:
     check("os_describe on it anyway says what it is and where to look, not only that it failed",
           describe_failed and "plumbing, not an app or a service" in described
           and "yos ls" in described, described)
+    check("the reading tools run the real yos in this process, not as a process each (#41)",
+          ran_in_process, "yos could not be loaded in-process")
+    check("and answer exactly what the process answers",
+          as_process == ((listing, listing_failed), (described, describe_failed)),
+          (as_process, listing, described))
+    print("     two reads: %.1f ms in-process the first time (loading yos), %.1f ms after, "
+          "%.1f ms as processes" % (in_process_took * 1000, warm_took * 1000, as_process_took * 1000))
 
 # A mind going round in circles is told so in the one place it reads while it works: the call's
 # own result (#234). The 23 September game: the editor refused four times, "Cannot open".
