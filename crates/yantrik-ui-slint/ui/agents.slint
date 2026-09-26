@@ -33,6 +33,8 @@ export struct AgentRowData {
     parent: string,    // the agent that started this one, if any
     role: string,      // the catalog role it was started as ("Reviewer"), if any
     origin: string,    // the recipe that handed it the work ("Council recipe"), if any
+    progress: string,  // while it works, the shell's own count: "14 calls · 3 failed · heard 20 s ago"
+    stuck: string,     // why the shell thinks it is stuck, when it does (#234)
 }
 
 // One run of same-looking cells in a command's terminal.
@@ -323,8 +325,12 @@ component AgentRow inherits Rectangle {
                 overflow: elide;
             }
             Text {
-                text: root.data.since == "" ? root.data.label : root.data.label + " · " + root.data.since;
-                color: root.data.state == "waiting_for_you" ? Theme.amber : Theme.text-dim;
+                // Stuck says why, in place of the state: the one line a person scanning the list
+                // needs. Otherwise the state, how long, and the shell's own count of its calls.
+                text: root.data.stuck != "" ? "Stuck: " + root.data.stuck
+                    : (root.data.since == "" ? root.data.label : root.data.label + " · " + root.data.since)
+                      + (root.data.progress == "" ? "" : " · " + root.data.progress);
+                color: root.data.stuck != "" || root.data.state == "waiting_for_you" ? Theme.amber : Theme.text-dim;
                 font-size: Theme.fs-micro;
                 overflow: elide;
             }

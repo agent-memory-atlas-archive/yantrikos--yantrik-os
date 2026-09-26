@@ -279,6 +279,8 @@ fn agents_row_and_card(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Bo
         parent: "".into(),
         role: role.into(),
         origin: origin.into(),
+        progress: "".into(),
+        stuck: "".into(),
     };
     g.set_rows(ModelRc::new(VecModel::from(vec![
         row("deepseek:c-9d1e02", "deepseek", "Review the change just made for: add a --dry-run flag", "waiting_for_you", "waiting for you", "Reviewer", "Build recipe"),

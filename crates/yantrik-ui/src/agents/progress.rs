@@ -33,6 +33,27 @@ pub struct Progress {
     pub waiting_on_you: bool,
     /// Why the shell thinks it is stuck, in plain words, when it does.
     pub stuck: Option<String>,
+    /// The same, as what kind of stuck: for words that must not quote the mind (a notification).
+    pub stuck_kind: Option<Stuck>,
+}
+
+/// How a task is stuck, in the shell's own terms.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stuck {
+    /// The same call failed this many times in a row, for the same reason.
+    Repeating { call: String, times: usize },
+    /// Nothing heard for this long, while it waits on nobody.
+    Quiet { secs: u64 },
+}
+
+impl Stuck {
+    /// Said in the desktop's own words, with nothing the mind or an app wrote.
+    pub fn plain(&self) -> String {
+        match self {
+            Stuck::Repeating { call, times } => format!("`{call}` has failed the same way {times} times in a row."),
+            Stuck::Quiet { secs } => format!("Nothing has been heard from it for {}.", span(*secs)),
+        }
+    }
 }
 
 /// What `agent` is doing right now, or None when it has no turn open.
@@ -44,12 +65,19 @@ pub fn of(agent: &Agent, now: u64) -> Option<Progress> {
     // being waited on, and the quiet is theirs, not the task's.
     let waiting_on_you = !agent.pending_approvals.is_empty() || agent.job_waits;
     let quiet_secs = now.saturating_sub(agent.touched);
-    let stuck = going_round(&cards).or_else(|| {
-        // Quiet is only stuck when nothing explains it: not a question to the person, and not
-        // a command the shell itself is watching run (a build can be silent for minutes).
-        (quiet_secs >= STUCK_QUIET_SECS && !waiting_on_you && running.is_none())
-            .then(|| format!("nothing heard from it for {}", span(quiet_secs)))
-    });
+    let repeating = going_round(&cards);
+    // Quiet is only stuck when nothing explains it: not a question to the person, and not a
+    // command the shell itself is watching run (a build can be silent for minutes).
+    let quiet = quiet_secs >= STUCK_QUIET_SECS && !waiting_on_you && running.is_none();
+    let stuck_kind = match &repeating {
+        Some((call, times, _)) => Some(Stuck::Repeating { call: call.clone(), times: *times }),
+        None if quiet => Some(Stuck::Quiet { secs: quiet_secs }),
+        None => None,
+    };
+    let stuck = match repeating {
+        Some((_, _, said)) => Some(said),
+        None => quiet.then(|| format!("nothing heard from it for {}", span(quiet_secs))),
+    };
     Some(Progress {
         task: turn.prompt.trim().to_string(),
         elapsed_secs: now.saturating_sub(turn.started),
@@ -60,12 +88,13 @@ pub fn of(agent: &Agent, now: u64) -> Option<Progress> {
         running,
         waiting_on_you,
         stuck,
+        stuck_kind,
     })
 }
 
-/// The last calls failing the same way, over and over: "`editor.act` failed 4 times in a row:
-/// Cannot open: No such file".
-fn going_round(cards: &[&Card]) -> Option<String> {
+/// The last calls failing the same way, over and over: the call, how many times, and "`editor.act`
+/// failed 4 times in a row: Cannot open: No such file".
+fn going_round(cards: &[&Card]) -> Option<(String, usize, String)> {
     let last = cards.last().filter(|c| c.state == CallState::Failed)?;
     let same = |c: &&&Card| c.state == CallState::Failed && c.name == last.name && c.summary == last.summary;
     let times: usize = cards
@@ -76,11 +105,12 @@ fn going_round(cards: &[&Card]) -> Option<String> {
         .sum();
     (times >= STUCK_REPEATS).then(|| {
         let why = last.summary.trim();
-        if why.is_empty() {
+        let said = if why.is_empty() {
             format!("{} failed {times} times in a row", call_line(last))
         } else {
             format!("{} failed {times} times in a row: {why}", call_line(last))
-        }
+        };
+        (last.name.clone(), times, said)
     })
 }
 
@@ -230,6 +260,12 @@ mod tests {
         );
         let p = of(&agent, 60).expect("a turn is open");
         assert_eq!(p.stuck.as_deref(), Some("editor.act failed 4 times in a row: Cannot open: No such file"));
+        assert_eq!(p.stuck_kind, Some(Stuck::Repeating { call: "editor.act".into(), times: 4 }));
+        assert_eq!(
+            p.stuck_kind.as_ref().unwrap().plain(),
+            "`editor.act` has failed the same way 4 times in a row.",
+            "the notification's words quote no refusal text"
+        );
         assert_eq!((p.calls, p.failed, p.elapsed_secs), (5, 4, 60));
         let told = p.told("Hermes");
         assert!(told.starts_with("Hermes is working on “Build a small game"), "{told}");
@@ -258,6 +294,7 @@ mod tests {
         let quiet = agent_with(vec![card("os_act", CallState::Ok, "", 10)], 0, 10);
         let p = of(&quiet, 10 + STUCK_QUIET_SECS).unwrap();
         assert_eq!(p.stuck.as_deref(), Some("nothing heard from it for 1 min"));
+        assert_eq!(p.stuck_kind, Some(Stuck::Quiet { secs: STUCK_QUIET_SECS }));
 
         let mut asking = agent_with(vec![card("os_act", CallState::Ok, "", 10)], 0, 10);
         asking.pending_approvals.push("appr-7".into());

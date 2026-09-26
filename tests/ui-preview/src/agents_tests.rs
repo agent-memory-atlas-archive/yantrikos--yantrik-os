@@ -56,6 +56,8 @@ pub(crate) fn fill(g: &AgentsState, popped: bool) {
         parent: "".into(),
         role: "".into(),
         origin: "".into(),
+        progress: "".into(),
+        stuck: "".into(),
     };
     g.set_rows(ModelRc::new(VecModel::from(vec![
         row("deepseek:main", "DeepSeek", "release notes for 0.4", "waiting_for_you", "waiting for you", "40s"),
@@ -491,6 +493,8 @@ pub fn run_catalog(w: &MinimalSoftwareWindow, output: &str) -> Result<(), Box<dy
         parent: "".into(),
         role: "Reviewer".into(),
         origin: "".into(),
+        progress: "".into(),
+        stuck: "".into(),
     };
     let mut rows: Vec<AgentRowData> = slint::Model::iter(&g.get_rows()).collect();
     rows.insert(0, row);
