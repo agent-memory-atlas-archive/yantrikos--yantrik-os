@@ -131,6 +131,21 @@ fn dispatch(
         return;
     }
 
+    // A mind already at work is answered by the desktop first, from its own record of the task:
+    // what it was asked, how long it has run, its last steps, and whether it looks stuck. The
+    // mind itself could only say "still working" (#246), and a status question sat queued behind
+    // the task until it ended. The word still goes to the mind below, which answers it as it
+    // always did: beside its work, or when its work is done. Commands (`/stop`) go straight on.
+    let told = (!text.trim_start().starts_with('/'))
+        .then(|| {
+            let agent = crate::agents::feed::main_agent(&host.active_id());
+            crate::agents::store().read(|s| {
+                let a = s.agent(&agent)?;
+                crate::agents::progress::of(a, crate::agents::model::now()).map(|p| p.told(&a.meta.mind))
+            })
+        })
+        .flatten();
+
     // An attached harness answers in Chunks. Adapt them to the token protocol the pump already
     // speaks, on a thread, because `Answer` is a blocking std channel and this is the UI thread.
     let answer = host.send(
@@ -178,7 +193,13 @@ fn dispatch(
             bridge.score_conversation_turn(asked);
         }
     });
-    streaming::stream_into(ui_weak.clone(), rx, text, streams);
+    match told {
+        Some(told) => {
+            streaming::say(ui_weak, Some(text), "desktop", &told);
+            streaming::stream_answer(ui_weak.clone(), rx, streams);
+        }
+        None => streaming::stream_into(ui_weak.clone(), rx, text, streams),
+    }
 }
 
 /// Wire on_send_message and on_lens_submit callbacks.
