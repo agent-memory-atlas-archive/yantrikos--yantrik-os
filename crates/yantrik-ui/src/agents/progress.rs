@@ -40,7 +40,9 @@ pub fn of(agent: &Agent, now: u64) -> Option<Progress> {
     let turn = agent.open_turn()?;
     let cards: Vec<&Card> = turn.cards().collect();
     let running = cards.iter().rev().find(|c| c.running()).map(|c| call_line(c));
-    let waiting_on_you = !agent.pending_approvals.is_empty();
+    // An approval card, or a command at a prompt (#182): either way the person is the one
+    // being waited on, and the quiet is theirs, not the task's.
+    let waiting_on_you = !agent.pending_approvals.is_empty() || agent.job_waits;
     let quiet_secs = now.saturating_sub(agent.touched);
     let stuck = going_round(&cards).or_else(|| {
         // Quiet is only stuck when nothing explains it: not a question to the person, and not
@@ -203,6 +205,7 @@ mod tests {
             approvals_asked: 0,
             approvals_answered: 0,
             pending_approvals: Vec::new(),
+            job_waits: false,
             seq: 0,
             touched,
             next_turn: 2,
@@ -261,6 +264,10 @@ mod tests {
         let p = of(&asking, 10 + STUCK_QUIET_SECS).unwrap();
         assert_eq!(p.stuck, None);
         assert!(p.told("Hermes").contains("waiting for you to answer an approval card"));
+
+        let mut prompting = agent_with(vec![card("os_act", CallState::Ok, "", 10)], 0, 10);
+        prompting.job_waits = true;
+        assert_eq!(of(&prompting, 10 + STUCK_QUIET_SECS).unwrap().stuck, None, "a command at a prompt waits on the person");
 
         let building = agent_with(vec![card("agent_run", CallState::Running, "", 10)], 0, 10);
         let p = of(&building, 10 + 600).unwrap();
