@@ -30,6 +30,7 @@
 // (design/desk-and-mind-2026-09-23.md, section 5).
 pub mod catalog;
 pub mod feed;
+pub mod handover;
 pub mod launch;
 pub mod model;
 pub mod progress;
