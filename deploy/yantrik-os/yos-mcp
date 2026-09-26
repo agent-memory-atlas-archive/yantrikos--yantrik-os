@@ -2015,6 +2015,87 @@ def report_unasked(audit, outcome):
             "record of that: %s. Tell the person what you did.)" % err)
 
 
+# ── Reading the desktop without starting a process each time (#41) ─────────────────────────
+#
+# Every tool call used to start `yos` as a process: 132 ms of interpreter start-up for a
+# question the socket answers in about 1 ms, and a mind describes apps all the time. `yos` is
+# Python like this bridge, so the reading tools now run its command in this process instead:
+# the same code, the same output and the same exit status, without the process. `os_act` still
+# runs `yos` as a process. It can wait minutes on a person's approval, and a process is what
+# its timeout can end.
+#
+# `yos` is loaded only when it is a module that can be imported safely: its source must guard
+# its entry point with `if __name__ == "__main__":` and dispatch through `COMMANDS`. Anything
+# else (a test's fake, an older `yos`), or a load that fails, keeps the process.
+
+IN_PROCESS = {"os_apps", "os_describe"}
+_YOS_MODULE = []            # [module] once loaded; [None] once it cannot be
+_YOS_LOCK = threading.Lock()
+_CAPTURE = threading.local()
+
+
+class _Ran:
+    """What `subprocess.run` hands back, for a command run in this process."""
+
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def _captured_print(*values, sep=" ", end="\n", file=None, flush=False):
+    """`print` inside the loaded `yos`: into this call's buffers, never this process's stdout,
+    which carries the JSON-RPC stream."""
+    target = _CAPTURE.err if file is sys.stderr else _CAPTURE.out if file in (None, sys.stdout) else None
+    if target is None:
+        print(*values, sep=sep, end=end, file=file, flush=flush)
+    else:
+        target.append(sep.join(str(v) for v in values) + end)
+
+
+def _yos_module():
+    if _YOS_MODULE:
+        return _YOS_MODULE[0]
+    module = None
+    try:
+        with open(YOS, encoding="utf-8") as f:
+            source = f.read()
+        if 'if __name__ == "__main__":' in source and "COMMANDS" in source:
+            from importlib.machinery import SourceFileLoader
+            import importlib.util
+            loader = SourceFileLoader("yos_in_process", YOS)
+            spec = importlib.util.spec_from_loader("yos_in_process", loader)
+            module = importlib.util.module_from_spec(spec)
+            for key, value in yos_env().items():
+                os.environ.setdefault(key, value)
+            loader.exec_module(module)
+            if not isinstance(getattr(module, "COMMANDS", None), dict):
+                module = None
+            else:
+                module.print = _captured_print
+    except (OSError, SyntaxError, ImportError, SystemExit, Exception):  # noqa: BLE001
+        module = None
+    _YOS_MODULE.append(module)
+    return module
+
+
+def in_process(argv):
+    """`yos <argv>` run in this process, or None when it cannot be (then it runs as a process)."""
+    module = _yos_module()
+    command = module.COMMANDS.get(argv[0]) if module is not None and argv else None
+    if command is None:
+        return None
+    with _YOS_LOCK:
+        _CAPTURE.out, _CAPTURE.err = [], []
+        code = 0
+        try:
+            command(list(argv[1:]))
+        except SystemExit as e:
+            code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        except Exception as e:  # noqa: BLE001 — a crash in yos is its failure, not this bridge's
+            code = 1
+            _CAPTURE.err.append("yos: %s: %s\n" % (type(e).__name__, e))
+        return _Ran(code, "".join(_CAPTURE.out), "".join(_CAPTURE.err))
+
+
 def run_tool(tool, args, present=None):
     """Invoke yos and return (text, is_error), whatever the outcome.
 
@@ -2125,8 +2206,9 @@ def run_tool(tool, args, present=None):
         # stdin closed to the child, for the reason in `yos`: this process's stdin belongs to
         # the client's JSON-RPC stream and nothing else may read from it. The environment is
         # `yos_env`'s: the desktop's session, and the agent token when this bridge has one.
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=yos_env(),
-                           stdin=subprocess.DEVNULL)
+        p = (in_process(argv[1:]) if tool["name"] in IN_PROCESS else None) or subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, env=yos_env(),
+            stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         note = join(note, report_unasked(audit, "timed out"))
         return (prefix(note, "timed out after %ss — the desktop did not answer. It may be busy "
