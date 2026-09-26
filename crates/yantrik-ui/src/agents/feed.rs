@@ -304,6 +304,35 @@ fn brief(text: &str) -> String {
     super::progress::brief(text, 300)
 }
 
+/// What the desktop notes on a turn a harness picked back up after the shell restarted (#246).
+pub const PICKED_UP: &str = "Picked back up after the desktop restarted: what it says from here arrives as usual.";
+
+/// A turn a re-attaching harness was still answering when the shell restarted (#246): open it
+/// again in the store, say so, and read the rest of its answer into it. `forward` hands the
+/// answer on unchanged, for the Lens to show, when the turn is the Lens's own conversation.
+pub fn resumed(agent: AgentId, prompt: &str, answer: Answer, forward: bool) -> Option<Answer> {
+    super::store().upsert_agent(meta_for(&agent));
+    super::store().open_turn(&agent, prompt);
+    super::store().note(&agent, PICKED_UP);
+    if !forward {
+        record(agent, answer, false);
+        return None;
+    }
+    let (tx, rx) = mpsc::channel();
+    let _ = std::thread::Builder::new().name("agents-resumed-turn".into()).spawn(move || {
+        let mut reader = Reader::new(agent, false);
+        while let Ok(chunk) = answer.recv() {
+            reader.chunk(&chunk);
+            if tx.send(chunk).is_err() {
+                reader.finish(Some("The conversation panel stopped listening."));
+                return;
+            }
+        }
+        reader.finish(None);
+    });
+    Some(rx)
+}
+
 /// Record an answer that nothing else is reading — a turn from New agent or an agent's prompt box.
 pub fn record(agent: AgentId, answer: Answer, builtin: bool) {
     let _ = std::thread::Builder::new().name("agents-turn".into()).spawn(move || {

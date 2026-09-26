@@ -232,6 +232,41 @@ fn dispatch(
     }
 }
 
+/// An answer the Lens was waiting for when the shell restarted, picked back up after it (#246):
+/// the desktop says what is being continued, and the rest of the answer streams in under it.
+pub fn resume_in_lens(
+    ui_weak: &slint::Weak<App>,
+    mind: &str,
+    prompt: &str,
+    answer: yantrik_harness::Answer,
+    streams: &streaming::Streams,
+) {
+    let (tx, rx) = crossbeam_channel::unbounded::<String>();
+    std::thread::spawn(move || {
+        while let Ok(chunk) = answer.recv() {
+            let sent = match chunk {
+                yantrik_harness::Chunk::Text(t) => tx.send(t),
+                yantrik_harness::Chunk::Failed(why) => tx.send("__REPLACE__".to_string()).and_then(|_| tx.send(why)),
+                yantrik_harness::Chunk::Event(_) => Ok(()),
+            };
+            if sent.is_err() {
+                return;
+            }
+        }
+        let _ = tx.send("__DONE__".to_string());
+    });
+    streaming::say(
+        ui_weak,
+        None,
+        "desktop",
+        &format!(
+            "The desktop restarted while {mind} was answering \u{201c}{}\u{201d}. It kept working; the rest of its answer follows.",
+            crate::agents::progress::brief(prompt, 120)
+        ),
+    );
+    streaming::stream_answer(ui_weak.clone(), rx, streams);
+}
+
 /// Wire on_send_message and on_lens_submit callbacks.
 pub fn wire(ui: &App, ctx: &AppContext) {
     wire_send_message(ui, ctx);

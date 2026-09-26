@@ -264,6 +264,8 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
     });
 
     let watch = RefCell::new(Watch::default());
+    // The Lens's pumps for answers picked back up after a restart (#246), kept alive here.
+    let resumed_streams = crate::streaming::Streams::new();
     let timer = Timer::default();
     {
         let (weak, state) = (weak.clone(), state.clone());
@@ -277,6 +279,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             let waiting: Vec<AgentId> = waiting_jobs.iter().map(|(agent, _)| agent.clone()).collect();
             agents::store().jobs_waiting(&waiting);
             let Some(ui) = weak.upgrade() else { return };
+            pick_up_resumed(&ui, &resumed_streams);
             // The Lens offers "open in Agents" while its conversation is an attached mind's.
             let lens_agent = crate::wire::harness::host()
                 .map(|h| h.active_id())
@@ -293,6 +296,21 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
     }
     // The timer lives as long as the shell, the idiom every wire module uses.
     std::mem::forget(timer);
+}
+
+/// Turns a re-attaching harness picked back up after the shell restarted (#246): back in their
+/// agents, and, for the Lens's own conversation, back in the Lens, where the person was
+/// waiting for the answer.
+fn pick_up_resumed(ui: &App, streams: &crate::streaming::Streams) {
+    let Some(host) = crate::wire::harness::host() else { return };
+    for r in host.take_resumed() {
+        let lens = feed::main_agent(&host.active_id()) == r.agent;
+        tracing::info!(agent = %r.agent, lens, "A harness picked a turn back up after the restart");
+        let mind = feed::meta_for(&r.agent).mind;
+        if let Some(answer) = feed::resumed(r.agent, &r.prompt, r.answer, lens) {
+            crate::wire::chat::resume_in_lens(&ui.as_weak(), &mind, &r.prompt, answer, streams);
+        }
+    }
 }
 
 /// New agent's Start, either way: the new agent selected on Active, or why it did not start.

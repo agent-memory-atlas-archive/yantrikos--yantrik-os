@@ -120,6 +120,9 @@ class FakeDesktop:
         self.notices: Dict[str, List[Any]] = {"cancelled": [], "ended": []}
         self._next_turn = 1
         self._next_session = 1
+        # Whether an attach's `resume` is honoured, as a desktop from #246 on does.
+        self.resumes = False
+        self.resumed: Dict[int, int] = {}   # old turn id -> the id it was given back under
         self._stop = threading.Event()
 
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -170,6 +173,15 @@ class FakeDesktop:
         """The shell restarted: every session id a harness is holding is now worthless."""
         with self.lock:
             self.sessions.clear()
+
+    def restart(self) -> None:
+        """A shell restart that knows how to take work back (#246): every session and every open
+        turn is forgotten, as a fresh shell knows none of them, and an attach that says what it
+        still holds is given its turns back under new ids."""
+        with self.lock:
+            self.sessions.clear()
+            self.open_turns.clear()
+            self.resumes = True
 
     def text(self, turn_id: int) -> str:
         with self.lock:
@@ -241,7 +253,21 @@ class FakeDesktop:
                 session = "s%d" % self._next_session
                 self._next_session += 1
                 self.sessions[session] = str(params.get("id"))
-                return {"session": session}, None
+                if not self.resumes:
+                    return {"session": session}, None
+                resumed = []
+                for item in params.get("resume") or []:
+                    was = item.get("turn_id")
+                    if not isinstance(was, int):
+                        continue
+                    new = self._next_turn
+                    self._next_turn += 1
+                    self.open_turns.add(new)
+                    self.deltas[new] = []
+                    self.events[new] = []
+                    self.resumed[was] = new
+                    resumed.append({"was": was, "turn_id": new})
+                return {"session": session, "resumed": resumed, "refused": []}, None
 
             session = str(params.get("session") or "")
             if session not in self.sessions:

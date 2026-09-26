@@ -50,7 +50,7 @@ pub mod host;
 pub mod protocol;
 
 pub use event::{AgentId, Event};
-pub use host::{AgentEntry, AgentState, Entry, EventCounts, Host, TurnEnd};
+pub use host::{AgentEntry, AgentState, Entry, EventCounts, Host, Resumed, TurnEnd};
 
 use std::sync::mpsc::Receiver;
 
