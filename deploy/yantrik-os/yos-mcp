@@ -2259,6 +2259,70 @@ def reply(msg_id, result=None, error=None):
         sys.stdout.flush()
 
 
+# ── A mind going round in circles, told so where it will read it ─────────────────────────────
+#
+# On 23 September Hermes tried to build a game and called the editor four times in a row, each
+# refused with "Cannot open: No such file", then gave up with no word to anybody (#234). The
+# shell saw every refusal and could only watch. A mind reads exactly one thing from this bridge
+# while it works: the result of each call. So that is where the desktop says it. From the third
+# identical failure in a row, the result carries one bracketed line from the desktop: this is
+# going round, repeating it will not change the answer, and what to do instead. Any other
+# outcome resets the count. The line is added to the call's own result, never sent on its own,
+# so it cannot be taken for something the person said.
+
+LOOP_WARN_AT = 3
+LOOP_STOP_AT = 5
+_LOOPS = {}
+_LOOPS_LOCK = threading.Lock()
+
+
+def _loop_key(tool_name, arguments):
+    """The call, as the same call: tool, app and action, plus the arguments that would make
+    it a different call."""
+    args = arguments if isinstance(arguments, dict) else {}
+    try:
+        detail = json.dumps(args.get("args", args), sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        detail = repr(args)
+    return (tool_name, str(args.get("app", "")), str(args.get("action", "")), detail)
+
+
+def _outcome(text, is_error):
+    """A failure's identity: flagged, or a REFUSED policy answer, by its first line. None for
+    anything that succeeded."""
+    head = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    if is_error or head.startswith("REFUSED") or head.startswith("refused:"):
+        return head[:200]
+    return None
+
+
+def going_round(tool_name, arguments, text, is_error):
+    """`text` as the mind should read it: with the desktop's word added once the same call has
+    failed the same way `LOOP_WARN_AT` times in a row."""
+    agent = os.environ.get("YANTRIK_AGENT_TOKEN", "")
+    key = _loop_key(tool_name, arguments)
+    failed = _outcome(text, is_error)
+    with _LOOPS_LOCK:
+        last = _LOOPS.get(agent)
+        if failed is None:
+            _LOOPS.pop(agent, None)
+            return text
+        times = last[2] + 1 if last and last[0] == key and last[1] == failed else 1
+        _LOOPS[agent] = (key, failed, times)
+    if times < LOOP_WARN_AT:
+        return text
+    if times < LOOP_STOP_AT:
+        said = ("This call has now failed the same way %d times in a row, and repeating it will "
+                "not change the answer. Read the app's state first (os_describe), then try a "
+                "different action or different arguments. If nothing you can do gets past this, "
+                "stop and tell the person what is blocking you." % times)
+    else:
+        said = ("This call has failed the same way %d times in a row. Stop retrying it. Tell the "
+                "person what you were trying to do and what keeps refusing it, and ask how they "
+                "want to go on." % times)
+    return "%s\n\n[From the desktop: %s]" % (text, said)
+
+
 def serve_call(msg_id, tool, arguments):
     """Run one tools/call and answer it. The body of a worker thread; must not raise.
 
@@ -2272,6 +2336,7 @@ def serve_call(msg_id, tool, arguments):
         text, is_error, meta = call_tool(tool, arguments)
     except Exception as e:  # a malformed argument must not take the server down
         text, is_error = "could not run %s: %s" % (tool["name"], e), True
+    text = going_round(tool["name"], arguments, text, is_error)
     result = {"content": [{"type": "text", "text": scrub(text)}], "isError": is_error}
     if meta is not None:
         result["_meta"] = {"yantrik/command": json.loads(scrub(json.dumps(meta)))}
