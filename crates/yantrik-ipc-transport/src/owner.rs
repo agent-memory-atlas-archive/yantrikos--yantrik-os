@@ -143,6 +143,81 @@ pub fn must_be_the_shell(peer: Option<PeerCred>) -> Result<(), String> {
     }
 }
 
+/// Whether `exe` is a program this desktop runs itself: `yantrik` (the CLI, whose `ask` and
+/// `serve` run the companion's tools), the shell and every app (`yantrik-*`), or a service
+/// (`*-service`). The callers a service's raw methods were written for (#161, #332).
+pub fn is_desktop_program(exe: &str) -> bool {
+    let exe = exe.strip_suffix(DELETED).unwrap_or(exe);
+    if !exe.starts_with('/') {
+        return false;
+    }
+    let name = crate::peer_identity::basename(exe);
+    name == "yantrik" || name.starts_with("yantrik-") || name.ends_with("-service")
+}
+
+/// The check on a service's raw methods that change something (#161): they answer only a program
+/// of this desktop's own, as the kernel's peer credentials and `/proc` identify it. Anything
+/// else is refused with a sentence that points at the graded door, `app.act`, which answers any
+/// caller under the ceiling, the mode and the grant.
+///
+/// `methods` names what was asked, for the sentence: `"sysmon.kill_process"`. This checks an
+/// executable, not a person. Code running as the same user can copy or exec a program with
+/// such a name (#154), so what these methods are worth stays with #43; what this ends is a
+/// script or a mind using the method instead of the action.
+pub fn desktop_programs_only(peer: Option<PeerCred>, methods: &str) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(format!(
+            "the kernel would not say which process is calling, and {methods} answers the \
+             desktop's own programs; the graded action on app.act answers any caller"
+        ));
+    };
+    match exe_of(peer.pid) {
+        Some(exe) if is_desktop_program(&exe) => Ok(()),
+        Some(exe) => Err(format!(
+            "{methods} answers the desktop's own programs, and the caller is {exe} (pid {}); the \
+             graded action on app.act answers any caller",
+            peer.pid
+        )),
+        None => Err(format!(
+            "the process calling {methods} (pid {}) could not be identified from /proc, and it \
+             answers the desktop's own programs; the graded action on app.act answers any caller",
+            peer.pid
+        )),
+    }
+}
+
+#[cfg(test)]
+mod desktop_program_tests {
+    use super::*;
+
+    #[test]
+    fn the_desktops_programs_are_its_cli_its_apps_and_its_services() {
+        for exe in [
+            "/opt/yantrik/bin/yantrik",
+            "/opt/yantrik/bin/yantrik-system-monitor",
+            "/opt/yantrik/bin/yantrik-ui (deleted)",
+            "/opt/yantrik/bin/email-service",
+        ] {
+            assert!(is_desktop_program(exe), "{exe}");
+        }
+        for exe in ["/usr/bin/python3", "/opt/yantrik/bin/yantrikish", "yantrik-ui", ""] {
+            assert!(!is_desktop_program(exe), "{exe}");
+        }
+    }
+
+    /// This test binary is none of them: the check refuses it by name, and says where the
+    /// graded door is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_caller_that_is_not_one_is_refused_in_words_naming_the_graded_door() {
+        let me = PeerCred { pid: std::process::id() as i32, uid: 0, gid: 0 };
+        let why = desktop_programs_only(Some(me), "email.send_message").unwrap_err();
+        assert!(why.starts_with("email.send_message answers the desktop's own programs, and the caller is /"), "{why}");
+        assert!(why.ends_with("the graded action on app.act answers any caller"), "{why}");
+        assert!(desktop_programs_only(None, "notes.delete").unwrap_err().contains("would not say which process"));
+    }
+}
+
 // ── Claiming a name ─────────────────────────────────────────────────
 
 /// How long a bind waits for whatever is on its path to answer `rpc.ping`. A live server answers

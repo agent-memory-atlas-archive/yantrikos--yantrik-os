@@ -397,6 +397,16 @@ be the shell's own child and wear its name, so the #154 limits stand, and what e
 worth stays with #43. The table below lists every method all the same — a peer check is not a
 grade, and it records what stands beside both until the methods themselves can be gated.
 
+Three more took the same step for the methods that change something (#161): System Monitor's
+`sysmon.kill_process`, every Notes method that writes a note, and every Email method that sends,
+moves, deletes, marks or stores (`email.send_message` has no graded door at all, on purpose). They
+answer `yantrik` (the CLI), the shell and every app (`yantrik-*`) and the services (`*-service`),
+the check `yantrik_ipc_transport::owner::desktop_programs_only` makes, and refuse anything else
+with `-32001` and a sentence pointing at `app.act`. Their reading methods stay open to any caller:
+they change nothing, and probes and scripts read them. Notifications, a11y and the rest are
+unchanged for now: `yos notify` calls `notifications.add` itself, and `scripts/a11y-probe.sh`
+calls `a11y.act`.
+
 <!-- service-methods: kept honest by `python3 -m unittest discover -s tests/service-methods`, which reads every service's dispatch and holds the two lists together. `read` changes nothing that outlives the call; `change` does. -->
 | Service | Method | | Gated `app.act` beside it | What it is, and who calls it |
 | --- | --- | --- | --- | --- |
