@@ -60,6 +60,12 @@ impl ServiceHandler for SysMonHandler {
         if let Some(answer) = self.surface.answer(method, &params, peer) {
             return answer;
         }
+        // The raw kill signals any pid it is handed, beside a `kill_process` action graded
+        // dangerous. It answers the desktop's own programs, the System Monitor window's End button
+        // among them, and nothing else (#161).
+        if method == "sysmon.kill_process" {
+            yantrik_service_sdk::desktop_programs_only(peer, method)?;
+        }
         match method {
             "sysmon.snapshot" => {
                 let snap = build_snapshot()?;
@@ -941,6 +947,23 @@ mod through_the_handler {
 /// The same rule with the ceiling, the mode and the shell's grant store pinned per case.
 #[cfg(all(test, unix))]
 mod tests {
+    /// #161: the raw kill answers only the desktop's own programs. This test binary is none of
+    /// them, so its kill is refused and the process lives on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_raw_kill_from_a_program_not_the_desktops_is_refused() {
+        use yantrik_service_sdk::ServiceHandler as _;
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("a sleep of our own");
+        let peer = yantrik_service_sdk::PeerCred { pid: std::process::id() as i32, uid: 0, gid: 0 };
+        let err = super::SysMonHandler::new()
+            .handle_from("sysmon.kill_process", serde_json::json!({ "pid": child.id() }), Some(peer))
+            .unwrap_err();
+        assert_eq!(err.code, -32001, "{}", err.message);
+        assert!(child.try_wait().unwrap().is_none(), "the process was not signalled");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     use super::*;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{Child, Command};
