@@ -46,9 +46,14 @@ fn builtin_turn(
     ui_weak: &slint::Weak<App>,
     bridge: &Arc<CompanionBridge>,
     text: &str,
+    handover: Option<&crate::agents::handover::Handover>,
     streams: &streaming::Streams,
 ) {
-    let answer = bridge.send_message(text.to_string());
+    let sent = match handover {
+        Some(h) => crate::agents::handover::with_handover(h, text),
+        None => text.to_string(),
+    };
+    let answer = bridge.send_message(sent);
     let (tx, rx) = crossbeam_channel::unbounded::<String>();
     let bridge = bridge.clone();
     let asked = text.to_string();
@@ -81,7 +86,18 @@ fn builtin_turn(
             bridge.score_conversation_turn(asked);
         }
     });
-    streaming::stream_into(ui_weak.clone(), rx, text, streams);
+    match handover {
+        Some(h) => {
+            streaming::say(ui_weak, Some(text), "desktop", &switched_to("Yantrik Companion", h));
+            streaming::stream_answer(ui_weak.clone(), rx, streams);
+        }
+        None => streaming::stream_into(ui_weak.clone(), rx, text, streams),
+    }
+}
+
+/// The desktop's line when the conversation changes hands: who answers now, and that it knows.
+fn switched_to(mind: &str, handover: &crate::agents::handover::Handover) -> String {
+    format!("Now talking to {mind}. It has been told what you and {} said, so you can carry on.", handover.from)
 }
 
 /// Send what the person typed to whichever mind is actually driving.
@@ -120,14 +136,22 @@ fn dispatch(
 
     let Some(host) = super::harness::host() else {
         // No host yet (very early boot). The builtin is the only thing that could answer.
-        builtin_turn(ui_weak, bridge, text, streams);
+        builtin_turn(ui_weak, bridge, text, None, streams);
         return;
     };
 
+    // The conversation, handed over when the answering mind has changed since the last word
+    // (#245): the new mind is told what was said and what the last one is still doing, in front
+    // of the person's words, so the switch is seamless. The person's bubble shows what they typed.
+    let active = host.active_id();
+    let handover = (!text.trim_start().starts_with('/'))
+        .then(|| crate::agents::store().read(|s| crate::agents::handover::for_turn(s.agents(), &active, crate::agents::model::now())))
+        .flatten();
+
     // The builtin keeps its own path: it carries tool calls, the __REPLACE__ convention and the
     // job board, none of which the harness protocol has or needs.
-    if host.active_id() == super::harness::BUILTIN_ID {
-        builtin_turn(ui_weak, bridge, text, streams);
+    if active == super::harness::BUILTIN_ID {
+        builtin_turn(ui_weak, bridge, text, handover.as_ref(), streams);
         return;
     }
 
@@ -148,9 +172,11 @@ fn dispatch(
 
     // An attached harness answers in Chunks. Adapt them to the token protocol the pump already
     // speaks, on a thread, because `Answer` is a blocking std channel and this is the UI thread.
-    let answer = host.send(
-        yantrik_harness::Turn::new(text.to_string()).with_context(desktop_context(&super::settings::place())),
-    );
+    let sent = match &handover {
+        Some(h) => crate::agents::handover::with_handover(h, text),
+        None => text.to_string(),
+    };
+    let answer = host.send(yantrik_harness::Turn::new(sent).with_context(desktop_context(&super::settings::place())));
     // The same turn, recorded as this mind's agent on the Agents screen; the answer passes through.
     let answer = crate::agents::feed::lens_turn(&host.active_id(), text, answer);
     let (tx, rx) = crossbeam_channel::unbounded::<String>();
@@ -193,12 +219,16 @@ fn dispatch(
             bridge.score_conversation_turn(asked);
         }
     });
-    match told {
-        Some(told) => {
-            streaming::say(ui_weak, Some(text), "desktop", &told);
-            streaming::stream_answer(ui_weak.clone(), rx, streams);
-        }
-        None => streaming::stream_into(ui_weak.clone(), rx, text, streams),
+    let mind = host.list().into_iter().find(|e| e.id == active).map(|e| e.name).unwrap_or_else(|| active.clone());
+    let desktop: Vec<String> =
+        [handover.as_ref().map(|h| switched_to(&mind, h)), told].into_iter().flatten().collect();
+    if desktop.is_empty() {
+        streaming::stream_into(ui_weak.clone(), rx, text, streams);
+    } else {
+        streaming::say(ui_weak, Some(text), "desktop", &desktop.join("
+
+"));
+        streaming::stream_answer(ui_weak.clone(), rx, streams);
     }
 }
 
