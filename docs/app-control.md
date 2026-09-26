@@ -210,9 +210,17 @@ The same token decides which agent's pane an approval card is drawn in (`request
 it on `Verified.agent`, and the card names it), and who is asking for `new_agent` (sensitive),
 `send_to_agent` and `stop_agent` (standard), and `read_agent` and `show_agent` (safe) —
 `control_agents.rs`. A call with no token is the person's; one whose token is not believed is
-refused. `consume_approval` refuses a grant asked for another agent when the caller carries a
-token. An app's own dispatch spends a grant without one (#116), so a grant is not yet bound to
-its agent on that path.
+refused. `consume_approval` binds a spend to the asking agent (#182): a caller that carries a
+token spends only the grants asked for it, whichever door the spend comes through. A Rust app
+forwarding a spend sends the pid the kernel stamped on the call its token arrived in as
+`caller_pid`, because the peer of the forwarded call is the app itself — and the shell honours
+that pid only when the forwarding process's executable, as `/proc` names it, is called like one
+of the desktop's own binaries (`yantrik-*` or `*-service`); a direct caller is judged by its own
+kernel pid, never by one it wrote. The check is a file name: it keeps one agent from spending
+another's grant, but code running as the person's own user can copy or exec a binary with such
+a name and forward a pid it chose — the same-user limit #154 describes. Python SDK spends
+(Blender, LibreOffice) do not forward the token and are unbound, as are spends that carry no
+token at all.
 
 `shell.run_recipe {recipe, inputs?}` starts a recipe — a formation among them, whose Agent steps
 hand work to catalog roles through `hand_off` (see [harness.md](harness.md), Formations). It is

@@ -155,7 +155,7 @@ impl Surface {
         let reach = call.reach()?;
         let action_id = next_action_id(&self.service_id);
         // Before a grant is spent: the action, the agent's reach, the arguments as sent.
-        call.spend_grant(&mut authority, self.registry.app_id(), || {
+        call.spend_grant(&mut authority, self.registry.app_id(), who, || {
             self.registry
                 .within_reach(reach.as_ref(), &call.action, &call.args)
                 .and_then(|()| self.registry.check_call(&call.action, &call.args))

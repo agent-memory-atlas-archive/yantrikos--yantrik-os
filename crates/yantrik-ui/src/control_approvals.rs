@@ -318,6 +318,17 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 Param::object("args_json")
                     .optional()
                     .describe("The same JSON object the request carried"),
+            )
+            .arg(
+                Param::integer("caller_pid")
+                    .optional()
+                    .describe("Internal, for an app forwarding a spend (#182): the pid the \
+                               kernel stamped on the call its agent token arrived in. Honoured \
+                               only when the forwarding process's executable is named like one \
+                               of the desktop's own (yantrik-*, *-service): a name check, which \
+                               same-user code can pass (#154). From any other caller it is \
+                               ignored, and the token is checked against the caller's own \
+                               kernel pid."),
             ),
             move |args| {
                 let id = required(args, "request_id")?;
@@ -329,7 +340,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 grant_belongs(
                     &id,
                     approvals::agent_of(&id).as_deref().unwrap_or_default(),
-                    &crate::control_agent_terminal::calling_agent(),
+                    &spending_agent(args),
                 )?;
                 approvals::consume(&id, &app, &action, &parsed)?;
                 if let Some(ui) = consume_ui.upgrade() {
@@ -1005,10 +1016,11 @@ fn draw_in_pane(agent: &str, request: &str, app: &str, action: &str) -> bool {
 
 /// May the caller spend request `id`, which was asked for `asked_for` (empty: for no agent)?
 ///
-/// A caller that runs as no agent — the person's own `yos act`, or an app's dispatch spending the
-/// grant it was handed (#116) — is not told apart here and is let through, as before. A caller
-/// that presented a token is held to it: a token that was not believed spends nothing, and an
-/// agent spends only what was asked for it. A child agent handed its parent's request id is
+/// A caller that runs as no agent — the person's own `yos act`, or a call that carried no token
+/// — is not told apart here and is let through, as before. A caller that presented a token is
+/// held to it: a token that was not believed spends nothing, and an agent spends only what was
+/// asked for it, whichever door the spend came through (#182) — the socket's `consume_approval`
+/// or the shell's own in-process dispatch. A child agent handed its parent's request id is
 /// refused, because a child starts with no grants.
 fn grant_belongs(
     id: &str,
@@ -1028,6 +1040,60 @@ fn grant_belongs(
             if asked_for.is_empty() { "by a caller that runs as no agent".to_string() } else { format!("agent `{asked_for}`") }
         )),
     }
+}
+
+/// Who the `consume_approval` call being dispatched is for (#182).
+///
+/// An app that spends a grant forwards the spend here: the token rides beside `args` as always,
+/// and the pid the kernel stamped on the call the token arrived in rides among the arguments —
+/// because the peer of a forwarded call is the app, and a token is checked against the process
+/// tree it was issued into, never against whoever happens to hold the socket.
+///
+/// That pid is believed only when this call's own peer runs an executable named like one of the
+/// desktop's binaries (`owner::is_own_binary`): a pid a call is judged by is never anything the
+/// caller wrote (`identity`'s rule), and a direct caller holding a stolen token could otherwise
+/// write a harness's pid and pass the process-tree check with it. Any other caller — python's
+/// SDK spends, the person's own `yos act`, anything else on the socket — is judged by its own
+/// kernel pid, as before. The check is a name, so same-user code can pass it (#154).
+fn spending_agent(args: &serde_json::Value) -> Option<Result<crate::agents::AgentId, String>> {
+    let forwarder = yantrik_app_runtime::control::caller()
+        .and_then(|who| yantrik_ipc_transport::owner::exe_of(who.pid))
+        .is_some_and(|exe| yantrik_ipc_transport::owner::is_own_binary(&exe));
+    spending_agent_with(args, forwarder)
+}
+
+/// [`spending_agent`] with the forwarder question already answered. Split out because a test
+/// binary is never a forwarder, so only this way can a test reach the branch that believes
+/// `caller_pid` — the one every agent spend through a Rust app takes.
+fn spending_agent_with(
+    args: &serde_json::Value,
+    forwarder: bool,
+) -> Option<Result<crate::agents::AgentId, String>> {
+    let forwarded = if forwarder {
+        args.get("caller_pid").and_then(|v| v.as_u64()).map(|pid| pid as u32).filter(|pid| *pid > 0)
+    } else {
+        None
+    };
+    match forwarded {
+        Some(pid) => crate::control_agent_terminal::calling_agent_at(Some(pid)),
+        None => crate::control_agent_terminal::calling_agent(),
+    }
+}
+
+/// How the shell's own dispatch spends a grant, in-process (#116): the same store and the same
+/// checks the socket door applies — including whose grant it is (#182). The dispatch hands the
+/// spender the agent the call arrived as, token and kernel's pid together, which is everything
+/// `consume_approval` would otherwise read off the forwarded call itself.
+fn spend_in_process(
+    id: &str,
+    app: &str,
+    action: &str,
+    args: &serde_json::Value,
+    caller: Option<&yantrik_app_runtime::control::CallingAgent>,
+) -> Result<(), String> {
+    let calling = caller.map(|c| crate::control_agent_terminal::agent_for(&c.token, c.pid));
+    grant_belongs(id, approvals::agent_of(id).as_deref().unwrap_or_default(), &calling)?;
+    approvals::consume(id, app, action, args)
 }
 
 /// How request `id` came out, for the pane of the agent that asked: `None` while it is waiting.
@@ -1167,11 +1233,9 @@ pub fn wire(ui: &App) {
     // The apps spend a grant through this shell's `consume_approval` over the socket. This
     // shell's own dispatch cannot — asking itself over its own socket from its own RPC thread is
     // a call that cannot be answered until it returns — so it spends them in-process, through
-    // the same store and the same check. Still not a way to grant: `consume` burns what a click
-    // created and refuses everything else.
-    yantrik_app_runtime::control::spend_grants_with(|id, app, action, args| {
-        approvals::consume(id, app, action, args)
-    });
+    // the same store and the same checks, the agent the spend arrived as among them (#182).
+    // Still not a way to grant: `consume` burns what a click created and refuses everything else.
+    yantrik_app_runtime::control::spend_grants_with(spend_in_process);
 
     let allow_ui = ui.as_weak();
     ui.on_approval_allow(move |id| {
@@ -2560,7 +2624,7 @@ mod control_approvals_tests {
         assert!(err.contains("not handed from one agent to another") && err.contains("pi:c-parent"), "{err}");
         assert!(grant_belongs("appr-2", "", &child).is_err(), "nor one the person asked for");
         assert!(grant_belongs("appr-1", "pi:c-parent", &Some(Err("no".into()))).is_err(), "a token not believed spends nothing");
-        assert!(grant_belongs("appr-1", "pi:c-parent", &None).is_ok(), "an app's own dispatch, as before");
+        assert!(grant_belongs("appr-1", "pi:c-parent", &None).is_ok(), "a caller that runs as no agent, as before — an app's dispatch forwards the claim it was handed (#182)");
     }
 
     /// #212: a card shown twice — once in the pane, once in the floating popup — was a card
@@ -3112,5 +3176,188 @@ mod audit_row_tests {
         // Nothing established and nothing claimed: no empty quoted claim on the row.
         let row = super::audit_row(&entry("", crate::approvals::Verified::default()));
         assert_eq!(row.actor.as_str(), "");
+    }
+}
+
+/// #182: the line `grant_belongs` draws, held at the two doors an app's spend comes through —
+/// the socket's `consume_approval`, where the app forwards the token beside `args` and the
+/// kernel's pid for the call among the arguments, and the shell's own in-process spender.
+/// Before, a forwarded spend arrived saying nothing about who was spending, so agent B could
+/// replay agent A's request id through any app's dispatch and the person's Allow for A ran B's
+/// call.
+#[cfg(test)]
+mod grant_spends_tests {
+    #[test]
+    fn approvals_a_grant_asked_for_one_agent_cannot_be_spent_by_another_through_an_apps_dispatch() {
+        use super::{grant_belongs, spend_in_process, spending_agent};
+        use crate::approvals::{self, Verified};
+        use crate::control_agent_terminal::{install_resolver, RESOLVER_TESTS};
+        use std::sync::Arc;
+        use yantrik_agent_terminal::TokenTable;
+        use yantrik_app_runtime::control::{AgentTokenScope, Caller, CallerScope, CallingAgent};
+
+        // The resolver is the shell's one global; hold it for the length of the test.
+        let _held = RESOLVER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        // This test process stands in for the harness that holds both tokens, the way
+        // control_agent_terminal's own token test does.
+        let me = std::process::id();
+        let table = Arc::new(TokenTable::new());
+        table.issue("t-a-182", crate::agents::AgentId::new("pi", "c-182"), Some(me));
+        table.issue("t-b-182", crate::agents::AgentId::new("deepseek", "c-182"), Some(me));
+        install_resolver(table);
+        // The kernel's account of the call being dispatched: the peer is this test process, a
+        // direct caller — this binary is `yantrik_ui-…`, not one of the desktop's forwarders —
+        // so the tokens are checked against this pid, which is the harness they were issued to.
+        let _who = CallerScope::enter(Some(Caller { pid: me as i32, uid: super::own_uid(), gid: 0 }));
+
+        // A request asked for agent A, which the person allowed.
+        let args = serde_json::json!({"text": "shopping"});
+        let asked = approvals::request(
+            "pi 0.9",
+            Verified { agent: "pi:c-182".into(), ..Verified::default() },
+            "notes",
+            "create_note",
+            args.clone(),
+            "standard",
+            "Create a note",
+            "",
+            "",
+        )
+        .unwrap();
+        approvals::grant(&asked.id).unwrap();
+        let id = asked.id.as_str();
+        let claim = |token: &str| CallingAgent { token: token.into(), pid: Some(me) };
+
+        // Agent B replays the id through the socket door. The token rode beside `args` — the
+        // dispatch lifted it into the scope the handler reads — and is believed from the
+        // kernel's own account of the caller; the `caller_pid` written among the arguments is
+        // ignored, this peer being no forwarder of the desktop's, and happens to name the same
+        // process. It names B, the grant was asked for A, and the spend is refused.
+        let forwarded = serde_json::json!({ "caller_pid": me });
+        {
+            let _token = AgentTokenScope::enter(Some("t-b-182".into()));
+            let calling = spending_agent(&forwarded);
+            assert_eq!(
+                calling.as_ref().and_then(|c| c.as_ref().ok()).map(|a| a.0.as_str()),
+                Some("deepseek:c-182"),
+                "the forwarded token resolves against the forwarded pid: {calling:?}"
+            );
+            let err = grant_belongs(id, approvals::agent_of(id).as_deref().unwrap_or_default(), &calling)
+                .unwrap_err();
+            assert!(
+                err.contains("asked for agent `pi:c-182`") && err.contains("not for the agent making this call"),
+                "{err}"
+            );
+        }
+        // In-process door, where the shell's own dispatch hands the spender the claim directly.
+        let err = spend_in_process(id, "notes", "create_note", &args, Some(&claim("t-b-182"))).unwrap_err();
+        assert!(err.contains("not for the agent making this call"), "{err}");
+
+        // Agent A spends its own grant through the same two doors — and it holds once.
+        {
+            let _token = AgentTokenScope::enter(Some("t-a-182".into()));
+            grant_belongs(id, approvals::agent_of(id).as_deref().unwrap_or_default(), &spending_agent(&forwarded))
+                .expect("the agent that asked spends it");
+        }
+        spend_in_process(id, "notes", "create_note", &args, Some(&claim("t-a-182"))).unwrap();
+        let err = spend_in_process(id, "notes", "create_note", &args, Some(&claim("t-a-182"))).unwrap_err();
+        assert!(err.contains("already used"), "{err}");
+
+        // A caller that runs as no agent — the person's own `yos act` — still spends what the
+        // person allowed, as before.
+        let person = approvals::request(
+            "yos",
+            Verified::default(),
+            "notes",
+            "create_note",
+            args.clone(),
+            "standard",
+            "Create a note",
+            "",
+            "",
+        )
+        .unwrap();
+        approvals::grant(&person.id).unwrap();
+        spend_in_process(&person.id, "notes", "create_note", &args, None).unwrap();
+    }
+
+    /// #182, the lead's review: `caller_pid` is the pid the kernel stamped on another call, so
+    /// only the desktop's own binaries — an app or a service forwarding a spend — are believed
+    /// when they send one. A direct caller holds no such trust: the pid a call is judged by is
+    /// never anything the caller wrote (that is `identity`'s whole rule), and a stolen token
+    /// plus a written harness pid would otherwise pass the process-tree check. This test
+    /// process is exactly such a direct caller — its binary is `yantrik_ui-…`, not one of the
+    /// installed `yantrik-*` / `*-service` forwarders — so the impersonation is refused by its
+    /// own kernel pid.
+    #[test]
+    fn approvals_a_direct_caller_cannot_name_the_spending_agent_itself() {
+        use super::spending_agent;
+        use crate::control_agent_terminal::{install_resolver, RESOLVER_TESTS};
+        use std::sync::Arc;
+        use yantrik_agent_terminal::TokenTable;
+        use yantrik_app_runtime::control::{AgentTokenScope, Caller, CallerScope};
+
+        // The resolver is the shell's one global; hold it for the length of the test.
+        let _held = RESOLVER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        // The victim agent's token, issued into a harness process that does not exist here. A
+        // pid equal to the harness's is believed without a /proc walk, so a caller that could
+        // get that pid into the check would pass it holding nothing but the token.
+        let table = Arc::new(TokenTable::new());
+        table.issue("t-victim-182", crate::agents::AgentId::new("claude", "c-victim-182"), Some(999_999));
+        install_resolver(table);
+
+        // The kernel's account of this call: the peer is this test process, and it carries the
+        // stolen token beside `args` the way every agent call does.
+        let _who = CallerScope::enter(Some(Caller {
+            pid: std::process::id() as i32,
+            uid: super::own_uid(),
+            gid: 0,
+        }));
+        let _token = AgentTokenScope::enter(Some("t-victim-182".into()));
+
+        // It writes the harness pid among the arguments. Nothing about this socket peer is a
+        // forwarder, so `caller_pid` is ignored and the token meets the caller's OWN pid —
+        // which descends from no harness the token was issued to — and the call is refused.
+        let calling = spending_agent(&serde_json::json!({ "caller_pid": 999_999 }));
+        let err = calling
+            .expect("a token came with the call")
+            .expect_err("a direct caller is judged by its own kernel pid, never by one it wrote");
+        assert!(err.contains("was not issued to the process that sent it"), "the refusal says why: {err}");
+    }
+
+    /// The other branch of the same rule: a forwarder's `caller_pid` is what the token is checked
+    /// against. The token was issued into a harness this test process is not; forwarded by an
+    /// app with the harness's pid it resolves to that harness's agent, and the very same
+    /// arguments from a direct caller are judged by the caller's own pid and refused — so the
+    /// two branches cannot pass for each other, and a forwarder check that stopped matching the
+    /// desktop's apps would show here as every agent spend through an app being refused.
+    #[test]
+    fn approvals_a_forwarders_caller_pid_is_the_pid_the_token_meets() {
+        use super::spending_agent_with;
+        use crate::control_agent_terminal::{install_resolver, RESOLVER_TESTS};
+        use std::sync::Arc;
+        use yantrik_agent_terminal::TokenTable;
+        use yantrik_app_runtime::control::{AgentTokenScope, Caller, CallerScope};
+
+        let _held = RESOLVER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let table = Arc::new(TokenTable::new());
+        table.issue("t-fwd-182", crate::agents::AgentId::new("pi", "c-fwd-182"), Some(999_998));
+        install_resolver(table);
+        let _who = CallerScope::enter(Some(Caller {
+            pid: std::process::id() as i32,
+            uid: super::own_uid(),
+            gid: 0,
+        }));
+        let _token = AgentTokenScope::enter(Some("t-fwd-182".into()));
+        let args = serde_json::json!({ "caller_pid": 999_998 });
+
+        let forwarded = spending_agent_with(&args, true).expect("a token came with the call");
+        assert_eq!(
+            forwarded.as_ref().map(|a| a.0.as_str()),
+            Ok("pi:c-fwd-182"),
+            "a forwarder's caller_pid is the pid the token is checked against"
+        );
+        let direct = spending_agent_with(&args, false).expect("a token came with the call");
+        assert!(direct.is_err(), "the same arguments from a direct caller: {direct:?}");
     }
 }

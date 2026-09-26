@@ -313,6 +313,29 @@ pub fn calling_agent() -> Option<Result<AgentId, String>> {
     Some(call.agent())
 }
 
+/// As [`calling_agent`], but the token is checked against `pid` rather than the socket peer
+/// (#182): an app that spends a grant forwards the pid the kernel stamped on the call its token
+/// arrived in, because the peer of the forwarded call is the app itself and a token is believed
+/// only from the process tree it was issued into. Read in the same place, inside a dispatch.
+pub fn calling_agent_at(pid: Option<u32>) -> Option<Result<AgentId, String>> {
+    let call = Call::current();
+    call.token.as_ref()?;
+    Some(resolver().resolve(call.token.as_deref().unwrap_or_default(), pid))
+}
+
+/// What `token` names when it is checked against `pid`, outside any dispatch: the shell's own
+/// dispatch spends grants in-process, where the token and the kernel's pid for the call arrive
+/// on the spender's own arguments instead of in thread-locals (#182). Same resolver, same rule.
+pub fn agent_for(token: &str, pid: Option<u32>) -> Result<AgentId, String> {
+    resolver().resolve(token, pid)
+}
+
+/// The resolver is one global for the whole shell, and tests install tables into it: a test
+/// that drives token checks holds this for its length, so two tests' tables cannot replace
+/// each other mid-run.
+#[cfg(test)]
+pub(crate) static RESOLVER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Hand the work to the socket's side; run it here only when called without a socket.
 fn later(work: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Result<Value, String> {
     control::answer_later(work)
@@ -652,6 +675,9 @@ mod tests {
     /// before any are installed.
     #[test]
     fn the_actions_answer_for_the_agent_the_token_names_and_nobody_else() {
+        // The resolver is the shell's one global; hold it for the length of the test (see
+        // `RESOLVER_TESTS`).
+        let _held = RESOLVER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let me = Some(std::process::id());
 
         // Before the host issues tokens, every call is inert — and says so.

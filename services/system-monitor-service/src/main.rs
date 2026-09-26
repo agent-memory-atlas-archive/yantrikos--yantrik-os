@@ -979,7 +979,7 @@ mod tests {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
-            gate::spend_grants_with(move |id, app, action, args| {
+            gate::spend_grants_with(move |id, app, action, args, _caller| {
                 let Some(pid) = id.strip_prefix("ok-kill-").and_then(|p| p.parse::<u64>().ok()) else {
                     return Err(format!("no approval request `{id}`."));
                 };

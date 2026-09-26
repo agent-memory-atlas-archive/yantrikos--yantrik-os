@@ -1012,6 +1012,10 @@ pub struct Agent {
     pub approvals_answered: u32,
     /// Approval requests asked and not yet answered, by request id.
     pub pending_approvals: Vec<String>,
+    /// Whether any of its terminal's jobs sits at a prompt waiting for the person (#182).
+    /// While one does, the row stays `WaitingForYou` even when a settled card would
+    /// otherwise send it back to work.
+    pub job_waits: bool,
     /// Creation order, to break ties between agents started in the same second.
     pub seq: u64,
     /// Last time anything happened to it.
