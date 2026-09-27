@@ -132,7 +132,7 @@ pub fn wire(ui: &App, ctx: &AppContext) {
     // into its agent's next turn.
     crate::control_agent_terminal::serve_host(&host);
 
-    serve_socket(host.clone());
+    serve_socket(host.clone(), ui.as_weak());
 
     // Choosing a mind, from Settings or from anywhere else that offers it.
     {
@@ -443,8 +443,18 @@ fn publish_catalogue(ui: &App, entries: &[yantrik_harness::Entry]) {
     ui.set_harness_busy(busy);
 }
 
+/// How often a shell whose harness socket another process holds looks again (#367).
+const HELD_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Serve the `harness` socket for the life of the shell.
-fn serve_socket(host: Host) {
+///
+/// While another running process holds the socket, the shell never takes it from it (that one may
+/// be serving a session of its own), but it no longer gives up either (#367): on VM 520 a stale
+/// shell kept the socket for two days, every newer shell logged one refusal and ran with no minds,
+/// and the person saw a working desktop that no mind could reach. Now the shell says so on the
+/// status bar, naming the process, and looks again every few seconds, taking the socket the moment
+/// it is free.
+fn serve_socket(host: Host, ui: slint::Weak<App>) {
     std::thread::Builder::new()
         .name("harness-socket".into())
         .spawn(move || {
@@ -455,19 +465,60 @@ fn serve_socket(host: Host) {
                     return;
                 }
             };
-            runtime.block_on(async {
-                let address =
-                    yantrik_ipc_transport::server::RpcServer::default_address("harness");
+            let address = yantrik_ipc_transport::server::RpcServer::default_address("harness");
+            let mut said: Option<String> = None;
+            loop {
+                let notice = held_notice(std::path::Path::new(&address));
+                if notice != said {
+                    match &notice {
+                        Some(n) => tracing::warn!(address = %address, "{n}; looking again every {}s", HELD_RETRY.as_secs()),
+                        None if said.is_some() => tracing::info!(address = %address, "Harness socket is free again; taking it"),
+                        None => {}
+                    }
+                    let shown = notice.clone().unwrap_or_default();
+                    let _ = ui.upgrade_in_event_loop(move |ui| ui.set_minds_notice(shown.into()));
+                    said = notice.clone();
+                }
+                if notice.is_some() {
+                    std::thread::sleep(HELD_RETRY);
+                    continue;
+                }
                 tracing::info!(address = %address, "Harness socket listening (attach to answer)");
                 let server = yantrik_ipc_transport::server::RpcServer::new(&address);
-                if let Err(e) = server.serve(Arc::new(HarnessService { host })).await {
-                    // Not fatal: a shell whose harness socket died still has its companion, and
-                    // taking the desktop down over it would be the worse outcome.
-                    tracing::warn!(error = %e, "Harness socket stopped; only built-in minds remain");
+                let served = runtime.block_on(server.serve(Arc::new(HarnessService { host: host.clone() })));
+                match served {
+                    // Taken between the look and the bind: say so and look again.
+                    Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                    Err(e) => {
+                        // Not fatal: a shell whose harness socket died still has its companion,
+                        // and taking the desktop down over it would be the worse outcome.
+                        tracing::warn!(error = %e, "Harness socket stopped; only built-in minds remain");
+                        return;
+                    }
+                    Ok(()) => return,
                 }
-            });
+            }
         })
         .ok();
+}
+
+/// What the status bar says while another process holds the harness socket at `path`, naming it
+/// so the person (or whoever looks) knows what to stop; `None` when the socket is free to take.
+fn held_notice(path: &std::path::Path) -> Option<String> {
+    use yantrik_ipc_transport::owner::{self, Holder};
+    if owner::who_holds(path, owner::CLAIM_PING) == Holder::Nobody {
+        return None;
+    }
+    let pid = std::os::unix::net::UnixStream::connect(path).ok().and_then(|s| owner::peer_of(&s)).map(|p| p.pid);
+    Some(match pid {
+        Some(pid) if pid as u32 != std::process::id() => {
+            let what = owner::exe_of(pid)
+                .map(|exe| exe.rsplit('/').next().unwrap_or(&exe).to_string())
+                .unwrap_or_else(|| "another process".to_string());
+            format!("Minds can't reach this desktop: {what} (pid {pid}) holds their socket")
+        }
+        _ => "Minds can't reach this desktop: another process holds their socket".to_string(),
+    })
 }
 
 struct HarnessService {
@@ -509,6 +560,52 @@ mod tests {
     use super::*;
     use crate::harness_catalogue::{Manifest, Machine, State, Unit};
     use yantrik_harness::protocol;
+
+    /// #367: a socket another live process answers on is reported, not taken, and a socket file
+    /// nobody listens on any more is free.
+    #[test]
+    fn a_harness_socket_someone_else_answers_on_is_named_and_a_dead_one_is_free() {
+        use std::io::{BufRead, BufReader, Write};
+        let dir = std::env::temp_dir().join(format!("yantrik-367-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("harness.sock");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(held_notice(&path), None, "nothing there: free");
+
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let serving = std::thread::spawn(move || {
+            // Answer every line of the first few connections the way a running shell does.
+            for stream in listener.incoming().take(3).flatten() {
+                let mut out = stream.try_clone().unwrap();
+                for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                    let _ = line;
+                    let _ = out.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"harness\"}\n");
+                }
+            }
+        });
+        let said = held_notice(&path).expect("a live holder is reported");
+        assert!(said.starts_with("Minds can't reach this desktop:"), "{said}");
+        drop(serving);
+
+        // A socket file left by a process that is gone is free to take.
+        let _ = std::fs::remove_file(&path);
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert_eq!(held_notice(&path), None, "a socket nobody listens on is free");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The chip is wired: the shell sets it, the status bar draws it, and its click goes to Minds.
+    #[test]
+    fn the_minds_notice_reaches_the_status_bar_and_opens_minds() {
+        let wiring = include_str!("harness.rs");
+        assert!(wiring.contains("ui.set_minds_notice("));
+        let app = include_str!("../../../yantrik-ui-slint/ui/app.slint");
+        assert!(app.contains("minds-notice: root.minds-notice;"));
+        let at = app.find("minds-notice-clicked =>").expect("the chip's click is handled");
+        assert!(app[at..at + 200].contains("root.settings-category = 8;"), "it opens Minds");
+        let bar = include_str!("../../../yantrik-ui-slint/ui/components/status_bar.slint");
+        assert!(bar.contains("if root.minds-notice != \"\" : TouchArea"));
+    }
 
     /// pi's manifest, plus what — if anything — systemd says about its unit. The manifest
     /// needs nothing the machine cannot already answer for, so the unit is the one fact that
