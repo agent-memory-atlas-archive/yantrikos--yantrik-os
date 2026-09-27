@@ -48,6 +48,7 @@
 pub mod event;
 pub mod host;
 pub mod protocol;
+pub mod run_store;
 
 pub use event::{AgentId, Event};
 pub use host::{AgentEntry, AgentState, Entry, EventCounts, Host, Resumed, TurnEnd};
