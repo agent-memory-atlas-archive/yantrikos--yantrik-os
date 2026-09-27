@@ -120,6 +120,8 @@ export component App inherits Window {
     // one persistent status-bar line that clicks straight into Settings → AI. Rust sets
     // it from `assistant_offline_notice` and clears it when a model answers again.
     in property <string> assistant-offline-notice: "";
+    /// Set while another process holds the harness socket, so no mind can attach here (#367).
+    in property <string> minds-notice: "";
 
     // Chat state
     in property <[MessageData]> messages: [];
@@ -2434,6 +2436,7 @@ export component App inherits Window {
             companion-status: root.companion-status;
             companion-online: root.companion-online;
             assistant-offline-notice: root.assistant-offline-notice;
+            minds-notice: root.minds-notice;
             battery-available: root.battery-available;
             battery-level: root.battery-level;
             battery-charging: root.battery-charging;
@@ -2474,6 +2477,12 @@ export component App inherits Window {
             ai-privacy-clicked => { root.ai-quick-switcher-open = !root.ai-quick-switcher-open; }
             // Straight to the section, not to the front door of Settings.
             active-mind-clicked => {
+                root.settings-category = 8;
+                root.current-screen = 7;
+                root.navigate(7);
+            }
+            // The "minds can't reach" notice goes to Minds, which lists what is attached (#367).
+            minds-notice-clicked => {
                 root.settings-category = 8;
                 root.current-screen = 7;
                 root.navigate(7);
