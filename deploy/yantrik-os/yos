@@ -1218,14 +1218,17 @@ def cmd_act(argv):
     print("accepted: %s, settled: %s" % (reply.get("accepted"), reply.get("settled")))
     if "revision" in reply:
         print("revision: %s" % reply["revision"])
-    # The app's state after the action, as facts rather than prose: what a mind otherwise has to
-    # scrape out of the summary ("…, unsaved"). Only its small fields, on one line, so the shell's
-    # 180-line state never lands here; the rest is one `yos describe` away.
+    # The action's own result first: it is what the call was for. A caller that reads only so far
+    # must never lose it to the state below — the shell's state line put files_go's result at
+    # character 1,330 and past a mind's 900-character cut (yantrik-mind F24, 2026-09-27).
+    if reply.get("result"):
+        print(json.dumps(reply["result"], indent=2))
+    # Then the app's state after the action, as facts rather than prose: what a mind otherwise has
+    # to scrape out of the summary ("…, unsaved"). Only its small fields, on one line, so the
+    # shell's 180-line state never lands here; the rest is one `yos describe` away.
     head, left_out = state_head(reply.get("state"))
     if head:
         print("state: %s" % json.dumps(head, separators=(",", ":"), ensure_ascii=False))
-    if reply.get("result"):
-        print(json.dumps(reply["result"], indent=2))
     if left_out:
         print("(more state: `yos describe %s`)" % target)
 
