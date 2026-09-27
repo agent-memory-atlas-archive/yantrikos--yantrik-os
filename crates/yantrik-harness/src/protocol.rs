@@ -151,6 +151,13 @@ pub struct Attach {
     /// turn is in the one conversation, `main`, and the desktop says so rather than pretending.
     #[serde(default)]
     pub conversations: bool,
+    /// Reads the conversation handed over from another mind (#245) out of the turn's context, as
+    /// `context.handover` = `{from, text}`, and wants the person's own words alone in `text`.
+    /// Without it the hand-over is put in front of the person's words, as it always was, which a
+    /// mind has to tell apart from what the person said: the Mind took one for the person's answer
+    /// to its own question and filed it in their profile (yantrik-mind F28, 2026-09-27).
+    #[serde(default)]
+    pub handover_context: bool,
     /// What this harness was doing for a desktop it lost (#246): each conversation it still
     /// holds, with the agent token the desktop gave it, and the turn it is still answering in
     /// it, if any. A shell that restarted mid-answer used to fail every one of them, so the
@@ -231,6 +238,7 @@ mod tests {
             tools: true,
             memory: true,
             conversations: true,
+            handover_context: true,
             resume: Vec::new(),
         })
         .unwrap();

@@ -863,6 +863,14 @@ impl Host {
         state.attached.get(harness_id).map(|h| h.announced.conversations)
     }
 
+    /// Whether an attached harness reads a hand-over from the turn's context (`context.handover`)
+    /// rather than in front of the person's words. False when nothing by that id is attached.
+    pub fn reads_handover(&self, harness_id: &str) -> bool {
+        let mut state = self.lock();
+        self.reap(&mut state);
+        state.attached.get(harness_id).is_some_and(|h| h.announced.handover_context)
+    }
+
     /// Hand a live agent's token to `f`, for the one thing the shell derives from it: the one-way
     /// digest it publishes an agent's reach under (`yantrik_ipc_transport::reach`). The token
     /// itself goes no further than `f`. `None` for an agent that is not live.

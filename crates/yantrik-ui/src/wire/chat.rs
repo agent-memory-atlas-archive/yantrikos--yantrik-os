@@ -33,6 +33,19 @@ pub(crate) fn desktop_context(place: &super::settings::Place) -> String {
     serde_json::json!({ "machine": machine }).to_string()
 }
 
+/// The desktop's context with the conversation handed over in it, for a harness that said it reads
+/// it there (`Attach::handover_context`): the person's words then go in `text` alone.
+pub(crate) fn context_with_handover(context: &str, handover: &crate::agents::handover::Handover) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(context).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "handover".into(),
+            serde_json::json!({ "from": handover.from, "text": handover.told }),
+        );
+    }
+    value.to_string()
+}
+
 /// The built-in's turn: relayed to the chat panel, and counted when it ends answered.
 ///
 /// The built-in used to score its own turns from inside its handlers — and those handlers also
@@ -172,11 +185,15 @@ fn dispatch(
 
     // An attached harness answers in Chunks. Adapt them to the token protocol the pump already
     // speaks, on a thread, because `Answer` is a blocking std channel and this is the UI thread.
-    let sent = match &handover {
-        Some(h) => crate::agents::handover::with_handover(h, text),
-        None => text.to_string(),
+    // A harness that reads the hand-over from the context gets the person's words alone; any other
+    // gets it in front of them, as before.
+    let context = desktop_context(&super::settings::place());
+    let (sent, context) = match &handover {
+        Some(h) if host.reads_handover(&active) => (text.to_string(), context_with_handover(&context, h)),
+        Some(h) => (crate::agents::handover::with_handover(h, text), context),
+        None => (text.to_string(), context),
     };
-    let answer = host.send(yantrik_harness::Turn::new(sent).with_context(desktop_context(&super::settings::place())));
+    let answer = host.send(yantrik_harness::Turn::new(sent).with_context(context));
     // The same turn, recorded as this mind's agent on the Agents screen; the answer passes through.
     let answer = crate::agents::feed::lens_turn(&host.active_id(), text, answer);
     let run_of = crate::agents::feed::main_agent(&host.active_id());
@@ -422,6 +439,32 @@ fn wire_lens_submit(ui: &App, ctx: &AppContext) {
         // ignored the mind picker even after chat stopped doing so.
         dispatch(&ui_weak, &bridge, &query, &streams);
     });
+}
+
+#[cfg(test)]
+mod handover_context_tests {
+    use super::*;
+
+    /// A harness that reads the hand-over from the context gets it there, beside what the desktop
+    /// already says about itself, with the contract strings a mind may still key on unchanged.
+    #[test]
+    fn the_handover_rides_in_the_context_beside_the_machine() {
+        let handover = crate::agents::handover::Handover {
+            from: "Hermes Agent".into(),
+            told: "[From the desktop: you are taking this conversation over from Hermes Agent. The person \
+                   expects you to know what was said; it was:\n- The person: build the town model\nCarry on from here.]"
+                .into(),
+        };
+        let context = r#"{"machine":{"timezone":"America/Chicago"}}"#;
+        let with: serde_json::Value = serde_json::from_str(&context_with_handover(context, &handover)).unwrap();
+        assert_eq!(with["machine"]["timezone"], "America/Chicago", "what was there stays");
+        assert_eq!(with["handover"]["from"], "Hermes Agent");
+        let text = with["handover"]["text"].as_str().unwrap();
+        assert!(text.starts_with("[From the desktop:") && text.ends_with("Carry on from here.]"), "{text}");
+
+        let broken: serde_json::Value = serde_json::from_str(&context_with_handover("not json", &handover)).unwrap();
+        assert_eq!(broken["handover"]["from"], "Hermes Agent", "a context that did not parse still carries it");
+    }
 }
 
 #[cfg(test)]
