@@ -1980,6 +1980,19 @@ with tempfile.TemporaryDirectory() as d:
     print("     two reads: %.1f ms in-process the first time (loading yos), %.1f ms after, "
           "%.1f ms as processes" % (in_process_took * 1000, warm_took * 1000, as_process_took * 1000))
 
+# An act's result carries no command-line advice (yantrik-mind, 2026-09-26): "re-run with --full"
+# is for someone at a terminal, and a model reads "re-run" as "call it again".
+with tempfile.TemporaryDirectory() as t:
+    module = load_mcp(HERE / "yos", pathlib.Path(t) / "loops.json")
+    printed = ("New tab: untitled-2\naccepted: True, settled: True\nrevision: 3f\n"
+               "(state omitted; `yos describe editor`, or re-run with --full)")
+    said = module.for_a_mind(printed)
+    check("an act's result names the tool a mind has, not the command line's --full",
+          "os_describe editor" in said and "--full" not in said and "re-run" not in said, said)
+    check("and says the action is done, not to repeat it", "do not repeat it" in said, said)
+    check("everything else in the result is left as it was",
+          said.startswith("New tab: untitled-2\naccepted: True, settled: True\nrevision: 3f\n"), said)
+
 # A mind going round in circles is told so in the one place it reads while it works: the call's
 # own result (#234). The 23 September game: the editor refused four times, "Cannot open".
 with tempfile.TemporaryDirectory() as t:
