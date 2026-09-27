@@ -782,7 +782,14 @@ fn task_row(a: &Agent, n: u64, now: u64) -> Option<AgentRowData> {
     if turn.open() {
         row.since = duration(now.saturating_sub(turn.started)).into();
     } else {
-        let (state, label) = if turn.ok == Some(false) { ("failed", "could not finish") } else { ("done", "done") };
+        // A task the desktop's stopping cut off is lost, not failed: the mind never gave up on it.
+        let (state, label) = if turn.lost {
+            ("lost", "lost when the desktop stopped")
+        } else if turn.ok == Some(false) {
+            ("failed", "could not finish")
+        } else {
+            ("done", "done")
+        };
         row.state = state.into();
         row.label = label.into();
         row.since = clock(turn.ended.unwrap_or(turn.started)).into();
@@ -2296,7 +2303,7 @@ mod latest_request_tests {
     use super::*;
 
     fn asked(n: u64, prompt: &str) -> Turn {
-        Turn { n, prompt: prompt.into(), started: n, ended: Some(n + 1), ok: Some(true), items: vec![], events: false, trail_seq: 0 }
+        Turn { n, prompt: prompt.into(), started: n, ended: Some(n + 1), ok: Some(true), lost: false, items: vec![], events: false, trail_seq: 0 }
     }
 
     #[test]

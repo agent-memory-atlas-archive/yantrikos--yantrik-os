@@ -983,6 +983,9 @@ pub struct Turn {
     pub started: u64,
     pub ended: Option<u64>,
     pub ok: Option<bool>,
+    /// Ended by the desktop stopping, not by the mind (#234): its task is lost, which is not the
+    /// same as failed. A harness that comes back may pick the work up again as a new turn.
+    pub lost: bool,
     pub items: Vec<Item>,
     /// Whether any structured `harness.event` arrived in this turn. Once one has, trail lines in
     /// the text are the same calls told twice and are not made into cards.

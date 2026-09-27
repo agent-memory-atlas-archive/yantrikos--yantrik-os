@@ -220,6 +220,7 @@ impl Store {
             started: now,
             ended: None,
             ok: None,
+            lost: false,
             items: Vec::new(),
             events: false,
             trail_seq: 0,
@@ -983,6 +984,7 @@ fn turn_for_verified(agent: &mut Agent, now: u64) -> &mut Turn {
             started: now,
             ended: Some(now),
             ok: None,
+            lost: false,
             items: Vec::new(),
             events: false,
             trail_seq: 0,
@@ -1280,6 +1282,8 @@ struct TurnRecord {
     ok: Option<bool>,
     #[serde(default)]
     events: bool,
+    #[serde(default)]
+    lost: bool,
     items: Vec<ItemRecord>,
 }
 
@@ -1430,6 +1434,7 @@ fn serialize(agent: &Agent) -> String {
             started: turn.started,
             ended: turn.ended,
             ok: turn.ok,
+            lost: turn.lost,
             events: turn.events,
             items,
         });
@@ -1541,6 +1546,7 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
             started: turn.started,
             ended: turn.ended,
             ok: turn.ok,
+            lost: turn.lost,
             items,
             events: turn.events,
             trail_seq: 0,
@@ -1560,6 +1566,7 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
             turn.items.push(Item::Note("The shell stopped while this turn was running.".into()));
             turn.ended = Some(now);
             turn.ok = Some(false);
+            turn.lost = true;
         }
     }
     if was_working {
@@ -1915,6 +1922,30 @@ mod tests {
 
     /// Design decision 4, in the store: the approval is an item of the session — the request id,
     /// what was asked, how it came out — settled once; an answer counts as answered and an expiry
+    /// #234: a task the desktop's stopping cut off is lost, not failed, and stays so across later
+    /// restarts; a task that ended on its own is not.
+    #[test]
+    fn a_turn_the_shell_stopped_during_is_lost_and_stays_lost() {
+        let dir = scratch_dir("lost");
+        let (mut s, _) = store();
+        let pi = id("pi:c-lost1");
+        s.open_turn(&pi, "finished before");
+        s.close_turn(&pi, false);
+        s.open_turn(&pi, "build the town model");
+        s.save(&dir).unwrap();
+
+        let back = Store::load(&dir, Box::new(|| 1_800_000_000));
+        let turns = &back.agent(&pi).unwrap().turns;
+        assert_eq!((turns[0].lost, turns[0].ok), (false, Some(false)), "a failure of its own is still a failure");
+        assert_eq!((turns[1].lost, turns[1].ok), (true, Some(false)), "cut off by the stop: lost");
+
+        let mut back = back;
+        back.save(&dir).unwrap();
+        let again = Store::load(&dir, Box::new(|| 1_800_000_100));
+        assert!(again.agent(&pi).unwrap().turns[1].lost, "still lost after the next restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn questions(s: &Store, agent: &AgentId) -> Vec<Question> {
         s.agent(agent).unwrap().turns.iter().flat_map(|t| t.items.iter()).filter_map(|i| match i {
             Item::Question(q) => Some(q.clone()),
