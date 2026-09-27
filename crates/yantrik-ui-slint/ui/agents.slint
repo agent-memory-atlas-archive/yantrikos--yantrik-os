@@ -16,7 +16,7 @@ import { YInput } from "components/y_input.slint";
 import { ToolCallData, ToolCallCard } from "components/tool_call.slint";
 import { ApprovalRequest, ApprovalCard } from "components/intent_lens.slint";
 import { QuestionCard } from "components/question_card.slint";
-import { OverviewNode, OverviewEdge, AgentsOverview } from "agents_overview.slint";
+import { RouteStopData, AgentsRoute } from "agents_route.slint";
 
 export struct AgentTabData {
     id: string,        // active | needs_you | complete | all
@@ -178,12 +178,15 @@ export global AgentsState {
     in-out property <string> notice: "";
     // Close, while work is running: the agent waiting for a yes.
     in-out property <string> confirm-close: "";
-    // List, or Overview: every mind and agent on this machine as one map (#226). The map is laid
+    // List, or Overview: the selected run as a route (Pranab, 27 September), drawn from what the
+    // shell works out in agents/route.rs.
     // out by the shell for the size the map reports, from every agent, whatever the tab.
     in-out property <string> view: "list";
-    in-out property <[OverviewNode]> overview-nodes: [];
-    in-out property <[OverviewEdge]> overview-edges: [];
-    in-out property <string> overview-summary: "";
+    in-out property <[RouteStopData]> route-stops: [];
+    in-out property <string> route-title: "";
+    in-out property <string> route-summary: "";
+    in-out property <bool> route-live: false;
+    in-out property <string> route-note: "";
 
     callback select-tab(string);
     callback select(string);
@@ -211,8 +214,6 @@ export global AgentsState {
     // Show one agent on the Agents screen — the Lens's "open in Agents", a notification's Open,
     // `show_agent`.
     callback show-agent(string);
-    // The map's size, whenever it changes.
-    callback overview-resized(length, length);
 }
 
 // List | Overview, beside New agent.
@@ -1053,8 +1054,8 @@ export component AgentsScreen inherits Rectangle {
 
         if AgentsState.notice != "" : NoticeBar { }
 
-        // The list and one session, with the Overview's map laid over them when it is chosen. Over,
-        // not instead of: the list keeps its place and its scroll, so going back finds it as left.
+        // The list and one session, with the Overview's route laid over the session when it is
+        // chosen. Over, not instead of: the session keeps its scroll, so going back finds it as left.
         Rectangle {
             vertical-stretch: 1;
 
@@ -1109,25 +1110,30 @@ export component AgentsScreen inherits Rectangle {
                 }
             }
 
-            if AgentsState.view == "overview" : AgentsOverview {
-                nodes: AgentsState.overview-nodes;
-                edges: AgentsState.overview-edges;
-                summary: AgentsState.overview-summary;
-                selected: AgentsState.selected;
-                resized(w, h) => { AgentsState.overview-resized(w, h); }
-                // An agent opens in the list with its session, whatever tab it is under; the fold of
-                // finished agents opens the Complete tab. A mind or the machine is only a place.
-                pick(id, kind) => {
-                    if (kind == "agent") {
+            // Over the session only: the list stays beside it, so another run is one press away,
+            // and the details stay too.
+            if AgentsState.view == "overview" : AgentsRoute {
+                x: 270px + Theme.sp-3;
+                width: parent.width - 270px - 250px - 2 * Theme.sp-3;
+                height: parent.height;
+                stops: AgentsState.route-stops;
+                title: AgentsState.route-title;
+                summary: AgentsState.route-summary;
+                live: AgentsState.route-live;
+                note: AgentsState.route-note;
+                // A branch is an agent of its own: its route, whatever tab it is under. Any other
+                // station opens its step in the session, unfolded.
+                pick(key, kind) => {
+                    if (kind == "branch") {
                         AgentsState.select-tab("all");
-                        AgentsState.select(id);
+                        AgentsState.select(key);
+                    } else {
                         AgentsState.view = "list";
-                    } else if (kind == "more") {
-                        AgentsState.select-tab("complete");
-                        AgentsState.view = "list";
+                        if (kind != "start") {
+                            AgentsState.toggle(key, true);
+                        }
                     }
                 }
-                open(id) => { AgentsState.pop-out(id); }
             }
         }
     }

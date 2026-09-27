@@ -28,7 +28,7 @@ use crate::agents::{self, feed, launch, AgentId, Store};
 use crate::app_context::AppContext;
 use crate::{
     AccentPreset, AgentDetailsData, AgentHeaderData, AgentItemData, AgentMindData, AgentRoleData, AgentRowData,
-    AgentRunData, AgentTabData, AgentWindow, AgentsState, App, ApprovalRequest, OverviewEdge, OverviewNode, ThemeMode,
+    AgentRunData, AgentTabData, AgentWindow, AgentsState, App, ApprovalRequest, RouteStopData, ThemeMode,
     ThemeOverrides, ToolCallData,
 };
 
@@ -110,8 +110,6 @@ struct Screen {
     windows: BTreeMap<AgentId, Popped>,
     /// When New agent last read the catalog, while it is open.
     roles_read: Option<std::time::Instant>,
-    /// The Overview's map, as big as it last said it was: what it is laid out for (#226).
-    overview_size: (f32, f32),
 }
 
 type Shared = Rc<RefCell<Screen>>;
@@ -125,7 +123,6 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         main: Surface::new(),
         windows: BTreeMap::new(),
         roles_read: None,
-        overview_size: (0.0, 0.0),
     }));
     let g = ui.global::<AgentsState>();
     g.set_items(ModelRc::from(state.borrow().main.items.clone()));
@@ -201,14 +198,6 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
     // are shown; Start hands the task to it as the person (`control_agents::hand_off`), held to
     // the role's reach like any hand-off.
     g.on_pick_role(on(|ui, _state, role| pick_role(&ui.global::<AgentsState>(), &role)));
-    g.on_overview_resized({
-        let (weak, state) = (weak.clone(), state.clone());
-        move |width, height| {
-            let Some(ui) = weak.upgrade() else { return };
-            state.borrow_mut().overview_size = (width, height);
-            refresh(&ui, &state, false);
-        }
-    });
     g.on_start_role({
         let (weak, state) = (weak.clone(), state.clone());
         move |role, task| {
@@ -571,9 +560,8 @@ fn refresh(ui: &App, state: &Shared, force: bool) {
         st.main.run = st.run;
         draw(&g, &mut st.main, s, selected.as_ref(), &seen, force);
 
-        if g.get_view() == "overview" {
-            overview(&g, s, &seen, st.overview_size);
-        }
+        // Published whatever the view, so choosing Overview finds the route already there.
+        publish_route(&g, s, selected.as_ref(), st.run);
     });
 
     if g.get_new_open() {
@@ -606,77 +594,53 @@ fn refresh(ui: &App, state: &Shared, force: bool) {
     }
 }
 
-/// The Overview's map (#226): every agent whatever the tab, under the minds attached now, laid out
-/// for the size the map last reported. Set only where it changed, so a map in which nothing moves
-/// asks for no redraw.
-fn overview(g: &AgentsState, s: &Store, seen: &Seen, (width, height): (f32, f32)) {
-    use crate::agents_overview as map;
-    let minds: Vec<map::Mind> = seen
-        .minds
-        .iter()
-        .map(|(id, name, detail)| map::Mind { id: id.clone(), name: name.clone(), detail: detail.clone() })
-        .collect();
-    let agents: Vec<map::Agent> = s
-        .list(Tab::All, None)
-        .iter()
-        .filter_map(|id| s.agent(id))
-        .map(|a| {
-            let row = row_of(a);
-            map::Agent {
-                id: row.id.into(),
-                mind: row.mind.into(),
-                title: row.title.into(),
-                state: row.state.into(),
-                label: row.label.into(),
-                since: row.since.into(),
-                parent: row.parent.into(),
-                role: row.role.into(),
-                origin: row.origin.into(),
-            }
+/// The Overview (Pranab, 27 September): the selected run as a route, not every agent at once.
+/// Set only where it changed, so a route in which nothing moves asks for no redraw.
+fn publish_route(g: &AgentsState, s: &Store, agent: Option<&AgentId>, run: Option<u64>) {
+    let a = agent.and_then(|id| s.agent(id));
+    let children: Vec<&Agent> = match a {
+        Some(a) => s.agents().iter().filter(|c| c.meta.parent.as_ref() == Some(&a.meta.id)).collect(),
+        None => Vec::new(),
+    };
+    let route = a.and_then(|a| agents::route::route(a, run, &children, now()));
+    let note = match a {
+        None => "Pick a run in the list to see its route.",
+        Some(_) => "It has not run anything yet.",
+    };
+    let (title, summary, live, stops) = match route {
+        Some(r) => (r.title, r.summary, r.live, r.stops),
+        None => (String::new(), String::new(), false, Vec::new()),
+    };
+    let stops: Vec<RouteStopData> = stops
+        .into_iter()
+        .map(|st| RouteStopData {
+            key: st.key.into(),
+            kind: st.kind.into(),
+            state: st.state.into(),
+            title: st.title.into(),
+            sub: st.sub.into(),
+            track_in: st.track_in.into(),
+            track_out: st.track_out.into(),
+            train_in: st.train_in,
+            train_out: st.train_out,
+            train_span: st.train_span,
         })
         .collect();
-    let laid = map::layout(host_name(), &minds, &agents, width, height);
-    let nodes: Vec<OverviewNode> = laid
-        .nodes
-        .iter()
-        .map(|n| OverviewNode {
-            id: n.id.as_str().into(),
-            kind: n.kind.into(),
-            x: n.x,
-            y: n.y,
-            size: n.size,
-            state: n.state.as_str().into(),
-            title: n.title.as_str().into(),
-            sub: n.sub.as_str().into(),
-            label_x: n.label.x,
-            label_y: n.label.y,
-            label_w: n.label.w,
-            label_h: n.label.h,
-        })
-        .collect();
-    let edges: Vec<OverviewEdge> = laid
-        .edges
-        .iter()
-        .map(|e| OverviewEdge { d: e.d.as_str().into(), state: e.state.as_str().into(), hot: e.hot, leader: e.leader })
-        .collect();
-    if let Some(model) = crate::models::changed(g.get_overview_nodes(), nodes) {
-        g.set_overview_nodes(model);
+    if let Some(model) = crate::models::changed(g.get_route_stops(), stops) {
+        g.set_route_stops(model);
     }
-    if let Some(model) = crate::models::changed(g.get_overview_edges(), edges) {
-        g.set_overview_edges(model);
+    if g.get_route_title() != title.as_str() {
+        g.set_route_title(title.into());
     }
-    if g.get_overview_summary() != laid.summary.as_str() {
-        g.set_overview_summary(laid.summary.into());
+    if g.get_route_summary() != summary.as_str() {
+        g.set_route_summary(summary.into());
     }
-}
-
-/// This machine's name, for the middle of the map. Read once: it does not change under a running
-/// shell, and the map is laid out again every time an agent does.
-fn host_name() -> &'static str {
-    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HOST.get_or_init(|| {
-        std::fs::read_to_string("/proc/sys/kernel/hostname").map(|h| h.trim().to_string()).unwrap_or_default()
-    })
+    if g.get_route_live() != live {
+        g.set_route_live(live);
+    }
+    if g.get_route_note() != note {
+        g.set_route_note(note.into());
+    }
 }
 
 /// How often New agent reads the catalog again while it is open.
