@@ -195,6 +195,18 @@ impl Store {
         true
     }
 
+    /// The person said something to a mind in the chat (the Lens): a turn begins that is chat,
+    /// not agent work. It is listed in Agents as a run only if it goes on to do work.
+    pub fn open_chat_turn(&mut self, id: &AgentId, prompt: &str) {
+        self.open_turn(id, prompt);
+        if let Some(i) = self.index(id) {
+            if let Some(t) = self.agents[i].turns.last_mut() {
+                t.origin = TurnOrigin::Chat;
+            }
+            self.mark(i);
+        }
+    }
+
     /// The person (or a parent agent) said something to this agent: a turn begins.
     ///
     /// An agent nobody has announced is made known here, named after its harness — a turn is
@@ -221,6 +233,7 @@ impl Store {
             ended: None,
             ok: None,
             lost: false,
+            origin: TurnOrigin::Agent,
             items: Vec::new(),
             events: false,
             trail_seq: 0,
@@ -602,6 +615,39 @@ impl Store {
     }
 }
 
+/// One row of the Agents list: an agent, or one run of a mind's chat (`agent#n`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RowKey {
+    pub agent: AgentId,
+    pub run: Option<u64>,
+}
+
+impl RowKey {
+    pub fn agent(id: &AgentId) -> RowKey {
+        RowKey { agent: id.clone(), run: None }
+    }
+
+    pub fn run(id: &AgentId, n: u64) -> RowKey {
+        RowKey { agent: id.clone(), run: Some(n) }
+    }
+
+    /// The row's id on screen: the agent's id, or `agent#n` for a run.
+    pub fn id(&self) -> String {
+        match self.run {
+            Some(n) => format!("{}#{n}", self.agent.0),
+            None => self.agent.0.clone(),
+        }
+    }
+
+    /// A row id back into its key.
+    pub fn parse(id: &str) -> RowKey {
+        match id.rsplit_once('#').and_then(|(a, n)| n.parse().ok().map(|n| (a, n))) {
+            Some((agent, n)) => RowKey { agent: AgentId(agent.to_string()), run: Some(n) },
+            None => RowKey { agent: AgentId(id.to_string()), run: None },
+        }
+    }
+}
+
 /// Whether the person still owes this agent an answer: an approval, a job at its prompt (#182),
 /// or a question it asked.
 fn waits_on_person(agent: &Agent) -> bool {
@@ -629,7 +675,60 @@ impl Store {
 
     /// How many agents each tab lists, in [`Tab::EVERY`] order.
     pub fn counts(&self) -> [usize; 4] {
-        Tab::EVERY.map(|tab| self.agents.iter().filter(|a| self.in_tab(tab, a)).count())
+        Tab::EVERY.map(|tab| self.rows(tab, None).len())
+    }
+
+    /// The Agents list's rows under `tab`, in the order to draw them.
+    ///
+    /// Chat and agents are different things (Pranab, 27 September). A mind's main conversation
+    /// is the person's chat with it, so it is not one agent row: each of its requests that did
+    /// work (a call, a question, an approval) is its own run row, "from chat", and plain
+    /// conversation stays with the chat. An agent started as one (New agent, a recipe, a
+    /// hand-off) is a row as before. Each row is judged by its own state: a run that finished is
+    /// Complete even while its mind works on the next.
+    ///
+    /// Newest first; under Active, what needs the person first. While the pointer is over the list
+    /// `hold` is the order on screen, kept, with rows that left the tab taken out and new ones
+    /// added at the bottom (design decision 4).
+    pub fn rows(&self, tab: Tab, hold: Option<&[RowKey]>) -> Vec<RowKey> {
+        let mut all: Vec<(RowKey, u64, bool)> = Vec::new(); // (row, started, needs the person)
+        for a in &self.agents {
+            if a.is_plain_main() {
+                for t in a.turns.iter().filter(|t| a.is_run(t)) {
+                    let open = t.open();
+                    let needs = open && (a.state == State::WaitingForYou || self.stuck(a));
+                    let held = match tab {
+                        Tab::Active => open,
+                        Tab::NeedsYou => needs,
+                        Tab::Complete => !open,
+                        Tab::All | Tab::Tasks => true,
+                    };
+                    if held {
+                        all.push((RowKey::run(&a.meta.id, t.n), t.started, needs));
+                    }
+                }
+            } else if self.in_tab(tab, a) {
+                let needs = a.state == State::WaitingForYou || self.stuck(a);
+                all.push((RowKey::agent(&a.meta.id), a.meta.started, needs));
+            }
+        }
+        all.sort_by(|x, y| y.1.cmp(&x.1));
+        if tab == Tab::Active {
+            all.sort_by_key(|(_, _, needs)| !needs);
+        }
+        let wanted: Vec<RowKey> = all.into_iter().map(|(k, _, _)| k).collect();
+        match hold {
+            None => wanted,
+            Some(on_screen) => {
+                let mut kept: Vec<RowKey> = on_screen.iter().filter(|k| wanted.contains(k)).cloned().collect();
+                for k in wanted {
+                    if !kept.contains(&k) {
+                        kept.push(k);
+                    }
+                }
+                kept
+            }
+        }
     }
 
     /// Whether `a` is listed under `tab`. Needs you holds what waits on the person *and* what is
@@ -652,7 +751,7 @@ impl Store {
         let mut all: Vec<(&Agent, &Turn)> = self
             .agents
             .iter()
-            .flat_map(|a| a.turns.iter().filter(|t| !t.prompt.trim().is_empty()).map(move |t| (a, t)))
+            .flat_map(|a| a.turns.iter().filter(|t| !t.prompt.trim().is_empty() && a.is_run(t)).map(move |t| (a, t)))
             .collect();
         all.sort_by(|(a1, t1), (a2, t2)| t2.started.cmp(&t1.started).then(a2.seq.cmp(&a1.seq)).then(t2.n.cmp(&t1.n)));
         all.into_iter().take(limit).map(|(a, t)| (a.meta.id.clone(), t.n)).collect()
@@ -999,6 +1098,7 @@ fn turn_for_verified(agent: &mut Agent, now: u64) -> &mut Turn {
             ended: Some(now),
             ok: None,
             lost: false,
+            origin: TurnOrigin::Agent,
             items: Vec::new(),
             events: false,
             trail_seq: 0,
@@ -1298,6 +1398,8 @@ struct TurnRecord {
     events: bool,
     #[serde(default)]
     lost: bool,
+    #[serde(default)]
+    origin: TurnOrigin,
     items: Vec<ItemRecord>,
 }
 
@@ -1449,6 +1551,7 @@ fn serialize(agent: &Agent) -> String {
             ended: turn.ended,
             ok: turn.ok,
             lost: turn.lost,
+            origin: turn.origin,
             events: turn.events,
             items,
         });
@@ -1561,6 +1664,7 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
             ended: turn.ended,
             ok: turn.ok,
             lost: turn.lost,
+            origin: turn.origin,
             items,
             events: turn.events,
             trail_seq: 0,
@@ -2141,16 +2245,63 @@ mod tests {
     }
 
     #[test]
+    fn chat_talk_is_not_listed_chat_work_is_a_run_and_an_agent_is_one_row() {
+        let (mut s, clock) = store();
+        let hermes = id("hermes:main");
+        // Talk in the chat: never an agent, never a run.
+        s.open_chat_turn(&hermes, "thanks, that's all");
+        s.text(&hermes, "You're welcome.");
+        s.close_turn(&hermes, true);
+        clock.fetch_add(1, Ordering::SeqCst);
+        // Work asked in the chat: its own run, from chat.
+        s.open_chat_turn(&hermes, "build a small game");
+        s.event(&hermes, &Event::ToolStart { call: "c1".into(), name: "os_act".into(), target: "editor".into(), args: json!({}) }, Provenance::Reported);
+        s.close_turn(&hermes, true);
+        clock.fetch_add(1, Ordering::SeqCst);
+        s.open_chat_turn(&hermes, "and a town model");
+        s.event(&hermes, &Event::ToolStart { call: "c2".into(), name: "os_act".into(), target: "editor".into(), args: json!({}) }, Provenance::Reported);
+        // An agent started as one: one row, as before.
+        clock.fetch_add(1, Ordering::SeqCst);
+        let pi = id("pi:c-9a8b7c");
+        s.open_turn(&pi, "tidy Downloads");
+
+        let all: Vec<String> = s.rows(Tab::All, None).iter().map(RowKey::id).collect();
+        assert_eq!(all, ["pi:c-9a8b7c", "hermes:main#3", "hermes:main#2"], "no row for the chat, none for its talk");
+        let active: Vec<String> = s.rows(Tab::Active, None).iter().map(RowKey::id).collect();
+        assert_eq!(active, ["pi:c-9a8b7c", "hermes:main#3"], "each run by its own state: the finished one is not active");
+        assert_eq!(s.rows(Tab::Complete, None), vec![RowKey::run(&hermes, 2)]);
+        assert_eq!(s.tasks(10).len(), 3, "the Tasks tab lists work, not talk");
+        assert_eq!(RowKey::parse("hermes:main#3"), RowKey::run(&hermes, 3));
+        assert_eq!(RowKey::parse("pi:c-9a8b7c"), RowKey::agent(&pi));
+    }
+
+    #[test]
+    fn a_session_saved_before_turns_said_where_they_came_from_reads_as_chat_on_a_mind_and_work_on_an_agent() {
+        let (mut s, _) = store();
+        let hermes = id("hermes:main");
+        s.open_turn(&hermes, "hello");
+        s.close_turn(&hermes, true);
+        for t in &mut s.agents.iter_mut().find(|a| a.meta.id == hermes).unwrap().turns {
+            t.origin = TurnOrigin::Unknown;
+        }
+        let pi = id("pi:c-1");
+        s.open_turn(&pi, "old work");
+        s.close_turn(&pi, true);
+        let all: Vec<String> = s.rows(Tab::All, None).iter().map(RowKey::id).collect();
+        assert_eq!(all, ["pi:c-1"], "the old chat turn with no work is talk; the agent is still an agent");
+    }
+
+    #[test]
     fn the_tabs_count_and_filter_the_one_list() {
         let (mut s, clock) = store();
         for (name, state) in [
-            ("a:main", State::Thinking),
-            ("b:main", State::RunningTool),
-            ("c:main", State::WaitingForYou),
-            ("d:main", State::Idle),
-            ("e:main", State::Done),
-            ("f:main", State::Failed),
-            ("g:main", State::HarnessGone),
+            ("a:c-a", State::Thinking),
+            ("b:c-b", State::RunningTool),
+            ("c:c-c", State::WaitingForYou),
+            ("d:c-d", State::Idle),
+            ("e:c-e", State::Done),
+            ("f:c-f", State::Failed),
+            ("g:c-g", State::HarnessGone),
         ] {
             clock.fetch_add(1, Ordering::SeqCst);
             s.upsert_agent(AgentMeta::new(id(name), name));
@@ -2158,8 +2309,8 @@ mod tests {
         }
         assert_eq!(s.counts(), [4, 1, 3, 7], "Active, Needs you, Complete, All");
         let names = |tab| s.list(tab, None).into_iter().map(|i| i.0).collect::<Vec<_>>();
-        assert_eq!(names(Tab::NeedsYou), vec!["c:main"]);
-        assert_eq!(names(Tab::Complete), vec!["g:main", "f:main", "e:main"], "newest first");
+        assert_eq!(names(Tab::NeedsYou), vec!["c:c-c"]);
+        assert_eq!(names(Tab::Complete), vec!["g:c-g", "f:c-f", "e:c-e"], "newest first");
         assert_eq!(names(Tab::All).len(), 7);
     }
 

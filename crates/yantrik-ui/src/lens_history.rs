@@ -24,6 +24,7 @@ pub fn bubbles(turns: &[Turn], limit: usize) -> Vec<MessageData> {
     for turn in &turns[start..] {
         if !turn.prompt.trim().is_empty() {
             out.push(MessageData {
+                run: Default::default(),
                 role: "user".into(),
                 content: turn.prompt.as_str().into(),
                 is_streaming: false,
@@ -33,6 +34,7 @@ pub fn bubbles(turns: &[Turn], limit: usize) -> Vec<MessageData> {
         let (content, blocks) = reply(turn);
         if !blocks.is_empty() {
             out.push(MessageData {
+                run: Default::default(),
                 role: "assistant".into(),
                 content: content.into(),
                 is_streaming: false,
@@ -142,7 +144,7 @@ mod tests {
             started: 100 + n,
             ended: ended.then_some(200 + n),
             ok: ended.then_some(true),
-            lost: false,
+            lost: false, origin: Default::default(),
             items,
             events: false,
             trail_seq: 0,

@@ -77,6 +77,7 @@ pub(crate) fn fill(g: &AgentsState, popped: bool) {
         note: "pi holds one conversation at a time — the same one the Lens talks to.".into(),
         can_send: false,
         send_hint: "pi is working — wait, or Stop it".into(),
+        tell_hint: "".into(),
         can_stop: true,
     });
     let item = |kind: &str, key: &str, text: &str| AgentItemData {
@@ -190,6 +191,7 @@ fn red_team(g: &AgentsState) {
         note: "".into(),
         can_send: true,
         send_hint: "".into(),
+        tell_hint: "".into(),
         can_stop: false,
     });
     let mut details = g.get_details();

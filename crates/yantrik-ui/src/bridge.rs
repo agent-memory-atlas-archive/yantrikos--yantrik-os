@@ -1503,6 +1503,7 @@ fn worker_loop(
                                     .downcast_ref::<VecModel<crate::MessageData>>()
                                     .unwrap();
                                 model.push(crate::MessageData {
+                                    run: Default::default(),
                                     role: SharedString::from("assistant"),
                                     content: SharedString::from(&text),
                                     is_streaming: false,
@@ -2296,6 +2297,7 @@ fn worker_loop(
                                             .downcast_ref::<VecModel<crate::MessageData>>()
                                             .unwrap();
                                         model.push(crate::MessageData {
+                                            run: Default::default(),
                                             role: SharedString::from("assistant"),
                                             content: SharedString::from(&text),
                                             is_streaming: false,

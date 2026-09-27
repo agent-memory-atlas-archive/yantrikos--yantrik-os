@@ -52,6 +52,10 @@ const TEXT_BYTES: usize = 32 * 1024;
 /// What one surface shows: the screen, or one popped-out window.
 struct Surface {
     agent: Option<AgentId>,
+    /// The one run shown, when the row picked is a run (`agent#n`); None: the whole session.
+    run: Option<u64>,
+    /// The run drawn last, so a change of run redraws.
+    drawn_run: Option<u64>,
     /// Cards and thinking the person opened, by key.
     expanded: HashSet<String>,
     items: Rc<VecModel<AgentItemData>>,
@@ -65,6 +69,8 @@ impl Surface {
     fn new() -> Self {
         Surface {
             agent: None,
+            run: None,
+            drawn_run: None,
             expanded: HashSet::new(),
             items: Rc::new(VecModel::default()),
             keys: Vec::new(),
@@ -96,8 +102,10 @@ struct Popped {
 struct Screen {
     tab: Tab,
     selected: Option<AgentId>,
+    /// The run picked, when the selected row is one run of a chat (`agent#n`).
+    run: Option<u64>,
     /// The rows as drawn, so they can be held still while the pointer is over them.
-    order: Vec<AgentId>,
+    order: Vec<agents::RowKey>,
     main: Surface,
     windows: BTreeMap<AgentId, Popped>,
     /// When New agent last read the catalog, while it is open.
@@ -112,6 +120,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
     let state: Shared = Rc::new(RefCell::new(Screen {
         tab: Tab::Active,
         selected: None,
+        run: None,
         order: Vec::new(),
         main: Surface::new(),
         windows: BTreeMap::new(),
@@ -137,12 +146,17 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             st.tab = Tab::from_key(&key);
             st.order.clear();
             st.selected = None;
+            st.run = None;
         }
         ui.global::<AgentsState>().set_tab(key.into());
         refresh(ui, state, true);
     }));
     g.on_select(on(|ui, state, id| {
-        state.borrow_mut().selected = Some(agent_of_row(&id));
+        let key = agents::RowKey::parse(&id);
+        let mut st = state.borrow_mut();
+        st.selected = Some(key.agent);
+        st.run = key.run;
+        drop(st);
         refresh(ui, state, true);
     }));
     g.on_pop_out(on(|ui, state, id| pop_out(ui, state, agent_of_row(&id))));
@@ -329,6 +343,7 @@ fn started(ui: &App, state: &Shared, outcome: Result<AgentId, String>) {
                 }
                 st.order.clear();
                 st.selected = Some(agent);
+                st.run = None;
             }
             refresh(ui, state, true);
         }
@@ -523,18 +538,15 @@ fn refresh(ui: &App, state: &Shared, force: bool) {
             g.set_empty_note(empty.into());
         }
 
-        let (order, rows): (Vec<AgentId>, Vec<AgentRowData>) = if st.tab == Tab::Tasks {
-            // One row per request (#234), keyed `agent#turn` so each is its own row; picking
-            // one opens its agent, whose session holds the turn.
-            let rows = tasks
-                .iter()
-                .filter_map(|(id, n)| s.agent(id).and_then(|a| task_row(a, *n, now())))
-                .collect();
-            (tasks.iter().map(|(id, _)| id.clone()).collect(), rows)
+        let (order, rows): (Vec<agents::RowKey>, Vec<AgentRowData>) = if st.tab == Tab::Tasks {
+            // One row per request (#234), keyed `agent#turn`; picking one opens that run.
+            let keys: Vec<agents::RowKey> = tasks.iter().map(|(id, n)| agents::RowKey::run(id, *n)).collect();
+            let rows = keys.iter().filter_map(|k| row_for(s, k)).collect();
+            (keys, rows)
         } else {
             let hold = (hovering && !st.order.is_empty()).then_some(st.order.as_slice());
-            let order = s.list(st.tab, hold);
-            let rows = order.iter().filter_map(|id| s.agent(id)).map(row_of).collect();
+            let order = s.rows(st.tab, hold);
+            let rows = order.iter().filter_map(|k| row_for(s, k)).collect();
             (order, rows)
         };
         st.order = order;
@@ -543,13 +555,20 @@ fn refresh(ui: &App, state: &Shared, force: bool) {
         }
 
         if st.selected.as_ref().is_none_or(|id| s.agent(id).is_none()) {
-            st.selected = st.order.first().cloned();
+            let first = st.order.first().cloned();
+            st.selected = first.as_ref().map(|k| k.agent.clone());
+            st.run = first.and_then(|k| k.run);
         }
-        let selected = st.selected.clone().map(|id| id.0).unwrap_or_default();
+        let selected = st
+            .selected
+            .clone()
+            .map(|agent| agents::RowKey { agent, run: st.run }.id())
+            .unwrap_or_default();
         if g.get_selected() != selected.as_str() {
             g.set_selected(selected.into());
         }
         let selected = st.selected.clone();
+        st.main.run = st.run;
         draw(&g, &mut st.main, s, selected.as_ref(), &seen, force);
 
         if g.get_view() == "overview" {
@@ -697,7 +716,11 @@ fn draw(g: &AgentsState, surface: &mut Surface, s: &Store, agent: Option<&AgentI
     if !g.get_has_agent() {
         g.set_has_agent(true);
     }
-    let header = header_of(a, seen);
+    let mut header = header_of(a, seen);
+    if let Some(t) = surface.run.and_then(|n| a.turns.iter().find(|t| t.n == n)) {
+        // One run of a chat: named by what it was asked.
+        header.title = one_line(&t.prompt, TITLE_CHARS).into();
+    }
     if g.get_header() != header {
         g.set_header(header);
     }
@@ -706,9 +729,10 @@ fn draw(g: &AgentsState, surface: &mut Surface, s: &Store, agent: Option<&AgentI
         g.set_details(details);
     }
 
-    let fresh = surface.agent.as_ref() != Some(&a.meta.id);
+    let fresh = surface.agent.as_ref() != Some(&a.meta.id) || surface.drawn_run != surface.run;
     if fresh {
         surface.agent = Some(a.meta.id.clone());
+        surface.drawn_run = surface.run;
         surface.expanded.clear();
         surface.drawn = None;
     }
@@ -719,7 +743,7 @@ fn draw(g: &AgentsState, surface: &mut Surface, s: &Store, agent: Option<&AgentI
         return;
     }
     surface.drawn = Some(stamp);
-    publish_items(g, surface, items_of(a, &surface.expanded, &seen.approvals), fresh);
+    publish_items(g, surface, items_of(a, &surface.expanded, &seen.approvals, surface.run), fresh);
 }
 
 /// Put a session's items in the model: in place when only the end changed, so the view keeps its
@@ -766,6 +790,18 @@ fn row_of(a: &Agent) -> AgentRowData {
 
 /// How many requests the Tasks tab lists, newest first.
 const TASKS_SHOWN: usize = 60;
+
+/// One row of the list: an agent as before, or one run of a chat, marked where it came from.
+fn row_for(s: &Store, key: &agents::RowKey) -> Option<AgentRowData> {
+    let a = s.agent(&key.agent)?;
+    let Some(n) = key.run else { return Some(row_of(a)) };
+    let mut row = task_row(a, n, now())?;
+    let from_chat = a.is_plain_main() && a.turns.iter().find(|t| t.n == n).is_some_and(|t| t.origin != crate::agents::model::TurnOrigin::Agent);
+    if from_chat {
+        row.origin = "Chat".into();
+    }
+    Some(row)
+}
 
 /// The agent a row is about: a Tasks row's id is `agent#turn`.
 fn agent_of_row(id: &str) -> AgentId {
@@ -988,8 +1024,14 @@ fn one_line(text: &str, max: usize) -> String {
 
 /// A session as the screen draws it, newest last. `pending` is the shell's approval store's
 /// waiting requests: an approval item is drawn from there, never from the session.
-fn items_of(a: &Agent, expanded: &HashSet<String>, pending: &[crate::approvals::Card]) -> Vec<AgentItemData> {
+fn items_of(a: &Agent, expanded: &HashSet<String>, pending: &[crate::approvals::Card], run: Option<u64>) -> Vec<AgentItemData> {
     let mut out = Vec::new();
+    // One run of a chat: that turn alone. The rest of the conversation is the chat's, not this run's.
+    if let Some(n) = run {
+        if let Some(i) = a.turns.iter().position(|t| t.n == n) {
+            return items_of_turns(a, &a.turns[i..=i], expanded, pending, out);
+        }
+    }
     let from = a.turns.len().saturating_sub(SHOWN_TURNS);
     if from > 0 {
         out.push(AgentItemData {
@@ -999,7 +1041,18 @@ fn items_of(a: &Agent, expanded: &HashSet<String>, pending: &[crate::approvals::
             ..Default::default()
         });
     }
-    for turn in &a.turns[from..] {
+    items_of_turns(a, &a.turns[from..], expanded, pending, out)
+}
+
+/// The items of `turns`, appended to `out`.
+fn items_of_turns(
+    a: &Agent,
+    turns: &[Turn],
+    expanded: &HashSet<String>,
+    pending: &[crate::approvals::Card],
+    mut out: Vec<AgentItemData>,
+) -> Vec<AgentItemData> {
+    for turn in turns {
         if !turn.prompt.is_empty() {
             out.push(AgentItemData {
                 kind: "prompt".into(),
@@ -1426,6 +1479,7 @@ fn close(ui: &App, state: &Shared, agent: AgentId, confirmed: bool) {
         }
         if st.selected.as_ref() == Some(&agent) {
             st.selected = None;
+            st.run = None;
         }
     }
     refresh(ui, state, true);
@@ -1601,7 +1655,10 @@ fn show_agent(ui: &App, state: &Shared, agent: AgentId) {
             g.set_tab(Tab::All.key().into());
         }
         st.order.clear();
-        st.selected = Some(agent);
+        // `show_agent` may name one run of a chat (`agent#n`): the chat's link to it opens that run.
+        let key = agents::RowKey::parse(&agent.0);
+        st.selected = Some(key.agent);
+        st.run = key.run;
     }
     ui.set_current_screen(SCREEN);
     ui.invoke_navigate(SCREEN);
@@ -1984,7 +2041,7 @@ mod tests {
     }
 
     fn approvals_drawn(store: &Store, agent: &AgentId, pending: &[crate::approvals::Card]) -> Vec<AgentItemData> {
-        items_of(store.agent(agent).unwrap(), &HashSet::new(), pending).into_iter().filter(|i| i.kind == "approval").collect()
+        items_of(store.agent(agent).unwrap(), &HashSet::new(), pending, None).into_iter().filter(|i| i.kind == "approval").collect()
     }
 
     /// Design decision 4: the card in the pane is the shell's, with Allow and Deny bound to the one
@@ -2033,7 +2090,7 @@ mod tests {
         };
         s.event(&pi, &event, Provenance::Reported);
         s.event(&pi, &crate::agents::Event::Status { text: "waiting for approval appr-7".into() }, Provenance::Reported);
-        let items = items_of(s.agent(&pi).unwrap(), &HashSet::new(), &[pending_card("appr-7", "pi:c-7f3a91")]);
+        let items = items_of(s.agent(&pi).unwrap(), &HashSet::new(), &[pending_card("appr-7", "pi:c-7f3a91")], None);
         assert!(items.iter().all(|i| i.kind != "approval"), "{:?}", items.iter().map(|i| i.kind.to_string()).collect::<Vec<_>>());
         assert!(s.agent(&pi).unwrap().pending_approvals.is_empty());
     }
@@ -2276,7 +2333,7 @@ mod tests {
         let red = AgentId("deepseek:c-red001".into());
         s.open_turn(&red, "attack this plan");
         s.text(&red, "## Strongest point\n\n**How:** it *fails* when `sync` runs twice.\n\n- one **bold**\n- two\n\n```\nsync && sync\n```\n");
-        let items = items_of(s.agent(&red).unwrap(), &HashSet::new(), &[]);
+        let items = items_of(s.agent(&red).unwrap(), &HashSet::new(), &[], None);
         let prompt = items.iter().find(|i| i.kind == "prompt").expect("the prompt").key.to_string();
         let prose: Vec<&AgentItemData> = items.iter().filter(|i| i.kind == "text").collect();
         let drawn: Vec<(String, &str, &str)> =
@@ -2309,12 +2366,12 @@ mod tests {
         let red = AgentId("deepseek:c-red002".into());
         s.open_turn(&red, "attack this plan");
         s.text(&red, "## Verdict\n\nIt is **very");
-        let first = items_of(s.agent(&red).unwrap(), &HashSet::new(), &[]);
+        let first = items_of(s.agent(&red).unwrap(), &HashSet::new(), &[], None);
         let open = first.last().unwrap();
         assert_eq!((open.block.as_str(), open.text.as_str()), ("text", "It is **very"));
         assert_eq!(open.styled, slint::StyledText::from_plain_text("It is **very"), "an open marker is its characters");
         s.text(&red, " weak** here.\n\n- and a list");
-        let next = items_of(s.agent(&red).unwrap(), &HashSet::new(), &[]);
+        let next = items_of(s.agent(&red).unwrap(), &HashSet::new(), &[], None);
         let keys = |items: &[AgentItemData]| items.iter().map(|i| i.key.to_string()).collect::<Vec<_>>();
         assert!(keys(&next).starts_with(&keys(&first)), "{:?} then {:?}", keys(&first), keys(&next));
         let closed = &next[first.len() - 1];
@@ -2399,7 +2456,7 @@ mod latest_request_tests {
     use super::*;
 
     fn asked(n: u64, prompt: &str) -> Turn {
-        Turn { n, prompt: prompt.into(), started: n, ended: Some(n + 1), ok: Some(true), lost: false, items: vec![], events: false, trail_seq: 0 }
+        Turn { n, prompt: prompt.into(), started: n, ended: Some(n + 1), ok: Some(true), lost: false, origin: Default::default(), items: vec![], events: false, trail_seq: 0 }
     }
 
     #[test]
@@ -2533,7 +2590,7 @@ mod first_prompt_attribution_tests {
     }
 
     fn first_prompt(s: &Store, id: &AgentId) -> AgentItemData {
-        let items = items_of(s.agent(id).unwrap(), &HashSet::new(), &[]);
+        let items = items_of(s.agent(id).unwrap(), &HashSet::new(), &[], None);
         items.into_iter().find(|i| i.kind == "prompt").expect("the prompt")
     }
 

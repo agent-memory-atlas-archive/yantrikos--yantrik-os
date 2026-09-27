@@ -1384,6 +1384,8 @@ export component App inherits Window {
             // The mind's own questions (#25), answered through the same one path as in Agents.
             questions: root.lens-questions;
             question-answer(agent, request, answer) => { AgentsState.answer-question(agent, request, answer); }
+            // A chat reply's link to its run: the Agents pane of that one run.
+            open-run(run) => { AgentsState.show-agent(run); }
             lens-can-open-in-agents: root.lens-can-open-in-agents;
             lens-open-in-agents => { root.lens-open-in-agents(); }
             lens-open-history => { root.lens-open-history(); }
