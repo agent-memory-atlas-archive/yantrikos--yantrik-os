@@ -1178,6 +1178,20 @@ mod tests {
     fn spend_through_a_stand_in_shell() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
+            // The stand-in shell answers what a token may reach, as the shell does (#189): the
+            // reviewer's token is held to its role; every other token has no role, so a call
+            // carrying it is held by nothing but the grade, the mode and the grant. One reader
+            // per process, as the shell has one registry.
+            use yantrik_ipc_transport::reach;
+            reach::read_reach_with(|token| {
+                (token == "tok-reach-reviewer").then(|| reach::Reach {
+                    agent: "deepseek:c-reach1".into(),
+                    role: "reviewer".into(),
+                    name: "Reviewer".into(),
+                    surfaces: vec!["caller-test.echo".into(), "caller-test.nuke".into()],
+                    ceiling: "safe".into(),
+                })
+            });
             let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
             spend_grants_with(move |id, app, action, args, caller| {
                 SPEND_CALLERS.lock().unwrap_or_else(|e| e.into_inner())
@@ -1614,18 +1628,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_agent_is_held_to_its_reach_on_the_socket_before_any_grant_is_spent() {
-        use yantrik_ipc_transport::reach;
-
+        // The stand-in shell's reader holds `tok-reach-reviewer` to the reviewer's reach.
         spend_through_a_stand_in_shell();
-        reach::read_reach_with(|token| {
-            (token == "tok-reach-reviewer").then(|| reach::Reach {
-                agent: "deepseek:c-reach1".into(),
-                role: "reviewer".into(),
-                name: "Reviewer".into(),
-                surfaces: vec!["caller-test.echo".into(), "caller-test.nuke".into()],
-                ceiling: "safe".into(),
-            })
-        });
         let act = |action: &str, token: &str, grant: Option<&str>| {
             let mut params = serde_json::json!({ "action": action, "args": {}, "agent_token": token });
             if let Some(grant) = grant {

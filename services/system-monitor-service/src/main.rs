@@ -1001,6 +1001,10 @@ mod tests {
     fn spend_through_a_stand_in_shell() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
+            // The stand-in shell answers what a token may reach, as the shell does (#189):
+            // no role for any token here, so a token-carrying call is held by nothing but
+            // the grade, the mode and the grant these tests are about.
+            yantrik_service_sdk::reach::read_reach_with(|_| None);
             let spent = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
             gate::spend_grants_with(move |id, app, action, args, _caller| {
                 let Some(pid) = id.strip_prefix("ok-kill-").and_then(|p| p.parse::<u64>().ok()) else {
