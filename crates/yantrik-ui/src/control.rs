@@ -1508,7 +1508,22 @@ pub fn publish(
             move |args| {
                 let want = args["title"].as_str().unwrap_or_default();
                 let open = crate::windows::addressable_titles();
-                let title = crate::windows::window_to_close(want, &open)?;
+                let title = match crate::windows::window_to_close(want, &open) {
+                    Ok(title) => title,
+                    // Not on the person's desktop, but an app a mind opened is drawn in Mind View:
+                    // close it there, as its × would.
+                    Err(why) => match crate::mind_view::app_named(want) {
+                        Some(app) => {
+                            let name = crate::mind_view::close_app(&app)?;
+                            return Ok(serde_json::json!({
+                                "closing": name,
+                                "where": "Mind View",
+                                "note": "the app was drawn in Mind View, where the apps a mind opens go,                                          and was asked to close there as pressing × does; one with                                          unsaved work may put up its own dialog and stay. Read                                          `mind_view` in `describe shell` to see whether it went.",
+                            }));
+                        }
+                        None => return Err(why),
+                    },
+                };
                 crate::windows::close(&title)?;
                 Ok(serde_json::json!({
                     "closing": title,

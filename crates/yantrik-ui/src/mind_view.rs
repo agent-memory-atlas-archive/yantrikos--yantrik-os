@@ -477,6 +477,53 @@ pub fn mark_launched(app_id: &str, pid: u32) {
     });
 }
 
+/// The one app drawing in Mind View that `want` names, by its id or the name it goes by. None when
+/// none does, or more than one does.
+///
+/// `close_window` reaches for this when nothing on the person's desktop answers: an app a mind
+/// opened is drawn here, not there, so "Close the Notes app" was refused with "no open window
+/// matches `Notes`" while Notes was open, and the mind told the person it was not (yantrik-mind,
+/// VM 520, 2026-09-27).
+pub fn app_named(want: &str) -> Option<String> {
+    let want = want.trim().to_lowercase();
+    if want.is_empty() {
+        return None;
+    }
+    let apps: Vec<String> = with_state(|s| s.apps.iter().map(|(_, id)| id.clone()).collect());
+    let mut found: Vec<String> = apps
+        .into_iter()
+        .filter(|id| {
+            let name = crate::windows::app_display_name(id).to_lowercase();
+            id.to_lowercase() == want || name == want || name.contains(&want)
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    (found.len() == 1).then(|| found.remove(0))
+}
+
+/// Ask an app drawing in Mind View to close, as its × does: on Mind View's own display, so an app
+/// with unsaved work can still put up its dialog. Returns the name it was asked by.
+pub fn close_app(app_id: &str) -> Result<String, String> {
+    let display = with_state(|s| s.nested.as_ref().map(|n| n.seat.wayland.clone()))
+        .ok_or_else(|| "Mind View is not running, so nothing is drawn there to close".to_string())?;
+    let title = crate::windows::app_display_name(app_id);
+    let args = ["toplevel".to_string(), "close".to_string(), format!("title:{title}")];
+    let (answer, wait) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("yos-wlrctl-mind-view".to_string())
+        .spawn(move || {
+            let _ = answer.send(Command::new("wlrctl").args(&args).env("WAYLAND_DISPLAY", &display).status());
+        })
+        .map_err(|_| "could not start a thread to talk to Mind View's compositor".to_string())?;
+    match wait.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(status)) if status.success() => Ok(title),
+        Ok(Ok(_)) => Err(format!("Mind View's compositor has no window called `{title}` to close")),
+        Ok(Err(e)) => Err(format!("could not run wlrctl: {e}")),
+        Err(_) => Err("Mind View's compositor did not answer within 2 s".to_string()),
+    }
+}
+
 /// Forget an app that has exited.
 pub fn mark_exited(pid: u32) {
     with_state(|s| s.apps.retain(|(p, _)| *p != pid));
@@ -551,6 +598,21 @@ mod tests {
         assert_eq!(left_behind(&proc_dir, script, 256173), vec![1021934], "never this shell itself");
         assert!(left_behind(&proc_dir.join("absent"), script, SHELL).is_empty(), "no /proc, nothing to stop");
         let _ = std::fs::remove_dir_all(&proc_dir);
+    }
+
+    #[test]
+    fn an_app_a_mind_opened_is_found_by_its_name_and_only_when_one_answers() {
+        mark_launched("notes", 990_001);
+        assert_eq!(app_named("Notes").as_deref(), Some("notes"), "by the name it goes by");
+        assert_eq!(app_named("notes").as_deref(), Some("notes"), "by its id");
+        assert_eq!(app_named("  NOTES "), Some("notes".to_string()));
+        assert_eq!(app_named("Calendar"), None, "not drawn here");
+        assert_eq!(app_named(""), None);
+        mark_launched("notes", 990_002);
+        assert_eq!(app_named("Notes").as_deref(), Some("notes"), "two of one app are still one app");
+        mark_exited(990_001);
+        mark_exited(990_002);
+        assert_eq!(app_named("Notes"), None, "gone once it exits");
     }
 
     #[test]

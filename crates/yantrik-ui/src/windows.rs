@@ -294,6 +294,11 @@ pub const APP_NAMES: &[(&str, &str)] = &[
     ("weather", "Weather"),
 ];
 
+/// The name one of our app ids goes by on screen, for callers outside this file.
+pub fn app_display_name(app_id: &str) -> String {
+    display_name(app_id)
+}
+
 fn display_name(app_id: &str) -> String {
     APP_NAMES
         .iter()
