@@ -163,10 +163,9 @@ fn station(turn: &Turn, j: usize, item: &Item, now: u64) -> Option<(u64, Stop)> 
     let key = format!("t{}.{j}", turn.n);
     match item {
         Item::Card(c) => {
-            let mut title = one_line(&c.as_call().summary());
-            if c.repeats > 1 {
-                title = format!("{title} ×{}", c.repeats);
-            }
+            // The call's own summary already says how many times it ran (×n); adding it again
+            // read "os_act ×2 ×2" on VM 520.
+            let title = one_line(&station_name(&c.as_call().summary()));
             let (state, sub) = match c.state {
                 CallState::Running => ("here", format!("running · {}", span(now.saturating_sub(c.started)))),
                 CallState::Ok => ("passed", took(c.started, c.ended, &c.summary)),
@@ -198,6 +197,17 @@ fn station(turn: &Turn, j: usize, item: &Item, now: u64) -> Option<(u64, Stop)> 
         }
         Item::Text(_) | Item::Thinking(_) | Item::Note(_) => None,
     }
+}
+
+/// A call as a station names it: this desktop's own tools without the prefix an MCP client puts
+/// on them ("mcp_yantrik_os_os_act" is `os_act`); anything else as the harness named it.
+fn station_name(summary: &str) -> String {
+    for prefix in ["mcp_yantrik_os_", "mcp_yantrik-os_", "mcp__yantrik-os__", "mcp__yantrik_os__"] {
+        if let Some(rest) = summary.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    summary.to_string()
 }
 
 /// An agent this run started, as a branch off the line.
@@ -446,6 +456,14 @@ mod tests {
         let pi = id("pi:c-new");
         s.upsert_agent(AgentMeta::new(pi.clone(), "pi"));
         assert!(route(s.agent(&pi).unwrap(), None, &[], 0).is_none());
+    }
+
+    #[test]
+    fn a_station_is_named_by_the_call_once_without_this_desktops_mcp_prefix() {
+        assert_eq!(station_name("mcp_yantrik_os_os_act ×2"), "os_act ×2");
+        assert_eq!(station_name("mcp__yantrik-os__web_go \"example.com\""), "web_go \"example.com\"");
+        assert_eq!(station_name("mcp_github_search"), "mcp_github_search", "another server's tool keeps its name");
+        assert_eq!(station_name("bash"), "bash");
     }
 
     #[test]
