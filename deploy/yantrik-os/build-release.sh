@@ -67,7 +67,15 @@ fail() { printf '\033[31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 # for the image name — gets the identical string in the tarball, the BUILD marker and the
 # binaries. A step that recomputed it could land on a different answer than the step before it:
 # a tag pushed between the two is enough.
-VERSION="${YANTRIK_VERSION:-$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null)}"
+# `set -e` ends the script on a failed command substitution in an assignment, and with the error
+# sent to /dev/null it ended with nothing said and status 0: a publish that reported success and
+# did nothing. That is what a git worktree made on Windows looks like from WSL (its .git file
+# names a C:/ path this git cannot follow). Say so instead.
+if [ -z "${YANTRIK_VERSION:-}" ]; then
+  VERSION="$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>&1)"     || fail "git cannot read $PROJECT_ROOT to name this build: $VERSION. A worktree made by another OS's git cannot be read here; clone it natively, or set YANTRIK_VERSION."
+else
+  VERSION="$YANTRIK_VERSION"
+fi
 [ -n "$VERSION" ] || fail "cannot determine a version — refusing to build an unidentifiable release"
 STAMP="$(date -u +%Y%m%d)"
 GITREV="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
