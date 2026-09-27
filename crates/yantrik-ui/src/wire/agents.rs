@@ -1099,16 +1099,33 @@ fn empty_note(tab: Tab, counts: [usize; 4]) -> String {
 /// (`approval_asked`, never an event or the agent's text), the shell's store says the request is
 /// still waiting, and that request was asked for THIS agent — its token's, not its words'. Anything
 /// else draws a line with no buttons.
+/// The most answers a question card offers as buttons, and the longest a button's label or the
+/// question itself is drawn: the agent chooses them, and must not be able to push the pane apart.
+const QUESTION_OPTIONS: usize = 6;
+const QUESTION_OPTION_CHARS: usize = 40;
+const QUESTION_CHARS: usize = 2000;
+
+/// `s` drawn in at most `n` characters.
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n - 1).chain(['…']).collect() }
+}
+
 /// A question the agent asked, as its card draws it: waiting with its answers, or the line it
 /// leaves once answered or closed.
 fn question_of(q: &crate::agents::model::Question, key: String) -> AgentItemData {
     AgentItemData {
         kind: "question".into(),
         key: key.into(),
-        text: q.prompt.as_str().into(),
+        text: clip(&q.prompt, QUESTION_CHARS).into(),
         request: q.request.as_str().into(),
+        // A clipped label is answered with the agent's full option (`answer_question`); the
+        // label is only how it is drawn.
         options: slint::ModelRc::new(slint::VecModel::from(
-            q.options.iter().map(|o| slint::SharedString::from(o.as_str())).collect::<Vec<_>>(),
+            q.options
+                .iter()
+                .take(QUESTION_OPTIONS)
+                .map(|o| slint::SharedString::from(clip(o, QUESTION_OPTION_CHARS)))
+                .collect::<Vec<_>>(),
         )),
         answer: q.answer.as_str().into(),
         explain: q.closed.as_str().into(),
@@ -1126,6 +1143,16 @@ pub fn answer_question(agent: &str, request: &str, answer: &str) {
         return;
     }
     let id = AgentId(agent.to_string());
+    // A button stands for the agent's own option, whatever its clipped label says.
+    let full = agents::store().read(|s| {
+        s.agent(&id)?.turns.iter().flat_map(|t| t.items.iter()).find_map(|i| match i {
+            Item::Question(q) if q.request == request => {
+                q.options.iter().find(|o| clip(o, QUESTION_OPTION_CHARS) == answer).cloned()
+            }
+            _ => None,
+        })
+    });
+    let answer = full.as_deref().unwrap_or(answer);
     let Some(host) = super::harness::host() else { return };
     match host.answer_for(&id, request, &serde_json::Value::String(answer.to_string())) {
         Ok(()) => {
@@ -2393,6 +2420,14 @@ mod first_prompt_attribution_tests {
         assert_eq!(card.options.row_count(), 2);
         q.answer = "Yes".into();
         assert_eq!(question_of(&q, "t1.0".into()).answer.as_str(), "Yes");
+
+        // The agent picks the answers; it cannot push the pane apart with them.
+        q.options = (0..50).map(|i| format!("option {i} {}", "x".repeat(200))).collect();
+        q.prompt = "?".repeat(10_000);
+        let card = question_of(&q, "t1.0".into());
+        assert_eq!(card.options.row_count(), QUESTION_OPTIONS);
+        assert_eq!(card.options.row_data(0).unwrap().chars().count(), QUESTION_OPTION_CHARS);
+        assert_eq!(card.text.chars().count(), QUESTION_CHARS);
     }
 
     /// Only the person answers a run's question: the card's callback is the one caller of
