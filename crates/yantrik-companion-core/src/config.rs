@@ -3,6 +3,7 @@
 //! Mirrors the Python `CompanionConfig` Pydantic model.
 //! Supports YAML deserialization.
 
+pub use crate::judge_config::JudgeConfig;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -1629,6 +1630,10 @@ pub struct CompanionConfig {
     /// Multi-provider chat integration (Discord, Matrix, IRC, Slack, Signal).
     #[serde(default)]
     pub chat: ChatConfig,
+    /// A System One model (Jev, Kev, ...) that makes small decisions, such as which tool a
+    /// request needs, instead of the chat model. Off unless an endpoint is set.
+    #[serde(default)]
+    pub judge: JudgeConfig,
 }
 
 /// OAuth connector configuration for external services.
@@ -1761,6 +1766,7 @@ impl Default for CompanionConfig {
             enabled_services: default_enabled_services(),
             ck5: CK5Config::default(),
             chat: ChatConfig::default(),
+            judge: JudgeConfig::default(),
         }
     }
 }

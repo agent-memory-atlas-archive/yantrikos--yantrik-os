@@ -54,6 +54,7 @@ pub mod telegram;
 pub mod task_manager;
 pub mod query_planner;
 pub mod interjection;
+pub mod judge_route;
 pub mod recipe;
 pub mod recipe_executor;
 pub mod recipe_templates;
