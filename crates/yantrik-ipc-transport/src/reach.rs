@@ -138,20 +138,55 @@ pub fn read_reach_with(read: impl Fn(&str) -> Option<Reach> + Send + Sync + 'sta
     let _ = READER.set(Box::new(read));
 }
 
-/// The reach `token` carries right now: the installed reader's answer, or the file's. A missing
-/// file is no reach for anyone — no agent with a role has been started. A file that is there and
-/// cannot be read is an error, so a token-carrying call is refused rather than let through unheld.
+/// How long a door waits for the shell to say what a token may reach.
+const REACH_ROUNDTRIP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The reach `token` carries right now: the installed reader's answer (the shell's own), or the
+/// shell's answer over its socket.
+///
+/// Not the file (#189). The file was read here, and a missing file meant no reach for anyone,
+/// so anything running as the person could delete it, or write `{"agents":[]}` over it, and the
+/// next act carrying a held agent's token went through unheld. The shell is where the reach is
+/// kept, as it is for grants, so a door asks it, and only a process that is the shell
+/// (`owner::must_be_the_shell`, from the kernel's peer credentials) is believed. No answer is
+/// an error: the call carrying the token is refused rather than let through unheld. The file is
+/// still written, for readers that only use it as a hint.
 ///
 /// IO. A window reads it on its RPC thread, beside the ceiling and the mode.
 pub fn reach_of(token: &str) -> Result<Option<Reach>, String> {
     if let Some(read) = READER.get() {
         return Ok(read(token));
     }
-    match std::fs::read_to_string(reach_path()) {
-        Ok(text) => reach_from(&text, token),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{REACH_FILE} could not be read: {e}")),
+    ask_the_shell(token)
+}
+
+/// `reach_of` over the shell's socket, asked by the token's digest; the token itself is never
+/// sent to anything but the process it was issued by.
+#[cfg(unix)]
+fn ask_the_shell(token: &str) -> Result<Option<Reach>, String> {
+    let reply = crate::SyncRpcClient::for_service("app-shell")
+        .with_timeout(REACH_ROUNDTRIP)
+        .expecting_peer(crate::owner::must_be_the_shell)
+        .call("app.act", serde_json::json!({ "action": "reach_of", "args": { "token_sha256": token_digest(token) } }))
+        .map_err(|e| format!("the shell did not say what this agent token may reach ({})", e.message))?;
+    reach_in_reply(&reply)
+}
+
+#[cfg(not(unix))]
+fn ask_the_shell(_token: &str) -> Result<Option<Reach>, String> {
+    Err("there is no shell socket to ask on this platform".into())
+}
+
+/// The reach in the shell's answer to `reach_of`: `{"result": {"reach": <Reach> | null}}`. An
+/// answer of any other shape is an error, never "no reach".
+pub fn reach_in_reply(reply: &Value) -> Result<Option<Reach>, String> {
+    let Some(reach) = reply.get("result").and_then(|r| r.get("reach")) else {
+        return Err("the shell's answer about this agent token's reach is not one it gives".into());
+    };
+    if reach.is_null() {
+        return Ok(None);
     }
+    serde_json::from_value(reach.clone()).map(Some).map_err(|e| format!("the shell's answer about this agent token's reach does not read: {e}"))
 }
 
 /// Does one of `surfaces` cover `app_id.action`?
@@ -460,5 +495,34 @@ mod tests {
     #[test]
     fn no_token_is_the_persons_call_and_meets_no_reach() {
         assert!(permits(None, "system-monitor", "kill_process", "dangerous", &json!({})).is_ok());
+    }
+
+    /// #189: a door takes the shell's word for a token's reach, and never "no reach" from an
+    /// answer it cannot read.
+    #[test]
+    fn a_doors_reach_is_the_shells_answer_and_anything_else_is_an_error() {
+        let held = json!({ "accepted": true, "result": { "reach": reviewer() } });
+        assert_eq!(reach_in_reply(&held).unwrap(), Some(reviewer()));
+        let unheld = json!({ "accepted": true, "result": { "reach": null } });
+        assert_eq!(reach_in_reply(&unheld).unwrap(), None, "a token with no role");
+        for bad in [json!({}), json!({ "result": {} }), json!({ "result": { "reach": { "agent": 3 } } })] {
+            assert!(reach_in_reply(&bad).is_err(), "{bad} must not read as no reach");
+        }
+    }
+
+    /// #189: with no shell to ask, a token-carrying call is refused, whatever the file says. The
+    /// file is written by anything running as the person, so it is not believed.
+    #[cfg(unix)]
+    #[test]
+    fn with_no_shell_to_ask_a_token_is_refused_not_let_through() {
+        let shell = crate::server::RpcServer::default_address("app-shell");
+        if std::path::Path::new(&shell).exists() {
+            return; // a real shell is running beside this test; nothing to prove here
+        }
+        let err = reach_of("some-agent-token").unwrap_err();
+        assert!(err.contains("the shell did not say"), "{err}");
+        let refused = permits(Some("some-agent-token"), "notes", "append", "standard", &json!({})).unwrap_err();
+        assert!(refused.starts_with("REACH:") && refused.contains("Nothing was run"), "{refused}");
+        assert!(permits(None, "notes", "append", "standard", &json!({})).is_ok(), "no token: the person, as before");
     }
 }

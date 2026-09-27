@@ -1124,6 +1124,10 @@ mod tests {
         let held = reaches::lookup(&token).expect("the shell's own dispatch holds it");
         assert_eq!(held.agent, handed.agent.0);
         assert_eq!(reaches::read_as_a_door(&token).unwrap(), Some(held.clone()), "and so does every other door");
+        // What every other door is told when it asks the shell (#189), by the token's digest.
+        let digest = yantrik_ipc_transport::reach::token_digest(&token);
+        assert_eq!(reaches::lookup_digest(&digest), Some(held.clone()), "the shell's answer to a door");
+        assert_eq!(reaches::lookup_digest(&digest.to_uppercase()), Some(held.clone()), "whatever the hex case");
         assert!(!std::fs::read_to_string(reaches::path()).unwrap().contains(&token), "the file keeps a digest, never the token");
 
         use yantrik_ipc_transport::reach::within;
@@ -1154,6 +1158,7 @@ mod tests {
         stop_agent(&host, &Caller::NoAgent, &handed.agent).unwrap();
         assert_eq!(reaches::lookup(&token), None, "stopped, it is let go");
         assert_eq!(reaches::read_as_a_door(&token).unwrap(), None);
+        assert_eq!(reaches::lookup_digest(&digest), None, "and doors are told it holds nothing now");
     }
 
     /// Down its list to the first mind attached that can give it a conversation of its own; a
