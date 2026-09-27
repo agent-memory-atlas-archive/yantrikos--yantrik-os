@@ -142,7 +142,7 @@ impl Flight {
                     Ok(())
                 }
             },
-            Event::Thinking { .. } | Event::Status { .. } | Event::Usage { .. } => Ok(()),
+            Event::Thinking { .. } | Event::Status { .. } | Event::Usage { .. } | Event::Request { .. } => Ok(()),
         }
     }
 
@@ -257,6 +257,9 @@ struct Attached {
     cancelled: Vec<u64>,
     /// Conversations the desktop ended, to tell the harness on its next poll.
     ended: Vec<String>,
+    /// Answers the person gave to questions its runs asked, to hand over on its next poll:
+    /// `{turn_id, request_id, answer}`, each already consumed in the run store, so exactly once.
+    answers: Vec<serde_json::Value>,
 }
 
 impl Attached {
@@ -499,6 +502,26 @@ impl Host {
         for &id in ids {
             self.record("end", id, |s| s.transition(id, state));
         }
+    }
+
+    /// The person's answer to a question run `run_id` asked. It is consumed in the run store
+    /// first, so it counts exactly once, and only then queued for the one harness answering that
+    /// run, which gets it on its next poll. A connection that was replaced holds no runs, so it
+    /// can never receive it. Errors say why nothing was delivered.
+    pub fn answer(&self, run_id: u64, request_id: &str, answer: &serde_json::Value) -> Result<(), String> {
+        let store = self.runs.as_ref().ok_or("this desktop keeps no runs")?;
+        let mut state = self.lock();
+        self.reap(&mut state);
+        let Some(harness) = state.attached.values_mut().find(|h| h.in_flight.contains_key(&run_id)) else {
+            return Err(match store.run(run_id) {
+                Ok(Some(r)) if r.state.is_final() => format!("run {run_id} has ended ({})", r.state.as_str()),
+                Ok(Some(_)) => format!("no harness is answering run {run_id} now"),
+                _ => format!("run {run_id} does not exist"),
+            });
+        };
+        store.answer(run_id, request_id, answer).map_err(|e| e.to_string())?;
+        harness.answers.push(serde_json::json!({ "turn_id": run_id, "request_id": request_id, "answer": answer }));
+        Ok(())
     }
 
     /// Cancel a run: the harness is told on its next poll, the person's listener is settled, and
@@ -1014,6 +1037,7 @@ impl Host {
                 finished: VecDeque::new(),
                 cancelled: Vec::new(),
                 ended: Vec::new(),
+                answers: Vec::new(),
             },
         );
 
@@ -1200,6 +1224,9 @@ impl Host {
         if !harness.ended.is_empty() {
             reply["ended"] = serde_json::json!(std::mem::take(&mut harness.ended));
         }
+        if !harness.answers.is_empty() {
+            reply["answers"] = serde_json::json!(std::mem::take(&mut harness.answers));
+        }
         Ok(reply)
     }
 
@@ -1297,7 +1324,21 @@ impl Host {
             tracing::warn!(harness = %who, turn = turn_id, why = %why, "event out of order; refused");
             return Ok(refused(why));
         }
-        self.record("event", turn_id, |s| s.append(turn_id, "event", raw));
+        if let Event::Request { request_id, prompt, options } = &event {
+            // A question is only asked if it can be answered exactly once, which needs the store.
+            let Some(store) = &self.runs else {
+                return Ok(refused("this desktop keeps no runs, so it cannot take a question".to_string()));
+            };
+            if request_id.trim().is_empty() {
+                counts.malformed += 1;
+                return Ok(refused("a `request` needs a `request_id`".to_string()));
+            }
+            if let Err(e) = store.ask(turn_id, request_id, &serde_json::json!({ "prompt": prompt, "options": options })) {
+                return Ok(refused(e.to_string()));
+            }
+        } else {
+            self.record("event", turn_id, |s| s.append(turn_id, "event", raw));
+        }
         let tx = flight.tx.as_ref().expect("checked above");
         if tx.send(Chunk::Event(event)).is_err() {
             flight.abandon(None);
@@ -2734,5 +2775,87 @@ mod tests {
         complete(&host, &session, run);
         assert_eq!(crate::collect(answer).unwrap(), "hi");
         assert!(host.run_store().is_none());
+    }
+
+    // ── Questions and answers (#25): exactly once, to the run that asked ─────────────────────
+
+    fn ask(host: &Host, session: &str, run: u64, request_id: &str) -> serde_json::Value {
+        event(host, session, run, json!({ "kind": "request", "request_id": request_id, "prompt": "Delete 3 files?", "options": ["Allow", "Deny"] }))
+            .unwrap()
+    }
+
+    #[test]
+    fn answering_the_first_question_twice_lands_once_and_the_other_run_still_waits() {
+        let (host, store) = host_with_runs();
+        let (s1, _, r1, _a1) = turn_in_flight(&host);
+        let (s2, _, r2, _a2) = {
+            let agent = host.start_agent("pi").unwrap();
+            let answer = host.send_to(&agent, Turn::new("second task")).unwrap();
+            let run = poll(&host, &s1)["turn_id"].as_u64().unwrap();
+            (s1.clone(), agent, run, answer)
+        };
+        assert_eq!(ask(&host, &s1, r1, "a"), json!({}));
+        assert_eq!(ask(&host, &s2, r2, "a"), json!({}), "request ids are per run");
+        assert_eq!(store.run(r1).unwrap().unwrap().state, RunState::WaitingOnPerson);
+
+        host.answer(r1, "a", &json!("Allow")).unwrap();
+        let again = host.answer(r1, "a", &json!("Allow")).unwrap_err();
+        assert!(again.contains("already answered"), "{again}");
+
+        let delivered = poll(&host, &s1);
+        assert_eq!(delivered["answers"], json!([{ "turn_id": r1, "request_id": "a", "answer": "Allow" }]), "once, to the run that asked");
+        assert!(poll(&host, &s1).get("answers").is_none(), "and never again");
+        assert_eq!(store.run(r1).unwrap().unwrap().state, RunState::Running);
+        assert_eq!(store.run(r2).unwrap().unwrap().state, RunState::WaitingOnPerson, "the other run still waits");
+    }
+
+    #[test]
+    fn a_question_never_asked_a_repeated_one_and_one_without_an_id_are_refused() {
+        let (host, _) = host_with_runs();
+        let (session, _, run, _answer) = turn_in_flight(&host);
+        assert!(host.answer(run, "never", &json!(1)).unwrap_err().contains("never asked"));
+        ask(&host, &session, run, "a");
+        assert!(ask(&host, &session, run, "a")["refused"].as_str().unwrap().contains("already asked"));
+        let blank = event(&host, &session, run, json!({ "kind": "request", "request_id": " ", "prompt": "?" })).unwrap();
+        assert!(blank["refused"].as_str().unwrap().contains("request_id"));
+    }
+
+    #[test]
+    fn an_answer_after_the_run_ended_or_its_harness_left_is_refused_with_why() {
+        let (host, _) = host_with_runs();
+        let (session, _, run, _answer) = turn_in_flight(&host);
+        ask(&host, &session, run, "a");
+        complete(&host, &session, run);
+        assert!(host.answer(run, "a", &json!("Allow")).unwrap_err().contains("ended (done)"));
+
+        let (session, _, run, _answer) = turn_in_flight(&host);
+        ask(&host, &session, run, "b");
+        host.handle(protocol::DETACH, &json!({ "session": session })).unwrap();
+        assert!(host.answer(run, "b", &json!("Allow")).unwrap_err().contains("ended (orphaned)"));
+        assert!(host.answer(777, "b", &json!("Allow")).unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn a_connection_that_was_replaced_never_receives_the_answer() {
+        let (host, _) = host_with_runs();
+        let (old, agent, run, _answer) = turn_in_flight(&host);
+        ask(&host, &old, run, "a");
+        let token = host.lock().attached["pi"].agents[agent.conversation()].token.clone();
+        let reply = host
+            .handle(protocol::ATTACH, &json!({ "id": "pi", "name": "pi", "conversations": true, "resume": [
+                { "conversation": agent.conversation(), "agent_token": token, "turn_id": run } ]}))
+            .unwrap();
+        let new = reply["session"].as_str().unwrap().to_string();
+        host.answer(run, "a", &json!("Allow")).unwrap();
+        assert!(host.handle(protocol::POLL, &json!({ "session": old })).is_err(), "the old connection is gone");
+        assert_eq!(poll(&host, &new)["answers"][0]["request_id"], "a", "the one answering the run gets it");
+    }
+
+    #[test]
+    fn without_a_store_a_question_is_refused_rather_than_left_unanswerable() {
+        let host = host();
+        let (session, _, run, _answer) = turn_in_flight(&host);
+        assert!(ask(&host, &session, run, "a")["refused"].as_str().unwrap().contains("keeps no runs"));
+        assert!(host.answer(run, "a", &json!(1)).is_err());
     }
 }

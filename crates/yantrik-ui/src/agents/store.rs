@@ -972,6 +972,7 @@ fn what_event(event: &Event) -> String {
         Event::Thinking { .. } => "some thinking".to_string(),
         Event::Status { text } => format!("a status line ({})", clip_text(text, 40)),
         Event::Usage { .. } => "a usage report".to_string(),
+        Event::Request { prompt, .. } => format!("a question ({})", clip_text(prompt, 40)),
     }
 }
 
@@ -1055,6 +1056,12 @@ fn apply(agent: &mut Agent, event: &Event, provenance: Provenance, now: u64) -> 
             append(&mut turn.items, cap(delta), true);
         }
         Event::Status { text } => agent.status = cap(text).to_string(),
+        // The agent asked the person something (#25): it waits, and says what it asked. The
+        // question itself is kept by the host's run store, which alone takes the answer.
+        Event::Request { prompt, .. } => {
+            agent.status = cap(&format!("asks: {prompt}")).to_string();
+            set_state(agent, State::WaitingForYou, now);
+        }
         Event::Usage { model, input_tokens, output_tokens, cost_usd } => {
             let usage = &mut agent.usage;
             usage.reported = true;
@@ -1507,6 +1514,19 @@ mod tests {
         s.open_turn(&pi, "and the videos");
         assert_eq!(s.agent(&pi).unwrap().meta.title, "tidy the photos folder, dupes into Trash");
         assert_eq!(s.agent(&pi).unwrap().turns.len(), 2);
+    }
+
+    #[test]
+    fn a_question_from_the_agent_makes_it_wait_and_says_what_it_asked() {
+        let (mut s, _) = store();
+        let pi = id("pi:main");
+        s.open_turn(&pi, "clean up Downloads");
+        let ask = Event::Request { request_id: "r1".into(), prompt: "Delete 3 old installers?".into(), options: vec!["Allow".into(), "Deny".into()] };
+        s.event(&pi, &ask, Provenance::Reported);
+        let agent = s.agent(&pi).unwrap();
+        assert_eq!(agent.state, State::WaitingForYou);
+        assert_eq!(agent.status, "asks: Delete 3 old installers?");
+        assert!(agent.pending_approvals.is_empty(), "a question is not an OS approval and never goes to the gate");
     }
 
     #[test]
