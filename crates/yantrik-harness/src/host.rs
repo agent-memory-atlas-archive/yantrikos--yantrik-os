@@ -60,6 +60,9 @@ pub const INTERRUPTED: &str = "interrupted";
 /// What the person who asked is told when an agent is stopped mid-turn.
 pub const STOPPED: &str = "stopped before it finished";
 
+/// Why a turn ended when the person interrupted it to say something (#234).
+pub const INTERRUPTED_TO_TELL: &str = "interrupted: the person has something to tell it";
+
 /// How many finished turns each harness remembers, so an event that arrives after its turn was
 /// closed is counted as late rather than mistaken for one it was never given.
 const REMEMBERED_TURNS: usize = 256;
@@ -914,6 +917,29 @@ impl Host {
     /// poll to stop working on it and, for a harness with conversations, to let the conversation
     /// go. The agent is no longer live, its token no longer names it, and its place under the
     /// cap is free. Returns whether there was anything to stop.
+    /// Interrupt what `agent` is doing, without ending it (#234): the turn in flight in its
+    /// conversation is cancelled (the harness hears on its next poll, the listener is settled, the
+    /// run ends `cancelled`), but the agent, its conversation and its token stay, so the next turn
+    /// (the person's word to a stuck task) goes to the same mind with its context. Unlike
+    /// [`Host::stop_agent`], nothing is ended. `false` when it had nothing in flight.
+    pub fn interrupt(&self, agent: &AgentId) -> bool {
+        let mut state = self.lock();
+        self.reap(&mut state);
+        let Some(harness) = state.attached.get_mut(agent.harness()) else { return false };
+        let conversation = agent.conversation();
+        let mut cancelled = Vec::new();
+        for (turn_id, flight) in harness.in_flight.iter_mut() {
+            if flight.conversation == conversation && flight.tx.is_some() {
+                flight.abandon(Some(INTERRUPTED_TO_TELL.to_string()));
+                harness.cancelled.push(*turn_id);
+                cancelled.push(*turn_id);
+            }
+        }
+        drop(state);
+        self.end_runs(&cancelled, RunState::Cancelled);
+        !cancelled.is_empty()
+    }
+
     pub fn stop_agent(&self, agent: &AgentId) -> bool {
         let mut state = self.lock();
         self.reap(&mut state);
@@ -2899,5 +2925,24 @@ mod tests {
         let stranger = AgentId::new("pi", "c-someone-else");
         ask(&host, &session, run, "r2");
         assert!(host.answer_for(&stranger, "r2", &json!("Yes")).is_err(), "only the agent that asked");
+    }
+
+    #[test]
+    fn interrupting_an_agent_cancels_its_turn_and_keeps_the_agent_its_token_and_its_run_log() {
+        let (host, store) = host_with_runs();
+        let (session, agent, run, answer) = turn_in_flight(&host);
+        let token = host.lock().attached["pi"].agents[agent.conversation()].token.clone();
+        assert!(host.interrupt(&agent));
+        assert!(crate::collect(answer).unwrap_err().contains(INTERRUPTED_TO_TELL));
+        assert_eq!(poll(&host, &session)["cancelled"], json!([run]), "the harness is told to stop that turn");
+        assert_eq!(store.run(run).unwrap().unwrap().state, RunState::Cancelled);
+        assert!(poll(&host, &session).get("ended").is_none(), "the conversation is not ended");
+        assert_eq!(host.lock().attached["pi"].agents[agent.conversation()].token, token, "the same agent, the same token");
+        // The person's word is the next turn, to the same conversation.
+        let _next = host.send_to(&agent, Turn::new("the file does not exist yet: create it first")).unwrap();
+        complete(&host, &session, run);
+        let next = poll(&host, &session);
+        assert_eq!(next["conversation"], agent.conversation());
+        assert!(!host.interrupt(&AgentId::new("pi", "c-nobody")), "nothing in flight there");
     }
 }

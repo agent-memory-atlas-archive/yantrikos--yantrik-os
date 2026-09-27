@@ -207,7 +207,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
         let (weak, state) = (weak.clone(), state.clone());
         move |agent, text| {
             let Some(ui) = weak.upgrade() else { return };
-            notice(&ui.global::<AgentsState>(), launch::send(&AgentId(agent.to_string()), &text));
+            notice(&ui.global::<AgentsState>(), launch::tell(&AgentId(agent.to_string()), &text));
             refresh(&ui, &state, true);
         }
     });
@@ -854,6 +854,13 @@ fn header_of(a: &Agent, seen: &Seen) -> AgentHeaderData {
     let reachable = launch::reachable(&a.meta.id, &seen.live(), &seen.attached());
     let turn_open = a.open_turn().is_some();
     let gone = a.state == State::HarnessGone;
+    // A stuck task can be told something (#234): the box opens, and says what sending does.
+    let stuck = crate::agents::progress::of(a, now()).and_then(|p| p.stuck);
+    let tell_hint = stuck
+        .as_deref()
+        .filter(|_| reachable && !gone)
+        .map(|why| format!("Stuck: {why}. Tell {} what to do differently (this interrupts the stuck step)…", a.meta.mind))
+        .unwrap_or_default();
     let send_hint = if gone {
         "its harness is gone".to_string()
     } else if !attached {
@@ -879,8 +886,9 @@ fn header_of(a: &Agent, seen: &Seen) -> AgentHeaderData {
         since: since(a).into(),
         status: a.status.as_str().into(),
         note: note.into(),
-        can_send: reachable && !turn_open && !gone,
+        can_send: reachable && !gone && (!turn_open || !tell_hint.is_empty()),
         send_hint: send_hint.into(),
+        tell_hint: tell_hint.into(),
         can_stop: attached && !builtin && a.busy(),
     }
 }
@@ -1489,7 +1497,7 @@ fn wire_window(window: &AgentWindow, state: &Shared, agent: &AgentId, shell: &sl
         let weak = weak.clone();
         move |agent, text| {
             if let Some(window) = weak.upgrade() {
-                notice(&window.global::<AgentsState>(), launch::send(&AgentId(agent.to_string()), &text));
+                notice(&window.global::<AgentsState>(), launch::tell(&AgentId(agent.to_string()), &text));
             }
         }
     });
@@ -1607,13 +1615,25 @@ impl Notice {
                 format!("{} Open it to see where, give it a hint, or stop it.", why.plain()),
             ),
         };
-        Notification::new("Yantrik", title)
+        let n = Notification::new("Yantrik", title)
             .body(body)
             // News, not a question with a deadline: Do Not Disturb holds it, like any other.
             .urgency(Level::Normal)
             // The shell presses `show_agent` on its own surface for this, as Download Manager's
             // "Open folder" is pressed on its.
-            .action_with("show_agent", "Open", serde_json::json!({ "agent": self.agent().0 }))
+            .action_with("show_agent", self.open_label(), serde_json::json!({ "agent": self.agent().0 }));
+        // A stuck task can also be stopped from where the person is (#234). The press is the
+        // person's, through the shell's own `stop_agent`, graded as it always is.
+        if matches!(self, Notice::Stuck { .. }) {
+            n.action_with("stop_agent", "Stop", serde_json::json!({ "agent": self.agent().0 }))
+        } else {
+            n
+        }
+    }
+
+    /// "Tell it" for a stuck task, whose pane opens ready for a hint; "Open" for the rest.
+    fn open_label(&self) -> &'static str {
+        if matches!(self, Notice::Stuck { .. }) { "Tell it" } else { "Open" }
     }
 }
 
@@ -2059,6 +2079,14 @@ mod tests {
         assert_eq!(title, "build a small game");
         let words = told[0].notification();
         assert!(format!("{words:?}").contains("Nothing has been heard from it for 2 min"), "{words:?}");
+        // What the person can do about it from the notification: tell it something (its pane opens
+        // ready for a hint), or stop it (#234).
+        let actions = format!("{words:?}");
+        assert!(actions.contains("show_agent") && actions.contains("Tell it"), "{actions}");
+        assert!(actions.contains("stop_agent") && actions.contains("Stop"), "{actions}");
+        let finished = Notice::Finished { agent: hermes.clone(), mind: "hermes".into(), title: "x".into(), ok: true };
+        let plain = format!("{:?}", finished.notification());
+        assert!(plain.contains("Open") && !plain.contains("stop_agent"), "only a stuck task offers Stop: {plain}");
         assert!(watch.changes(&s, &[], later + 60).is_empty(), "once a turn, not once a tick");
 
         // The next task is news of its own.

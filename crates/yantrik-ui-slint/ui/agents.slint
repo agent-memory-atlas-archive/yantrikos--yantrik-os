@@ -96,6 +96,7 @@ export struct AgentHeaderData {
     note: string,          // "pi holds one conversation at a time — the one the Lens talks to."
     can-send: bool,
     send-hint: string,     // why the prompt box is closed, when it is
+    tell-hint: string,     // a stuck task: why, and that sending interrupts the stuck step (#234)
     can-stop: bool,
 }
 
@@ -682,7 +683,8 @@ export component AgentSession inherits Rectangle {
             composer := YInput {
                 horizontal-stretch: 1;
                 disabled: !AgentsState.header.can-send;
-                placeholder: AgentsState.header.can-send ? "type to " + AgentsState.header.mind + "…" : AgentsState.header.send-hint;
+                placeholder: AgentsState.header.tell-hint != "" ? AgentsState.header.tell-hint
+                    : AgentsState.header.can-send ? "type to " + AgentsState.header.mind + "…" : AgentsState.header.send-hint;
                 accepted(text) => {
                     AgentsState.send(AgentsState.header.id, text);
                     self.value = "";
