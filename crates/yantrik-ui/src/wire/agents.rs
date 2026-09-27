@@ -752,7 +752,7 @@ fn row_of(a: &Agent) -> AgentRowData {
     AgentRowData {
         id: a.meta.id.0.as_str().into(),
         mind: a.meta.mind.as_str().into(),
-        title: latest_request(&a.turns, &a.meta.title).into(),
+        title: one_line(latest_request(&a.turns, &a.meta.title), TITLE_CHARS).into(),
         state: a.state.key().into(),
         label: a.state.label().into(),
         since: since(a).into(),
@@ -810,6 +810,10 @@ fn row_progress(a: &Agent, now: u64) -> (String, String) {
 /// mind is one long-lived agent, so every request a person made there sat under whatever they
 /// asked first, hours before: on VM 520, "Release check: reply with exactly one word, READY."
 /// over a town model, a daily briefing and a game (#234, #246).
+/// The longest a row's or a header's title is kept: they are one line and elide at the edge, so
+/// this only bounds the work of a prompt pasted in whole.
+const TITLE_CHARS: usize = 200;
+
 fn latest_request<'a>(turns: &'a [Turn], first: &'a str) -> &'a str {
     turns.iter().rev().map(|t| t.prompt.trim()).find(|p| !p.is_empty()).unwrap_or(first)
 }
@@ -869,7 +873,7 @@ fn header_of(a: &Agent, seen: &Seen) -> AgentHeaderData {
     AgentHeaderData {
         id: a.meta.id.0.as_str().into(),
         mind: a.meta.mind.as_str().into(),
-        title: latest_request(&a.turns, &a.meta.title).into(),
+        title: one_line(latest_request(&a.turns, &a.meta.title), TITLE_CHARS).into(),
         state: a.state.key().into(),
         label: a.state.label().into(),
         since: since(a).into(),
@@ -2082,6 +2086,24 @@ mod tests {
         // The screen's own route for the button: the shell publishes `show_agent`.
         let actions = read("src/control_agents.rs");
         assert!(actions.contains("\"show_agent\""));
+    }
+
+    /// #368: a role agent's first prompt is its whole brief, many lines long. A row and the pane's
+    /// header are one line each, and an embedded newline breaks a Text however it elides, so the
+    /// brief drew over the rows below it.
+    #[test]
+    fn a_multi_line_request_is_one_line_in_its_row_and_its_header() {
+        let mut s = Store::new();
+        let id = AgentId("deepseek:c-brief1".into());
+        s.open_turn(&id, "You are the Researcher on this desktop.\n\nFind out what is true\nand say how you know.");
+        let a = s.agent(&id).unwrap();
+        let row = row_of(a);
+        assert_eq!(row.title.as_str(), "You are the Researcher on this desktop. Find out what is true and say how you know.");
+        let seen = Seen { minds: Vec::new(), agents: Vec::new(), approvals: Vec::new() };
+        assert!(!header_of(a, &seen).title.contains('\n'));
+        s.open_turn(&id, &format!("{}\nend", "x".repeat(500)));
+        let long = row_of(s.agent(&id).unwrap());
+        assert!(!long.title.contains('\n') && long.title.chars().count() <= TITLE_CHARS);
     }
 
     /// Agents catalog: a role's agent is named by its role in the list, and its details say what
