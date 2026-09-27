@@ -1185,6 +1185,21 @@ with tempfile.TemporaryDirectory() as d:
     check("and the fallback is stated rather than assumed silently",
           "could not read the desktop's mind-mode" in text and "fell back to" in text, text)
 
+    # 16b. A grade that could not be read, for a reason that says nothing ("yos:" and no more):
+    # the answer names what a mind can do, not an empty colon (yantrik-mind, 2026-09-27).
+    module, state = case(tmp, "bare-why")
+    module.action_detail = lambda app, action: (None, None)
+    for said in ("yos:", "yos: ", "", "  yos:  .\n"):
+        module.ungraded_because = lambda app, action, why=None, said=said: said
+        refusal = module.guard_act({"app": "calendar", "action": "delete_event"})[0]
+        check("a bare reason (%r) reads as the app not answering" % said,
+              refusal.endswith("os_describe calendar would not answer.") and "yos:" not in refusal,
+              refusal)
+    module.ungraded_because = lambda app, action, why=None: "yos: calendar timed out after 5s"
+    refusal = module.guard_act({"app": "calendar", "action": "delete_event"})[0]
+    check("a reason with words in it is kept as it was", refusal.endswith("yos: calendar timed out after 5s"),
+          refusal)
+
     module, state = case(tmp, "nomode-standard", no_mode=True)
     text, is_error = act(module, "calendar", "add_event", {"title": "X", "date": "2026-10-02"})
     check("an unreadable mode does not block ordinary work",

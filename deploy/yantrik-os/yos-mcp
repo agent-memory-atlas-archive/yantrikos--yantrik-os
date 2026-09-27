@@ -1864,6 +1864,10 @@ def guard_act(args):
     level, purpose = action_detail(app, action)
     if level is None:
         why = ungraded_because(app, action)
+        # A `why` with nothing in it past a "yos:" prefix says nothing a mind can act on, and it
+        # reached one as "…could not be read: yos:" (yantrik-mind, 2026-09-27).
+        if not re.sub(r"^\s*yos:\s*", "", why or "").strip(" .:-\n\t"):
+            why = ""
         if "is not open" in why:
             return ("%s is not open, so %s was not run — nothing is wrong with the request. "
                     "Open it with os_act on shell: open_app name=%s (os_apps lists the exact "
@@ -2146,7 +2150,12 @@ def run_tool(tool, args, present=None):
     sub-agent that was refused three URLs lost the desktop entirely and spent its remaining
     forty-seven turns being told to wait. Those answers go back unflagged, and say REFUSED in
     their first word instead, where a model cannot read them as success. Failures — a timeout,
-    a non-zero exit, an app that is not running, a missing argument — stay flagged.
+    a non-zero exit, an app that did not answer, a missing argument — stay flagged.
+
+    An app that is simply not open is neither: nothing failed and nobody said no. The request
+    was fine, and the answer says to open the app and call again. It goes back unflagged, like a
+    policy answer, so a model that trips over a closed app three times does not take this
+    server away from itself.
     """
     # Required arguments, said plainly. A call without one used to fail inside argv as a bare
     # KeyError — "could not run os_describe: 'app'" — which tells a model nothing it can act on.
