@@ -1316,6 +1316,8 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
     let own_delete_ui = ui_for.clone();
     let update_ui = ui_for.clone();
     let own_update_ui = ui_for.clone();
+    let date_state = state.clone();
+    let date_ui = ui_for.clone();
     let view_ui = ui_for;
 
     App::new("calendar")
@@ -1336,6 +1338,31 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                     .map(|e| e.title.to_string())
                     .collect();
                 Ok(serde_json::json!({ "day": day, "events": titles }))
+            },
+        )
+        .action(
+            // Any day, in any month, in one call. The window could be moved a month at a time
+            // (`show_month`) or back to today, and `select_day` picks a day of the month shown, so
+            // "what is on 25 October" took counting months first (yantrik-mind, 2026-09-27).
+            Action::new("show_date", "Show what is on one day, in whatever month it is")
+                .arg(Param::text("date").describe("YYYY-MM-DD")),
+            move |args| {
+                let ui = date_ui()?;
+                let date = args["date"].as_str().unwrap_or_default().trim().to_string();
+                if ymd(&date).is_none() {
+                    return Err(format!("`date` should look like 2026-10-25, not `{date}`"));
+                }
+                show_date(&ui, &date_state, &date);
+                let model = ui.get_events_today();
+                let titles: Vec<String> = (0..model.row_count())
+                    .filter_map(|i| model.row_data(i))
+                    .map(|e| e.title.to_string())
+                    .collect();
+                Ok(serde_json::json!({
+                    "showing": ui.get_month_title().to_string(),
+                    "date": date,
+                    "events": titles,
+                }))
             },
         )
         .action(
