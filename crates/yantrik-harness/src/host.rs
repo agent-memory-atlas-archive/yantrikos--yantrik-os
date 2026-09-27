@@ -51,6 +51,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::event::{AgentId, Event};
 use crate::protocol::{self, Assignment, Attach};
+use crate::run_store::{RunError, RunState, RunStore};
 use crate::{Answer, Capabilities, Chunk, Harness, Health, Turn};
 
 /// The summary a call gets when its turn ended before it did.
@@ -290,13 +291,17 @@ impl Attached {
 
     /// Everything this harness owed, failed, so nobody is left waiting on an answer that is not
     /// coming: open calls interrupted, the turn in flight failed, the turns behind it failed.
-    fn fail_everything(self, in_flight: &str, queued: &str) {
-        for (_, mut flight) in self.in_flight {
+    /// Returns the turns that were in flight, whose runs are orphaned by the caller.
+    fn fail_everything(self, in_flight: &str, queued: &str) -> Vec<u64> {
+        let mut ids = Vec::with_capacity(self.in_flight.len());
+        for (id, mut flight) in self.in_flight {
             flight.settle(Some(in_flight.to_string()));
+            ids.push(id);
         }
         for waiting in self.queued {
             let _ = waiting.tx.send(Chunk::Failed(queued.to_string()));
         }
+        ids
     }
 }
 
@@ -425,6 +430,9 @@ pub struct Host {
     /// Asks whether the process that attached still runs — the kernel's `pid_alive` by default,
     /// unless a test injected its own with [`Host::with_liveness`].
     liveness: Arc<dyn Fn(u32) -> bool + Send + Sync>,
+    /// Where each turn is kept as a run (#25), when the shell gave the host somewhere to keep
+    /// them: see [`Host::with_runs`].
+    runs: Option<Arc<RunStore>>,
 }
 
 impl Host {
@@ -445,7 +453,72 @@ impl Host {
                 resumed: Vec::new(),
             })),
             liveness: Arc::new(pid_alive),
+            runs: None,
         }
+    }
+
+    /// The same host, keeping every turn a harness takes as a run in `store` (#25): its state and
+    /// a sequenced log of what it streamed, each entry stored before the harness is answered.
+    ///
+    /// Whatever the previous host left unfinished is orphaned here, before anything attaches —
+    /// readable, never resumed — and turn ids continue from the store's, so a run id never names
+    /// two runs across restarts.
+    pub fn with_runs(self, store: Arc<RunStore>) -> Host {
+        match store.orphan_unfinished() {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(runs = n, "runs left unfinished by the last start are orphaned"),
+            Err(e) => tracing::error!(error = %e, "could not orphan unfinished runs"),
+        }
+        match store.next_run_id() {
+            Ok(next) => {
+                let mut st = self.lock();
+                st.next_turn = st.next_turn.max(next);
+            }
+            Err(e) => tracing::error!(error = %e, "could not read the next run id; turn ids may repeat old runs"),
+        }
+        Host { runs: Some(store), ..self }
+    }
+
+    /// The run store, for reading runs and their logs, when there is one.
+    pub fn run_store(&self) -> Option<Arc<RunStore>> {
+        self.runs.clone()
+    }
+
+    /// Write to the run store, if there is one. A failed write is logged and the turn goes on:
+    /// losing its record is better than losing the turn.
+    fn record<T>(&self, what: &str, run_id: u64, f: impl FnOnce(&RunStore) -> Result<T, RunError>) {
+        if let Some(store) = &self.runs {
+            if let Err(e) = f(store) {
+                tracing::error!(run = run_id, what, error = %e, "run not recorded");
+            }
+        }
+    }
+
+    /// End these runs in `state`: the harness that held them is gone, or stopped them.
+    fn end_runs(&self, ids: &[u64], state: RunState) {
+        for &id in ids {
+            self.record("end", id, |s| s.transition(id, state));
+        }
+    }
+
+    /// Cancel a run: the harness is told on its next poll, the person's listener is settled, and
+    /// the run ends `cancelled`. `false` when no harness is answering it now.
+    pub fn cancel_run(&self, run_id: u64) -> bool {
+        let mut state = self.lock();
+        self.reap(&mut state);
+        let found = state.attached.values_mut().find_map(|h| {
+            let flight = h.in_flight.get_mut(&run_id)?;
+            if flight.tx.is_some() {
+                flight.abandon(Some(STOPPED.to_string()));
+            }
+            h.cancelled.push(run_id);
+            Some(())
+        });
+        drop(state);
+        if found.is_some() {
+            self.end_runs(&[run_id], RunState::Cancelled);
+        }
+        found.is_some()
     }
 
     /// The same host, asking `probe` whether a process that attached still runs instead of
@@ -477,10 +550,11 @@ impl Host {
             if let Some(lost) = state.attached.remove(&id) {
                 // Anyone waiting on an answer from it is told, rather than left on a channel that
                 // will never produce anything.
-                lost.fail_everything(
+                let orphaned = lost.fail_everything(
                     &format!("{id} stopped responding"),
                     &format!("{id} left before it answered"),
                 );
+                self.end_runs(&orphaned, RunState::Orphaned);
             }
         }
     }
@@ -806,16 +880,19 @@ impl Host {
             let _ = waiting.tx.send(Chunk::Failed(STOPPED.to_string()));
             stopped = true;
         }
+        let mut cancelled = Vec::new();
         for (turn_id, flight) in harness.in_flight.iter_mut() {
             if flight.conversation == conversation && flight.tx.is_some() {
                 flight.abandon(Some(STOPPED.to_string()));
                 harness.cancelled.push(*turn_id);
+                cancelled.push(*turn_id);
                 stopped = true;
             }
         }
         if existed && harness.announced.conversations {
             harness.ended.push(conversation.to_string());
         }
+        self.end_runs(&cancelled, RunState::Cancelled);
         stopped
     }
 
@@ -916,10 +993,11 @@ impl Host {
                     kept.insert(turn, flight);
                 }
             }
-            previous.fail_everything(
+            let orphaned = previous.fail_everything(
                 &format!("{} restarted mid-answer", announced.id),
                 &format!("{} restarted before it answered", announced.id),
             );
+            self.end_runs(&orphaned, RunState::Orphaned);
         }
 
         let id = announced.id.clone();
@@ -939,7 +1017,7 @@ impl Host {
             },
         );
 
-        let (resumed, refused) = Self::resume(&mut state, &id, kept);
+        let (resumed, refused) = self.resume(&mut state, &id, kept);
 
         // The first mind to attach on a machine with no built-in becomes the one answering,
         // rather than leaving a desktop that has a harness and is not using it.
@@ -960,6 +1038,7 @@ impl Host {
     /// new id, and its answer waits for [`Host::take_resumed`]. Returns the turns as
     /// `{"was", "turn_id"}` and what was not taken back as `{"conversation", "why"}`.
     fn resume(
+        &self,
         state: &mut State,
         harness_id: &str,
         mut kept: HashMap<u64, Flight>,
@@ -1015,13 +1094,21 @@ impl Host {
             };
             agent.turns = 1;
             harness.agents.insert(r.conversation.clone(), agent);
+            let session = harness.session.clone();
             if let Some(flight) = kept.remove(&was) {
                 harness.in_flight.insert(was, flight);
+                // The same run, carried on by the connection that came back.
+                self.record("owner", was, |s| s.set_owner(was, &session));
                 resumed.push(serde_json::json!({ "was": was, "turn_id": was }));
                 continue;
             }
             let (tx, rx) = mpsc::channel();
             harness.in_flight.insert(next, Flight::new(r.conversation.clone(), tx));
+            // A turn this host never knew (the shell restarted): a new run, saying what it continues.
+            self.record("start", next, |s| {
+                s.start(next, harness_id, &r.conversation, &session)?;
+                s.append(next, "resumed", &serde_json::json!({ "was": was, "prompt": r.prompt }))
+            });
             state.next_turn += 1;
             state.resumed.push(Resumed {
                 agent: AgentId::new(harness_id, &r.conversation),
@@ -1031,8 +1118,9 @@ impl Host {
             resumed.push(serde_json::json!({ "was": was, "turn_id": next }));
         }
         // What was kept for a conversation that was then refused has nobody left to answer it.
-        for (_, mut flight) in kept {
+        for (id, mut flight) in kept {
             flight.settle(Some("the harness came back without it".to_string()));
+            self.end_runs(&[id], RunState::Orphaned);
         }
         (resumed, refused)
     }
@@ -1097,6 +1185,9 @@ impl Host {
                 harness
                     .in_flight
                     .insert(assignment.turn_id, Flight::new(assignment.conversation.clone(), tx));
+                // The turn becomes a run when a harness takes it, owned by the session that did.
+                let (run, who, session) = (assignment.turn_id, harness.announced.id.clone(), harness.session.clone());
+                self.record("start", run, |s| s.start(run, &who, &assignment.conversation, &session));
                 serde_json::to_value(&assignment).unwrap_or_else(|_| serde_json::json!({}))
             }
             // Nothing waiting is an ordinary answer, not an error: a harness polls far more often
@@ -1130,6 +1221,7 @@ impl Host {
         if delta.is_empty() {
             return Ok(serde_json::json!({}));
         }
+        self.record("text", turn_id, |s| s.append(turn_id, "text", &serde_json::json!({ "delta": delta })));
         if tx.send(Chunk::Text(delta)).is_err() {
             // The panel stopped listening — the person closed it or asked something else.
             flight.abandon(None);
@@ -1205,6 +1297,7 @@ impl Host {
             tracing::warn!(harness = %who, turn = turn_id, why = %why, "event out of order; refused");
             return Ok(refused(why));
         }
+        self.record("event", turn_id, |s| s.append(turn_id, "event", raw));
         let tx = flight.tx.as_ref().expect("checked above");
         if tx.send(Chunk::Event(event)).is_err() {
             flight.abandon(None);
@@ -1231,6 +1324,21 @@ impl Host {
                 });
             }
         }
+        // A run the person cancelled has already ended; the harness closing it changes nothing.
+        let already_ended = self
+            .runs
+            .as_ref()
+            .and_then(|s| s.run(turn_id).ok().flatten())
+            .is_some_and(|r| r.state.is_final());
+        if !already_ended {
+            match &failure {
+                Some(why) => self.record("finish", turn_id, |s| {
+                    s.append(turn_id, "failure", &serde_json::json!({ "why": why }))?;
+                    s.transition(turn_id, RunState::Failed)
+                }),
+                None => self.record("finish", turn_id, |s| s.transition(turn_id, RunState::Done)),
+            }
+        }
         flight.settle(failure);
         Ok(if abandoned { serde_json::json!({ "dropped": true }) } else { serde_json::json!({}) })
     }
@@ -1242,7 +1350,8 @@ impl Host {
             harness.announced.id.clone()
         };
         if let Some(gone) = state.attached.remove(&id) {
-            gone.fail_everything(&format!("{id} detached mid-answer"), &format!("{id} detached before answering"));
+            let orphaned = gone.fail_everything(&format!("{id} detached mid-answer"), &format!("{id} detached before answering"));
+            self.end_runs(&orphaned, RunState::Orphaned);
         }
         Ok(serde_json::json!({}))
     }
@@ -2519,5 +2628,111 @@ mod tests {
         let merged = with_notes(Some(json!({ "notes": ["a"] }).to_string()), vec!["b".into()]).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&merged).unwrap(), json!({ "notes": ["a", "b"] }));
         assert_eq!(with_notes(Some("{}".into()), vec![]), Some("{}".into()), "no notes, no change");
+    }
+
+    // ── Runs (#25): every turn a harness takes is kept, with its log ─────────────────────────
+
+    fn host_with_runs() -> (Host, Arc<RunStore>) {
+        let store = Arc::new(RunStore::in_memory().unwrap());
+        (host().with_runs(store.clone()), store)
+    }
+
+    fn kinds(store: &RunStore, run: u64) -> Vec<String> {
+        store.events(run, 0, crate::run_store::PAGE_MAX).unwrap().events.into_iter().map(|e| e.kind).collect()
+    }
+
+    #[test]
+    fn a_turn_is_kept_as_a_run_with_everything_it_streamed_in_order() {
+        let (host, store) = host_with_runs();
+        let (session, agent, run, _answer) = turn_in_flight(&host);
+        let long = "y".repeat(900);
+        host.handle(protocol::CHUNK, &json!({ "session": session, "turn_id": run, "delta": long })).unwrap();
+        event(&host, &session, run, start("c1")).unwrap();
+        event(&host, &session, run, end("c1")).unwrap();
+        complete(&host, &session, run);
+
+        let info = store.run(run).unwrap().expect("the turn is a run");
+        assert_eq!((info.harness.as_str(), info.conversation.as_str(), info.owner.as_str()), ("pi", agent.conversation(), session.as_str()));
+        assert_eq!(info.state, RunState::Done);
+        assert_eq!(kinds(&store, run), vec!["state", "text", "event", "event", "state"]);
+        let text = &store.events(run, 1, 1).unwrap().events[0];
+        assert_eq!(text.payload["delta"].as_str().unwrap().len(), 900, "a message longer than the 600-character summary is kept whole");
+    }
+
+    #[test]
+    fn a_failed_turn_keeps_why() {
+        let (host, store) = host_with_runs();
+        let (session, _, run, _answer) = turn_in_flight(&host);
+        host.handle(protocol::FAIL, &json!({ "session": session, "turn_id": run, "error": "model unreachable" })).unwrap();
+        assert_eq!(store.run(run).unwrap().unwrap().state, RunState::Failed);
+        let log = store.events(run, 0, 10).unwrap().events;
+        assert!(log.iter().any(|e| e.kind == "failure" && e.payload["why"] == "model unreachable"), "{log:?}");
+    }
+
+    #[test]
+    fn a_harness_that_goes_away_mid_answer_orphans_its_run_and_a_stopped_agent_cancels_it() {
+        let (host, store) = host_with_runs();
+        let (session, agent, run, _answer) = turn_in_flight(&host);
+        host.handle(protocol::DETACH, &json!({ "session": session })).unwrap();
+        assert_eq!(store.run(run).unwrap().unwrap().state, RunState::Orphaned);
+
+        let (_, agent2, run2, _answer2) = turn_in_flight(&host);
+        assert!(host.stop_agent(&agent2));
+        assert_eq!(store.run(run2).unwrap().unwrap().state, RunState::Cancelled);
+        assert_ne!(agent, agent2);
+    }
+
+    #[test]
+    fn cancelling_a_run_tells_the_harness_and_its_late_close_changes_nothing() {
+        let (host, store) = host_with_runs();
+        let (session, _, run, answer) = turn_in_flight(&host);
+        assert!(host.cancel_run(run));
+        assert!(crate::collect(answer).unwrap_err().contains(STOPPED));
+        assert_eq!(poll(&host, &session)["cancelled"], json!([run]), "the harness learns on its next poll");
+        complete(&host, &session, run);
+        assert_eq!(store.run(run).unwrap().unwrap().state, RunState::Cancelled, "a cancelled run stays cancelled");
+        assert!(!host.cancel_run(999), "nobody is answering 999");
+    }
+
+    #[test]
+    fn a_restarted_host_orphans_what_the_last_one_left_and_never_reuses_a_run_id() {
+        let store = Arc::new(RunStore::in_memory().unwrap());
+        let first = host().with_runs(store.clone());
+        let (_, _, run, _answer) = turn_in_flight(&first);
+        drop(first);
+
+        let second = host().with_runs(store.clone());
+        assert_eq!(store.run(run).unwrap().unwrap().state, RunState::Orphaned, "readable, not resumed");
+        let (_, _, next, _answer) = turn_in_flight(&second);
+        assert!(next > run, "run {next} would have named run {run} again");
+    }
+
+    #[test]
+    fn a_turn_kept_across_a_lost_connection_is_the_same_run_under_the_new_connection() {
+        let (host, store) = host_with_runs();
+        let (_, agent, was, _answer) = turn_in_flight(&host);
+        let token = host.lock().attached["pi"].agents[agent.conversation()].token.clone();
+        let reply = host
+            .handle(
+                protocol::ATTACH,
+                &json!({ "id": "pi", "name": "pi", "conversations": true, "resume": [
+                    { "conversation": agent.conversation(), "agent_token": token, "turn_id": was },
+                ]}),
+            )
+            .unwrap();
+        let session = reply["session"].as_str().unwrap().to_string();
+        assert_eq!(store.run(was).unwrap().unwrap().owner, session);
+        complete(&host, &session, was);
+        assert_eq!(store.run(was).unwrap().unwrap().state, RunState::Done);
+    }
+
+    #[test]
+    fn without_a_store_nothing_changes() {
+        let host = host();
+        let (session, _, run, answer) = turn_in_flight(&host);
+        host.handle(protocol::CHUNK, &json!({ "session": session, "turn_id": run, "delta": "hi" })).unwrap();
+        complete(&host, &session, run);
+        assert_eq!(crate::collect(answer).unwrap(), "hi");
+        assert!(host.run_store().is_none());
     }
 }

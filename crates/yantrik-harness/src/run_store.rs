@@ -372,6 +372,24 @@ impl RunStore {
         })
     }
 
+    /// Hand an unfinished run to a new connection: a harness that lost its connection and came
+    /// back still answering it (#246). From now on only `owner` may act on it; the log says when
+    /// it changed hands.
+    pub fn set_owner(&self, run_id: u64, owner: &str) -> Result<u64, RunError> {
+        self.with(|db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let state = state_in(&tx, run_id)?;
+            if state.is_final() {
+                return Err(RunError::Ended { run_id, state });
+            }
+            let at = now_ms();
+            tx.execute("UPDATE runs SET owner = ?2 WHERE run_id = ?1", params![run_id as i64, owner])?;
+            let seq = append_in(&tx, run_id, "owner", &json!({"owner": owner}), at)?;
+            tx.commit()?;
+            Ok(seq)
+        })
+    }
+
     /// The questions `run_id` is still waiting on, oldest first: `(request_id, prompt)`.
     pub fn pending_requests(&self, run_id: u64) -> Result<Vec<(String, Value)>, RunError> {
         self.with(|db| {
@@ -629,6 +647,16 @@ mod tests {
         assert_eq!(store.start(3, "scripted", "c", "conn-2"), Err(RunError::Exists(3)));
         assert_eq!(store.orphan_unfinished().unwrap(), 0);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_unfinished_run_can_change_hands_and_a_finished_one_cannot() {
+        let store = store_with_runs(&[1]);
+        store.set_owner(1, "conn-2").unwrap();
+        assert_eq!(store.run(1).unwrap().unwrap().owner, "conn-2");
+        assert_eq!(store.events(1, 0, PAGE_MAX).unwrap().events.last().unwrap().payload["owner"], "conn-2");
+        store.transition(1, RunState::Done).unwrap();
+        assert_eq!(store.set_owner(1, "conn-3"), Err(RunError::Ended { run_id: 1, state: RunState::Done }));
     }
 
     #[test]

@@ -99,8 +99,31 @@ impl Harness for Companion {
 
 // ── Wiring ──────────────────────────────────────────────────────────
 
+/// The run store at `$XDG_DATA_HOME/yantrik/runs.db`, or `None` (logged) when it cannot be opened.
+fn open_runs() -> Option<Arc<yantrik_harness::run_store::RunStore>> {
+    let dir = crate::agents::dir().parent()?.to_path_buf();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(dir = %dir.display(), error = %e, "no directory for the run store; runs are not kept");
+        return None;
+    }
+    let path = dir.join("runs.db");
+    match yantrik_harness::run_store::RunStore::open(&path) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "run store did not open; runs are not kept");
+            None
+        }
+    }
+}
+
 pub fn wire(ui: &App, ctx: &AppContext) {
     let host = Host::new(vec![Arc::new(Companion { bridge: ctx.bridge.clone() })]);
+    // Every turn a mind takes is kept as a run beside the agents' sessions (#25); without the
+    // file the host still works, it just keeps no runs.
+    let host = match open_runs() {
+        Some(store) => host.with_runs(store),
+        None => host,
+    };
     let _ = HOST.set(host.clone());
 
     // The agent terminal's side of agents (design/agents-workspace-2026-09-23.md, decision 3):
