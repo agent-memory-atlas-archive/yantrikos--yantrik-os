@@ -2096,6 +2096,23 @@ mod tests {
         assert!(matches!(&watch.changes(&s, &[], later + 300)[..], [Notice::Stuck { .. }]));
     }
 
+    /// Only the person interrupts a task (#234): `launch::tell` is called from the pane's own send,
+    /// and nothing a mind can call (the control surface) reaches it or `Host::interrupt`. A mind's
+    /// `send_to_agent` still waits for the turn in flight.
+    #[test]
+    fn only_the_person_can_interrupt_a_task() {
+        for file in ["src/control_agents.rs", "src/control.rs", "src/control_agent_terminal.rs"] {
+            let text = read(file);
+            let code = text.split("#[cfg(test)]").next().unwrap();
+            assert!(!code.contains("launch::tell(") && !code.contains(".interrupt("), "{file} can interrupt a task");
+        }
+        let wiring = read("src/wire/agents.rs");
+        let wiring = wiring.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(wiring.matches("launch::tell(").count(), 2, "the pane's send and the pop-out's");
+        let send = read("src/control_agents.rs");
+        assert!(send.contains("launch::send_on(host, target, text)"), "send_to_agent keeps the ordinary send");
+    }
+
     /// Said as the desktop, with nothing the agent wrote in it, and a button that opens the agent.
     #[test]
     fn a_notice_is_the_desktops_and_opens_its_agent() {
