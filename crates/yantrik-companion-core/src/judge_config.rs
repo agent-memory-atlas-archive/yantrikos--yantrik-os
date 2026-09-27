@@ -7,8 +7,9 @@
 //! tokens of every schema left out and stops the chat model picking the wrong one. Anything the
 //! judge is unsure of, or any failure to reach it, falls back to the ordinary selection.
 //!
-//! The judge reads each request and the last few messages before it. A cloud judge therefore
-//! receives that text; in incognito the companion asks no judge at all.
+//! The judge reads each request and the person's last few messages, never the assistant's
+//! replies, with anything shaped like a credential redacted. A cloud judge therefore receives
+//! that text; in incognito the companion asks no judge at all.
 //!
 //! Any server speaking `/v1/systemone` works:
 //!

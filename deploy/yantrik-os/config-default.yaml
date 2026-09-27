@@ -66,8 +66,8 @@ tools:
 
 # A judge (a System One model) picks the tool a request needs, so the chat model is sent that
 # one schema instead of a shortlist: fewer tokens, fewer wrong picks. Off until an endpoint is set.
-# It reads each request and the last few messages; a cloud judge receives that text (never in
-# incognito). If it is unsure or unreachable, tool selection is as it would be without it.
+# It reads each request and your last few messages (never the assistant's replies; credentials
+# redacted); a cloud judge receives that text (never in incognito). If it is unsure or unreachable, tool selection is as it would be without it.
 # judge:
 #   endpoint: "http://127.0.0.1:8009"       # Kev on this machine (kev.serve)
 #   model: "kev-latest"

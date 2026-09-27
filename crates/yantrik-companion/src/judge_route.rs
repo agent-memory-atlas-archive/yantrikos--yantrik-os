@@ -63,19 +63,24 @@ pub fn decide(r: &Routing, route_at: f64) -> Decision {
 }
 
 /// Put the request to the judge: which of `shortlist` (similarity, name, compact card) does it
-/// need, and does it need more than one tool? `earlier` is the end of the conversation, so a
+/// need, and does it need more than one tool? The person's last few messages go with it, so a
 /// reply like "yes, send it" is read in its context.
+///
+/// Only what the person typed is sent, never the assistant's replies: those can carry a vault
+/// value, an email body or a web page, and the judge may be a cloud service. Anything shaped like
+/// a credential in what is sent is redacted; picking `vault_store` does not need the token.
 pub fn ask(judge: &dyn Judge, request: &str, earlier: &[ChatMessage], shortlist: &[(f32, String, String)]) -> Result<Routing, String> {
     let mut options: Vec<(String, String)> = shortlist.iter().map(|(_, name, card)| (name.clone(), card.clone())).collect();
     options.push((NO_TOOL.into(), "No tool: the request is conversation, or is answered from what is already known".into()));
-    let earlier: Vec<_> = earlier
+    let mut earlier: Vec<String> = earlier
         .iter()
         .rev()
-        .take(4)
-        .rev()
-        .map(|m| json!({"role": m.role, "text": m.content.chars().take(600).collect::<String>()}))
+        .filter(|m| m.role == "user")
+        .take(3)
+        .map(|m| redact(&m.content.chars().take(600).collect::<String>()))
         .collect();
-    let state = json!({"request": request, "earlier_in_conversation": earlier});
+    earlier.reverse();
+    let state = json!({"request": redact(request), "persons_earlier_messages": earlier});
     let answers = judge.ask(&state, &[
         ("tool", Question::Choice {
             instructions: "Which tool should the assistant use first to carry out `request`?".into(),
@@ -97,6 +102,35 @@ pub fn ask(judge: &dyn Judge, request: &str, earlier: &[ChatMessage], shortlist:
         _ => return Err("the judge gave no multi_step answer".into()),
     };
     Ok(Routing { pick, p, multi_step })
+}
+
+/// Credential-shaped text replaced by `<redacted>`, the prefix that names it kept. The same
+/// shapes `yantrik_app_runtime::problems` scrubs from a public issue.
+fn redact(text: &str) -> String {
+    const PREFIXES: &[&str] = &[
+        "sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "AKIA", "Bearer ", "bearer ",
+        "token=", "TOKEN=", "api_key=", "API_KEY=", "apikey=", "key=", "KEY=", "password=",
+        "PASSWORD=", "secret=", "SECRET=",
+    ];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while !rest.is_empty() {
+        for prefix in PREFIXES {
+            if let Some(after) = rest.strip_prefix(prefix) {
+                let end = after
+                    .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',')
+                    .unwrap_or(after.len());
+                out.push_str(prefix);
+                out.push_str("<redacted>");
+                rest = &after[end..];
+                continue 'scan;
+            }
+        }
+        let ch = rest.chars().next().unwrap_or(' ');
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
 }
 
 /// The companion's tool selection with a judge in front: `select_tools_adaptive` unless the
@@ -238,12 +272,26 @@ mod tests {
     }
 
     #[test]
-    fn the_end_of_the_conversation_goes_with_the_request() {
+    fn the_persons_last_messages_go_with_the_request_and_nothing_the_assistant_said() {
         let j = judge("send_email", 0.9, 0.0);
-        let earlier: Vec<ChatMessage> = (0..6).map(|i| ChatMessage::user(&format!("turn {i}"))).collect();
+        let mut earlier = Vec::new();
+        for i in 0..5 {
+            earlier.push(ChatMessage::user(&format!("turn {i}")));
+            earlier.push(ChatMessage::assistant("Your wifi password is hunter2"));
+        }
         ask(&j, "yes, send it", &earlier, &shortlist()).unwrap();
-        let state = &j.asked.lock().unwrap()[0];
-        let texts: Vec<_> = state["earlier_in_conversation"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap().to_string()).collect();
-        assert_eq!(texts, vec!["turn 2", "turn 3", "turn 4", "turn 5"]);
+        let state = j.asked.lock().unwrap()[0].to_string();
+        assert!(state.contains(r#""persons_earlier_messages":["turn 2","turn 3","turn 4"]"#), "{state}");
+        assert!(!state.contains("hunter2"), "an assistant reply reached the judge: {state}");
+    }
+
+    #[test]
+    fn credentials_the_person_typed_are_redacted_before_the_judge_sees_them() {
+        let j = judge("vault_store", 0.9, 0.0);
+        let earlier = vec![ChatMessage::user("my key=abc123 for the router")];
+        ask(&j, "keep my github token safe: ghp_AbCdEf123, thanks", &earlier, &shortlist()).unwrap();
+        let state = j.asked.lock().unwrap()[0].to_string();
+        assert!(!state.contains("ghp_AbCdEf123") && !state.contains("abc123"), "{state}");
+        assert!(state.contains("ghp_<redacted>, thanks") && state.contains("key=<redacted> for"), "{state}");
     }
 }
