@@ -521,9 +521,9 @@ def main():
               and head.get("tabs") == editor_state["tabs"] and head.get("dialog") == "none", head)
         check("and not the summary again, nor the document's text", "summary" not in head
               and "text" not in head, head)
-        check("between the revision and the result",
-              lines.index(state_lines[0]) == lines.index("revision: 3f") + 1
-              and lines[lines.index(state_lines[0]) + 1] == "{", out)
+        check("after the action's own result, which a caller that reads only so far must not lose",
+              lines.index("revision: 3f") + 1 == lines.index("{")
+              and lines.index(state_lines[0]) > lines.index("}"), out)
         check("and what it left out is named, not the old --full advice",
               "(more state: `yos describe editor`)" in out and "--full" not in out, out)
 
