@@ -187,7 +187,7 @@ check("the shell and every autostart service answer on a socket",
 # The desktop, asked the way everything else asks it: every app opens and answers, every screen
 # shows, the permission gate refuses on every door, the ceiling holds on a service, nothing
 # crashes, and the shell is idle when idle. docs/releasing.md: this is the nightly's gate.
-rc = ask("XDG_RUNTIME_DIR=/run/user/1000 timeout 900 /opt/yantrik/bin/release-check --tier ci "
+rc = ask("XDG_RUNTIME_DIR=/run/user/1000 timeout 900 /opt/yantrik/bin/release-check --tier ci --may-lock "
          "--json /tmp/release-check.json > /tmp/release-check.txt 2>&1; echo exit=$?; "
          "grep -E '^(PASS|FAIL|SKIP)' /tmp/release-check.txt; grep -A1 '^FAIL' /tmp/release-check.txt",
          timeout=960)
