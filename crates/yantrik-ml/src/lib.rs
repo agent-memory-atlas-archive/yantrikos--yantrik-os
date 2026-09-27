@@ -39,6 +39,9 @@ pub mod provider;
 #[cfg(feature = "api-llm")]
 pub mod hardware;
 
+// Judges: typed answers with probabilities from System One models (Jev, Kev, ...)
+pub mod judge;
+
 // Voice modules
 pub mod stt;
 pub mod tts;

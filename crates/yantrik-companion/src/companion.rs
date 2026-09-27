@@ -592,6 +592,9 @@ pub struct CompanionService {
     // Whether to use native OpenAI tool calling format (API backend with --jinja).
     use_native_tools: bool,
 
+    // A System One model (Jev, Kev, ...) that picks the tool a request needs, when configured.
+    judge: Option<std::sync::Arc<dyn yantrik_ml::judge::Judge>>,
+
     // Model family for family-aware chat templates (tool format, tool results).
     model_family: ModelFamily,
 
@@ -804,6 +807,15 @@ impl CompanionService {
         // Full tool set discoverable via discover_tools meta-tool.
         let max_perm = parse_permission(&config.tools.max_permission);
         let use_native_tools = llm.backend_name() == "api" && capability_profile.uses_native_tools();
+        let judge: Option<std::sync::Arc<dyn yantrik_ml::judge::Judge>> = config.judge.enabled().then(|| {
+            tracing::info!(endpoint = %config.judge.endpoint, model = %config.judge.model, "tool routing by judge");
+            std::sync::Arc::new(yantrik_ml::judge::SystemOneJudge::new(
+                &config.judge.endpoint,
+                &config.judge.model,
+                Some(config.judge.api_key_env.as_str()),
+                std::time::Duration::from_millis(config.judge.timeout_ms),
+            )) as _
+        });
 
         // Native tools: only ALWAYS_TOOLS (6 tools) — rest added dynamically per query
         tracing::debug!(always_on = ALWAYS_TOOLS.len(), "Dynamic tool selection initialized");
@@ -925,6 +937,7 @@ impl CompanionService {
             native_core_tools,
             skill_extra_tools: Vec::new(),
             use_native_tools,
+            judge,
             model_family: capability_profile.family,
             task_manager: std::sync::Mutex::new(task_mgr),
             recent_events: Vec::new(),
@@ -1898,7 +1911,12 @@ impl CompanionService {
         let mut selected_tool_names: Vec<&str> = if degraded {
             FALLBACK_TOOLS.to_vec()
         } else if needs_tools {
-            select_tools_adaptive(user_text, &self.db, &active_profile)
+            crate::judge_route::select_tools(
+                // Incognito: the conversation goes to no judge, which may be a cloud service.
+                if self.incognito { None } else { self.judge.as_deref() },
+                &self.config.judge, user_text,
+                &self.conversation_history, &self.db, &active_profile,
+            )
         } else {
             ALWAYS_TOOLS.to_vec()
         };
@@ -2721,7 +2739,12 @@ impl CompanionService {
         let selected_tool_names: Vec<&str> = if degraded {
             FALLBACK_TOOLS.to_vec()
         } else if needs_tools {
-            select_tools_adaptive(user_text, &self.db, &active_profile)
+            crate::judge_route::select_tools(
+                // Incognito: the conversation goes to no judge, which may be a cloud service.
+                if self.incognito { None } else { self.judge.as_deref() },
+                &self.config.judge, user_text,
+                &self.conversation_history, &self.db, &active_profile,
+            )
         } else {
             ALWAYS_TOOLS.to_vec()
         };
