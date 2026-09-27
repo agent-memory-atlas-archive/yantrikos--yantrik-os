@@ -817,18 +817,42 @@ capture_shell_env() {
 # healthy build with a message about a timeout. Worse: the rollback ran the same redirect, so
 # it could not restart the OLD shell either -- one absent directory took a machine dark and
 # reported it as "the previous build is running again".
+# The desktop session a running shell belongs to (#374), as "<runtime dir> <supervised> <uid>".
+#
+# The runtime dir is its owner's, whoever runs this: under sudo the caller's own is root's, where
+# no desktop lives, and asking it said "no Yantrik session" and left the new build waiting for
+# the next login. Supervised is 1 when the shell's parent is the `yantrik-shell` supervisor,
+# which starts the new build itself once the old one exits; starting another here as well left
+# two shells, one without its sockets (#367). YANTRIK_PROC is for the selftest's fake tree.
+shell_session() {
+  local proc="${YANTRIK_PROC:-/proc}" pid="$1" uid ppid supervised=0
+  [ -d "$proc/$pid" ] || return 1
+  uid="$(stat -c %u "$proc/$pid" 2>/dev/null)" || return 1
+  ppid="$(awk '/^PPid:/ {print $2}' "$proc/$pid/status" 2>/dev/null)"
+  if [ -n "$ppid" ] && tr '\0' ' ' < "$proc/$ppid/cmdline" 2>/dev/null | grep -q 'yantrik-shell'; then
+    supervised=1
+  fi
+  printf '/run/user/%s %s %s\n' "$uid" "$supervised" "$uid"
+}
+
 start_shell() {
-  local runtime="$1"
+  local runtime="$1" owner="${2:-}"
   mkdir -p "$PREFIX/logs" 2>/dev/null || true
+  # Started for the session's owner, never as root: under sudo this process is root, and a shell
+  # started from it would be root's (#374).
+  local as=()
+  if [ "$(id -u)" = 0 ] && [ -n "$owner" ] && [ "$owner" != 0 ]; then
+    as=(runuser -u "$(id -nu "$owner")" --)
+  fi
 
   if [ "${#SHELL_ENV[@]}" -gt 0 ]; then
     # The session's own environment, verbatim.
-    setsid env "${SHELL_ENV[@]}" \
+    setsid "${as[@]}" env "${SHELL_ENV[@]}" \
       "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$LOG_FILE" 2>&1 &
   else
     # Nothing was running to copy from. SLINT_FULLSCREEN is named here on purpose: a shell
     # without it is a window, and a window is the one thing this is not.
-    setsid env \
+    setsid "${as[@]}" env \
       XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
       SLINT_BACKEND="${SLINT_BACKEND:-winit}" SLINT_FULLSCREEN="${SLINT_FULLSCREEN:-1}" \
       "$BIN_DIR/yantrik-ui" "$PREFIX/config.yaml" >> "$LOG_FILE" 2>&1 &
@@ -955,10 +979,16 @@ sudo systemctl restart $SESSION_UNIT"
     warn "could not restart $SESSION_UNIT without a password; starting the shell directly"
   fi
 
-  # No session unit, or no privilege to restart it: a development machine where somebody
-  # started the shell by hand. NOW the caller's own runtime dir is the right question, because
-  # the shell they started is a child of their session.
-  runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  # No session unit, or no privilege to restart it. The session to restart is the one the
+  # running shell belongs to (#374), not the caller's: under sudo the caller is root. Only with
+  # no shell running at all is the caller's own runtime dir the question.
+  local shell_pid session supervised=0 owner=""
+  shell_pid="$(pgrep -x yantrik-ui 2>/dev/null | head -1)"
+  if [ -n "$shell_pid" ] && session="$(shell_session "$shell_pid")"; then
+    read -r runtime supervised owner <<< "$session"
+  else
+    runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  fi
   if [ ! -S "$runtime/yantrik/app-shell.sock" ] && [ ! -d "$runtime/yantrik" ]; then
     warn "no session unit, and no Yantrik session on this runtime dir ($runtime)."
     info "the new build will take effect the next time the desktop session starts."
@@ -972,12 +1002,16 @@ sudo systemctl restart $SESSION_UNIT"
   sleep 3
   pkill -9 -x yantrik-ui 2>/dev/null
   sleep 1
-  start_shell "$runtime"
+  if [ "$supervised" = 1 ]; then
+    info "the session's shell supervisor starts the new build"
+  else
+    start_shell "$runtime" "$owner"
+  fi
 
   say "Waiting for the shell to answer"
   local sock="$runtime/yantrik/app-shell.sock"
   for _ in $(seq 1 20); do
-    if [ -S "$sock" ] && "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
+    if [ -S "$sock" ] && XDG_RUNTIME_DIR="$runtime" "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
       printf '%shealthy — update complete%s\n' "$c_grn" "$c_off"
       report_stale
       return 0
@@ -998,14 +1032,14 @@ sudo systemctl restart $SESSION_UNIT"
   restore_backup "$backup"
   pkill -9 -x yantrik-ui 2>/dev/null
   sleep 1
-  start_shell "$runtime"
+  [ "$supervised" = 1 ] || start_shell "$runtime" "$owner"
 
   # Verify the ROLLBACK, rather than announcing one that did not happen. The restore used to
   # print "the previous build is running again" without ever checking, and on the day the log
   # directory was missing it said exactly that while the machine sat dark.
   local sock_rb="$runtime/yantrik/app-shell.sock"
   for _ in $(seq 1 20); do
-    if [ -S "$sock_rb" ] && "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
+    if [ -S "$sock_rb" ] && XDG_RUNTIME_DIR="$runtime" "$BIN_DIR/yos" describe shell >/dev/null 2>&1; then
       fail "update rolled back — the previous build is running again"
     fi
     sleep 1
@@ -1257,6 +1291,20 @@ cmd_selftest() {
   }
 
   say "yantrik-update selftest"
+
+  # 0. Which session a running shell belongs to (#374), from a fake process tree: a shell under
+  #    the supervisor, one started by hand, and none at all.
+  local fp="$root/proc" me; me="$(id -u)"
+  mkdir -p "$fp/100" "$fp/200" "$fp/300"
+  printf '/bin/sh\0/opt/yantrik/bin/yantrik-shell\0/opt/yantrik/config.yaml\0' > "$fp/100/cmdline"
+  printf 'Name:\tyantrik-ui\nPPid:\t100\n' > "$fp/200/status"
+  printf 'bash\0' > "$fp/1/cmdline" 2>/dev/null || { mkdir -p "$fp/1"; printf 'bash\0' > "$fp/1/cmdline"; }
+  printf 'Name:\tyantrik-ui\nPPid:\t1\n' > "$fp/300/status"
+  t "a supervised shell: its owner's runtime dir, and the supervisor restarts it" \
+    "/run/user/$me 1 $me" "$(YANTRIK_PROC="$fp" shell_session 200)"
+  t "a shell started by hand: restarted here, for its owner" \
+    "/run/user/$me 0 $me" "$(YANTRIK_PROC="$fp" shell_session 300)"
+  t "no such shell: no session" "none" "$(YANTRIK_PROC="$fp" shell_session 999 || echo none)"
 
   # 1. Nothing at all: the hard default, and it says so.
   local p1="$root/empty"; mkdir -p "$p1"
