@@ -951,7 +951,7 @@ mod tests {
         let room = definition(formations::WRITERS_ROOM);
         assert!(seats_of(&room, &catalog, &SeatPicks::default()).is_empty());
         let (_, inputs) = start_request(&[room], formations::WRITERS_ROOM, "The larder, at midnight", &catalog, &SeatPicks::default()).unwrap();
-        assert!(inputs.get("cast").is_none());
+        assert!(inputs.get("voice_1").is_none());
 
         // The screen draws the chooser: the seats on the definition's row, the catalog's roles as
         // the choices, and a press carrying the seat and the role back to the shell.
