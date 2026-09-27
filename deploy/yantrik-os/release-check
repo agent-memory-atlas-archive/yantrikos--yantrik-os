@@ -22,6 +22,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import pathlib
 import shutil
 import socket
 import subprocess
@@ -227,6 +228,21 @@ def _image_commands():
                      "reconcile installs the packages behind them (%s)"
                      % (", ".join(missing), "; ".join(IMAGE_COMMANDS[m] for m in missing)))
     return "%d/%d present: %s" % (len(IMAGE_COMMANDS), len(IMAGE_COMMANDS), " ".join(sorted(IMAGE_COMMANDS)))
+
+
+@check("the browser can open Save and Upload dialogs: a FileChooser portal is installed")
+def _file_chooser():
+    # #33: the wlr portal backend has no file picker, and with nothing else installed Chromium's
+    # Save and Upload found no org.freedesktop.portal.FileChooser. The gtk backend supplies it,
+    # and labwc's labwc-portals.conf (default=wlr;*) routes to it. No command to look for on
+    # PATH, so the backend's own declaration is what is checked.
+    portals = pathlib.Path("/usr/share/xdg-desktop-portal/portals")
+    offering = [p.name for p in sorted(portals.glob("*.portal"))
+                if "org.freedesktop.impl.portal.FileChooser" in p.read_text(errors="replace")]
+    if not offering:
+        raise Failed("no portal backend offers FileChooser in %s, so Save and Upload open nothing; "
+                     "yantrik-update reconcile installs xdg-desktop-portal-gtk" % portals)
+    return "FileChooser from %s" % ", ".join(offering)
 
 
 @check("every action on every surface declares a grade")
