@@ -167,6 +167,14 @@ impl Agents {
         self.lock().approval_settled(id, request, outcome, record)
     }
 
+    pub fn question_answered(&self, id: &AgentId, request: &str, answer: &str) -> bool {
+        self.lock().question_answered(id, request, answer)
+    }
+
+    pub fn question_closed(&self, id: &AgentId, request: &str, why: &str) {
+        self.lock().question_closed(id, request, why)
+    }
+
     /// Read the store. Keep it short: every feeder waits on the same lock.
     pub fn read<R>(&self, f: impl FnOnce(&Store) -> R) -> R {
         f(&self.lock())

@@ -554,19 +554,76 @@ impl Store {
         }
         // Back to work only when nothing else holds the row: a terminal job still at its prompt
         // keeps it waiting on the person (#182), and `jobs_waiting` brings it back instead.
-        if agent.state == State::WaitingForYou && agent.pending_approvals.is_empty() && !agent.job_waits {
-            let next = if agent.cards().any(Card::running) {
-                State::RunningTool
-            } else if agent.open_turn().is_some() {
-                State::Thinking
-            } else {
-                State::Idle
-            };
-            set_state(agent, next, now);
-        }
+        back_to_work(agent, now);
         self.mark(i);
     }
 
+    /// The person answered the agent's question `request` through its card. `false` when there is
+    /// no such question still waiting (answered, closed, or never asked), so nothing changed.
+    pub fn question_answered(&mut self, id: &AgentId, request: &str, answer: &str) -> bool {
+        let Some(i) = self.index(id) else { return false };
+        let now = self.now();
+        let agent = &mut self.agents[i];
+        let Some(question) = agent
+            .turns
+            .iter_mut()
+            .rev()
+            .flat_map(|t| t.items.iter_mut().rev())
+            .find_map(|item| match item {
+                Item::Question(q) if q.request == request && q.waiting() => Some(q),
+                _ => None,
+            })
+        else {
+            return false;
+        };
+        question.answer = answer.to_string();
+        agent.status.clear();
+        back_to_work(agent, now);
+        self.mark(i);
+        true
+    }
+
+    /// The answer could not be delivered (the run ended, its harness left): the question stays in
+    /// the session, closed, with why.
+    pub fn question_closed(&mut self, id: &AgentId, request: &str, why: &str) {
+        let Some(i) = self.index(id) else { return };
+        let now = self.now();
+        let agent = &mut self.agents[i];
+        for item in agent.turns.iter_mut().flat_map(|t| t.items.iter_mut()) {
+            if let Item::Question(q) = item {
+                if q.request == request && q.waiting() {
+                    q.closed = why.to_string();
+                }
+            }
+        }
+        back_to_work(agent, now);
+        self.mark(i);
+    }
+}
+
+/// Whether the person still owes this agent an answer: an approval, a job at its prompt (#182),
+/// or a question it asked.
+fn waits_on_person(agent: &Agent) -> bool {
+    !agent.pending_approvals.is_empty()
+        || agent.job_waits
+        || agent.turns.iter().flat_map(|t| t.items.iter()).any(|i| matches!(i, Item::Question(q) if q.waiting()))
+}
+
+/// Back to work once nothing holds the row on the person.
+fn back_to_work(agent: &mut Agent, now: u64) {
+    if agent.state == State::WaitingForYou && !waits_on_person(agent) {
+        let next = if agent.cards().any(Card::running) {
+            State::RunningTool
+        } else if agent.open_turn().is_some() {
+            State::Thinking
+        } else {
+            State::Idle
+        };
+        set_state(agent, next, now);
+    }
+}
+
+impl Store {
     // ── Reading ─────────────────────────────────────────────────────
 
     /// How many agents each tab lists, in [`Tab::EVERY`] order.
@@ -707,6 +764,11 @@ impl Store {
                     // the agent said, and a reader asking for the session wants the session.
                     Item::Thinking(_) => {}
                     Item::Note(note) => out.push(format!("(the desktop: {note})")),
+                    Item::Question(q) => out.push(match (q.answer.as_str(), q.closed.as_str()) {
+                        ("", "") => format!("[asked the person] {} — waiting for an answer", q.prompt),
+                        ("", why) => format!("[asked the person] {} — not answered: {why}", q.prompt),
+                        (answer, _) => format!("[asked the person] {} — answered: {answer}", q.prompt),
+                    }),
                     Item::Approval(a) => out.push(match a.outcome {
                         ApprovalOutcome::Pending => format!("[asked the person] {} — waiting for an answer", a.what),
                         _ => format!("[asked the person] {} — {}", a.what, a.record),
@@ -1058,7 +1120,19 @@ fn apply(agent: &mut Agent, event: &Event, provenance: Provenance, now: u64) -> 
         Event::Status { text } => agent.status = cap(text).to_string(),
         // The agent asked the person something (#25): it waits, and says what it asked. The
         // question itself is kept by the host's run store, which alone takes the answer.
-        Event::Request { prompt, .. } => {
+        Event::Request { request_id, prompt, options } => {
+            let turn = turn_for(agent, provenance, now);
+            let known = turn.items.iter().any(|i| matches!(i, Item::Question(q) if q.request == *request_id));
+            if !known {
+                turn.items.push(Item::Question(Question {
+                    request: request_id.clone(),
+                    prompt: prompt.clone(),
+                    options: options.clone(),
+                    answer: String::new(),
+                    closed: String::new(),
+                    asked: now,
+                }));
+            }
             agent.status = cap(&format!("asks: {prompt}")).to_string();
             set_state(agent, State::WaitingForYou, now);
         }
@@ -1217,6 +1291,20 @@ enum ItemRecord {
     Note(String),
     Card(CardRecord),
     Approval(ApprovalRecord),
+    Question(QuestionRecord),
+}
+
+#[derive(Serialize, Deserialize)]
+struct QuestionRecord {
+    request: String,
+    prompt: String,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default)]
+    answer: String,
+    #[serde(default)]
+    closed: String,
+    asked: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1299,6 +1387,14 @@ fn serialize(agent: &Agent) -> String {
                 Item::Text(t) => ItemRecord::Text(t.last(PERSIST_BYTES)),
                 Item::Thinking(t) => ItemRecord::Thinking(t.last(PERSIST_BYTES)),
                 Item::Note(n) => ItemRecord::Note(n.clone()),
+                Item::Question(q) => ItemRecord::Question(QuestionRecord {
+                    request: q.request.clone(),
+                    prompt: q.prompt.clone(),
+                    options: q.options.clone(),
+                    answer: q.answer.clone(),
+                    closed: q.closed.clone(),
+                    asked: q.asked,
+                }),
                 Item::Approval(a) => ItemRecord::Approval(ApprovalRecord {
                     request: a.request.clone(),
                     what: a.what.clone(),
@@ -1393,6 +1489,19 @@ fn parse(text: &str, now: u64) -> Option<Agent> {
                 ItemRecord::Text(t) => Item::Text(Capped::restore(TEXT_CAP, &t, t.len() as u64, 0)),
                 ItemRecord::Thinking(t) => Item::Thinking(Capped::restore(TEXT_CAP, &t, t.len() as u64, 0)),
                 ItemRecord::Note(n) => Item::Note(n),
+                // Its run was orphaned when the desktop stopped, so nobody can answer it now.
+                ItemRecord::Question(q) => Item::Question(Question {
+                    closed: if q.answer.is_empty() && q.closed.is_empty() {
+                        "the desktop restarted while it waited".to_string()
+                    } else {
+                        q.closed
+                    },
+                    request: q.request,
+                    prompt: q.prompt,
+                    options: q.options,
+                    answer: q.answer,
+                    asked: q.asked,
+                }),
                 // A request still waiting when the shell stopped is gone with the shell: requests
                 // are held in memory, so nobody can answer it now, and it is never drawn with
                 // buttons again.
@@ -1806,6 +1915,70 @@ mod tests {
 
     /// Design decision 4, in the store: the approval is an item of the session — the request id,
     /// what was asked, how it came out — settled once; an answer counts as answered and an expiry
+    fn questions(s: &Store, agent: &AgentId) -> Vec<Question> {
+        s.agent(agent).unwrap().turns.iter().flat_map(|t| t.items.iter()).filter_map(|i| match i {
+            Item::Question(q) => Some(q.clone()),
+            _ => None,
+        }).collect()
+    }
+
+    fn asks(request: &str, prompt: &str) -> Event {
+        Event::Request { request_id: request.into(), prompt: prompt.into(), options: vec!["Yes".into(), "No".into()] }
+    }
+
+    /// A question waits in the session as one card, is answered once, and an approval answered
+    /// meanwhile does not take the agent out of waiting while the question still is.
+    #[test]
+    fn a_question_is_one_card_answered_once_and_holds_the_agent_waiting() {
+        let (mut s, _) = store();
+        let pi = id("pi:c-q1");
+        s.open_turn(&pi, "tidy Downloads");
+        s.event(&pi, &asks("r1", "Delete 3 installers?"), Provenance::Reported);
+        s.event(&pi, &asks("r1", "Delete 3 installers?"), Provenance::Reported);
+        assert_eq!(questions(&s, &pi).len(), 1, "the same question twice is one card");
+
+        s.approval_asked(&pi, "appr-9", "files.move");
+        s.approval_answered(&pi, "appr-9", true);
+        assert_eq!(s.agent(&pi).unwrap().state, State::WaitingForYou, "the question still holds it");
+
+        assert!(s.question_answered(&pi, "r1", "Yes"));
+        assert!(!s.question_answered(&pi, "r1", "No"), "answered once");
+        assert_eq!(questions(&s, &pi)[0].answer, "Yes");
+        assert_eq!(s.agent(&pi).unwrap().state, State::Thinking, "back to work");
+        assert!(s.transcript(&pi, 5).unwrap().contains("[asked the person] Delete 3 installers? — answered: Yes"));
+    }
+
+    #[test]
+    fn a_question_whose_answer_could_not_be_delivered_closes_with_why() {
+        let (mut s, _) = store();
+        let pi = id("pi:c-q2");
+        s.open_turn(&pi, "tidy Downloads");
+        s.event(&pi, &asks("r1", "Delete them?"), Provenance::Reported);
+        s.question_closed(&pi, "r1", "run 4 has ended (orphaned)");
+        let q = &questions(&s, &pi)[0];
+        assert_eq!((q.answer.as_str(), q.closed.as_str()), ("", "run 4 has ended (orphaned)"));
+        assert!(!q.waiting());
+        assert_eq!(s.agent(&pi).unwrap().state, State::Thinking);
+    }
+
+    #[test]
+    fn a_question_still_waiting_when_the_shell_stops_comes_back_closed() {
+        let dir = scratch_dir("questions");
+        let (mut s, _) = store();
+        let pi = id("pi:c-q3");
+        s.open_turn(&pi, "tidy Downloads");
+        s.event(&pi, &asks("r1", "Delete them?"), Provenance::Reported);
+        s.event(&pi, &asks("r2", "And the videos?"), Provenance::Reported);
+        s.question_answered(&pi, "r2", "No");
+        s.save(&dir).unwrap();
+        let back = Store::load(&dir, Box::new(|| 1_800_000_000));
+        let kept = questions(&back, &pi);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].closed, "the desktop restarted while it waited", "never drawn with buttons again");
+        assert_eq!((kept[1].answer.as_str(), kept[1].closed.as_str()), ("No", ""), "an answered one stays answered");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// does not; and one still waiting when the shell stops comes back withdrawn, never waiting.
     #[test]
     fn an_approval_waits_in_the_session_settles_once_and_a_restart_withdraws_it() {
