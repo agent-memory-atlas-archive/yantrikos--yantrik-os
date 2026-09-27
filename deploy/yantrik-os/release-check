@@ -148,6 +148,26 @@ def switch_mind(mid):
 BASELINE = {}
 
 
+def take_baseline():
+    """What the machine looked like before any check ran: its windows, its problem records, the
+    active mind and the mode. Taken once, at the start, whatever `--only` picks. The checks that
+    compare against it used to find it filled in by the first two checks, so `--only "nothing
+    crashed"` compared against nothing and called every record on file new (VM 520, 2026-09-27)."""
+    try:
+        st = shell().get("state", {})
+    except Exception:  # noqa: BLE001 -- the first check says what is wrong with the shell
+        return
+    BASELINE["windows"] = {w.get("title") for w in st.get("windows", [])}
+    BASELINE["problems"] = {p.get("id") or json.dumps(p) for p in st.get("problems", [])}
+    BASELINE["mind"] = next((m.get("id") for m in st.get("minds", []) if m.get("active")), None)
+    try:
+        doc = json.load(open(os.path.expanduser("~/.config/yantrik/mind-mode.json")))
+    except (OSError, ValueError):
+        return
+    if doc.get("mode") in ("plan", "ask", "auto", "bypass"):
+        BASELINE["mode"] = doc["mode"]
+
+
 @check("the shell answers, and says which build it is")
 def _shell():
     d = shell()
@@ -160,9 +180,6 @@ def _shell():
         raise Failed("the shell says %s but this machine's BUILD says %s — the shell read it before the "
                      "last install and has not restarted, or the install did not record itself"
                      % (st.get("version"), recorded))
-    BASELINE["windows"] = {w.get("title") for w in st.get("windows", [])}
-    BASELINE["problems"] = {p.get("id") or json.dumps(p) for p in st.get("problems", [])}
-    BASELINE["mind"] = next((m.get("id") for m in st.get("minds", []) if m.get("active")), None)
     return "version %s, %d actions, screen %s" % (st.get("version"), len(d.get("actions", [])), st.get("screen"))
 
 
@@ -800,6 +817,7 @@ def main():
     started = time.time()
     tiers = ("ci",) if ARGS.tier == "ci" else ("ci", "rc")
     print("release-check — tier %s%s" % (ARGS.tier, ", interactive" if ARGS.interactive else ""), flush=True)
+    take_baseline()
     for c in CHECKS:
         if c["tier"] not in tiers or (c["interactive"] and not ARGS.interactive):
             continue
