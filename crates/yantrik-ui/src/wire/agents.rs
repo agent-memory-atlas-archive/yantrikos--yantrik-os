@@ -1146,6 +1146,32 @@ fn publish_lens_questions(ui: &App) {
     }
 }
 
+/// Every question an agent is waiting on a person to answer, for `describe shell`: beside
+/// `pending_approvals`, so a second mind or a test can tell "waiting for someone to answer" from
+/// "hung". The same limits as the cards; answering stays with the card (`answer_question` is the
+/// person's), so this only says what is being asked.
+pub fn questions_for_describe() -> serde_json::Value {
+    let waiting: Vec<serde_json::Value> = agents::store().read(|s| {
+        s.agents()
+            .iter()
+            .flat_map(|a| {
+                a.turns.iter().flat_map(|t| t.items.iter()).filter_map(move |i| match i {
+                    Item::Question(q) if q.waiting() => Some(serde_json::json!({
+                        "agent": a.meta.id.0,
+                        "mind": a.meta.mind,
+                        "request": q.request,
+                        "prompt": clip(&q.prompt, QUESTION_CHARS),
+                        "options": q.options.iter().take(QUESTION_OPTIONS)
+                            .map(|o| clip(o, QUESTION_OPTION_CHARS)).collect::<Vec<_>>(),
+                    })),
+                    _ => None,
+                })
+            })
+            .collect()
+    });
+    serde_json::Value::Array(waiting)
+}
+
 /// One waiting question as the Lens's card draws it, held to the same limits as in Agents.
 fn lens_question(agent: &str, mind: &str, q: &crate::agents::model::Question) -> crate::QuestionRequest {
     crate::QuestionRequest {
@@ -1827,6 +1853,31 @@ fn parse_key(key: &str) -> Option<(u64, usize)> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// `describe shell` says what an agent is waiting on the person to answer, and stops saying it
+    /// once it is answered: a test or a second mind can tell "asked, waiting" from "hung".
+    #[test]
+    fn a_waiting_question_is_in_describe_until_it_is_answered() {
+        let agent = AgentId::new("pi", "c-describe-question");
+        agents::store().open_turn(&agent, "tidy Downloads");
+        let ask = yantrik_harness::event::Event::Request {
+            request_id: "q-describe-1".into(),
+            prompt: "Delete the 3 old installers?".into(),
+            options: vec!["Yes".into(), "No".into()],
+        };
+        agents::store().event(&agent, &ask, agents::model::Provenance::Reported);
+        let mine = |v: serde_json::Value| -> Vec<serde_json::Value> {
+            v.as_array().unwrap().iter().filter(|q| q["agent"] == agent.0.as_str()).cloned().collect()
+        };
+        let waiting = mine(questions_for_describe());
+        assert_eq!(waiting.len(), 1, "{waiting:?}");
+        assert_eq!(waiting[0]["request"], "q-describe-1");
+        assert_eq!(waiting[0]["prompt"], "Delete the 3 old installers?");
+        assert_eq!(waiting[0]["options"], serde_json::json!(["Yes", "No"]));
+
+        agents::store().question_answered(&agent, "q-describe-1", "No");
+        assert!(mine(questions_for_describe()).is_empty(), "an answered question is not waiting");
+    }
 
     fn read(relative: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
