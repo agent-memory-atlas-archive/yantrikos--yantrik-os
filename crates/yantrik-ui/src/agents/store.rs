@@ -629,8 +629,21 @@ impl Store {
 
     /// How many agents each tab lists, in [`Tab::EVERY`] order.
     pub fn counts(&self) -> [usize; 4] {
-        Tab::EVERY.map(|tab| self.agents.iter().filter(|a| tab.holds(a.state)).count())
+        Tab::EVERY.map(|tab| self.agents.iter().filter(|a| self.in_tab(tab, a)).count())
     }
+
+    /// Whether `a` is listed under `tab`. Needs you holds what waits on the person *and* what is
+    /// stuck (#234): a stuck task is still thinking or running a tool by its state, but it is the
+    /// person it now needs, and it was found nowhere they look for that.
+    fn in_tab(&self, tab: Tab, a: &Agent) -> bool {
+        tab.holds(a.state) || (tab == Tab::NeedsYou && self.stuck(a))
+    }
+
+    /// Whether the shell judges `a` stuck now (`progress::of`, on this store's clock).
+    fn stuck(&self, a: &Agent) -> bool {
+        super::progress::of(a, self.now()).is_some_and(|p| p.stuck.is_some())
+    }
+
 
     /// The Tasks tab's rows (#234): every request a person or an agent made, newest first, as
     /// `(agent, turn)`, at most `limit`. A turn with no prompt is the shell's own account of
@@ -652,10 +665,11 @@ impl Store {
     /// left the tab taken out and new ones added at the bottom. A row must not move under a
     /// pointer that is about to click it (design decision 4).
     pub fn list(&self, tab: Tab, hold: Option<&[AgentId]>) -> Vec<AgentId> {
-        let mut rows: Vec<&Agent> = self.agents.iter().filter(|a| tab.holds(a.state)).collect();
+        let mut rows: Vec<&Agent> = self.agents.iter().filter(|a| self.in_tab(tab, a)).collect();
         rows.sort_by(|a, b| b.meta.started.cmp(&a.meta.started).then(b.seq.cmp(&a.seq)));
         if tab == Tab::Active {
-            rows.sort_by_key(|a| a.state != State::WaitingForYou);
+            // What needs the person first: waiting on them, or stuck.
+            rows.sort_by_key(|a| a.state != State::WaitingForYou && !self.stuck(a));
         }
         let wanted: Vec<AgentId> = rows.iter().map(|a| a.meta.id.clone()).collect();
         match hold {
@@ -1944,6 +1958,28 @@ mod tests {
         let again = Store::load(&dir, Box::new(|| 1_800_000_100));
         assert!(again.agent(&pi).unwrap().turns[1].lost, "still lost after the next restart");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #234: a stuck task is listed where the person looks for what needs them, counted there,
+    /// and first under Active; once it is heard from again it leaves Needs you.
+    #[test]
+    fn a_stuck_task_is_in_needs_you_and_first_in_active() {
+        let (mut s, clock) = store();
+        let calm = id("pi:c-calm");
+        let quiet = id("deepseek:c-quiet");
+        s.open_turn(&quiet, "build the game");
+        s.open_turn(&calm, "tidy Downloads");
+        assert_eq!(s.list(Tab::NeedsYou, None), Vec::<AgentId>::new());
+
+        clock.fetch_add(crate::agents::progress::STUCK_QUIET_SECS + 10, Ordering::SeqCst);
+        s.text(&calm, "still going");
+        assert_eq!(s.list(Tab::NeedsYou, None), vec![quiet.clone()], "quiet past the limit: stuck, and it needs you");
+        let at = Tab::EVERY.iter().position(|t| *t == Tab::NeedsYou).unwrap();
+        assert_eq!(s.counts()[at], 1);
+        assert_eq!(s.list(Tab::Active, None)[0], quiet, "what needs the person comes first");
+
+        s.text(&quiet, "found it, carrying on");
+        assert!(s.list(Tab::NeedsYou, None).is_empty(), "heard from again: no longer stuck");
     }
 
     fn questions(s: &Store, agent: &AgentId) -> Vec<Question> {
