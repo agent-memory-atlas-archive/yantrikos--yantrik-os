@@ -969,6 +969,7 @@ fn change_and_answer(
     ) {
         Ok(event) => {
             ui.set_notice(SharedString::new());
+            show_date(ui, state, &event.start);
             Ok(serde_json::json!({
                 "id": event.id,
                 "title": event.title,
@@ -983,6 +984,31 @@ fn change_and_answer(
             Err(e)
         }
     }
+}
+
+/// The year, month and day a `YYYY-MM-DD…` string starts with (a date, or an event's start).
+fn ymd(date: &str) -> Option<(i32, u32, i32)> {
+    let mut parts = date.get(..10)?.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: i32 = parts.next()?.parse().ok()?;
+    ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((year, month, day))
+}
+
+/// Put the window on `date`: its month, that day picked. What an action just changed is then what
+/// the window shows, and what the answer's first line says. `add_event` used to leave the window
+/// on whatever day was picked, so a mind adding to the 30th read "3 things on day 25", saw no sign
+/// of its event, and added it again (yantrik-mind R2, T3 rep 3), and the duplicate became a false
+/// claim in the next task.
+fn show_date(ui: &CalendarApp, state: &Rc<RefCell<CalState>>, date: &str) {
+    let Some((year, month, day)) = ymd(date) else { return };
+    {
+        let mut s = state.borrow_mut();
+        s.year = year;
+        s.month = month;
+    }
+    ui.set_selected_day(day);
+    refresh(ui, state);
 }
 
 /// Change an appointment, and show what it became — or say why it did not.
@@ -1410,6 +1436,7 @@ fn publish_control(app: &CalendarApp, state: Rc<RefCell<CalState>>) {
                     }
                 };
                 ui.set_notice(SharedString::new());
+                show_date(&ui, &add_state, &date);
                 let on = if all_day { date.clone() } else { format!("{date} {time}") };
                 let mut answer = serde_json::json!({
                     "added": title, "on": on, "id": id, "all_day": all_day,
@@ -2017,4 +2044,19 @@ fn wire(app: &CalendarApp) -> slint::Timer {
         });
     }
     watch
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_date_or_an_events_start_names_the_day_to_show() {
+        assert_eq!(ymd("2026-09-30"), Some((2026, 9, 30)));
+        assert_eq!(ymd("2026-10-15T16:30:00-05:00"), Some((2026, 10, 15)), "an event's start");
+        assert_eq!(ymd("2026-13-01"), None, "no month 13");
+        assert_eq!(ymd("2026-09-32"), None);
+        assert_eq!(ymd("30 Sep"), None, "not a date: the window stays where it is");
+        assert_eq!(ymd(""), None);
+    }
 }
