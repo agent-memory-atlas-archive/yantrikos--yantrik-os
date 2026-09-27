@@ -142,6 +142,7 @@ mod tests {
             started: 100 + n,
             ended: ended.then_some(200 + n),
             ok: ended.then_some(true),
+            lost: false,
             items,
             events: false,
             trail_seq: 0,
