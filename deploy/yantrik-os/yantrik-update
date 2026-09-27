@@ -772,7 +772,18 @@ EOF
   say "Installed $remote_ver ($remote_git)"
   # The binaries are current; the base system may not be. Never fails the update over it —
   # reconcile_packages says in words what it could not do and how to finish it.
-  reconcile_packages || true
+  #
+  # With the NEW build's list: this process is still the updater that was installed before, and
+  # its REQUIRED_PACKAGES is the old one. VM 520 went a08a47f → 0f3e733 and was told "base system
+  # reconciled" without swaybg, which only the new list names, so a package a build adds reached
+  # machines one update late. The installed file is the new build's by now, whatever path this
+  # process was started from, so it reconciles, as a process of its own; this one's list stands
+  # in only when that file cannot run.
+  if [ -x "$BIN_DIR/yantrik-update" ]; then
+    YANTRIK_PREFIX="$PREFIX" "$BIN_DIR/yantrik-update" reconcile || true
+  else
+    reconcile_packages || true
+  fi
 
   if [ "$reboot" = 1 ]; then
     say "Rebooting"
@@ -1211,8 +1222,10 @@ and this is running as $(id -un). Run: sudo yantrik-update set-channel $new"
 # without a nightly turning red.
 
 # Package names, not command names: `ip` and `ss` are both in iproute2, `ping` is in
-# iputils-ping. A package the image's own lists all install.
-REQUIRED_PACKAGES="iproute2 iputils-ping grim curl python3 nano htop swaybg"
+# iputils-ping. A package the image's own lists all install. xdg-desktop-portal-gtk has no
+# command: it is the file picker behind every Save and Upload the browser offers (#33), and a
+# machine installed before the image gained it could not save a page or attach a file.
+REQUIRED_PACKAGES="iproute2 iputils-ping grim curl python3 nano htop swaybg xdg-desktop-portal-gtk"
 
 # Is this package installed, per dpkg? Prints dpkg's own status word, or nothing.
 pkg_installed() {
@@ -1439,11 +1452,11 @@ cmd_selftest() {
   printf '#!/bin/sh\ncase "$1" in iproute2|curl|python3|grim) echo installed ;; esac\n' > "$old"
   chmod +x "$old"
   out="$(missing_packages "$old")"
-  if [ "$out" = "iputils-ping nano htop swaybg" ]; then
+  if [ "$out" = "iputils-ping nano htop swaybg xdg-desktop-portal-gtk" ]; then
     printf '  %sok%s   a 520-style machine is named package by package\n' "$c_grn" "$c_off"
   else
     printf '  %sFAIL%s a 520-style machine: wanted %s, got %s\n' \
-      "$c_red" "$c_off" "iputils-ping nano htop swaybg" "${out:-nothing}"
+      "$c_red" "$c_off" "iputils-ping nano htop swaybg xdg-desktop-portal-gtk" "${out:-nothing}"
     fails=$((fails + 1))
   fi
 

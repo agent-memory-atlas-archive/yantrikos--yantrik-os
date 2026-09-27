@@ -99,9 +99,12 @@ packages:
   - libnotify-bin
   # Portals: the file picker, the screenshot and the screen-share a sandboxed or foreign
   # application asks the desktop for. Chromium's "Upload file" dialog goes through this.
-  # The wlr backend is the one that speaks to a wlroots compositor such as labwc.
+  # The wlr backend is the one that speaks to a wlroots compositor such as labwc; it has no file
+  # picker, so the gtk backend supplies FileChooser (#33). labwc's own labwc-portals.conf
+  # (default=wlr;*) routes to it with no configuration of ours.
   - xdg-desktop-portal
   - xdg-desktop-portal-wlr
+  - xdg-desktop-portal-gtk
   # Something to answer polkit. The daemon is already running and had no agent, so every
   # action needing authorisation failed with no prompt and no explanation.
   - lxpolkit
