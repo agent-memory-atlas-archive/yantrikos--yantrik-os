@@ -43,6 +43,7 @@ import { ContentBlock, MessageData } from "components/message_bubble.slint";
 import { ToolCallData } from "components/tool_call.slint";
 import { UrgeCardData } from "components/glance_card.slint";
 import { LensResult, ApprovalRequest, ApprovalCard, VaultUnlockRequest, VaultUnlockCard } from "components/intent_lens.slint";
+import { QuestionRequest } from "components/question_card.slint";
 import { MindModeMenu, MindRule, MindAuditEntry } from "components/mind_mode_menu.slint";
 import { WhisperCardItem } from "components/whisper_card.slint";
 import { BriefSection } from "components/morning_brief.slint";
@@ -61,7 +62,7 @@ import { YMenuAction, YContextMenu } from "components/y_context_menu.slint";
 import { Icons } from "components/icon.slint";
 import { Tr } from "translations.slint";
 
-export { HarnessData, HarnessRowData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, ToolCallData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, MindRule, MindAuditEntry, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, NotifActionData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, ToastActionData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction, ProblemRow }
+export { HarnessData, HarnessRowData, Tr, ThemeMode, ThemeOverrides, AccentPreset, ContentBlock, MessageData, ToolCallData, UrgeCardData, BondData, OpinionData, SharedRefData, MemoryItem, LensResult, ApprovalRequest, QuestionRequest, MindRule, MindAuditEntry, WhisperCardItem, FileEntry, BreadcrumbSegment, FileDetailData, NotificationData, NotifActionData, ProcessData, ClipboardEntryData, AppGridItem, CategoryItem, ServiceItem, WindowItem, DockItem, ToastData, ToastActionData, PackageData, PendingAction, UsbDeviceData, PciDeviceData, InputDeviceData, StorageDeviceData, DisplayDeviceData, UserData, GroupData, PermFileData, ComponentVersionData, BriefSection, CommandItem, YSidebarItem, YSidebarSection, YTabItem, YMenuAction, ProblemRow }
 
 export component App inherits Window {
     default-font-family: Theme.font-ui;
@@ -137,6 +138,8 @@ export component App inherits Window {
     /// time because Slint has no way to skip a row inside a `for`, and a stack of zero-height
     /// rows would leave the card floating below a gap the size of the session's history.
     in property <[ApprovalRequest]> pending-approvals: [];
+    /// Questions the Lens's mind is waiting on (#25): `wire::agents` fills it every tick.
+    in property <[QuestionRequest]> lens-questions: [];
     /// How many further requests are queued behind it. See `approvals-waiting` in intent_lens.
     in property <int> approvals-waiting: 0;
     /// Pressed Allow. This callback, and the one below it, are the only way a grant comes into
@@ -1376,6 +1379,9 @@ export component App inherits Window {
             approval-allow(id) => { root.approval-allow(id); }
             approval-allow-session(id) => { root.approval-allow-session(id); }
             approval-deny(id) => { root.approval-deny(id); }
+            // The mind's own questions (#25), answered through the same one path as in Agents.
+            questions: root.lens-questions;
+            question-answer(agent, request, answer) => { AgentsState.answer-question(agent, request, answer); }
             lens-can-open-in-agents: root.lens-can-open-in-agents;
             lens-open-in-agents => { root.lens-open-in-agents(); }
             lens-open-history => { root.lens-open-history(); }

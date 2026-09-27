@@ -287,6 +287,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
             if ui.get_lens_can_open_in_agents() != lens_agent {
                 ui.set_lens_can_open_in_agents(lens_agent);
             }
+            publish_lens_questions(&ui);
             if ui.get_current_screen() == SCREEN {
                 refresh(&ui, &state, false);
             }
@@ -1104,6 +1105,44 @@ fn empty_note(tab: Tab, counts: [usize; 4]) -> String {
 const QUESTION_OPTIONS: usize = 6;
 const QUESTION_OPTION_CHARS: usize = 40;
 const QUESTION_CHARS: usize = 2000;
+
+/// The questions the Lens's mind is waiting on, for the Lens to draw where approvals sit. Only
+/// the active mind's own conversation: another agent's question is answered in Agents.
+fn publish_lens_questions(ui: &App) {
+    let Some(host) = super::harness::host() else { return };
+    let agent = feed::main_agent(&host.active_id());
+    let questions: Vec<crate::QuestionRequest> = agents::store().read(|s| {
+        let Some(a) = s.agent(&agent) else { return Vec::new() };
+        a.turns
+            .iter()
+            .flat_map(|t| t.items.iter())
+            .filter_map(|i| match i {
+                Item::Question(q) if q.waiting() => Some(lens_question(&a.meta.id.0, &a.meta.mind, q)),
+                _ => None,
+            })
+            .collect()
+    });
+    if let Some(model) = crate::models::changed(ui.get_lens_questions(), questions) {
+        ui.set_lens_questions(model);
+    }
+}
+
+/// One waiting question as the Lens's card draws it, held to the same limits as in Agents.
+fn lens_question(agent: &str, mind: &str, q: &crate::agents::model::Question) -> crate::QuestionRequest {
+    crate::QuestionRequest {
+        agent: agent.into(),
+        mind: mind.into(),
+        request: q.request.as_str().into(),
+        prompt: clip(&q.prompt, QUESTION_CHARS).into(),
+        options: slint::ModelRc::new(slint::VecModel::from(
+            q.options
+                .iter()
+                .take(QUESTION_OPTIONS)
+                .map(|o| slint::SharedString::from(clip(o, QUESTION_OPTION_CHARS)))
+                .collect::<Vec<_>>(),
+        )),
+    }
+}
 
 /// `s` drawn in at most `n` characters.
 fn clip(s: &str, n: usize) -> String {
@@ -2403,6 +2442,31 @@ mod first_prompt_attribution_tests {
         let slint = read("../yantrik-ui-slint/ui/agents.slint");
         assert!(slint.contains("root.item.sent-by == \"\" ? \"you\" : root.item.sent-by"), "the pane draws the sender");
         assert!(!slint.contains("text: \"you\";"), "and no longer hardcodes it for every prompt");
+    }
+
+    #[test]
+    fn the_lens_draws_its_minds_questions_held_to_the_same_limits_and_answers_them_the_one_way() {
+        let q = crate::agents::model::Question {
+            request: "r1".into(),
+            prompt: "?".repeat(5_000),
+            options: (0..20).map(|i| format!("{i}{}", "y".repeat(100))).collect(),
+            answer: String::new(),
+            closed: String::new(),
+            asked: 0,
+        };
+        let card = lens_question("hermes:main", "Hermes", &q);
+        assert_eq!((card.agent.as_str(), card.mind.as_str(), card.request.as_str()), ("hermes:main", "Hermes", "r1"));
+        assert_eq!(card.options.row_count(), QUESTION_OPTIONS);
+        assert_eq!(card.prompt.chars().count(), QUESTION_CHARS);
+
+        // The Lens's card answers through the Agents view's own callback, the one path to
+        // `answer_for`; it has no answering of its own.
+        let app = read("../yantrik-ui-slint/ui/app.slint");
+        assert!(app.contains("question-answer(agent, request, answer) => { AgentsState.answer-question(agent, request, answer); }"));
+        let desktop = read("../yantrik-ui-slint/ui/desktop.slint");
+        assert!(desktop.contains("questions: root.questions;"), "the desktop screen hands the Lens its questions");
+        let lens = read("../yantrik-ui-slint/ui/components/intent_lens.slint");
+        assert!(lens.contains("for q in root.questions : QuestionCard"), "the Lens draws them");
     }
 
     #[test]
