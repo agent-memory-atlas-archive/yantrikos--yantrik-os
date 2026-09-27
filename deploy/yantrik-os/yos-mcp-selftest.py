@@ -181,6 +181,8 @@ revision: c0ffee
 # grades them in control_agent_terminal.rs).
 SHELL_ACTIONS = """  act: open_app(name)  [standard, settles later]
        Launch an app, or focus it if it is already running.
+  act: send_message(text)  [standard, settles later]
+       Ask the desktop something, as if typed into the Lens.
   act: agent_run(command, cwd?, wait?)  [sensitive, settles later]
        Run one command line in a fresh terminal of your own, in your pane.
          command: string - one command line, as it would be typed
@@ -1718,6 +1720,47 @@ with tempfile.TemporaryDirectory() as d:
     module.call_tool(module.AGENT_BY_NAME["read_agent"], {"agent": CHILD})
     text, is_error = module.run_tool(module.BY_NAME["web_type"], {"ref": 1, "text": "secret"})
     check("after read_agent, it is", text.startswith("REFUSED") and "read_agent" in text, text)
+
+    # 23t. A hand-off from a session that has read private state asks, whatever the mode. The
+    # agent on the other end has read nothing private, so its own bridge is clean and would type
+    # what it was handed into any page: the taint would be laundered through it. Untainted, the
+    # same hand-off runs as the mode says.
+    for mode in ("auto", "bypass"):
+        module, state = case(tmp, "handoff-taint-" + mode, mode=mode, machine_ceiling="dangerous",
+                             answer="granted", ceiling=None, token=TOKEN)
+        module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+        told = module.call_tool(module.AGENT_BY_NAME["send_to_agent"],
+                                {"agent": CHILD, "text": "Dentist 25 Sep 10:00"})
+        s = read(state)
+        reqs = s.get("requests", [])
+        check("in %s, a tainted session's send_to_agent puts a card up" % mode,
+              [r.get("action") for r in reqs] == ["send_to_agent"], reqs)
+        check("the card says what the message carries",
+              reqs and "Carries what this session has read (os_describe)" in str(reqs[0].get("purpose")),
+              reqs)
+        check("and the mind is told why it was asked, in its own words",
+              "already read private state" in told[0] and "not something to route around" in told[0],
+              told[0])
+        check("allowed, it runs once, with the grant it was minted for",
+              [(a["action"], a.get("grant")) for a in s.get("acted", [])] == [("send_to_agent", "appr-1")],
+              s.get("acted"))
+    module, state = case(tmp, "handoff-taint-denied", mode="auto", answer="denied", ceiling=None,
+                         token=TOKEN)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    told = module.call_tool(module.AGENT_BY_NAME["new_agent"], {"mind": "pi", "task": "post it"})
+    check("refused, a tainted hand-off does not reach the other mind",
+          not [a for a in read(state).get("acted", []) if a["action"] == "new_agent"]
+          and told[0].startswith("REFUSED"), (told[0][:120], read(state).get("acted")))
+    module, state = case(tmp, "handoff-lens", mode="auto", ceiling=None)
+    module.run_tool(module.BY_NAME["os_describe"], {"app": "calendar"})
+    act(module, "shell", "send_message", {"text": "Dentist 25 Sep 10:00"})
+    check("a message put into the Lens by a tainted session is a hand-off too, and asks",
+          [r.get("action") for r in read(state).get("requests", [])] == ["send_message"], read(state))
+    module, state = case(tmp, "handoff-clean", mode="auto", ceiling=None, token=TOKEN)
+    module.call_tool(module.AGENT_BY_NAME["send_to_agent"], {"agent": CHILD, "text": "and the notes"})
+    check("untainted, send_to_agent in auto runs as the mode says, unasked",
+          not read(state).get("requests") and [a["action"] for a in read(state).get("acted", [])]
+          == ["send_to_agent"], read(state))
 
     # 23d. In `auto`, new_agent runs unasked and is written down — without the token; a token a
     # mind puts among the arguments is dropped; and one the desktop echoes back is scrubbed.

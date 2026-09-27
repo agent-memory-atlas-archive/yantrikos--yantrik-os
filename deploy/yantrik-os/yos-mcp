@@ -1264,6 +1264,28 @@ def payload_in_url(url):
     return False
 
 
+# A hand-off carries free text to another mind: a new agent's task, a message to one, a role's
+# task, a message put into the Lens. The session on the other end has read nothing private itself, so its own bridge is clean
+# and would type whatever it was handed into any page. From a session that has read private
+# state, then, a hand-off is how the taint would be laundered, and it asks the person every time,
+# whatever the mode, as putting data into a page is refused whatever the mode (found reviewing the
+# taint rule's sinks, 2026-09-27). Delegation still works; it is just never silent.
+HANDOFFS = {("shell", "new_agent"), ("shell", "send_to_agent"), ("shell", "hand_off"),
+            # The Lens, as if typed: the mind answering there may be another one, its session clean.
+            ("shell", "send_message")}
+
+
+def carries_private(app, action):
+    """Why this hand-off must be asked about, when it carries a tainted session's words. "" = no."""
+    if TAINT_OFF or not _SAW_PRIVATE or (app, action) not in HANDOFFS:
+        return ""
+    saw = ", ".join(dict.fromkeys(_SAW_PRIVATE))
+    return ("This session has already read private state (%s), and %s.%s carries text to another "
+            "mind whose own session has read nothing private and so could put it anywhere. It is "
+            "asked about whatever the mode, as typing into a page is refused whatever the mode: "
+            "not a fault, and not something to route around." % (saw, app, action))
+
+
 def taint_refusal(name, args):
     """Refuse an outbound call once this session has seen private data. None = allow."""
     if TAINT_OFF or not _SAW_PRIVATE or name not in OUTBOUND:
@@ -1911,6 +1933,9 @@ def guard_act(args):
     # One call, one table — the harness's own cap included, so there is nothing here that the
     # vectors do not cover. See `decide`; `CEILING` is only a cap when somebody set it.
     verdict, detail = decide(level, app, action, cannot_undo, mode, rules, machine, cap=cap)
+    private = carries_private(app, action)
+    if private and verdict == "run":
+        verdict = "ask"
 
     if verdict.startswith("refuse"):
         return join(unreadable, detail), None, None, None
@@ -1956,8 +1981,12 @@ def guard_act(args):
             "look for another route to the same effect."
             % (mode, level, app, action))
 
+    asked_anyway = join(asked_anyway, private)
+    # The card says it too: the person is deciding whether what this session read goes on.
+    card_purpose = (join("Carries what this session has read (%s)." % ", ".join(dict.fromkeys(_SAW_PRIVATE)),
+                         purpose) if private else purpose)
     allowed, message, grant = ask_the_person(
-        app, action, level, purpose, bound, requester_name(state))
+        app, action, level, card_purpose, bound, requester_name(state))
     if allowed:
         return None, join(unreadable, join(asked_anyway, message)), None, grant
     return join(unreadable, join(asked_anyway, message)), None, None, None
