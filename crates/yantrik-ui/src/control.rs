@@ -658,6 +658,8 @@ pub fn publish(
                 // test, can tell "the machine is waiting for someone to press a button" from
                 // "the machine is hung" — the two look identical from outside otherwise.
                 .with("pending_approvals", crate::control_approvals::pending_for_describe())
+                // And what an agent has asked the person (#25), waiting for an answer on its card.
+                .with("pending_questions", crate::wire::agents::questions_for_describe())
                 // What went wrong on this machine, newest first: the local records a person
                 // or a mind can choose to send with `report_problem`. Reading them sends nothing.
                 .with("problems", crate::wire::problem_report::for_describe())
