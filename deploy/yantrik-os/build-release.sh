@@ -548,8 +548,11 @@ PYEOF" || fail "manifest update failed"
   # So the URL comes from the channel, and cloud-init is used for what it can actually
   # settle — the host — with a warning rather than a failure if it points somewhere else.
   CI_URL="$(grep -o 'http[^"]*yantrik-os-latest[^"]*' "$SCRIPT_DIR/cloud-init/user-data.yaml" 2>/dev/null | head -1)"
-  HOST_URL="$(printf '%s' "$CI_URL" | sed -n 's#^\(https\?://[^/]*\)/.*#\1#p')"
-  URL="${HOST_URL:-http://releases.yantrikos.com}/$PUBLISH_CHANNEL/yantrik-os-latest-linux-amd64.$EXT"
+  # And from the machine this run uploaded to, not from whatever the release name resolves to.
+  # releases.yantrikos.com moved to the public host, while this script publishes to the LAN box
+  # at $RELEASES_IP (the test stage): every LAN publish on 2026-09-27 "failed" verification
+  # against the public server's bytes while the LAN box served exactly the right ones.
+  URL="http://$RELEASES_IP/$PUBLISH_CHANNEL/yantrik-os-latest-linux-amd64.$EXT"
 
   CI_CHANNEL="$(printf '%s' "$CI_URL" | sed -n 's#.*/\([^/]*\)/yantrik-os-latest.*#\1#p')"
   if [ -n "$CI_CHANNEL" ] && [ "$CI_CHANNEL" != "$PUBLISH_CHANNEL" ]; then
