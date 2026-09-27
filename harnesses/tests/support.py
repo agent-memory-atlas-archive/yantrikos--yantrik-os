@@ -117,7 +117,11 @@ class FakeDesktop:
         self.events_supported = events
         self.events: Dict[int, List[Dict[str, Any]]] = {}
         self.stopped: set = set()       # turns the desktop cancelled; still open until closed
-        self.notices: Dict[str, List[Any]] = {"cancelled": [], "ended": []}
+        self.notices: Dict[str, List[Any]] = {"cancelled": [], "ended": [], "answers": []}
+        # Questions turns asked (#25), by (turn id, request id), and whether a desktop that keeps
+        # runs is being played; one that does not refuses every question, as the host does.
+        self.questions: Dict[Tuple[int, str], Dict[str, Any]] = {}
+        self.keeps_runs = True
         self._next_turn = 1
         self._next_session = 1
         # Whether an attach's `resume` is honoured, as a desktop from #246 on does.
@@ -161,6 +165,17 @@ class FakeDesktop:
                 self.notices["cancelled"].append(turn_id)
             if conversation is not None:
                 self.notices["ended"].append(conversation)
+
+    def answer(self, turn_id: int, request_id: str, answer: Any) -> bool:
+        """What the person's click on a question card does: the answer goes to the harness on its
+        next poll, once. False, as the host refuses it, for a question never asked or answered."""
+        with self.lock:
+            q = self.questions.get((turn_id, request_id))
+            if q is None or q.get("answered"):
+                return False
+            q["answered"] = True
+            self.notices["answers"].append({"turn_id": turn_id, "request_id": request_id, "answer": answer})
+            return True
 
     def events_for(self, turn_id: int) -> List[Dict[str, Any]]:
         with self.lock:
@@ -276,7 +291,7 @@ class FakeDesktop:
 
             if method == "harness.poll":
                 reply: Dict[str, Any] = {}
-                for key in ("cancelled", "ended"):
+                for key in ("cancelled", "ended", "answers"):
                     if self.notices[key]:
                         reply[key] = self.notices[key]
                         self.notices[key] = []
@@ -295,6 +310,13 @@ class FakeDesktop:
                 event = params.get("event") or {}
                 if len(json.dumps(event)) > 64 * 1024:
                     return {"refused": "too big"}, None
+                if event.get("kind") == "request":
+                    if not self.keeps_runs:
+                        return {"refused": "this desktop keeps no runs, so it cannot take a question"}, None
+                    key = (turn_id, str(event.get("request_id") or ""))
+                    if key in self.questions:
+                        return {"refused": "run %s already asked %r" % key}, None
+                    self.questions[key] = dict(event)
                 self.events.setdefault(turn_id, []).append(event)
                 return {}, None
 
