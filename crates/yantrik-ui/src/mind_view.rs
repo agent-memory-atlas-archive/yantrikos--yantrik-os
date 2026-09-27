@@ -39,6 +39,10 @@ use std::time::{Duration, Instant};
 /// and only the first time: labwc on the software renderer answers in well under a second.
 const START_BUDGET: Duration = Duration::from_secs(5);
 
+/// The startup script the nested labwc runs, in the session's socket directory. Only a Mind View
+/// runs it, which is how one an earlier shell left is found.
+const SEAT_SCRIPT: &str = "mind-view-seat.sh";
+
 /// Where the nested labwc's configuration is installed, and where it is in a checkout.
 const INSTALLED_CONFIG: &str = "/opt/yantrik/share/labwc-mind";
 const CHECKOUT_CONFIG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/labwc-mind");
@@ -265,6 +269,44 @@ pub fn ensure() -> Result<Seat, String> {
     }
 }
 
+/// Stops every Mind View an earlier shell left running. A shell that stops, whether the
+/// supervisor restarts it or an update does, never stops the nested labwc it started, so each
+/// restart used to leave one on the person's desktop: a `labwc - WL-1` window that no shell
+/// tracks or can reach. VM 520 had two. Called once as the shell starts, and again before a Mind
+/// View is started.
+pub fn stop_left_behind() {
+    let script = yantrik_ipc_transport::server::socket_dir().join(SEAT_SCRIPT);
+    for pid in left_behind(Path::new("/proc"), &script, std::process::id()) {
+        tracing::info!(pid, "stopping a Mind View an earlier shell left running");
+        #[cfg(unix)]
+        // SAFETY: kill(2) on a pid read from /proc; a pid that has gone since is ESRCH, no harm.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+}
+
+/// The labwcs running this session's Mind View startup script, which only a Mind View runs, from
+/// a `/proc`-shaped directory, leaving out `own` (this shell). Only asked while this shell holds
+/// no Mind View of its own: as it starts, and before it starts one.
+fn left_behind(proc_dir: &Path, script: &Path, own: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir(proc_dir) else { return Vec::new() };
+    let script = script.as_os_str().as_encoded_bytes();
+    let mut found: Vec<u32> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+            let labwc = args.first().is_some_and(|a| a.ends_with(b"labwc"));
+            let runs_script = args.windows(2).any(|w| w[0] == b"-s" && w[1] == script);
+            (labwc && runs_script && pid != own).then_some(pid)
+        })
+        .collect();
+    found.sort_unstable();
+    found
+}
+
 fn socket_path(wayland: &str) -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_default();
     runtime.join(wayland)
@@ -357,7 +399,10 @@ fn start() -> Result<Nested, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let seat_file = seat_file(&dir);
     let _ = std::fs::remove_file(&seat_file);
-    let script = dir.join("mind-view-seat.sh");
+    // One this shell does not hold is one an earlier shell left: its apps are out of reach, and
+    // it would stay on the desktop beside the new one.
+    stop_left_behind();
+    let script = dir.join(SEAT_SCRIPT);
     let outer = std::env::var("WAYLAND_DISPLAY").unwrap_or_default();
     std::fs::write(&script, seat_script(&seat_file, &config, &outer))
         .map_err(|e| format!("{}: {e}", script.display()))?;
@@ -477,6 +522,35 @@ mod tests {
 
     fn facts(pid: Option<u32>, agent: Option<bool>, mind: Option<&str>) -> CallerFacts {
         CallerFacts { pid, agent, attached_mind: mind.map(str::to_string) }
+    }
+
+    #[test]
+    fn a_mind_view_an_earlier_shell_left_is_found_by_its_script_and_nothing_else_is() {
+        let proc_dir = std::env::temp_dir().join(format!("mv-left-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proc_dir);
+        let script = Path::new("/run/user/1000/yantrik/mind-view-seat.sh");
+        let process = |pid: u32, args: &[&str]| {
+            let dir = proc_dir.join(pid.to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut cmdline = args.join("\0");
+            cmdline.push('\0');
+            std::fs::write(dir.join("cmdline"), cmdline).unwrap();
+        };
+        let left = ["/usr/bin/labwc", "-C", "/opt/yantrik/share/labwc-mind", "-s", "/run/user/1000/yantrik/mind-view-seat.sh"];
+        process(256173, &left);
+        process(1021934, &left);
+        // The person's own compositor runs the shell, not the script.
+        process(713, &["labwc", "-s", "/opt/yantrik/bin/yantrik-ui /opt/yantrik/config.yaml"]);
+        // Another user's Mind View runs a script in their own runtime dir.
+        process(900, &["/usr/bin/labwc", "-C", "x", "-s", "/run/user/1001/yantrik/mind-view-seat.sh"]);
+        // Something that only names the script is not a labwc.
+        process(901, &["cat", "-s", "/run/user/1000/yantrik/mind-view-seat.sh"]);
+        std::fs::create_dir_all(proc_dir.join("self")).unwrap();
+
+        assert_eq!(left_behind(&proc_dir, script, SHELL), vec![256173, 1021934]);
+        assert_eq!(left_behind(&proc_dir, script, 256173), vec![1021934], "never this shell itself");
+        assert!(left_behind(&proc_dir.join("absent"), script, SHELL).is_empty(), "no /proc, nothing to stop");
+        let _ = std::fs::remove_dir_all(&proc_dir);
     }
 
     #[test]

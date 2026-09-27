@@ -149,6 +149,9 @@ fn main() {
     // A browser the companion opens goes where a mind's apps go (#239), not onto the person's
     // display, which is where its tools used to put it unconditionally.
     yantrik_companion::tools::browser::set_display_for_mind(mind_view::display_for_mind);
+    // A Mind View an earlier shell left running goes now, not when a mind next opens an app: until
+    // then it sits on the desktop as a window nothing tracks.
+    mind_view::stop_left_behind();
 
     // Pick the renderer before Slint reads SLINT_BACKEND — it only looks once, at App::new().
     // Getting this wrong is not a small penalty: femtovg on a machine with no GPU falls through
