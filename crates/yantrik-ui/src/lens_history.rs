@@ -66,6 +66,11 @@ fn reply(turn: &Turn) -> (String, Vec<ContentBlock>) {
                 blocks.push(ContentBlock { block_type: "tool".into(), text: call.summary.clone(), call });
             }
             Item::Note(note) => blocks.push(line(note)),
+            Item::Question(q) => blocks.push(line(&match (q.answer.as_str(), q.closed.as_str()) {
+                ("", "") => format!("Asked you: {}", q.prompt),
+                ("", why) => format!("Asked you: {} (not answered: {why})", q.prompt),
+                (answer, _) => format!("Asked you: {} (you answered: {answer})", q.prompt),
+            })),
             Item::Approval(approval) => {
                 let record = if approval.record.trim().is_empty() { &approval.what } else { &approval.record };
                 blocks.push(line(record));

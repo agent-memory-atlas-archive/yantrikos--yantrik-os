@@ -51,7 +51,7 @@ export struct AgentRunData {
 // One thing in a session: a prompt, the mind's text, its thinking, a note from the shell, a card,
 // or an approval the shell asked the person for on this agent's behalf.
 export struct AgentItemData {
-    kind: string,          // prompt | text | thinking | note | card | approval
+    kind: string,          // prompt | text | thinking | note | card | approval | question
     key: string,           // stable across redraws; what `toggle` names
     text: string,
     // For a prompt: who sent it — "Council recipe" or the starting agent's id (`deepseek:c-…`),
@@ -77,6 +77,11 @@ export struct AgentItemData {
     // and links, which one StyledText draws and a Text cannot.
     block: string,
     styled: styled-text,
+    // For a question the agent asked (#25): its request id, the answers it offers (none: a free
+    // answer) and what the person answered, "" while it waits. `explain` says why it closed.
+    request: string,
+    options: [string],
+    answer: string,
 }
 
 export struct AgentHeaderData {
@@ -199,6 +204,8 @@ export global AgentsState {
     callback approval-allow(string);
     callback approval-allow-session(string);
     callback approval-deny(string);
+    // The person answered a question the agent asked (#25): agent id, request id, answer.
+    callback answer-question(string, string, string);
     // Show one agent on the Agents screen — the Lens's "open in Agents", a notification's Open,
     // `show_agent`.
     callback show-agent(string);
@@ -508,6 +515,58 @@ component ItemView inherits Rectangle {
             allow => { AgentsState.approval-allow(root.item.approval.id); }
             allow-session => { AgentsState.approval-allow-session(root.item.approval.id); }
             deny => { AgentsState.approval-deny(root.item.approval.id); }
+        }
+
+        // A question the agent itself asked (#25). Its words and its answers are the agent's, so
+        // it is drawn as the agent speaking ("pi asks"), plainly, and never as the approval card
+        // above, which only the shell makes: an agent cannot dress a question up as the desktop's
+        // permission. The answer goes to the run that asked, once.
+        if root.item.kind == "question" : Rectangle {
+            background: Theme.bg-card;
+            border-radius: Theme.radius-card;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            VerticalLayout {
+                padding: Theme.sp-3;
+                spacing: Theme.sp-2;
+                Text {
+                    text: AgentsState.header.mind + " asks";
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                }
+                Text {
+                    text: root.item.text;
+                    color: Theme.text-primary;
+                    wrap: word-wrap;
+                }
+                if root.item.answer == "" && root.item.explain == "" && root.item.options.length > 0 : HorizontalLayout {
+                    spacing: Theme.sp-2;
+                    alignment: start;
+                    for option in root.item.options : YButton {
+                        label: option;
+                        variant: 1;
+                        size: 0;
+                        clicked => { AgentsState.answer-question(AgentsState.header.id, root.item.request, option); }
+                    }
+                }
+                if root.item.answer == "" && root.item.explain == "" && root.item.options.length == 0 : YInput {
+                    placeholder: "answer " + AgentsState.header.mind + "…";
+                    accepted(text) => { AgentsState.answer-question(AgentsState.header.id, root.item.request, text); }
+                }
+                if root.item.answer != "" : Text {
+                    text: "You answered: " + root.item.answer;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-caption;
+                    wrap: word-wrap;
+                }
+                if root.item.explain != "" : Text {
+                    text: "Not answered: " + root.item.explain;
+                    color: Theme.text-dim;
+                    font-size: Theme.fs-caption;
+                    font-italic: true;
+                    wrap: word-wrap;
+                }
+            }
         }
 
         // A call: the one card every view of a mind's calls shares (#125), with the call's own

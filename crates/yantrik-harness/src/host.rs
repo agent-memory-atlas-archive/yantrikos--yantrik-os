@@ -524,6 +524,33 @@ impl Host {
         Ok(())
     }
 
+    /// [`Host::answer`] for a question `agent` asked, found by the agent and the request id,
+    /// which is what the shell's agent view knows: the run is the one in flight for that agent
+    /// that is still waiting on `request_id`.
+    pub fn answer_for(&self, agent: &AgentId, request_id: &str, answer: &serde_json::Value) -> Result<(), String> {
+        let store = self.runs.as_ref().ok_or("this desktop keeps no runs")?;
+        let runs: Vec<u64> = {
+            let mut state = self.lock();
+            self.reap(&mut state);
+            state
+                .attached
+                .get(agent.harness())
+                .map(|h| {
+                    h.in_flight
+                        .iter()
+                        .filter(|(_, f)| f.conversation == agent.conversation())
+                        .map(|(id, _)| *id)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let run = runs
+            .into_iter()
+            .find(|&run| store.pending_requests(run).is_ok_and(|p| p.iter().any(|(r, _)| r == request_id)))
+            .ok_or_else(|| format!("`{agent}` is no longer waiting on that question"))?;
+        self.answer(run, request_id, answer)
+    }
+
     /// Cancel a run: the harness is told on its next poll, the person's listener is settled, and
     /// the run ends `cancelled`. `false` when no harness is answering it now.
     pub fn cancel_run(&self, run_id: u64) -> bool {
@@ -2857,5 +2884,20 @@ mod tests {
         let (session, _, run, _answer) = turn_in_flight(&host);
         assert!(ask(&host, &session, run, "a")["refused"].as_str().unwrap().contains("keeps no runs"));
         assert!(host.answer(run, "a", &json!(1)).is_err());
+    }
+
+    #[test]
+    fn an_agents_question_is_answered_by_agent_and_request_id() {
+        let (host, store) = host_with_runs();
+        let (session, agent, run, _answer) = turn_in_flight(&host);
+        ask(&host, &session, run, "r1");
+        assert!(host.answer_for(&agent, "r9", &json!("Yes")).unwrap_err().contains("no longer waiting"));
+        host.answer_for(&agent, "r1", &json!("Yes")).unwrap();
+        assert_eq!(poll(&host, &session)["answers"][0], json!({ "turn_id": run, "request_id": "r1", "answer": "Yes" }));
+        assert!(host.answer_for(&agent, "r1", &json!("Yes")).unwrap_err().contains("no longer waiting"), "once");
+        assert_eq!(store.run(run).unwrap().unwrap().state, RunState::Running);
+        let stranger = AgentId::new("pi", "c-someone-else");
+        ask(&host, &session, run, "r2");
+        assert!(host.answer_for(&stranger, "r2", &json!("Yes")).is_err(), "only the agent that asked");
     }
 }

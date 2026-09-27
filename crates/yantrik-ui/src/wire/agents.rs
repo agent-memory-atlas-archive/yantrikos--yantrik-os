@@ -1019,6 +1019,7 @@ fn items_of(a: &Agent, expanded: &HashSet<String>, pending: &[crate::approvals::
                 }
                 Item::Card(card) => out.push(card_of(card, key, open)),
                 Item::Approval(approval) => out.push(approval_of(a, approval, key, pending)),
+                Item::Question(q) => out.push(question_of(q, key)),
             }
         }
     }
@@ -1098,6 +1099,42 @@ fn empty_note(tab: Tab, counts: [usize; 4]) -> String {
 /// (`approval_asked`, never an event or the agent's text), the shell's store says the request is
 /// still waiting, and that request was asked for THIS agent — its token's, not its words'. Anything
 /// else draws a line with no buttons.
+/// A question the agent asked, as its card draws it: waiting with its answers, or the line it
+/// leaves once answered or closed.
+fn question_of(q: &crate::agents::model::Question, key: String) -> AgentItemData {
+    AgentItemData {
+        kind: "question".into(),
+        key: key.into(),
+        text: q.prompt.as_str().into(),
+        request: q.request.as_str().into(),
+        options: slint::ModelRc::new(slint::VecModel::from(
+            q.options.iter().map(|o| slint::SharedString::from(o.as_str())).collect::<Vec<_>>(),
+        )),
+        answer: q.answer.as_str().into(),
+        explain: q.closed.as_str().into(),
+        ..Default::default()
+    }
+}
+
+/// The person answered the agent's question through its card. The host takes it first — it
+/// alone knows the run and refuses a second answer — and only then does the card settle; if the
+/// host could not deliver it, the card closes with why instead of claiming an answer that never
+/// arrived.
+pub fn answer_question(agent: &str, request: &str, answer: &str) {
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return;
+    }
+    let id = AgentId(agent.to_string());
+    let Some(host) = super::harness::host() else { return };
+    match host.answer_for(&id, request, &serde_json::Value::String(answer.to_string())) {
+        Ok(()) => {
+            agents::store().question_answered(&id, request, answer);
+        }
+        Err(why) => agents::store().question_closed(&id, request, &why),
+    }
+}
+
 fn approval_of(a: &Agent, approval: &Approval, key: String, pending: &[crate::approvals::Card]) -> AgentItemData {
     let live = (approval.outcome == ApprovalOutcome::Pending)
         .then(|| {
@@ -1245,6 +1282,9 @@ fn card_of(c: &Card, key: String, open: bool) -> AgentItemData {
         runs,
         rows,
         approval: Default::default(),
+        request: Default::default(),
+        options: Default::default(),
+        answer: Default::default(),
         block: Default::default(),
         styled: Default::default(),
     }
@@ -1429,6 +1469,9 @@ fn forward_approvals(g: &AgentsState, shell: &slint::Weak<App>) {
             }
         }
     });
+    // Only the person's click on a question card comes here; no control-surface action and no
+    // harness call answers a run's question (#25).
+    g.on_answer_question(|agent, request, answer| answer_question(&agent, &request, &answer));
 }
 
 /// Put one agent on the Agents screen: selected, under a tab that lists it, the screen shown.
@@ -2333,5 +2376,38 @@ mod first_prompt_attribution_tests {
         let slint = read("../yantrik-ui-slint/ui/agents.slint");
         assert!(slint.contains("root.item.sent-by == \"\" ? \"you\" : root.item.sent-by"), "the pane draws the sender");
         assert!(!slint.contains("text: \"you\";"), "and no longer hardcodes it for every prompt");
+    }
+
+    #[test]
+    fn a_question_card_offers_its_answers_while_it_waits_and_settles_after() {
+        let mut q = crate::agents::model::Question {
+            request: "r1".into(),
+            prompt: "Delete 3 installers?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            answer: String::new(),
+            closed: String::new(),
+            asked: 0,
+        };
+        let card = question_of(&q, "t1.0".into());
+        assert_eq!((card.kind.as_str(), card.request.as_str(), card.text.as_str()), ("question", "r1", "Delete 3 installers?"));
+        assert_eq!(card.options.row_count(), 2);
+        q.answer = "Yes".into();
+        assert_eq!(question_of(&q, "t1.0".into()).answer.as_str(), "Yes");
+    }
+
+    /// Only the person answers a run's question: the card's callback is the one caller of
+    /// `answer_for`. No control-surface action (which a mind can call) and nothing in the
+    /// harness protocol reaches it, so an agent cannot answer its own question.
+    #[test]
+    fn nothing_a_mind_can_call_answers_a_question() {
+        for file in ["src/control_agents.rs", "src/control.rs", "src/control_agent_terminal.rs", "src/control_approvals.rs"] {
+            let text = read(file);
+            let code = text.split("#[cfg(test)]").next().unwrap();
+            assert!(!code.contains(".answer_for(") && !code.contains("answer_question("), "{file} can answer a run's question");
+        }
+        let wiring = read("src/wire/agents.rs");
+        let wiring = wiring.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(wiring.matches("answer_for(").count(), 1, "one caller: the card's answer");
+        assert!(wiring.contains("g.on_answer_question("));
     }
 }

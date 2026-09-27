@@ -936,6 +936,29 @@ pub struct Approval {
     pub settled: Option<u64>,
 }
 
+/// A question the agent asked the person (#25). Answered only through its card, once; the answer
+/// goes to the run that asked, through the host, which refuses a second one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Question {
+    /// The harness's own id for it, unique within its run.
+    pub request: String,
+    pub prompt: String,
+    /// The answers offered as buttons; empty for a free answer.
+    pub options: Vec<String>,
+    /// What the person answered; empty while it waits.
+    pub answer: String,
+    /// Why it can no longer be answered, when that happened; empty while it can.
+    pub closed: String,
+    pub asked: u64,
+}
+
+impl Question {
+    /// Still waiting for the person.
+    pub fn waiting(&self) -> bool {
+        self.answer.is_empty() && self.closed.is_empty()
+    }
+}
+
 /// One thing in a turn, in the order it happened.
 #[derive(Debug)]
 pub enum Item {
@@ -947,6 +970,8 @@ pub enum Item {
     Note(String),
     /// An approval the shell asked the person for, on this agent's behalf.
     Approval(Approval),
+    /// A question the agent itself asked the person.
+    Question(Question),
 }
 
 /// One prompt and everything that came of it.
