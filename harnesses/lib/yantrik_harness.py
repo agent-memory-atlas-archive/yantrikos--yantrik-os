@@ -14,7 +14,8 @@ What a harness supplies is a handler:
 
     class Mind(Handler):
         concurrent = False                 # can two turns run at once?
-        def answer(self, turn): ...        # turn.text in, turn.emit(...) out
+        def answer(self, turn): ...        # turn.text in, turn.emit(...) out;
+                                           # turn.ask("Delete them?", ["Yes", "No"]) waits for the person
         def reset(self): ...               # /new
         def cancel(self, turn): ...        # /stop, on top of turn.cancelled being set
 
@@ -400,6 +401,22 @@ class Turn:
             event["cost_usd"] = float(cost_usd)
         return self._event(event)
 
+    def ask(self, prompt: str, options: Optional[Sequence[str]] = None,
+            request_id: Optional[str] = None, timeout: Optional[float] = None) -> Optional[Any]:
+        """Ask the person something and wait for the answer (#25).
+
+        The desktop shows it as a card, with `options` as buttons (none: a free answer), and sends
+        the person's answer back exactly once. Returns that answer, or None when there is none to
+        wait for: the desktop did not take the question (an older one, or one that keeps no runs),
+        the turn was stopped or its panel went away, the desktop restarted (the question went with
+        it), or `timeout` seconds passed. Only this answer counts: a "yes" typed into the chat is
+        conversation, never an answer to the question.
+        """
+        ask = getattr(self.harness, "_ask", None)
+        if ask is None:
+            return None
+        return ask(self, str(prompt), [str(o) for o in (options or [])], request_id, timeout)
+
     def _event(self, event: Dict[str, Any]) -> bool:
         if self.closed or self.dropped:
             return not self.dropped
@@ -584,6 +601,9 @@ class Harness:
         self.session: Optional[str] = None
         self._resolved: Optional[str] = address
         self._open: Dict[int, Turn] = {}
+        # Questions a turn is waiting on (#25), by (turn id, request id): the answer, once it came.
+        self._questions: Dict[Tuple[int, str], Dict[str, Any]] = {}
+        self._asked = 0
         self._lock = threading.Lock()
         self._stopping = threading.Event()
         self._workers: List[threading.Thread] = []
@@ -645,6 +665,15 @@ class Harness:
                 self._drop(turn)
         for conversation in reply.get("ended") or []:
             self._end(str(conversation))
+        for given in reply.get("answers") or []:
+            key = (given.get("turn_id"), str(given.get("request_id") or ""))
+            with self._lock:
+                waiting = self._questions.get(key)
+            if waiting is None:
+                self.log("an answer arrived for a question nothing is waiting on: turn %s, %s" % key)
+                continue
+            waiting["answer"] = given.get("answer")
+            waiting["done"].set()
 
     def _end(self, conversation: str) -> None:
         with self._lock:
@@ -876,11 +905,17 @@ class Harness:
             return False
         return True
 
-    def _event(self, turn: Turn, event: Dict[str, Any]) -> bool:
-        """One `harness.event`. False only when the panel is no longer listening."""
+    def _event(self, turn: Turn, event: Dict[str, Any],
+               reply_out: Optional[Dict[str, Any]] = None) -> bool:
+        """One `harness.event`. False only when the panel is no longer listening. `reply_out`, when
+        given, receives the desktop's reply, or `{"unsent": ...}` when the event was not sent."""
         if turn.closed or turn.dropped or self._stopping.is_set():
+            if reply_out is not None:
+                reply_out["unsent"] = "the turn is over"
             return not turn.dropped
         if not self._events_ok:
+            if reply_out is not None:
+                reply_out["unsent"] = "this desktop does not take events"
             return True
         try:
             reply = self._call(EVENT, {"session": turn.session, "turn_id": turn.turn_id,
@@ -892,12 +927,16 @@ class Harness:
                 self._events_ok = False
                 self.log("this desktop does not take harness.event; tool calls show as trail "
                          "lines only")
+                if reply_out is not None:
+                    reply_out["unsent"] = "this desktop does not take events"
                 return True
             if not turn.dropped:
                 self.log("event on turn %d failed: %s" % (turn.turn_id, exc))
             self._drop(turn)
             return False
         turn.last_call = time.monotonic()
+        if reply_out is not None:
+            reply_out.update(reply)
         if reply.get("dropped"):
             self._drop(turn)
             return False
@@ -907,6 +946,41 @@ class Harness:
             self.log("the desktop refused a %s event on turn %d: %s"
                      % (event.get("kind"), turn.turn_id, reply["refused"]))
         return True
+
+    def _ask(self, turn: Turn, prompt: str, options: List[str], request_id: Optional[str],
+             timeout: Optional[float]) -> Optional[Any]:
+        """`Turn.ask`: send the question, then wait for its answer on a later poll."""
+        asked_on = turn.turn_id
+        with self._lock:
+            self._asked += 1
+            rid = str(request_id or "q%d" % self._asked)
+            waiting: Dict[str, Any] = {"done": threading.Event(), "answer": None}
+            self._questions[(asked_on, rid)] = waiting
+        try:
+            event: Dict[str, Any] = {"kind": "request", "request_id": rid, "prompt": prompt}
+            if options:
+                event["options"] = options
+            reply: Dict[str, Any] = {}
+            if not self._event(turn, event, reply):
+                return None
+            not_taken = reply.get("unsent") or reply.get("refused") or reply.get("ignored")
+            if not_taken:
+                self.log("the desktop did not take a question on turn %d: %s" % (asked_on, not_taken))
+                return None
+            deadline = None if timeout is None else time.monotonic() + timeout
+            while not waiting["done"].wait(0.25):
+                if turn.cancelled.is_set() or turn.dropped or turn.closed or self._stopping.is_set():
+                    return None
+                # Re-opened under a new id by a desktop that restarted: the question, and the run
+                # that asked it, went with the old desktop.
+                if turn.turn_id != asked_on:
+                    return None
+                if deadline is not None and time.monotonic() >= deadline:
+                    return None
+            return waiting["answer"]
+        finally:
+            with self._lock:
+                self._questions.pop((asked_on, rid), None)
 
     def _drop(self, turn: Turn) -> None:
         """The panel stopped listening: nothing more is sent, and the mind is asked to stop."""

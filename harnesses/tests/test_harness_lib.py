@@ -62,6 +62,22 @@ class Waiting(Handler):
         self.cancelled_from.append(turn.turn_id)
 
 
+class Asking(Handler):
+    """Asks the person one question, then says what came back."""
+
+    def __init__(self, options=("Allow", "Deny"), timeout=None):
+        self.options = list(options)
+        self.timeout = timeout
+        self.asked = threading.Event()
+        self.got = []
+
+    def answer(self, turn):
+        self.asked.set()
+        got = turn.ask("Delete 3 old installers?", self.options, request_id="del", timeout=self.timeout)
+        self.got.append(got)
+        turn.emit("answer: %s" % got)
+
+
 class Resettable(Handler):
     def __init__(self):
         self.resets = 0
@@ -470,6 +486,56 @@ class ConversationTests(unittest.TestCase):
         self.desktop.wait_closed(self.desktop.ask("/new", conversation="c-aaaaaa"))
         self.assertEqual(handler.mind("c-aaaaaa").resets, 1)
         self.assertEqual(handler.mind("c-bbbbbb").resets, 0)
+
+    # ── questions (#25) ─────────────────────────────────────────────────
+
+    def test_a_question_waits_for_the_persons_answer_and_gets_it_once(self):
+        handler = Asking()
+        self.start(handler)
+        turn = self.desktop.ask("clean up Downloads")
+        self.assertTrue(wait_for(lambda: (turn, "del") in self.desktop.questions), "the question was not asked")
+        asked = self.desktop.questions[(turn, "del")]
+        self.assertEqual((asked["prompt"], asked["options"]), ("Delete 3 old installers?", ["Allow", "Deny"]))
+        time.sleep(0.3)
+        self.assertEqual(handler.got, [], "it answered before the person did")
+        self.assertTrue(self.desktop.answer(turn, "del", "Allow"))
+        self.assertFalse(self.desktop.answer(turn, "del", "Deny"), "a second answer is refused")
+        self.desktop.wait_closed(turn)
+        self.assertEqual(handler.got, ["Allow"])
+        self.assertEqual(self.desktop.text(turn), "answer: Allow")
+
+    def test_a_desktop_that_cannot_take_a_question_gets_none_at_once(self):
+        self.desktop.keeps_runs = False
+        handler = Asking()
+        self.start(handler)
+        turn = self.desktop.ask("clean up Downloads")
+        self.desktop.wait_closed(turn)
+        self.assertEqual(handler.got, [None])
+
+    def test_a_desktop_from_before_events_gets_none_at_once(self):
+        old = FakeDesktop(events=False)
+        self.addCleanup(old.stop)
+        handler = Asking()
+        self.start(handler, desktop=old)
+        turn = old.ask("clean up Downloads")
+        old.wait_closed(turn)
+        self.assertEqual(handler.got, [None])
+
+    def test_stopping_the_turn_ends_the_wait(self):
+        handler = Asking()
+        self.start(handler)
+        turn = self.desktop.ask("clean up Downloads")
+        self.assertTrue(wait_for(lambda: (turn, "del") in self.desktop.questions))
+        self.desktop.stop_agent(turn_id=turn)
+        self.desktop.wait_closed(turn)
+        self.assertEqual(handler.got, [None])
+
+    def test_a_question_left_unanswered_gives_up_at_its_timeout(self):
+        handler = Asking(timeout=0.5)
+        self.start(handler)
+        turn = self.desktop.ask("clean up Downloads")
+        self.desktop.wait_closed(turn)
+        self.assertEqual(handler.got, [None])
 
     def test_a_cancelled_turn_is_stopped_and_still_closed_once(self):
         handler = Waiting()

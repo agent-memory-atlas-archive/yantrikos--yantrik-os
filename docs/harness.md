@@ -287,7 +287,10 @@ within the run). The answer arrives once, on a later poll, as
 (one replaced by a re-attach gets nothing). The desktop refuses, with the reason, a second answer
 to the same request, an answer to a question the run never asked, and one after the run ended —
 so an answer meant for one question can never release the next. Only this answer counts: the
-person saying "yes" in the chat is conversation, not an answer. A desktop that keeps no runs
+person saying "yes" in the chat is conversation, not an answer. In `harnesses/lib`,
+`turn.ask(prompt, options, timeout=…)` does all of this and returns the answer, or `None` when
+there is none to wait for (the desktop did not take it, the turn was stopped, it timed out).
+A desktop that keeps no runs
 refuses a `request` rather than leave it unanswerable.
 
 **Events.** Text still travels as `harness.chunk`. Beside it, `harness.event` says what the agent
