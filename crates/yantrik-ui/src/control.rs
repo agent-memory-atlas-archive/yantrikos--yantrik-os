@@ -1215,6 +1215,23 @@ pub fn publish(
             // choice is written to the shell's settings as the preferred mind: it decides who
             // answers from now on, stands after a restart, and belongs in front of the person
             // before it happens rather than after.
+            Action::new(
+                "reach_of",
+                "What an agent token may reach, asked by the token's SHA-256: the reach its role holds \
+                 it to, or null for a token with no role. What every door outside the shell asks \
+                 before it runs an act that carries an agent token (#189).",
+            )
+            .risk("safe")
+            .arg(Param::text("token_sha256").describe("The SHA-256 of the agent token, as lowercase hex")),
+            move |args| {
+                let digest = args["token_sha256"].as_str().unwrap_or_default();
+                if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("`token_sha256` is the token's SHA-256, 64 hex characters".into());
+                }
+                Ok(serde_json::json!({ "reach": crate::agents::reaches::lookup_digest(digest) }))
+            },
+        )
+        .action(
             Action::new("use_harness", "Choose which mind answers when the shell is asked something")
                 .risk("sensitive")
                 .arg(Param::text("id").describe("Harness id, as `describe shell` lists under `minds`")),

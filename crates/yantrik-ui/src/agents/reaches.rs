@@ -75,6 +75,13 @@ pub fn lookup(token: &str) -> Option<Reach> {
     live().iter().find(|e| e.token_sha256 == digest).map(|e| e.reach.clone())
 }
 
+/// The reach the token with this digest carries: what a door in another process asks the shell
+/// for (#189), by digest so the token itself never travels.
+pub fn lookup_digest(token_sha256: &str) -> Option<Reach> {
+    let digest = token_sha256.trim().to_ascii_lowercase();
+    live().iter().find(|e| e.token_sha256 == digest).map(|e| e.reach.clone())
+}
+
 /// The reach `agent` is held to, if it was started as a role.
 pub fn of(agent: &AgentId) -> Option<Reach> {
     live().iter().find(|e| e.reach.agent == agent.0).map(|e| e.reach.clone())
