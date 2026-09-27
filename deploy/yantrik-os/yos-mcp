@@ -2096,6 +2096,23 @@ def in_process(argv):
         return _Ran(code, "".join(_CAPTURE.out), "".join(_CAPTURE.err))
 
 
+# `yos` is a command line, and some of what it prints is advice for someone at one: "re-run with
+# --full". A mind has no --full, and to a model "re-run" reads as "call it again", which is what
+# the Mind did on VM 520 (2026-09-26): editor.new with the same text five times, never save_as,
+# while every nudge said save it. yantrik-mind found the line. The advice is put in this bridge's
+# own words, naming the tool a mind does have.
+_CLI_STATE_HINT = re.compile(r"\(state omitted; `yos describe ([^`]+)`, or re-run with --full\)")
+
+
+def for_a_mind(text):
+    """`text` with the command-line advice in it said the way a mind can act on."""
+    return _CLI_STATE_HINT.sub(
+        lambda m: "(The app's state is left out of this result; os_describe %s shows it. The action "
+                  "is done: do not repeat it to see the state.)" % m.group(1),
+        text,
+    )
+
+
 def run_tool(tool, args, present=None):
     """Invoke yos and return (text, is_error), whatever the outcome.
 
@@ -2221,7 +2238,7 @@ def run_tool(tool, args, present=None):
     # weaker thing for a person to read than "it was done" or "it failed".
     note = join(note, report_unasked(audit, "ok" if p.returncode == 0 else "failed"))
 
-    out = (p.stdout or "").strip()
+    out = for_a_mind((p.stdout or "").strip())
     err = (p.stderr or "").strip()
     app = args.get("app")
     if p.returncode != 0 and app and "no socket for" in err and tool["name"] in ("os_describe", "os_act"):
