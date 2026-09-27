@@ -98,6 +98,7 @@ pub fn say(ui_weak: &slint::Weak<App>, asked: Option<&str>, role: &str, said: &s
     let Some(model) = messages.as_any().downcast_ref::<VecModel<MessageData>>() else { return };
     if let Some(text) = asked {
         model.push(MessageData {
+            run: Default::default(),
             role: "user".into(),
             content: SharedString::from(text),
             is_streaming: false,
@@ -106,6 +107,7 @@ pub fn say(ui_weak: &slint::Weak<App>, asked: Option<&str>, role: &str, said: &s
         ui.set_lens_chat_mode(true);
     }
     model.push(MessageData {
+        run: Default::default(),
         role: role.into(),
         content: SharedString::from(said),
         is_streaming: false,
@@ -146,6 +148,7 @@ fn open_bubbles(ui_weak: &slint::Weak<App>, asked: Option<&str>) -> Option<usize
     let model = messages.as_any().downcast_ref::<VecModel<MessageData>>()?;
     if let Some(text) = asked {
         model.push(MessageData {
+            run: Default::default(),
             role: "user".into(),
             content: SharedString::from(text),
             is_streaming: false,
@@ -153,6 +156,7 @@ fn open_bubbles(ui_weak: &slint::Weak<App>, asked: Option<&str>) -> Option<usize
         });
     }
     model.push(MessageData {
+        run: Default::default(),
         role: "assistant".into(),
         content: "".into(),
         is_streaming: true,
@@ -172,6 +176,9 @@ fn open_bubbles(ui_weak: &slint::Weak<App>, asked: Option<&str>) -> Option<usize
 }
 
 /// Poll one answer at 60fps and append it to its own bubble.
+/// A token naming the run a reply was (`mind:main#n`), sent just before `__DONE__`.
+pub const RUN_MARK: &str = "__RUN__:";
+
 fn pump(
     ui_weak: slint::Weak<App>,
     token_rx: crossbeam_channel::Receiver<String>,
@@ -190,6 +197,19 @@ fn pump(
             if token == "__DONE__" {
                 done = true;
                 break;
+            }
+            // The run this reply was: its link, not its text.
+            if let Some(run) = token.strip_prefix(RUN_MARK) {
+                if let Some(ui) = ui_weak.upgrade() {
+                    let messages = ui.get_messages();
+                    if let Some(model) = messages.as_any().downcast_ref::<VecModel<MessageData>>() {
+                        if let Some(mut bubble) = model.row_data(row) {
+                            bubble.run = run.into();
+                            model.set_row_data(row, bubble);
+                        }
+                    }
+                }
+                continue;
             }
             // __REPLACE__: the next token replaces the whole message content (used when tool
             // calls are detected, to strip raw XML).

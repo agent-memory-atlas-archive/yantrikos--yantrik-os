@@ -225,7 +225,7 @@ mod tests {
                 started,
                 ended: None,
                 ok: None,
-                lost: false,
+                lost: false, origin: Default::default(),
                 items: cards.into_iter().map(Item::Card).collect(),
                 events: true,
                 trail_seq: 0,

@@ -959,6 +959,19 @@ impl Question {
     }
 }
 
+/// Where a turn came from: the person's chat with a mind (the Lens), or agent work (an agent
+/// started as one, a recipe's step, a hand-off, a word in its pane). The Agents screen lists
+/// agent work and the chat's requests that did work; plain conversation stays with the chat.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOrigin {
+    /// Saved before turns said where they came from.
+    #[default]
+    Unknown,
+    Chat,
+    Agent,
+}
+
 /// One thing in a turn, in the order it happened.
 #[derive(Debug)]
 pub enum Item {
@@ -986,6 +999,8 @@ pub struct Turn {
     /// Ended by the desktop stopping, not by the mind (#234): its task is lost, which is not the
     /// same as failed. A harness that comes back may pick the work up again as a new turn.
     pub lost: bool,
+    /// Where it came from: the chat, or agent work.
+    pub origin: TurnOrigin,
     pub items: Vec<Item>,
     /// Whether any structured `harness.event` arrived in this turn. Once one has, trail lines in
     /// the text are the same calls told twice and are not made into cards.
@@ -995,6 +1010,11 @@ pub struct Turn {
 }
 
 impl Turn {
+    /// Whether it did work: a call, a question to the person, or an approval asked for.
+    pub fn did_work(&self) -> bool {
+        self.items.iter().any(|i| matches!(i, Item::Card(_) | Item::Question(_) | Item::Approval(_)))
+    }
+
     pub fn open(&self) -> bool {
         self.ended.is_none()
     }
@@ -1068,6 +1088,23 @@ impl Agent {
     }
 
     /// Whether anything of it is still running: its turn, or a command the shell owns.
+    /// A mind's main conversation with no role, recipe or parent: the person's chat with it (the
+    /// Lens). Its turns are listed as runs, not the conversation as one agent.
+    pub fn is_plain_main(&self) -> bool {
+        self.meta.id.conversation() == AgentId::MAIN && self.meta.role.is_none() && self.meta.recipe.is_none() && self.meta.parent.is_none()
+    }
+
+    /// Whether turn `t` of this agent is a run the Agents screen lists: agent work always; a chat
+    /// request only if it did work. A turn saved before turns said where they came from counts as
+    /// chat on a plain main conversation, and as agent work anywhere else.
+    pub fn is_run(&self, t: &Turn) -> bool {
+        match t.origin {
+            TurnOrigin::Agent => true,
+            TurnOrigin::Chat => t.did_work(),
+            TurnOrigin::Unknown => !self.is_plain_main() || t.did_work(),
+        }
+    }
+
     pub fn busy(&self) -> bool {
         self.state.working() || self.open_turn().is_some() || self.cards().any(|c| c.running())
     }

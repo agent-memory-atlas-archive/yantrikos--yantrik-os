@@ -179,6 +179,7 @@ fn dispatch(
     let answer = host.send(yantrik_harness::Turn::new(sent).with_context(desktop_context(&super::settings::place())));
     // The same turn, recorded as this mind's agent on the Agents screen; the answer passes through.
     let answer = crate::agents::feed::lens_turn(&host.active_id(), text, answer);
+    let run_of = crate::agents::feed::main_agent(&host.active_id());
     let (tx, rx) = crossbeam_channel::unbounded::<String>();
     let bridge = bridge.clone();
     let asked = text.to_string();
@@ -206,6 +207,11 @@ fn dispatch(
             if sent.is_err() {
                 return;
             }
+        }
+        // A reply that did work links to its run in Agents (the chat is the conversation; the
+        // run is agent work). Named before the end so the pump puts it on this reply.
+        if let Some(run) = crate::agents::feed::chat_run(&run_of) {
+            let _ = tx.send(format!("{}{run}", crate::streaming::RUN_MARK));
         }
         let _ = tx.send("__DONE__".to_string());
         // The bond is the person's relationship with the desktop, whichever mind answers — the

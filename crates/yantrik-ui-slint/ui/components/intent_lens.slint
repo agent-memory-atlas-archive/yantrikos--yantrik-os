@@ -958,6 +958,8 @@ export component IntentLens inherits Rectangle {
     /// Questions the mind this conversation is with asked and is waiting on (#25), oldest first.
     in property <[QuestionRequest]> questions: [];
     callback question-answer(string, string, string);   // agent id, request id, answer
+    // A reply's "Open the run": the run's row id (`mind:main#n`).
+    callback open-run(string);
 
     // Callbacks
     callback approval-allow(string);   // request id — a click, and nothing else, creates a grant
@@ -2053,6 +2055,7 @@ export component IntentLens inherits Rectangle {
                     min-height: root.transcript-min;
 
                     for msg[idx] in root.messages : MessageBubble {
+                        open-run(run) => { root.open-run(run); }
                         data: msg;
                     }
                 }

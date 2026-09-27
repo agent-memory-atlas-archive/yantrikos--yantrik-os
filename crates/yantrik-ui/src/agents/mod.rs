@@ -35,6 +35,7 @@ pub mod launch;
 pub mod model;
 pub mod progress;
 pub mod reaches;
+pub mod route;
 pub mod store;
 
 use std::path::PathBuf;
@@ -42,7 +43,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 pub use model::{AgentId, AgentMeta, ApprovalOutcome, CallState, Event, Provenance, RecipeOrigin, RoleMeta, State, Stream, Tab};
-pub use store::Store;
+pub use store::{RowKey, Store};
 
 /// The title every popped-out agent window starts with, so the window list can tell an agent's
 /// window from anything else a task might be named after.
@@ -109,6 +110,11 @@ impl Agents {
 
     pub fn open_turn(&self, id: &AgentId, prompt: &str) {
         self.lock().open_turn(id, prompt)
+    }
+
+    /// A turn of the person's chat with a mind (the Lens): listed in Agents only if it does work.
+    pub fn open_chat_turn(&self, id: &AgentId, prompt: &str) {
+        self.lock().open_chat_turn(id, prompt)
     }
 
     pub fn text(&self, id: &AgentId, delta: &str) {
@@ -301,6 +307,23 @@ pub fn for_describe() -> serde_json::Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A chat reply links to its run only when the turn did work: talk stays with the chat.
+    #[test]
+    fn a_chat_reply_links_to_its_run_only_when_it_did_work() {
+        let mind = AgentId::new("chatlink", AgentId::MAIN);
+        store().open_chat_turn(&mind, "thanks!");
+        store().text(&mind, "Any time.");
+        assert_eq!(feed::chat_run(&mind), None, "talk: no run to link to");
+        store().close_turn(&mind, true);
+        store().open_chat_turn(&mind, "build a small game");
+        store().event(
+            &mind,
+            &Event::ToolStart { call: "c1".into(), name: "os_act".into(), target: "editor".into(), args: json!({}) },
+            Provenance::Reported,
+        );
+        assert_eq!(feed::chat_run(&mind).as_deref(), Some("chatlink:main#2"), "work: its run");
+    }
 
     /// `describe shell` → `agents`: each agent's id, mind, title and state, whether it needs the
     /// person, the commands the shell is running for it now, when it last did anything, and the

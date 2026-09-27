@@ -171,6 +171,7 @@ fn poller_loop(
                                 .downcast_ref::<VecModel<crate::MessageData>>()
                                 .unwrap();
                             model.push(crate::MessageData {
+                                run: Default::default(),
                                 role: SharedString::from("user"),
                                 content: SharedString::from(format!("[Telegram] {}", user_text)),
                                 is_streaming: false,
@@ -270,6 +271,7 @@ fn poller_loop(
                                 .downcast_ref::<VecModel<crate::MessageData>>()
                                 .unwrap();
                             model.push(crate::MessageData {
+                                run: Default::default(),
                                 role: SharedString::from("assistant"),
                                 content: SharedString::from(format!("[Telegram] {}", resp_text)),
                                 is_streaming: false,
@@ -402,6 +404,7 @@ fn handle_voice_message(
                 .downcast_ref::<VecModel<crate::MessageData>>()
                 .unwrap();
             model.push(crate::MessageData {
+                run: Default::default(),
                 role: SharedString::from("user"),
                 content: SharedString::from(ui_text),
                 is_streaming: false,
@@ -505,6 +508,7 @@ fn handle_voice_message(
                 .downcast_ref::<VecModel<crate::MessageData>>()
                 .unwrap();
             model.push(crate::MessageData {
+                run: Default::default(),
                 role: SharedString::from("assistant"),
                 content: SharedString::from(format!("[Telegram] {}", resp_text)),
                 is_streaming: false,
