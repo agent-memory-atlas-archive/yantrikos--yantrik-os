@@ -492,6 +492,41 @@ def main():
                   "duration_min": 30, "all_day": False},
               last_act("calendar"))
 
+        print("yos act prints the app's small state fields as one line")
+        # A mind used to scrape "…, unsaved" out of the summary, because the state that says
+        # `modified: true` was left out of what `yos act` printed (yantrik-mind, 2026-09-27).
+        editor_state = {
+            "summary": "Text Editor — notes.txt, 1 line, unsaved",
+            "path": "/home/yantrik/notes.txt",
+            "modified": True,
+            "tabs": [{"name": "notes.txt", "path": "/home/yantrik/notes.txt", "modified": True}],
+            "dialog": "none",
+            "text": "x" * 4000,
+        }
+
+        def editor_reply(_self, asked):
+            return {"summary": editor_state["summary"], "accepted": True, "settled": True,
+                    "revision": "3f", "result": {"saved": False}, "state": editor_state}
+
+        editor = FakeService(sockets / "editor.sock", editor_reply)
+        editor.start()
+        services.append(editor)
+        out, _err, _code = run(lambda: yos.cmd_act(["editor", "new", "title=notes.txt"]))
+        lines = out.splitlines()
+        state_lines = [l for l in lines if l.startswith("state: ")]
+        check("exactly one state line", len(state_lines) == 1, out)
+        head = json.loads(state_lines[0][len("state: "):]) if state_lines else {}
+        check("it carries the facts a mind needs, as values",
+              head.get("modified") is True and head.get("path") == "/home/yantrik/notes.txt"
+              and head.get("tabs") == editor_state["tabs"] and head.get("dialog") == "none", head)
+        check("and not the summary again, nor the document's text", "summary" not in head
+              and "text" not in head, head)
+        check("between the revision and the result",
+              lines.index(state_lines[0]) == lines.index("revision: 3f") + 1
+              and lines[lines.index(state_lines[0]) + 1] == "{", out)
+        check("and what it left out is named, not the old --full advice",
+              "(more state: `yos describe editor`)" in out and "--full" not in out, out)
+
         print("yos act, when the desktop wants a person's Allow")
         # The account from inside VM 520 (issue #116): `blender.render` is `sensitive`, the
         # machine was in `ask` mode, and `yos act` ran it in 1.72 s with no card. The app's own

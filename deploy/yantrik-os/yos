@@ -1136,6 +1136,33 @@ def take_agent_token(argv):
     return (token or None), rest
 
 
+# A field of an app's state that fits on the `state:` line: a value, or a short list or object of
+# them. Anything bigger (an action list, a document's text, the shell's windows) is left for
+# `yos describe`, which is the place to read it.
+STATE_FIELD_CHARS = 240
+STATE_LINE_CHARS = 1200
+
+
+def state_head(state):
+    """The small top-level fields of an act reply's `state`, and whether any were left out.
+
+    The summary is printed already, so it is not repeated. Fields are taken in the app's own
+    order until the line would pass STATE_LINE_CHARS."""
+    if not isinstance(state, dict):
+        return {}, bool(state)
+    head, used, left_out = {}, 0, False
+    for key, value in state.items():
+        if key == "summary":
+            continue
+        text = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+        if len(text) > STATE_FIELD_CHARS or used + len(key) + len(text) + 4 > STATE_LINE_CHARS:
+            left_out = True
+            continue
+        head[key] = value
+        used += len(key) + len(text) + 4
+    return head, left_out
+
+
 def cmd_act(argv):
     if len(argv) < 2:
         die("usage: yos act <target> <action> [key=value ...] [--full] [--grant <id>] [--no-ask] "
@@ -1191,10 +1218,16 @@ def cmd_act(argv):
     print("accepted: %s, settled: %s" % (reply.get("accepted"), reply.get("settled")))
     if "revision" in reply:
         print("revision: %s" % reply["revision"])
+    # The app's state after the action, as facts rather than prose: what a mind otherwise has to
+    # scrape out of the summary ("…, unsaved"). Only its small fields, on one line, so the shell's
+    # 180-line state never lands here; the rest is one `yos describe` away.
+    head, left_out = state_head(reply.get("state"))
+    if head:
+        print("state: %s" % json.dumps(head, separators=(",", ":"), ensure_ascii=False))
     if reply.get("result"):
         print(json.dumps(reply["result"], indent=2))
-    if reply.get("state"):
-        print("(state omitted; `yos describe %s`, or re-run with --full)" % target)
+    if left_out:
+        print("(more state: `yos describe %s`)" % target)
 
 
 def cmd_perception(argv):

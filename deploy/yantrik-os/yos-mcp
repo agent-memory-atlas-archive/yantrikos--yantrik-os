@@ -2102,13 +2102,21 @@ def in_process(argv):
 # while every nudge said save it. yantrik-mind found the line. The advice is put in this bridge's
 # own words, naming the tool a mind does have.
 _CLI_STATE_HINT = re.compile(r"\(state omitted; `yos describe ([^`]+)`, or re-run with --full\)")
+# Since the `state:` line (yantrik-os, 2026-09-27) an act prints the app's small state fields and
+# names only what it left out.
+_CLI_MORE_STATE = re.compile(r"\(more state: `yos describe ([^`]+)`\)")
 
 
 def for_a_mind(text):
     """`text` with the command-line advice in it said the way a mind can act on."""
-    return _CLI_STATE_HINT.sub(
+    text = _CLI_STATE_HINT.sub(
         lambda m: "(The app's state is left out of this result; os_describe %s shows it. The action "
                   "is done: do not repeat it to see the state.)" % m.group(1),
+        text,
+    )
+    return _CLI_MORE_STATE.sub(
+        lambda m: "(The state: line has the app's small fields; os_describe %s shows the rest. The "
+                  "action is done: do not repeat it to see them.)" % m.group(1),
         text,
     )
 

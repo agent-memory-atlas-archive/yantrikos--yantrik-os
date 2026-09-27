@@ -1993,6 +1993,19 @@ with tempfile.TemporaryDirectory() as t:
     check("everything else in the result is left as it was",
           said.startswith("New tab: untitled-2\naccepted: True, settled: True\nrevision: 3f\n"), said)
 
+# An act prints the app's small state fields as facts (yantrik-os, 2026-09-27): what a mind used to
+# scrape out of the summary ("…, unsaved") arrives as `modified`, and the line reaches the mind whole.
+with tempfile.TemporaryDirectory() as t:
+    module = load_mcp(HERE / "yos", pathlib.Path(t) / "loops.json")
+    printed = ('Text Editor — notes.txt, 1 line, unsaved\naccepted: True, settled: True\nrevision: 3f\n'
+               'state: {"path":"/home/yantrik/notes.txt","modified":true,"tabs":1}\n'
+               '(more state: `yos describe editor`)')
+    said = module.for_a_mind(printed)
+    check("the state line reaches a mind as it was printed",
+          'state: {"path":"/home/yantrik/notes.txt","modified":true,"tabs":1}\n' in said, said)
+    check("and what it left out is named by the tool a mind has",
+          "os_describe editor" in said and "yos describe" not in said and "do not repeat it" in said, said)
+
 # A mind going round in circles is told so in the one place it reads while it works: the call's
 # own result (#234). The 23 September game: the editor refused four times, "Cannot open".
 with tempfile.TemporaryDirectory() as t:
