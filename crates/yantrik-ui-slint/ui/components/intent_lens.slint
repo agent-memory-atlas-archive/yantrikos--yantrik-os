@@ -9,6 +9,7 @@
 // Dismiss: Escape or click outside.
 
 import { Theme } from "theme.slint";
+import { QuestionRequest, QuestionCard } from "question_card.slint";
 import { Icon, Icons } from "icon.slint";
 import { MessageData, MessageBubble } from "message_bubble.slint";
 import { ListView } from "std-widgets.slint";
@@ -954,6 +955,9 @@ export component IntentLens inherits Rectangle {
     /// 800px screen — the third one's buttons land under the taskbar — and a person facing a
     /// stack reads none of them properly, which is the failure the design is most afraid of.
     in property <int> approvals-waiting: 0;
+    /// Questions the mind this conversation is with asked and is waiting on (#25), oldest first.
+    in property <[QuestionRequest]> questions: [];
+    callback question-answer(string, string, string);   // agent id, request id, answer
 
     // Callbacks
     callback approval-allow(string);   // request id — a click, and nothing else, creates a grant
@@ -2050,6 +2054,19 @@ export component IntentLens inherits Rectangle {
 
                     for msg[idx] in root.messages : MessageBubble {
                         data: msg;
+                    }
+                }
+
+                // The mind's questions, where approvals sit and for the same reason: waiting on the
+                // person, they must stay put rather than scroll away with the transcript.
+                if root.questions.length > 0 : VerticalLayout {
+                    spacing: Theme.sp-1;
+                    padding: Theme.sp-2;
+                    for q in root.questions : QuestionCard {
+                        mind: q.mind;
+                        prompt: q.prompt;
+                        options: q.options;
+                        answered(a) => { root.question-answer(q.agent, q.request, a); }
                     }
                 }
 

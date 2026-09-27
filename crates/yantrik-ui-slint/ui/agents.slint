@@ -15,6 +15,7 @@ import { YButton } from "components/y_button.slint";
 import { YInput } from "components/y_input.slint";
 import { ToolCallData, ToolCallCard } from "components/tool_call.slint";
 import { ApprovalRequest, ApprovalCard } from "components/intent_lens.slint";
+import { QuestionCard } from "components/question_card.slint";
 import { OverviewNode, OverviewEdge, AgentsOverview } from "agents_overview.slint";
 
 export struct AgentTabData {
@@ -517,56 +518,14 @@ component ItemView inherits Rectangle {
             deny => { AgentsState.approval-deny(root.item.approval.id); }
         }
 
-        // A question the agent itself asked (#25). Its words and its answers are the agent's, so
-        // it is drawn as the agent speaking ("pi asks"), plainly, and never as the approval card
-        // above, which only the shell makes: an agent cannot dress a question up as the desktop's
-        // permission. The answer goes to the run that asked, once.
-        if root.item.kind == "question" : Rectangle {
-            background: Theme.bg-card;
-            border-radius: Theme.radius-card;
-            border-width: 1px;
-            border-color: Theme.border-subtle;
-            VerticalLayout {
-                padding: Theme.sp-3;
-                spacing: Theme.sp-2;
-                Text {
-                    text: AgentsState.header.mind + " asks";
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-caption;
-                }
-                Text {
-                    text: root.item.text;
-                    color: Theme.text-primary;
-                    wrap: word-wrap;
-                }
-                if root.item.answer == "" && root.item.explain == "" && root.item.options.length > 0 : HorizontalLayout {
-                    spacing: Theme.sp-2;
-                    alignment: start;
-                    for option in root.item.options : YButton {
-                        label: option;
-                        variant: 1;
-                        size: 0;
-                        clicked => { AgentsState.answer-question(AgentsState.header.id, root.item.request, option); }
-                    }
-                }
-                if root.item.answer == "" && root.item.explain == "" && root.item.options.length == 0 : YInput {
-                    placeholder: "answer " + AgentsState.header.mind + "…";
-                    accepted(text) => { AgentsState.answer-question(AgentsState.header.id, root.item.request, text); }
-                }
-                if root.item.answer != "" : Text {
-                    text: "You answered: " + root.item.answer;
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-caption;
-                    wrap: word-wrap;
-                }
-                if root.item.explain != "" : Text {
-                    text: "Not answered: " + root.item.explain;
-                    color: Theme.text-dim;
-                    font-size: Theme.fs-caption;
-                    font-italic: true;
-                    wrap: word-wrap;
-                }
-            }
+        // A question the agent itself asked (#25): the shared card, drawn as the agent speaking.
+        if root.item.kind == "question" : QuestionCard {
+            mind: AgentsState.header.mind;
+            prompt: root.item.text;
+            options: root.item.options;
+            answer: root.item.answer;
+            closed: root.item.explain;
+            answered(a) => { AgentsState.answer-question(AgentsState.header.id, root.item.request, a); }
         }
 
         // A call: the one card every view of a mind's calls shares (#125), with the call's own
