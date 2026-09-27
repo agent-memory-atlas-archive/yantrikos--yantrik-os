@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """release-check — what a Yantrik OS build must pass before it is tagged.
 
-    release-check [--tier ci|rc] [--interactive] [--json FILE] [--only WORD] [--skip WORD]
+    release-check [--tier ci|rc] [--interactive] [--json FILE] [--only WORD] [--skip WORD] [--may-lock]
 
 Runs ON the machine under test, as the person's user, inside their session, and talks to the
 desktop the way everything else does: through the control surfaces, via `yos`.
@@ -749,7 +749,11 @@ def _locked():
     # this is the check that it holds on a shipped machine. It runs last because it leaves the
     # machine locked and nothing on this socket can undo that — which is the fix. The boottest's
     # QEMU is thrown away afterwards; on a real machine a person unlocks at the keyboard, and the
-    # manual list already says so.
+    # manual list already says so. So it runs only when asked to (--may-lock): on a shared test
+    # machine a run left it locked twice, with the person away from the keyboard.
+    if not ARGS.may_lock:
+        raise Skipped("it leaves this machine locked until a person signs in; pass --may-lock "
+                      "on a machine that is thrown away afterwards, or with someone at the keyboard")
     if state().get("screen") not in ("lock", "login"):
         act("shell", "lock", timeout=15)
         if not wait(lambda: state().get("screen") == "lock", 15):
@@ -834,5 +838,7 @@ if __name__ == "__main__":
     ap.add_argument("--json")
     ap.add_argument("--only", action="append", default=[])
     ap.add_argument("--skip", action="append", default=[], help="skip apps whose id contains this")
+    ap.add_argument("--may-lock", action="store_true",
+                    help="run the check that locks the desktop, which only a person can undo")
     ARGS = ap.parse_args()
     main()
