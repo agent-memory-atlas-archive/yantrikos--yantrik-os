@@ -421,51 +421,42 @@ pub fn validate_path(path: &str) -> Result<String, String> {
         return Err("Path must be under your home directory".to_string());
     }
 
-    // Resolve symlinks: if the path exists, canonicalize and re-validate.
-    let canon_path = std::path::Path::new(&expanded);
-    if canon_path.exists() {
-        match canon_path.canonicalize() {
+    resolves_within(std::path::Path::new(&expanded), &roots)?;
+    Ok(expanded)
+}
+
+/// Where `path` really goes, links followed, must be inside `roots` and outside the protected
+/// places. The deepest part of the path that resolves decides: looking only at the path and its
+/// parent let a link two levels up (~/l -> /etc, asked as ~/l/X/y.txt) go unchecked whenever X
+/// did not exist, and a write would then create X under /etc (#443). A link on the way that leads
+/// nowhere is refused, since whatever is written through it lands where it points.
+fn resolves_within(path: &std::path::Path, roots: &[std::path::PathBuf]) -> Result<(), String> {
+    let mut probe = path.to_path_buf();
+    loop {
+        match probe.canonicalize() {
             Ok(resolved) => {
                 let resolved_str = resolved.to_string_lossy().to_string();
                 for blocked in BLOCKED_SEGMENTS {
                     if resolved_str.contains(blocked) {
-                        return Err(format!(
-                            "Access denied: path resolves to protected location ({})",
-                            blocked
-                        ));
+                        return Err(format!("Access denied: path resolves to protected location ({blocked})"));
                     }
                 }
-                if !under_any(&resolved_str, &roots) {
-                    return Err(
-                        "Access denied: path resolves outside your home directory".to_string()
-                    );
+                if !under_any(&resolved_str, roots) {
+                    return Err("Access denied: path resolves outside your home directory".to_string());
                 }
+                return Ok(());
             }
-            Err(_) => {}
-        }
-    } else if let Some(parent) = canon_path.parent() {
-        if parent.exists() {
-            if let Ok(resolved_parent) = parent.canonicalize() {
-                let rp = resolved_parent.to_string_lossy().to_string();
-                for blocked in BLOCKED_SEGMENTS {
-                    if rp.contains(blocked) {
-                        return Err(format!(
-                            "Access denied: parent directory resolves to protected location ({})",
-                            blocked
-                        ));
-                    }
+            Err(_) => {
+                if probe.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+                    return Err("Access denied: the path goes through a link that leads nowhere".to_string());
                 }
-                if !under_any(&rp, &roots) {
-                    return Err(
-                        "Access denied: parent directory resolves outside your home directory"
-                            .to_string(),
-                    );
+                match probe.parent() {
+                    Some(parent) => probe = parent.to_path_buf(),
+                    None => return Err("Access denied: no part of the path exists".to_string()),
                 }
             }
         }
     }
-
-    Ok(expanded)
 }
 
 /// Where the file tools may reach: the home directory, and the private scratch directory the
@@ -821,6 +812,29 @@ mod path_root_tests {
         if let Ok(work) = yantrik_ml::private_dir::work_dir() {
             assert!(validate_path(work.join("x.txt").to_str().unwrap()).is_err());
         }
+    }
+
+    #[test]
+    fn a_link_deep_in_the_path_is_followed_to_where_it_leads() {
+        use super::resolves_within;
+        let root = std::env::temp_dir().join(format!("yantrik-resolves-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::os::unix::fs::symlink("/etc", root.join("escape")).unwrap();
+        std::os::unix::fs::symlink("/etc/yantrik-no-such-thing", root.join("dangling")).unwrap();
+        let roots = [root.clone()];
+        let at = |p: &str| resolves_within(&root.join(p), &roots);
+
+        assert!(at("notes/new.txt").is_ok(), "a new file in a real folder");
+        assert!(at("notes/new/deeper/file.txt").is_ok(), "new folders under a real one");
+        for out in ["escape/passwd", "escape/new.txt", "escape/no-such-dir/new.txt", "escape/a/b/c/d.txt"] {
+            assert!(at(out).is_err(), "{out} leads out through the link");
+        }
+        for nowhere in ["dangling", "dangling/new.txt"] {
+            assert!(at(nowhere).is_err(), "{nowhere} goes through a link that leads nowhere");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

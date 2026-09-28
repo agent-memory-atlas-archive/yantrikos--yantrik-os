@@ -43,6 +43,34 @@ fn where_now(ui: &App) -> serde_json::Value {
     })
 }
 
+/// Where a mind may take the Files screen: a directory in the person's home, and not one of its
+/// protected places (#443). `files_go` took any absolute path, so a mind could open /etc, another
+/// account's home or ~/.ssh and read the listing back through `describe shell` - names, sizes and
+/// times the file tools themselves would never give it. The same rules as `files_stat`
+/// (file_stat.rs), links followed to where they really lead. The person, clicking or typing
+/// `yos` in their own terminal, goes wherever they can see.
+fn mind_may_open(path: &str) -> Result<(), String> {
+    if crate::mind_view::requester_now() == crate::mind_view::Requester::Person {
+        return Ok(());
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    open_verdict(path, std::path::Path::new(&home))
+}
+
+/// Whether a mind may open `path` in Files, with `home` as the person's home.
+fn open_verdict(path: &str, home: &std::path::Path) -> Result<(), String> {
+    let answer = crate::file_stat::stat(path, home);
+    match (&answer["exists"], answer["kind"].as_str()) {
+        (serde_json::Value::Bool(true), Some("directory")) => Ok(()),
+        (serde_json::Value::Bool(true), _) => Err(format!("{path} is not a folder")),
+        (serde_json::Value::Bool(false), _) => Err(format!("there is no folder at {path}")),
+        _ => Err(format!(
+            "a mind's Files stays in the person's home, outside its protected places; {path} is {}",
+            answer["reason"].as_str().unwrap_or("not one it may open")
+        )),
+    }
+}
+
 /// Whether the current listing has an entry by this name, so an action can refuse a name that is
 /// not there and say so, rather than invoke a callback that quietly does nothing.
 fn has_entry(ui: &App, name: &str) -> bool {
@@ -78,6 +106,7 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 if path.is_empty() {
                     return Err("`path` is empty".into());
                 }
+                mind_may_open(&path)?;
                 ensure_files_screen(&ui);
                 ui.invoke_file_navigate_to_path(path.clone().into());
                 Ok(serde_json::json!({ "requested_path": path, "now": where_now(&ui) }))
@@ -93,6 +122,8 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
                 if !has_entry(&ui, &name) {
                     return Err(format!("nothing called `{name}` in {}", ui.get_file_browser_path()));
                 }
+                let into = std::path::Path::new(ui.get_file_browser_path().as_str()).join(&name);
+                mind_may_open(&into.to_string_lossy())?;
                 ui.invoke_file_navigate_dir(name.clone().into());
                 Ok(serde_json::json!({ "requested_directory": name, "now": where_now(&ui) }))
             },
@@ -125,6 +156,10 @@ pub fn actions(surface: ControlSurface, ui: &App) -> ControlSurface {
             move |_| {
                 let ui = up(&for_up)?;
                 ensure_files_screen(&ui);
+                // From the home, up is /home and every account's name in it.
+                if let Some(parent) = std::path::Path::new(ui.get_file_browser_path().as_str()).parent() {
+                    mind_may_open(&parent.to_string_lossy())?;
+                }
                 ui.invoke_file_go_up();
                 Ok(serde_json::json!({ "now": where_now(&ui) }))
             },
@@ -370,4 +405,37 @@ fn ready(ui: &App) -> Result<(), String> {
         return Err("A file operation is running".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_verdict;
+
+    #[test]
+    fn a_mind_opens_folders_in_the_home_and_nowhere_else() {
+        let home = std::env::temp_dir().join(format!("yantrik-files-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::write(home.join("notes.txt"), "x").unwrap();
+        let home = home.canonicalize().unwrap();
+        std::os::unix::fs::symlink("/etc", home.join("escape")).unwrap();
+        let open = |p: &str| open_verdict(p, &home);
+
+        assert!(open("~").is_ok());
+        assert!(open("~/Documents").is_ok());
+        assert!(open(home.join("Documents").to_str().unwrap()).is_ok(), "absolute too");
+        for (refused, why) in [
+            ("/etc", "outside"),
+            ("/home", "outside"),
+            ("~/escape", "outside"),
+            ("~/.ssh", "protected"),
+            ("~/notes.txt", "not a folder"),
+            ("~/Nowhere", "no folder"),
+        ] {
+            let err = open(refused).unwrap_err();
+            assert!(err.contains(why), "{refused}: {err}");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
