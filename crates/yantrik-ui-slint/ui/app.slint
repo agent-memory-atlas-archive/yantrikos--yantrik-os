@@ -100,6 +100,13 @@ export component App inherits Window {
     // written a body for and the machine sat at 100% with four ticks and no desktop.
     callback boot-complete();
     boot-complete => {
+        // A desktop that starts locked (#415) is on the lock screen by the time boot finishes:
+        // leave it there. Switching away would end the shell's locked state behind the
+        // compositor's lock, and the control surface refuses by that state. The unlock goes
+        // where boot would have (wire/callbacks.rs, screen_after_unlock).
+        if root.current-screen == 3 || root.current-screen == 32 {
+            return;
+        }
         if root.onboarding-step > 0 {
             root.current-screen = 2;
             root.navigate(2);
