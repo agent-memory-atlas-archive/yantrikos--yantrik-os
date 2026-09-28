@@ -235,6 +235,30 @@ pub fn settle_approvals(status_of: impl Fn(&str) -> Option<(ApprovalOutcome, Str
     }
 }
 
+/// The fields of an agent's `describe shell` entry that are the person's: what they asked it
+/// (`title`), what it says it is doing, the commands it ran and the files it touched, and what is
+/// waiting on the person for it. Another mind reading `describe` is told none of them — only that
+/// the agent exists, which mind it is, how it stands and the counts — the same boundary as
+/// `read_agent`, which lets an agent read itself and the agents it started, and nothing else.
+pub const PERSONS_FIELDS: [&str; 6] = ["title", "status", "commands", "files", "pending_approvals", "running_jobs"];
+
+/// `for_describe`'s answer as an agent may read it: each entry with [`PERSONS_FIELDS`] taken out
+/// and marked `private`.
+pub fn for_describe_by_an_agent() -> serde_json::Value {
+    let mut view = for_describe();
+    if let Some(agents) = view["agents"].as_array_mut() {
+        for entry in agents.iter_mut() {
+            if let Some(map) = entry.as_object_mut() {
+                for field in PERSONS_FIELDS {
+                    map.remove(field);
+                }
+                map.insert("private".into(), "the person's; an agent reads its own session with read_agent".into());
+            }
+        }
+    }
+    view
+}
+
 /// What `describe shell` says under `agents`: the counts per tab, and one entry per agent with its
 /// state, whether it is waiting on the person, the commands the shell is running for it now, when
 /// it last did anything, and what it has done.
@@ -323,6 +347,31 @@ mod tests {
             Provenance::Reported,
         );
         assert_eq!(feed::chat_run(&mind).as_deref(), Some("chatlink:main#2"), "work: its run");
+    }
+
+    /// Another mind reading `describe` learns that an agent exists and how it stands — never what
+    /// the person asked it, the commands it ran, the files it touched or what waits on the person.
+    #[test]
+    fn an_agent_reading_describe_is_told_none_of_the_persons_fields() {
+        let pi = AgentId::new("pi", "c-private");
+        store().open_turn(&pi, "Lunch with Sam, 12:30");
+        store().approval_asked(&pi, "appr-private", "calendar.new_event");
+        let described = for_describe_by_an_agent();
+        let entry = described["agents"]
+            .as_array()
+            .and_then(|all| all.iter().find(|a| a["id"] == "pi:c-private"))
+            .unwrap_or_else(|| panic!("pi is still listed: {described}"))
+            .clone();
+        for field in PERSONS_FIELDS {
+            assert!(entry.get(field).is_none(), "{field} reached an agent: {entry}");
+        }
+        assert!(!entry.to_string().contains("Lunch with Sam"), "{entry}");
+        assert_eq!(entry["mind"], "pi");
+        assert_eq!(entry["needs_you"], true, "how it stands is not private");
+        assert!(entry["private"].as_str().unwrap().contains("read_agent"));
+        // The person's own describe is unchanged.
+        let theirs = for_describe();
+        assert!(theirs.to_string().contains("Lunch with Sam, 12:30"));
     }
 
     /// `describe shell` → `agents`: each agent's id, mind, title and state, whether it needs the

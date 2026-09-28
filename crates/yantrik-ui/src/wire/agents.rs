@@ -1929,7 +1929,12 @@ mod tests {
         assert_eq!(crate::control::screen_name(SCREEN), "agents");
         let control = read("src/control.rs");
         let control = control.split("#[cfg(test)]").next().unwrap();
-        assert!(control.contains(".with(\"agents\", crate::agents::for_describe())"), "describe shell lists the agents");
+        // Listed for the person whole, and for an agent without the person's fields.
+        assert!(
+            control.contains("\"agents\",") && control.contains("crate::agents::for_describe()")
+                && control.contains("crate::agents::for_describe_by_an_agent()"),
+            "describe shell lists the agents"
+        );
         assert!(control.contains("problems, agents"), "show_screen's description offers agents");
 
         // `open_app agents`, the listing a caller reads, and what it is for.
