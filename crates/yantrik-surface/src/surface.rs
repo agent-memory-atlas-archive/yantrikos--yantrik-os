@@ -153,7 +153,7 @@ impl Surface {
         let call = ActCall::parse(params)?;
         let who = peer.map(Caller::from);
         // A mind account's call acts only as a live agent (#411), before anything else.
-        call.require_standing(who)?;
+        call.require_standing(self.registry.app_id(), who)?;
         let reach = call.reach()?;
         let action_id = next_action_id(&self.service_id);
         // Before a grant is spent: the action, the agent's reach, the arguments as sent.

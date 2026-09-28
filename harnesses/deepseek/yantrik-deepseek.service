@@ -12,6 +12,14 @@ ExecStart=/usr/bin/python3 /opt/yantrik/share/harnesses/deepseek/yantrik_deepsee
 # A harness that dies is a desktop with one fewer mind in the picker, and nothing else notices.
 Restart=on-failure
 RestartSec=5
+# The person's desktop settings, memory grants among them (#447), are the desktop's to write,
+# not a mind's: this harness and everything it starts see ~/.config/yantrik read-only. It only
+# ever reads its own json and env file there. A second line, not a wall: the desktop's own tools
+# already refuse an agent's write there (#443), and a process running as the person can still
+# ask the user manager to run something outside this unit. In a user unit this implies
+# PrivateUsers=, which needs unprivileged user namespaces (on by default on Debian); the `-`
+# lets the unit start where the folder does not exist yet.
+ReadOnlyPaths=-%h/.config/yantrik
 # The key lives in ~/.config/yantrik/deepseek.json at mode 600, or in a variable named by
 # `api_key_env`. Do NOT put it here: a unit file is world-readable, and `systemctl show` prints
 # every Environment= line to anyone who asks. To pass one in, use an EnvironmentFile the person

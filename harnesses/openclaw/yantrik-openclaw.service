@@ -8,6 +8,14 @@ Type=simple
 ExecStart=/usr/bin/python3 /opt/yantrik/share/harnesses/openclaw/yantrik_openclaw.py
 Restart=on-failure
 RestartSec=5
+# The person's desktop settings, memory grants among them (#447), are the desktop's to write,
+# not a mind's: this harness and everything it starts see ~/.config/yantrik read-only. It only
+# ever reads its own json and env file there. A second line, not a wall: the desktop's own tools
+# already refuse an agent's write there (#443), and a process running as the person can still
+# ask the user manager to run something outside this unit. In a user unit this implies
+# PrivateUsers=, which needs unprivileged user namespaces (on by default on Debian); the `-`
+# lets the unit start where the folder does not exist yet.
+ReadOnlyPaths=-%h/.config/yantrik
 # A user service does not inherit a login shell's PATH, and `openclaw` and `node` are installed
 # per-user (~/.npm-global/bin, ~/.local/node/bin). Without this the CLI route cannot start
 # openclaw at all and the picker line says "openclaw" with no version, because even

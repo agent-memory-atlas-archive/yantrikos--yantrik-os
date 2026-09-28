@@ -235,13 +235,19 @@ pub(crate) const LOCKED_REFUSAL: &str = "LOCKED: the desktop is waiting for the 
 /// anything not named here is refused, which means an action added tomorrow is refused by
 /// default and its author has to come here — past a reader — to change that.
 ///
-/// The list is empty on purpose. Neither locked screen needs anything from this surface: both
-/// are driven by Slint callbacks (`wire/login.rs` and `on_try_unlock` in `wire/callbacks.rs`),
-/// and `describe` is not an action. `lock` is refused too — at the login screen it would trade
-/// the password gate for the weaker PIN one.
+/// It names one action. Neither locked screen needs anything from this surface: both are driven
+/// by Slint callbacks (`wire/login.rs` and `on_try_unlock` in `wire/callbacks.rs`), and
+/// `describe` is not an action. `lock` is refused too — at the login screen it would trade the
+/// password gate for the weaker PIN one.
+///
+/// `memory_validate` is the exception, and not a way past the lock: it moves nothing on the
+/// desktop and is answered to the person's memory server alone (#447). The lock guards the seat,
+/// not the person's memory; refusing it would take every mind's memory away whenever the screen
+/// locked, a scheduled job's included, and give the person at the seat nothing.
+pub(crate) const ALLOWED_WHILE_LOCKED: &[&str] = &["memory_validate"];
+
 pub(crate) fn allowed_while_locked(action: &str) -> bool {
-    const ALLOWED: &[&str] = &[];
-    ALLOWED.contains(&action)
+    ALLOWED_WHILE_LOCKED.contains(&action)
 }
 
 /// What the dispatch's state rule answers for `action` while `screen` is showing: the refusal
@@ -871,7 +877,7 @@ pub fn publish(
         // picture over a signed-in session, and `yos act shell open_lens` walked the desktop
         // straight past it. The rule reads the screen the shell is showing — the state IS the
         // screen, so there is nothing to fall out of sync — and refuses every action the
-        // allow-list in `allowed_while_locked` does not name, which today names none. An
+        // allow-list in `allowed_while_locked` does not name (today only `memory_validate`). An
         // action added to this surface tomorrow is held to it without its author doing
         // anything; getting out from under it means editing the allow-list, past a reader.
         .state_rule(move |action| {
@@ -1259,27 +1265,16 @@ pub fn publish(
             .arg(Param::text("memory_sha256").describe(
                 "The SHA-256 of what the mind presented, as lowercase hex: never the thing itself",
             )),
+            // Asked with no agent token: the server is not an agent acting on the desktop, and
+            // the surface's standing rule names this action as the one that needs none. The
+            // check on the asker's account inside is what holds it instead.
             move |args| {
-                let asker = yantrik_app_runtime::control::caller();
-                if !asker.is_some_and(|c| yantrik_ipc_transport::mind_door::is_mind(c.uid)) {
-                    return Err("only the person's memory server asks this".into());
-                }
-                let digest = args["memory_sha256"].as_str().unwrap_or_default();
-                let Some(host) = crate::wire::harness::host() else { return Ok(serde_json::Value::Null) };
-                let Some((agent, pid)) = host.memory_credential_holder_by_digest(
-                    digest,
-                    yantrik_ipc_transport::reach::token_digest,
-                ) else {
-                    return Ok(serde_json::Value::Null);
-                };
-                let mind = agent.harness();
-                let grants = crate::memory_grants::load()
-                    .grants_for(mind, crate::memory_grants::is_first_party(pid));
-                if !grants.any() {
-                    return Ok(serde_json::Value::Null);
-                }
-                let person = unsafe { libc::geteuid() };
-                Ok(crate::memory_grants::answer(person, mind, &agent.to_string(), &grants))
+                crate::memory_grants::validate(
+                    args,
+                    crate::wire::harness::host(),
+                    yantrik_ipc_transport::mind_door::is_mind,
+                    crate::memory_grants::load,
+                )
             },
         )
         .action(
@@ -2727,13 +2722,18 @@ mod locked_state_tests {
             actions.len()
         );
         for screen in LOCKED_SCREENS {
-            for action in &actions {
+            for action in actions.iter().filter(|a| !super::ALLOWED_WHILE_LOCKED.contains(&a.as_str())) {
                 assert_eq!(
                     locked_refusal(*screen, action).as_deref(),
                     Some(LOCKED_REFUSAL),
                     "`{action}` is not on the allow-list, so screen {screen} must refuse it"
                 );
             }
+        }
+        // What the allow-list names, and nothing else: an addition is a decision for a reader.
+        assert_eq!(super::ALLOWED_WHILE_LOCKED, &["memory_validate"]);
+        for screen in LOCKED_SCREENS {
+            assert_eq!(locked_refusal(*screen, "memory_validate"), None, "the memory server is answered");
         }
     }
 

@@ -1071,7 +1071,7 @@ mod tests {
 
     fn attach(host: &Host, id: &str, conversations: bool) -> String {
         let attach = json!({ "id": id, "name": id, "conversations": conversations });
-        host.handle_from(protocol::ATTACH, &attach, Some(std::process::id())).unwrap()["session"]
+        host.handle_from(protocol::ATTACH, &attach, Some(std::process::id()), None).unwrap()["session"]
             .as_str()
             .unwrap()
             .to_string()
@@ -1335,7 +1335,7 @@ mod tests {
     fn new_agent_starts_a_child_with_nothing_of_its_parents_and_meets_every_cap() {
         let host = Host::new(vec![]);
         let attach = json!({ "id": "glue", "name": "Glue", "conversations": true });
-        let session = host.handle_from(protocol::ATTACH, &attach, Some(std::process::id())).unwrap()["session"]
+        let session = host.handle_from(protocol::ATTACH, &attach, Some(std::process::id()), None).unwrap()["session"]
             .as_str()
             .unwrap()
             .to_string();
