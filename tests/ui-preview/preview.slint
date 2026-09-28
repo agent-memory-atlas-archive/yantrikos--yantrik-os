@@ -551,3 +551,90 @@ export component EditorProbe inherits TextEditorApp {
     numbers: root.repro-numbers;
     line-count: root.repro-lines;
 }
+
+// ── Installer (#400) ────────────────────────────────────────────────────────
+
+import { InstallerScreen, InstallerDisk, KeyboardChoice } from "installer.slint";
+
+// The production installer screens with fixture disks and layouts. The rules behind every
+// field are the production ones: the runner wires these callbacks to installer_rules.rs,
+// included by path. What the screens hand the shell is recorded instead of installing.
+export component InstallerProbe inherits Window {
+    in property <length> canvas-width: 1280px;
+    in property <length> canvas-height: 800px;
+    width: root.canvas-width; height: root.canvas-height;
+    default-font-family: Theme.font-ui;
+    background: Theme.bg-deep;
+
+    in-out property <int> step: 0;
+    in property <[KeyboardChoice]> keyboards;
+    in-out property <string> keyboard: "us";
+    in-out property <bool> keyboard-open: false;
+    in-out property <string> full-name;
+    in-out property <string> username;
+    in-out property <string> password;
+    in-out property <string> password-confirm;
+    in-out property <string> hostname: "yantrik";
+    in-out property <bool> username-touched;
+    in-out property <bool> hostname-touched;
+    in property <[InstallerDisk]> disks;
+    in property <bool> disks-scanned: true;
+    in-out property <string> selected-disk;
+    in-out property <string> timezone;
+    in-out property <bool> installing;
+    in-out property <int> install-progress;
+    in-out property <string> install-status;
+    in-out property <string> install-error;
+    out property <bool> you-ok: screen.you-ok;
+    out property <bool> can-install: screen.can-install;
+
+    // What the screens asked of the shell.
+    in-out property <string> chosen-layout;
+    in-out property <bool> tried;
+    in-out property <string> installed-with;
+    in-out property <int> reboots;
+
+    pure callback derive-username(string) -> string;
+    pure callback hostname-for(string) -> string;
+    pure callback check-full-name(string) -> string;
+    pure callback check-username(string) -> string;
+    pure callback check-hostname(string) -> string;
+    pure callback check-password(string, string) -> string;
+    pure callback check-timezone(string) -> string;
+
+    screen := InstallerScreen {
+        width: 100%; height: 100%;
+        step <=> root.step;
+        keyboards: root.keyboards;
+        keyboard <=> root.keyboard;
+        keyboard-open <=> root.keyboard-open;
+        keyboard-chosen(code) => { root.chosen-layout = code; }
+        try-first => { root.tried = true; }
+        full-name <=> root.full-name;
+        username <=> root.username;
+        password <=> root.password;
+        password-confirm <=> root.password-confirm;
+        hostname <=> root.hostname;
+        username-touched <=> root.username-touched;
+        hostname-touched <=> root.hostname-touched;
+        disks: root.disks;
+        disks-scanned: root.disks-scanned;
+        selected-disk <=> root.selected-disk;
+        timezone <=> root.timezone;
+        installing <=> root.installing;
+        install-progress <=> root.install-progress;
+        install-status <=> root.install-status;
+        install-error <=> root.install-error;
+        install-to-disk(u, p, f, h, k, t, d) => {
+            root.installed-with = u + "|" + f + "|" + h + "|" + k + "|" + t + "|" + d;
+        }
+        reboot => { root.reboots += 1; }
+        derive-username(n) => { return root.derive-username(n); }
+        hostname-for(u) => { return root.hostname-for(u); }
+        check-full-name(n) => { return root.check-full-name(n); }
+        check-username(u) => { return root.check-username(u); }
+        check-hostname(h) => { return root.check-hostname(h); }
+        check-password(p, c) => { return root.check-password(p, c); }
+        check-timezone(t) => { return root.check-timezone(t); }
+    }
+}

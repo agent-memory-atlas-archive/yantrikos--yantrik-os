@@ -1,63 +1,50 @@
 //! Real disk installer — partitions, copies live system, installs GRUB, creates user.
 //!
 //! This runs the same operations as the text-based `yantrik-install` script but
-//! from within the Slint UI, reporting progress back via a callback.
+//! from within the Slint UI (installer.slint), reporting progress back via a callback.
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, ModelRc, VecModel};
 use std::process::Command;
 
 use crate::app_context::AppContext;
+use crate::control_installer::step;
+use crate::installer_rules;
 use crate::wire::ai_onboarding::auth_type_for;
+use crate::wire::installer_locale;
 use crate::wire::settings::{provider_preset, ProviderStore, ProviderStoreEntry};
-use crate::App;
+use crate::{App, InstallerDisk, KeyboardChoice};
 
 mod subids;
 
 /// Wire the installer callbacks.
 pub fn wire(ui: &App, _ctx: &AppContext) {
-    // Detect installer mode
-    if std::path::Path::new("/opt/yantrik/.installer-mode").exists() {
+    wire_rules(ui);
+
+    let installer_mode = std::path::Path::new("/opt/yantrik/.installer-mode").exists();
+    if installer_mode {
         ui.set_onboard_installer_mode(true);
-        tracing::info!("Installer mode detected — disk install UI enabled");
+        // Straight to the Welcome screen. The onboarding's four-second orb animation played
+        // here too, before a person who had come to install anything could do so.
+        ui.set_onboard_phase(step::WELCOME);
+        tracing::info!("Installer mode detected — the installer is screen 2");
+        prepare(ui);
     }
 
-    // Populate disk list for the UI
-    if std::path::Path::new("/opt/yantrik/.installer-mode").exists() {
-        let ui_weak_disks = ui.as_weak();
-        std::thread::spawn(move || {
-            let disks = detect_disks();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = ui_weak_disks.upgrade() {
-                    if let Some(d) = disks.get(0) {
-                        ui.set_onboard_disk_1_name(d.name.clone().into());
-                        ui.set_onboard_disk_1_size(d.size.clone().into());
-                        ui.set_onboard_disk_1_model(d.model.clone().into());
-                        // Auto-select first disk
-                        ui.set_onboard_selected_disk(d.name.clone().into());
-                    }
-                    if let Some(d) = disks.get(1) {
-                        ui.set_onboard_disk_2_name(d.name.clone().into());
-                        ui.set_onboard_disk_2_size(d.size.clone().into());
-                        ui.set_onboard_disk_2_model(d.model.clone().into());
-                    }
-                    if let Some(d) = disks.get(2) {
-                        ui.set_onboard_disk_3_name(d.name.clone().into());
-                        ui.set_onboard_disk_3_size(d.size.clone().into());
-                        ui.set_onboard_disk_3_model(d.model.clone().into());
-                    }
-                }
-            });
-        });
-    }
+    // The person picked a layout on the Welcome screen.
+    ui.on_onboard_keyboard_chosen(|layout| {
+        let layout = layout.to_string();
+        std::thread::spawn(move || installer_locale::apply_to_live_session(&layout));
+    });
 
-    // Handle install-to-disk callback from onboarding UI
+    // Handle install-to-disk callback from the installer screens and the control surface
     let ui_weak = ui.as_weak();
-    ui.on_onboard_install_to_disk(move |username, password, full_name, hostname, companion_name, target_disk| {
+    ui.on_onboard_install_to_disk(move |username, password, full_name, hostname, keyboard, timezone, target_disk| {
         let username = username.to_string();
         let password = password.to_string();
         let full_name = full_name.to_string();
         let hostname = hostname.to_string();
-        let companion_name = companion_name.to_string();
+        let keyboard = keyboard.to_string();
+        let timezone = timezone.to_string();
         let target_disk = target_disk.to_string();
         let weak = ui_weak.clone();
 
@@ -66,6 +53,8 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 username = %username,
                 target_disk = %target_disk,
                 hostname = %hostname,
+                keyboard = %keyboard,
+                timezone = %timezone,
                 "Installer thread started"
             );
 
@@ -79,13 +68,10 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 });
             }
 
-            // The AI pages save whatever the person picked as the primary provider the
-            // moment they pick it (wire::ai_onboarding::save_primary), and that store is
-            // the only record of the choice — this callback is handed the identity fields
-            // but no AI ones. The installer used to start with an empty ai_provider, so
-            // configure_ai skipped the AI section and the installed config.yaml kept the
-            // image's default endpoint, which nothing serves on a machine built without
-            // --with-llm: the wizard's choice never reached the installed system.
+            // The installer no longer asks about AI — that is first-boot setup now (#400) —
+            // but a person who tried the live desktop first may have chosen a provider there,
+            // and wire::ai_onboarding::save_primary keeps that choice in this store. Carried
+            // over when present, so a key typed in the live session is not typed twice.
             let wizard = ProviderStore::load().primary().cloned();
             let (ai_provider, ai_base_url, ai_api_key) = match wizard {
                 Some(p) => (p.provider_type, p.base_url, p.api_key.unwrap_or_default()),
@@ -96,7 +82,7 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 ai_provider = %ai_provider,
                 ai_endpoint = %ai_base_url,
                 has_key = !ai_api_key.is_empty(),
-                "Installer: AI choice carried over from the wizard"
+                "Installer: AI choice carried over from the live session"
             );
 
             let state = InstallerState {
@@ -106,6 +92,8 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                 hostname,
                 language: String::new(),
                 locale: String::new(),
+                keyboard,
+                timezone,
                 target_disk: target_disk.clone(),
                 partition_scheme: "auto".into(),
                 ai_provider,
@@ -138,17 +126,17 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
                         Ok(()) => {
                             ui.set_onboard_install_status("Installation complete!".into());
                             ui.set_onboard_install_progress(100);
-                            // Phase 12 (complete) is shown automatically by the UI
-                            // when install-progress reaches 100
+                            // The installed step (and its restart countdown) is shown by the
+                            // screen when install-progress reaches 100.
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Installation failed");
                             ui.set_onboard_install_status(format!("Installation failed: {e}").into());
                             ui.set_onboard_install_error(format!("Installation failed: {e}").into());
-                            // Back to the summary, where the error is displayed and the Install
+                            // Back to Review, where the error is displayed and the Install
                             // button lives. The progress screen has no way off it, so failing
                             // there left the machine staring at a stalled bar.
-                            ui.set_onboard_phase(10);
+                            ui.set_onboard_phase(step::REVIEW);
                         }
                     }
                 }
@@ -169,6 +157,80 @@ pub fn wire(ui: &App, _ctx: &AppContext) {
     });
 }
 
+/// The installer's rules, handed to its screens. One set, in installer_rules.rs, so the field
+/// that turns amber, the Next button that stays disabled and the control surface's
+/// `blocked_by` cannot disagree.
+fn wire_rules(ui: &App) {
+    let problem = |p: Option<String>| p.unwrap_or_default().into();
+    ui.on_installer_derive_username(|name| installer_rules::derive_username(&name).into());
+    ui.on_installer_hostname_for(|username| installer_rules::hostname_for(&username).into());
+    ui.on_installer_check_full_name(move |name| problem(installer_rules::full_name_problem(&name)));
+    ui.on_installer_check_username(move |u| problem(installer_rules::username_problem(&u)));
+    ui.on_installer_check_hostname(move |h| problem(installer_rules::hostname_problem(&h)));
+    ui.on_installer_check_password(move |pw, confirm| {
+        problem(installer_rules::password_problem(&pw, &confirm))
+    });
+    ui.on_installer_check_timezone(move |tz| {
+        problem(installer_rules::timezone_problem(&tz, std::path::Path::new("/usr/share/zoneinfo")))
+    });
+}
+
+/// What the installer finds before anyone asks: the disks, the keyboard in use, and where the
+/// machine is. Each on its own worker, because two of them wait on other programs and one on
+/// the network, and the Welcome screen should not.
+fn prepare(ui: &App) {
+    // Keyboard: the list at once, with the detected layout chosen.
+    let detected = installer_locale::detect_layout();
+    let choices: Vec<KeyboardChoice> = installer_rules::layout_choices(&detected)
+        .into_iter()
+        .map(|(code, label)| KeyboardChoice { code: code.into(), label: label.into() })
+        .collect();
+    ui.set_onboard_keyboards(ModelRc::new(VecModel::from(choices)));
+    ui.set_onboard_keyboard(detected.clone().into());
+    tracing::info!(layout = %detected, "Installer: keyboard layout detected");
+
+    // Disks.
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let disks = detect_disks();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            // The first disk is preselected: on the machine most people install on there is
+            // exactly one, and the Disk screen says plainly that it will be erased.
+            if let Some(first) = disks.first() {
+                if ui.get_onboard_selected_disk().is_empty() {
+                    ui.set_onboard_selected_disk(first.name.clone().into());
+                }
+            }
+            let rows: Vec<InstallerDisk> = disks
+                .iter()
+                .map(|d| InstallerDisk {
+                    name: d.name.clone().into(),
+                    size: d.size.clone().into(),
+                    model: d.model.clone().into(),
+                    contents: d.contents.clone().into(),
+                    has_data: d.has_data,
+                })
+                .collect();
+            ui.set_onboard_disks(ModelRc::new(VecModel::from(rows)));
+            ui.set_onboard_disks_scanned(true);
+        });
+    });
+
+    // Timezone.
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let zone = installer_locale::detect_timezone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            // Not over one the person (or an agent) already typed.
+            if ui.get_onboard_timezone().is_empty() {
+                ui.set_onboard_timezone(zone.into());
+            }
+        });
+    });
+}
+
 /// Shared installer state collected across onboarding callbacks.
 #[derive(Debug, Clone, Default)]
 pub struct InstallerState {
@@ -178,6 +240,10 @@ pub struct InstallerState {
     pub full_name: String,
     pub password: String,
     pub hostname: String,
+    /// XKB layout chosen on the Welcome screen, e.g. "de". Empty means US.
+    pub keyboard: String,
+    /// IANA zone from the Review screen, e.g. "Europe/Berlin". Empty means UTC.
+    pub timezone: String,
     pub target_disk: String,      // e.g. "sda"
     pub partition_scheme: String,  // "auto" or "manual"
     pub ai_provider: String,
@@ -325,6 +391,15 @@ fn install_to_target(
         &format!("127.0.0.1\tlocalhost\n127.0.1.1\t{hostname}\n"),
     )?;
 
+    // The clock, from the Review screen. Written here rather than left to the desktop's own
+    // geolocation, which only fills a machine still at UTC and only after the first login.
+    progress(61, "Setting the timezone...");
+    let zone = installer_locale::configure_target_timezone(
+        mount_dir,
+        if state.timezone.is_empty() { installer_locale::FALLBACK_TIMEZONE } else { &state.timezone },
+    )?;
+    tracing::info!(timezone = %zone, "Installer: timezone set");
+
     // ── Step 7: Bind-mount for chroot (needed BEFORE any chroot commands) ──
     progress(62, "Preparing chroot environment...");
     // --rbind, not --bind. A plain bind mounts the one filesystem and leaves every submount
@@ -365,6 +440,13 @@ fn install_to_target(
         &format!("{mount_dir}/etc/default/locale"),
         &format!("LANG={locale}\n"),
     );
+
+    // The keyboard, from the Welcome screen: the console's here, the desktop's in the person's
+    // labwc environment (create_user). A failure costs the console its layout, not the install.
+    progress(69, "Configuring the keyboard...");
+    if let Err(e) = installer_locale::configure_target_keyboard(mount_dir, installed_layout(state)) {
+        tracing::warn!(error = %e, "Could not write the installed keyboard layout");
+    }
 
     // ── Step 10: Configure AI provider ───────────────────────────
     progress(70, "Configuring AI provider...");
@@ -624,9 +706,15 @@ fi
     // asking for this password (#415). It used to name the login screen (32) here, which is drawn
     // in the shell's own window, so an app window could sit over it; and this file is the
     // user's, so anything running as them could name another start screen.
+    //
+    // XKB_DEFAULT_LAYOUT is the layout chosen on the Welcome screen: labwc reads it from this
+    // file, and it is what decides the keys at the lock screen where this password is asked.
     sudo_write(
         &format!("{labwc_dir}/environment"),
-        "WLR_RENDERER=pixman\nWLR_RENDERER_ALLOW_SOFTWARE=1\nXDG_SESSION_TYPE=wayland\nQT_QPA_PLATFORM=wayland\nMOZ_ENABLE_WAYLAND=1\nSLINT_BACKEND=winit\nLIBGL_ALWAYS_SOFTWARE=1\n",
+        &installer_rules::environment_with_layout(
+            "WLR_RENDERER=pixman\nWLR_RENDERER_ALLOW_SOFTWARE=1\nXDG_SESSION_TYPE=wayland\nQT_QPA_PLATFORM=wayland\nMOZ_ENABLE_WAYLAND=1\nSLINT_BACKEND=winit\nLIBGL_ALWAYS_SOFTWARE=1\n",
+            installed_layout(state),
+        ),
     )?;
 
     // No autostart or rc.xml here. `yantrik-session` installs the shipped ones from
@@ -634,10 +722,19 @@ fi
     // an installed machine drew the shell inside a window with a title bar and minimise, maximise
     // and close buttons, with none of the key bindings the real config carries.
 
-    // The person has just answered onboarding, in this installer. Without the marker the
-    // installed desktop opened on the same questions again, starting with their name.
+    // The installer asked only what installing needs (#400). What it used to ask on the way —
+    // interests, how to be reached, which AI — is the first boot's to offer, as optional setup.
+    // This marker says the account is done, so that setup opens on a welcome with Skip rather
+    // than asking for the person's name a second time. `.onboarding_complete` is deliberately
+    // not written: it would skip the setup altogether.
     let _ = run_cmd("mkdir", &["-p", &format!("{dst_home}/.yantrik")]);
-    sudo_write(&format!("{dst_home}/.yantrik/.onboarding_complete"), "done")?;
+    // Kept as `yantrik`, the account is the live user's copied home, which carries the live
+    // session's marker if someone finished or skipped the onboarding there.
+    let _ = run_cmd("rm", &["-f", &format!("{dst_home}/.yantrik/.onboarding_complete")]);
+    sudo_write(
+        &format!("{dst_home}/{}", crate::onboarding::AFTER_INSTALL_MARKER),
+        "installed\n",
+    )?;
 
     // Fix ownership of everything in home
     let _ = chroot_cmd(mount_dir, &["chown", "-R", &format!("{username}:{username}"), &format!("/home/{username}")]);
@@ -733,6 +830,16 @@ fn configure_ai(mount_dir: &str, state: &InstallerState) {
     let _ = chroot_cmd(mount_dir, &["chown", "-R",
         &format!("{username}:{username}"),
         &format!("/home/{username}/.config/yantrik")]);
+}
+
+/// The layout to install: the chosen one if it is a layout at all, US otherwise. Checked here
+/// as well as on the screen because it is written into a file the session sources.
+fn installed_layout(state: &InstallerState) -> &str {
+    if installer_rules::is_plausible_layout(&state.keyboard) {
+        &state.keyboard
+    } else {
+        installer_rules::DEFAULT_LAYOUT
+    }
 }
 
 /// Whose name the installed system should show: the full name if one was given,
@@ -941,7 +1048,7 @@ fn partition_names(disk: &str, n1: u8, n2: u8) -> (String, String) {
 }
 
 /// Write a file via sudo tee (since direct fs::write lacks root perms).
-fn sudo_write(path: &str, content: &str) -> Result<(), String> {
+pub(super) fn sudo_write(path: &str, content: &str) -> Result<(), String> {
     let mut child = Command::new("sudo")
         .args(["tee", path])
         .stdin(std::process::Stdio::piped())
@@ -1077,7 +1184,7 @@ fn rsync_percent(line: &str) -> Option<i32> {
         .filter(|p| (0..=100).contains(p))
 }
 
-fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
+pub(super) fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     tracing::debug!(cmd = cmd, args = ?args, "installer: running command (via sudo)");
 
     let mut sudo_args = vec![cmd];
@@ -1098,7 +1205,7 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
 }
 
 /// Run a command inside a chroot (via sudo).
-fn chroot_cmd(mount_dir: &str, args: &[&str]) -> Result<String, String> {
+pub(super) fn chroot_cmd(mount_dir: &str, args: &[&str]) -> Result<String, String> {
     let mut full_args = vec!["chroot", mount_dir];
     full_args.extend_from_slice(args);
 
@@ -1133,57 +1240,93 @@ pub(crate) struct DiskInfo {
     pub(crate) name: String,
     size: String,
     model: String,
+    /// What is on the disk now, in words: "Empty", "3 partitions (ext4, ntfs)".
+    contents: String,
+    /// Anything at all is on it — erasing it loses something. Unknown counts as yes.
+    has_data: bool,
 }
 
 /// Detect available disks and return structured info. Also what the onboarding
 /// hardware scan measures its Disk row against, so the scan and the picker can
 /// never disagree about which disks are candidates.
 pub(crate) fn detect_disks() -> Vec<DiskInfo> {
-    // Use lsblk with JSON output for reliable parsing
+    // Not `-d`: the partitions under each disk are what say whether it holds anything, and
+    // "this disk has a Windows partition on it" is the one thing worth knowing before erasing it.
     let output = Command::new("lsblk")
-        .args(["-dn", "-o", "NAME,SIZE,MODEL,TYPE,RO,RM", "--json", "-e", "7,11"])
+        .args(["-J", "-o", "NAME,SIZE,MODEL,TYPE,RO,RM,FSTYPE", "-e", "7,11"])
         .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         .output();
 
-    let mut disks = Vec::new();
-
     let Ok(output) = output else {
         tracing::warn!("lsblk failed for disk detection");
-        // Fallback: try non-JSON
         return detect_disks_fallback();
     };
-
     if !output.status.success() {
         return detect_disks_fallback();
     }
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Parse JSON: {"blockdevices": [{"name":"sda","size":"80G","model":"VBOX HARDDISK","type":"disk","ro":false,"rm":false}, ...]}
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-        if let Some(devices) = json["blockdevices"].as_array() {
-            for dev in devices {
-                let dtype = dev["type"].as_str().unwrap_or("");
-                if dtype != "disk" { continue; }
+    let disks = disks_from_lsblk(&String::from_utf8_lossy(&output.stdout));
+    for d in &disks {
+        tracing::info!(name = %d.name, size = %d.size, model = %d.model, contents = %d.contents, "Detected disk");
+    }
+    disks
+}
 
-                let ro = dev["ro"].as_bool().unwrap_or(true);
-                let rm = dev["rm"].as_bool().unwrap_or(true);
-                if ro || rm { continue; }
+/// The install candidates in `lsblk -J` output: whole, writable, fixed disks, each with a line
+/// about what is on it. Kept apart from running lsblk so it can be tested on fixture text.
+fn disks_from_lsblk(json: &str) -> Vec<DiskInfo> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(json) else { return Vec::new() };
+    let Some(devices) = json["blockdevices"].as_array() else { return Vec::new() };
 
-                let name = dev["name"].as_str().unwrap_or("").to_string();
-                if name.starts_with("loop") || name.starts_with("sr") || name.starts_with("fd") {
-                    continue;
+    // util-linux wrote these flags as "0"/"1" before it wrote them as booleans; reading only
+    // one form turned every disk read-only on the other, and the installer found nothing.
+    let flag = |v: &serde_json::Value| match v {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::String(s) => s == "1" || s == "true",
+        serde_json::Value::Number(n) => n.as_u64() == Some(1),
+        _ => true, // unknown: treat as read-only / removable, and skip it
+    };
+
+    let mut disks = Vec::new();
+    for dev in devices {
+        if dev["type"].as_str() != Some("disk") || flag(&dev["ro"]) || flag(&dev["rm"]) {
+            continue;
+        }
+        let name = dev["name"].as_str().unwrap_or("").to_string();
+        if name.is_empty() || name.starts_with("loop") || name.starts_with("sr") || name.starts_with("fd") {
+            continue;
+        }
+        let size = dev["size"].as_str().unwrap_or("?").to_string();
+        let model = dev["model"].as_str().unwrap_or("").trim().to_string();
+        let model = if model.is_empty() { "Disk".to_string() } else { model };
+
+        let parts: Vec<&serde_json::Value> = dev["children"]
+            .as_array()
+            .map(|c| c.iter().filter(|p| p["type"].as_str() == Some("part")).collect())
+            .unwrap_or_default();
+        let mut kinds: Vec<String> = Vec::new();
+        for p in &parts {
+            if let Some(fs) = p["fstype"].as_str().filter(|f| !f.is_empty()) {
+                if !kinds.iter().any(|k| k == fs) {
+                    kinds.push(fs.to_string());
                 }
-
-                let size = dev["size"].as_str().unwrap_or("?").to_string();
-                let model = dev["model"].as_str().unwrap_or("Unknown").trim().to_string();
-                let model = if model.is_empty() { "Unknown".to_string() } else { model };
-
-                tracing::info!(name = %name, size = %size, model = %model, "Detected disk");
-                disks.push(DiskInfo { name, size, model });
             }
         }
+        let whole_disk_fs = dev["fstype"].as_str().filter(|f| !f.is_empty());
+        let (contents, has_data) = match (parts.len(), whole_disk_fs) {
+            (0, Some(fs)) => (format!("A whole-disk filesystem ({fs})"), true),
+            (0, None) => ("Empty".to_string(), false),
+            (n, _) => {
+                let count = if n == 1 { "1 partition".to_string() } else { format!("{n} partitions") };
+                if kinds.is_empty() {
+                    (count, true)
+                } else {
+                    (format!("{count} ({})", kinds.join(", ")), true)
+                }
+            }
+        };
+        disks.push(DiskInfo { name, size, model, contents, has_data });
     }
-
     disks
 }
 
@@ -1209,6 +1352,9 @@ fn detect_disks_fallback() -> Vec<DiskInfo> {
             name: name.to_string(),
             size: size.to_string(),
             model: "Disk".to_string(),
+            // Nothing here can say what is on it, so it is not claimed to be empty.
+            contents: "contents unknown".to_string(),
+            has_data: true,
         });
     }
     disks
@@ -1313,5 +1459,62 @@ llm:
         .expect("a chosen provider produces a store");
         let store: ProviderStore = serde_yaml::from_str(&yaml).expect("valid YAML");
         assert_eq!(store.primary().expect("primary").auth_type, "x-api-key");
+    }
+
+    /// `lsblk -J -o NAME,SIZE,MODEL,TYPE,RO,RM,FSTYPE` on a machine with a used disk, an
+    /// empty one, a USB stick and the ISO's CD drive.
+    const LSBLK: &str = r#"{"blockdevices": [
+        {"name":"sda","size":"80G","model":"VBOX HARDDISK","type":"disk","ro":false,"rm":false,"fstype":null,
+         "children":[
+            {"name":"sda1","size":"512M","model":null,"type":"part","ro":false,"rm":false,"fstype":"vfat"},
+            {"name":"sda2","size":"60G","model":null,"type":"part","ro":false,"rm":false,"fstype":"ntfs"},
+            {"name":"sda3","size":"19G","model":null,"type":"part","ro":false,"rm":false,"fstype":"ntfs"}
+         ]},
+        {"name":"nvme0n1","size":"476.9G","model":"Samsung SSD 980  ","type":"disk","ro":false,"rm":false,"fstype":null},
+        {"name":"sdb","size":"14.6G","model":"USB Stick","type":"disk","ro":false,"rm":true,"fstype":"iso9660"},
+        {"name":"sr0","size":"1.2G","model":"CD-ROM","type":"rom","ro":false,"rm":true,"fstype":"iso9660"}
+    ]}"#;
+
+    #[test]
+    fn the_disk_list_says_what_each_disk_holds() {
+        let disks = disks_from_lsblk(LSBLK);
+        let names: Vec<&str> = disks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["sda", "nvme0n1"], "removable media and the CD are not candidates");
+
+        assert_eq!(disks[0].contents, "3 partitions (vfat, ntfs)");
+        assert!(disks[0].has_data);
+        assert_eq!(disks[1].contents, "Empty");
+        assert!(!disks[1].has_data);
+        assert_eq!(disks[1].model, "Samsung SSD 980", "lsblk pads models with spaces");
+    }
+
+    #[test]
+    fn older_lsblk_flags_are_read_too() {
+        // util-linux before 2.33 printed the flags as strings.
+        let old = r#"{"blockdevices":[
+            {"name":"sda","size":"20G","model":"QEMU HARDDISK","type":"disk","ro":"0","rm":"0","fstype":"ext4"},
+            {"name":"sdb","size":"8G","model":"Flash","type":"disk","ro":"0","rm":"1","fstype":null}
+        ]}"#;
+        let disks = disks_from_lsblk(old);
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].contents, "A whole-disk filesystem (ext4)");
+        assert!(disks[0].has_data);
+    }
+
+    #[test]
+    fn nonsense_from_lsblk_is_no_disks_not_a_panic() {
+        assert!(disks_from_lsblk("").is_empty());
+        assert!(disks_from_lsblk("{}").is_empty());
+        assert!(disks_from_lsblk(r#"{"blockdevices":[{"type":"disk"}]}"#).is_empty());
+    }
+
+    #[test]
+    fn an_unusable_layout_installs_as_us() {
+        let mut state = InstallerState { keyboard: "de".into(), ..InstallerState::default() };
+        assert_eq!(installed_layout(&state), "de");
+        state.keyboard = "de\nXKB_DEFAULT_OPTIONS=x".into();
+        assert_eq!(installed_layout(&state), "us");
+        state.keyboard.clear();
+        assert_eq!(installed_layout(&state), "us");
     }
 }

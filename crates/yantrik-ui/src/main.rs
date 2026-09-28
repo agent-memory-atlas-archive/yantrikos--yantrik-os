@@ -47,6 +47,7 @@ mod companion_rpc;
 mod control;
 mod control_approvals;
 mod control_installer;
+mod installer_rules;
 mod control_update;
 mod control_files;
 /// Agents' commands on the shell's surface: agent_run / agent_job / agent_input / agent_kill.

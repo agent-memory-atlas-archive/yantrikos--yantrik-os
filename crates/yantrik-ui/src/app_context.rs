@@ -147,6 +147,13 @@ impl AppContext {
         if !crate::onboarding::marker_path().exists() {
             ui.set_onboarding_step(1);
             tracing::info!("First boot detected — onboarding enabled");
+            // Installed by the graphical installer, which already made the account: open on
+            // the optional-setup welcome (phase 3), past the animation and the name question.
+            if crate::onboarding::after_install_marker_path().exists() {
+                ui.set_onboard_after_install(true);
+                ui.set_onboard_phase(3);
+                tracing::info!("First boot after install — offering the optional setup");
+            }
         }
 
         // Lock screen PIN file
