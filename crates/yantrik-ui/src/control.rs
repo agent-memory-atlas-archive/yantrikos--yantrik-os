@@ -161,6 +161,30 @@ pub(crate) fn screen_name(id: i32) -> &'static str {
     }
 }
 
+/// The taskbar entry for the screen the shell is on, as `(name, title)`, when that screen is one a
+/// person reads as a window of its own — Files, Settings, Agents — and `None` on the desktop and
+/// on the screens nobody switches away from (boot, lock, onboarding, login).
+///
+/// Those screens are drawn by the shell with a title bar and window buttons, and look exactly like
+/// the app windows beside them in the taskbar; but they are not toplevels, so the taskbar, which
+/// lists toplevels, never showed them. With Weather in front of Files there was no way back to
+/// Files but the launcher, and a person reasonably read that as Files having closed.
+pub(crate) fn screen_entry(id: i32) -> Option<(&'static str, String)> {
+    let name = SCREENS.iter().find(|(_, s)| *s == id).map(|(n, _)| *n)?;
+    if name == "desktop" {
+        return None;
+    }
+    let mut title = name.to_string();
+    if let Some(first) = title.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    Some((name, title))
+}
+
+/// The app id a screen's taskbar entry carries: no program has it, so the entry can never be
+/// taken for a window of one.
+pub(crate) const SCREEN_ENTRY_PREFIX: &str = "shell:";
+
 /// Which of the two things `open_app` can do a name does, when it is one of the desktop's own.
 ///
 /// `Some` for a name that is part of the shell rather than a program: the screen it lands on and,
@@ -1751,6 +1775,28 @@ pub fn publish(
     // comes from its token. See `control_agents` and design/agents-workspace-2026-09-23.md,
     // decision 1, and design/desk-and-mind-2026-09-23.md, section 5.
     crate::control_agents::actions(surface, ui).serve();
+}
+
+#[cfg(test)]
+mod screen_entry_tests {
+    use super::{screen_entry, SCREENS};
+
+    /// Every screen a person reads as a window gets a taskbar entry named as its title bar names
+    /// it; the desktop, and the screens nobody switches away from, get none.
+    #[test]
+    fn a_screen_that_looks_like_a_window_is_on_the_taskbar() {
+        assert_eq!(screen_entry(8), Some(("files", "Files".to_string())));
+        assert_eq!(screen_entry(7), Some(("settings", "Settings".to_string())));
+        assert_eq!(screen_entry(34), Some(("agents", "Agents".to_string())));
+        for none in [1, 0, 2, 3, 32, 999] {
+            assert_eq!(screen_entry(none), None, "screen {none}");
+        }
+        for (name, id) in SCREENS.iter().filter(|(n, _)| *n != "desktop") {
+            let (entry, title) = screen_entry(*id).expect(name);
+            assert_eq!(entry, *name);
+            assert!(title.chars().next().is_some_and(|c| c.is_ascii_uppercase()), "{title}");
+        }
+    }
 }
 
 #[cfg(test)]
