@@ -713,6 +713,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     # "Nothing to do" is about the binaries. The base system is the half an up-to-date
     # machine can still be missing — a 520 has every current Yantrik file and no `ip` —
     # so a run that found no new build is exactly the moment to look (#210).
+    seal_share || true
     reconcile_packages || true
     reconcile_polkit || true
     reconcile_helpers || true
@@ -769,8 +770,10 @@ done by accident — to do it on purpose: yantrik-update apply --allow-downgrade
   say "Unpacking"
   local stage="$UPDATES_DIR/staging"
   rm -rf "$stage"; mkdir -p "$stage"
-  tar --use-compress-program='zstd -d' -xf "$dl" -C "$stage" 2>/dev/null \
-    || tar -xf "$dl" -C "$stage" \
+  # --no-same-owner: as root, tar keeps the archive's owners by default, and the builder's uid is
+  # the desktop's account on most machines (1000). Everything unpacked here is root's.
+  tar --no-same-owner --use-compress-program='zstd -d' -xf "$dl" -C "$stage" 2>/dev/null \
+    || tar --no-same-owner -xf "$dl" -C "$stage" \
     || fail "could not unpack the bundle (need zstd for .tar.zst)"
   # The bundle holds one top directory <NAME>/ with bin/ under it.
   local root; root="$(find "$stage" -maxdepth 1 -mindepth 1 -type d | head -1)"
@@ -868,11 +871,12 @@ safely. Old backups live in $BACKUP_DIR."
   if [ -d "$root/share" ]; then
     mkdir -p "$SHARE_DIR"
     if command -v rsync >/dev/null 2>&1; then
-      rsync -a --delete "$root/share/" "$SHARE_DIR/" || fail "could not install share/"
+      rsync -a --no-owner --no-group --delete "$root/share/" "$SHARE_DIR/" || fail "could not install share/"
     else
       rm -rf "$SHARE_DIR" && mkdir -p "$SHARE_DIR"
-      cp -a "$root/share/." "$SHARE_DIR/" || fail "could not install share/"
+      cp -a --no-preserve=ownership "$root/share/." "$SHARE_DIR/" || fail "could not install share/"
     fi
+    seal_share
     info "installed $(find "$SHARE_DIR" -type f | wc -l) shared files"
 
     # ── The app icon ──
@@ -1207,6 +1211,7 @@ restore_backup() {
   if [ -d "$backup/share" ]; then
     rm -rf "$SHARE_DIR"
     cp -a "$backup/share" "$SHARE_DIR"
+    seal_share
   fi
   [ -f "$backup/BUILD" ] && cp -a "$backup/BUILD" "$BUILD_FILE"
   # A rollback moves the version backwards, so the one-line copy has to move with it.
@@ -1419,12 +1424,35 @@ reconcile_packages() {
 # menu calls systemctl without sudo and needs the one that lets the desktop's user suspend,
 # restart and power off from any of their sessions (#397). Copied only when different, so an
 # unchanged rule costs nothing.
+# share/ is root's and nobody else may write it, once the tree is root's (#397). It holds what
+# this updater installs as root (the polkit rules, the root helpers sudo trusts, the kernel
+# settings), so a share/ the desktop's account can write is root for anything running as it:
+# write share/root-helpers/yantrik-pkg, run `sudo yantrik-update reconcile`, and the helper sudo
+# allows is yours. Every apply left it that way (tar and rsync -a kept the archive's owners, the
+# builder's uid 1000). Run after every install and restore of share/, and before each reconcile.
+seal_share() {
+  tree_is_roots || return 0
+  [ "$(id -u)" = 0 ] || return 0
+  [ -d "$SHARE_DIR" ] || return 0
+  chown -R root:root "$SHARE_DIR" && chmod -R go-w "$SHARE_DIR"
+}
+
+# Whether a file this updater is about to install as root came from where only root can write:
+# root's, not writable by group or others, in a directory that is the same.
+source_is_roots() {
+  local f="$1" d
+  d="$(dirname "$f")"
+  [ "$(stat -c %u "$f" 2>/dev/null)" = 0 ] && [ "$(stat -c %u "$d" 2>/dev/null)" = 0 ] || return 1
+  [ -z "$(find "$f" "$d" -maxdepth 0 -perm /022 2>/dev/null)" ]
+}
+
 reconcile_polkit() {
   local dir="$PREFIX/share/polkit" rules="/etc/polkit-1/rules.d" f dest
   [ -d "$dir" ] || return 0
   [ -d "$rules" ] || { info "no $rules on this machine; polkit rules not installed"; return 0; }
   for f in "$dir"/*.rules; do
     [ -f "$f" ] || continue
+    source_is_roots "$f" || { warn "refusing $f: it is not root's alone to write"; continue; }
     dest="$rules/$(basename "$f")"
     if cmp -s "$f" "$dest" 2>/dev/null; then continue; fi
     if sudo -n install -m 0644 -o root -g root "$f" "$dest" 2>/dev/null; then
@@ -1445,6 +1473,7 @@ reconcile_helpers() {
   sudo -n install -d -m 0755 -o root -g root "$dest_dir" 2>/dev/null     || { warn "could not create $dest_dir (no sudo here); the Package Manager cannot install yet"; return 0; }
   for f in "$dir"/*; do
     [ -f "$f" ] || continue
+    source_is_roots "$f" || { warn "refusing $f: it is not root's alone to write"; continue; }
     dest="$dest_dir/$(basename "$f")"
     if cmp -s "$f" "$dest" 2>/dev/null; then continue; fi
     if sudo -n install -m 0755 -o root -g root "$f" "$dest" 2>/dev/null; then
@@ -1477,7 +1506,7 @@ reconcile_sysctl() {
   fi
   for f in "$dir"/*.conf; do
     [ -f "$f" ] || continue
-    if [ "$(stat -c %u "$f" 2>/dev/null)" != 0 ] || ! sysctl_file_ok "$f"; then
+    if ! source_is_roots "$f" || ! sysctl_file_ok "$f"; then
       warn "refusing $f: not root's, or it sets something other than kernel.yama.ptrace_scope"
       continue
     fi
@@ -1498,6 +1527,7 @@ cmd_reconcile() {
   migrate_if_needed
   elevate
   remove_blanket_sudo
+  seal_share
   say "Reconciling the base system against what the image ships"
   info "required: $REQUIRED_PACKAGES"
   reconcile_packages
