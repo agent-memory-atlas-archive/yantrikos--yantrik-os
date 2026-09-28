@@ -415,9 +415,11 @@ if [ -d "$UNPACK/share/root-helpers" ]; then
 fi
 # Kernel settings (#414): Yama ptrace_scope 1, so nothing a mind starts can attach to the shell.
 [ -d "$UNPACK/share/sysctl" ] || fail "release tarball carries no share/sysctl — the image would let any process attach to the shell"
+sudo install -d -m 0755 -o root -g root "$ROOTFS/etc/sysctl.d"
 for conf in "$UNPACK/share/sysctl/"*.conf; do
     sudo install -m 0644 -o root -g root "$conf" "$ROOTFS/etc/sysctl.d/$(basename "$conf")"
 done
+[ -f "$ROOTFS/etc/sysctl.d/60-yantrik-ptrace.conf" ] || fail "60-yantrik-ptrace.conf missing from the image's /etc/sysctl.d"
 for required in share/labwc/rc.xml share/labwc/autostart bin/yantrik-session bin/yantrik-shell \
                 share/icons/hicolor/scalable/apps/yantrik.svg; do
     [ -e "$ROOTFS/opt/yantrik/$required" ] || fail "$required missing from the image — the desktop session would not be the shipped one"
