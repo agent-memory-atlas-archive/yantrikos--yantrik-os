@@ -481,9 +481,8 @@ class TestGrants(support.MachineCase):
                                         {"pid": 42})])
         self.assertEqual(seen["token"], "tok-1", "the token beside args reaches the handler")
         self.assertIsNone(agent_token(), "and is gone once the dispatch is over")
-        # #182: the spend says which agent it is for — the token, trimmed as the dispatch reads
-        # it, and no pid for a call the kernel stamped none on.
-        self.assertEqual(shell.callers, [gate.CallingAgent("tok-1", None)])
+        # Spent as no agent: the shell cannot yet believe an agent forwarded by a Python app (#466).
+        self.assertEqual(shell.callers, [None])
 
     def test_a_token_inside_args_alone_is_removed_and_not_used(self):
         self.machine.set_mode("bypass")

@@ -211,14 +211,17 @@ class TestAnActIsHeldToItsAgentsReach(support.MachineCase):
         self.assertTrue(message.startswith("REACH:"), message)
         self.assertEqual(spent, [], "the person's Allow is not used up on an act that cannot run")
 
-    def test_a_grant_is_spent_for_the_agent_the_call_arrived_as(self):
+    def test_a_grant_is_spent_as_no_agent_until_the_shell_believes_a_python_forwarder(self):
+        # #466: the shell believes a forwarded caller only from its own binaries, so an agent
+        # forwarded from a Python app would be "not believed" and every grant would fail.
         ran, spent = [], []
         s = notes_surface(shell_says(None), ran, spend_grant=lambda *a: spent.append(a))
         peer = wire.PeerCred(4321, os.getuid(), os.getgid())
         s.act({"action": "new_note", "args": {"title": "x"}, "agent_token": " tok ",
                "grant": "appr-2"}, peer)
-        self.assertEqual(spent, [("appr-2", "notes", "new_note", {"title": "x"},
-                                  gate.CallingAgent("tok", 4321))])
+        self.assertEqual(spent, [("appr-2", "notes", "new_note", {"title": "x"})])
+        self.assertEqual(ran, [("new_note", "x")])
+        # What the spend will carry once it can (#182, `spend_params` in the Rust gate).
         params = gate.spend_params("appr-2", "notes", "new_note", {"title": "x"},
                                    gate.CallingAgent("tok", 4321))
         self.assertEqual(params["agent_token"], "tok")

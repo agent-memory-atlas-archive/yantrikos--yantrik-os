@@ -757,10 +757,14 @@ class Surface:
             refusal = (self._within_reach(held, spec, args) or check_arguments(spec, args))
             if refusal is not None:
                 raise wire.RpcError(wire.RPC_INVALID_PARAMS, refusal)
-            caller = gate.CallingAgent(token, peer.pid if peer and peer.pid > 0 else None) \
-                if token else None
+            # Not forwarded as the calling agent (#182) — yet. The shell believes a forwarded
+            # `caller_pid` only from one of the desktop's own binaries (`spending_agent`), so from
+            # a Python app the token would be checked against the app's own pid, "not believed",
+            # and every agent's grant would fail to spend. Spent as no agent, as it always was,
+            # until the shell can tell a surface it launched from anything else on the socket
+            # (#466). `gate.spend_params` already carries the agent for when it can.
             refusal = authority.spend(grant, self.app_id, name, self._grade(spec), args,
-                                      self._spend_grant, caller)
+                                      self._spend_grant)
             if refusal is not None:
                 raise wire.RpcError(wire.RPC_INVALID_PARAMS, refusal)
 
