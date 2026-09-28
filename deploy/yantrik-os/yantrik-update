@@ -23,6 +23,7 @@
 #   yantrik-update status      [--porcelain]                 channel, host, build, backups
 #   yantrik-update set-channel nightly|beta|stable           change the channel, once, here
 #   yantrik-update reconcile                                 base packages the image ships and this machine lacks
+#   yantrik-update migrate-minds                             move Yantrik Mind into its own account (#411), memory counted twice
 #   yantrik-update selftest                                  offline checks of the two above
 #
 # It reads its defaults from /opt/yantrik/update.conf (CHANNEL=, HOST=, SCHEME=) when present.
@@ -558,7 +559,7 @@ sudo_rule_text() {
   printf '%s\n' \
     "# Yantrik OS (#397): what the desktop's account may run as root without a password." \
     "# Everything else asks for the password. Written by yantrik-update; do not edit." \
-    "%sudo ALL=(root) NOPASSWD: $BIN_DIR/yantrik-update, /usr/lib/yantrik/yantrik-pkg, /usr/bin/timedatectl set-timezone *"
+    "%sudo ALL=(root) NOPASSWD: $BIN_DIR/yantrik-update, /usr/lib/yantrik/yantrik-pkg, /usr/bin/timedatectl set-timezone *, /usr/bin/systemctl restart yantrik-mind.service"
 }
 
 # Hand the tree to root, keep what is the desktop's, and put the narrow rule in place. Root
@@ -722,6 +723,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     reconcile_helpers || true
     reconcile_sysctl || true
     reconcile_minds || true
+    reconcile_mind_units || true
     return 0
   fi
 
@@ -1662,6 +1664,119 @@ d /run/yantrik-minds 2750 $owner yantrik-minds -"
   systemd-tmpfiles --create "$conf" >/dev/null 2>&1 || warn "could not make /run/yantrik-minds now; it is made at the next boot"
 }
 
+# The system units the bundle ships for minds (share/systemd), into /etc/systemd/system, by
+# content like every other root file (#419). Installed, not enabled: a mind's unit is enabled by
+# `migrate-minds`, once what it remembers has moved out of the person's home.
+reconcile_mind_units() {
+  local dir="$PREFIX/share/systemd" f dest changed=0
+  [ -d "$dir" ] || return 0
+  [ "$(id -u)" = 0 ] || return 0
+  for f in "$dir"/*.service; do
+    [ -f "$f" ] || continue
+    dest="/etc/systemd/system/$(basename "$f")"
+    if ! root_file_ok "systemd/$(basename "$f")" "$f"; then
+      warn "refusing $f: not root's alone, or not what this build ships"
+      drop_unshipped "systemd/$(basename "$f")" "$dest"
+      continue
+    fi
+    cmp -s "$f" "$dest" 2>/dev/null && continue
+    install -m 0644 -o root -g root "$f" "$dest" && changed=1 && info "mind unit in place: $dest"
+  done
+  [ "$changed" = 1 ] && systemctl daemon-reload >/dev/null 2>&1
+  return 0
+}
+
+# Table counts of a mind's memory, read-only: `integrity <result>` then `<table> <rows>` lines.
+mind_db_counts() {
+  python3 - "$1" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
+print("integrity", c.execute("pragma integrity_check").fetchone()[0])
+for (t,) in c.execute("select name from sqlite_master where type='table' order by name"):
+    print(t, c.execute('select count(*) from "%s"' % t.replace('"', '""')).fetchone()[0])
+PY
+}
+
+# A file root may move out of the person's home: a regular file (not a link), the person's, and
+# really under their home. Minds ran as the person until now, so anything in that home may have
+# been put there to make root move, or chown, something else.
+movable() {
+  local f="$1" owner="$2" home="$3"
+  [ -e "$f" ] || return 1
+  [ -f "$f" ] && [ ! -L "$f" ] || { warn "refusing $f: not a plain file"; return 2; }
+  [ "$(stat -c %U "$f")" = "$owner" ] || { warn "refusing $f: not $owner's"; return 2; }
+  case "$(realpath -e "$f")" in "$home"/*) return 0 ;; esac
+  warn "refusing $f: it resolves outside $home"; return 2
+}
+
+# Move the Yantrik Mind out of the person's account into its own (#411): its memory (the db with
+# its WAL and SHM, which hold the latest writes), the files beside it, its settings and its MCP
+# config; counted before and after, and put back if the counts differ. Then its user unit off
+# and its system unit on. Safe to run again: with nothing left in the person's home it only
+# makes sure the system unit is the one running.
+cmd_migrate_minds() {
+  migrate_if_needed
+  elevate "$@"
+  reconcile_minds
+  reconcile_mind_units
+  getent passwd yantrik-mind >/dev/null 2>&1 || fail "there is no mind account; nothing was moved"
+  local owner home src dst f before after rc
+  owner="$(desktop_owner)"
+  case "$owner" in ''|root|*[!a-z0-9_-]*) fail "cannot tell whose desktop this is; nothing was moved" ;; esac
+  home="$(getent passwd "$owner" | cut -d: -f6)"
+  [ -d "$home" ] && [ ! -L "$home" ] || fail "no home for $owner; nothing was moved"
+  src="$home/.local/share/yantrik-mind"
+  dst=/var/lib/yantrik-mind
+  say "Moving Yantrik Mind from $owner's account into its own"
+  systemctl --user -M "$owner@" stop yantrik-mind.service >/dev/null 2>&1 || true
+  systemctl stop yantrik-mind.service >/dev/null 2>&1 || true
+  install -d -o yantrik-mind -g yantrik-minds -m 0750 "$dst" "$dst/.config" "$dst/.config/yantrik-mind" "$dst/coder"
+
+  if [ -e "$src/mind.db" ]; then
+    [ -L "$src" ] && fail "refusing $src: it is a link; nothing was moved"
+    [ -e "$dst/mind.db" ] && fail "a memory is already at $dst/mind.db and another at $src/mind.db; nothing was moved. Say which is the mind's."
+    movable "$src/mind.db" "$owner" "$home" || fail "the memory at $src/mind.db cannot be moved safely; nothing was moved"
+    before="$(mind_db_counts "$src/mind.db")" || fail "could not read the memory at $src/mind.db; nothing was moved"
+    case "$before" in "integrity ok"*) ;; *) fail "the memory at $src/mind.db fails its integrity check; nothing was moved" ;; esac
+    local moved=""
+    for f in mind.db mind.db-wal mind.db-shm mind.db.decisions.jsonl mind.db.read_receipts.jsonl \
+             egress.key egress_receipts.jsonl console.token devices.json yantrik-memory.token; do
+      movable "$src/$f" "$owner" "$home"; rc=$?
+      [ "$rc" = 1 ] && continue
+      [ "$rc" = 0 ] || { for m in $moved; do mv -f "$dst/$m" "$src/$m"; done; fail "stopped at $src/$f; everything moved so far was put back"; }
+      mv "$src/$f" "$dst/$f" || { for m in $moved; do mv -f "$dst/$m" "$src/$m"; done; fail "could not move $src/$f; everything moved so far was put back"; }
+      moved="$moved $f"
+    done
+    after="$(mind_db_counts "$dst/mind.db")"
+    if [ "$before" != "$after" ]; then
+      for m in $moved; do mv -f "$dst/$m" "$src/$m"; done
+      fail "the memory's counts changed in the move; it was put back where it was. Before: $(printf '%s' "$before" | tr '\n' ' ') After: $(printf '%s' "$after" | tr '\n' ' ')"
+    fi
+    info "memory moved and counted: $(printf '%s\n' "$after" | sed -n 2,999p | wc -l) tables, identical before and after"
+  fi
+  if movable "$home/.config/yantrik-mind.env" "$owner" "$home"; then
+    [ -e "$dst/.config/yantrik-mind.env" ] || mv "$home/.config/yantrik-mind.env" "$dst/.config/yantrik-mind.env"
+  fi
+  if movable "$home/.config/yantrik-mind/mcp.json" "$owner" "$home"; then
+    [ -e "$dst/.config/yantrik-mind/mcp.json" ] || mv "$home/.config/yantrik-mind/mcp.json" "$dst/.config/yantrik-mind/mcp.json"
+  fi
+  chown -R yantrik-mind:yantrik-minds "$dst"
+  chmod 0750 "$dst"
+  [ -e "$dst/.config/yantrik-mind.env" ] && chmod 0600 "$dst/.config/yantrik-mind.env"
+
+  # The person's unit off, for the person and for everyone the global enable reached; the mind's
+  # own on, if the mind is installed.
+  systemctl --user -M "$owner@" disable yantrik-mind.service >/dev/null 2>&1 || true
+  systemctl --global disable yantrik-mind.service >/dev/null 2>&1 || true
+  if [ -x /opt/yantrik-mind/bin/yantrik-mind ] && [ -f /etc/systemd/system/yantrik-mind.service ]; then
+    systemctl enable --now yantrik-mind.service >/dev/null 2>&1 \
+      && info "Yantrik Mind runs as yantrik-mind now" \
+      || warn "the mind's unit did not start; see: journalctl -u yantrik-mind"
+  else
+    info "Yantrik Mind is not installed here; its memory (if any) waits in $dst"
+  fi
+}
+
 cmd_reconcile() {
   migrate_if_needed
   elevate
@@ -1674,6 +1789,7 @@ cmd_reconcile() {
   reconcile_helpers
   reconcile_sysctl
   reconcile_minds
+  reconcile_mind_units
   audit_unowned /etc/polkit-1/rules.d '*.rules' polkit
   audit_unowned /etc/sysctl.d '*.conf' sysctl
 }
@@ -1907,6 +2023,7 @@ case "$CMD" in
   # person at a terminal types the hyphen.
   set-channel|set_channel) cmd_set_channel "$@" ;;
   reconcile) cmd_reconcile ;;
+  migrate-minds) cmd_migrate_minds "$@" ;;
   migrate-ownership) cmd_migrate_ownership ;;
   selftest) cmd_selftest ;;
   # Printed from a function rather than `sed -n '20,30p' "$0"`, which quietly printed whatever

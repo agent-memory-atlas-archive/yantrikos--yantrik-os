@@ -1230,7 +1230,10 @@ pub fn publish(
                 if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
                     return Err("`token_sha256` is the token's SHA-256, 64 hex characters".into());
                 }
-                Ok(serde_json::json!({ "reach": crate::agents::reaches::lookup_digest(digest) }))
+                let known = crate::wire::harness::host().is_some_and(|h| {
+                    h.knows_token_digest(&digest.to_ascii_lowercase(), yantrik_ipc_transport::reach::token_digest)
+                });
+                Ok(serde_json::json!({ "reach": crate::agents::reaches::lookup_digest(digest), "known": known }))
             },
         )
         .action(
