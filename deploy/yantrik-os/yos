@@ -966,7 +966,8 @@ def cmd_describe(argv):
 # small, high-value fields first, the large lists last, the rest in the wire's alphabetical order
 # between them. Keys and values are untouched; only the order they are printed in changes. A key
 # that is not present is simply not printed, so this is safe for every app, not only the shell.
-STATE_FIRST = ("summary", "screen", "locked", "clock", "in_front", "windows", "companion_online")
+STATE_FIRST = ("summary", "screen", "locked", "clock", "desktop_in_front", "in_front", "windows",
+               "companion_online")
 STATE_LAST = ("agents", "catalog", "services")
 
 
@@ -2464,6 +2465,14 @@ SCENE_WEB_LINES = 25    # lines of the page scan
 SCENE_WAIT = 5          # seconds any one reader is given
 
 
+def _flat(text, cap=160):
+    """Text another program wrote, as one line of at most `cap` characters. A window title, a
+    summary or a page title is the other program's to choose, and a newline in one would start a
+    line of its own here — a fake "Waiting on the person:", or a fake app with fake actions."""
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= cap else text[:cap - 3] + "..."
+
+
 def _quietly(fn, *args, **kwargs):
     """(value, None), or (None, why) — a scene is a listing, and one unreadable window must not
     take the rest of the screen with it."""
@@ -2495,7 +2504,7 @@ def scene_app(name, indent="    "):
     view, why = _quietly(request, name, "app.describe", timeout=SCENE_WAIT, waited=True)
     if view is None:
         return ["%snot readable: %s" % (indent, why)]
-    lines = ["%s%s" % (indent, (view.get("summary") or "(no summary)").strip())]
+    lines = ["%s%s" % (indent, _flat(view.get("summary") or "(no summary)", 240))]
     if view.get("actions"):
         lines.append("%sact: %s" % (indent, scene_actions(view["actions"])))
     return lines
@@ -2503,16 +2512,14 @@ def scene_app(name, indent="    "):
 
 def scene_element(element):
     """One accessibility element: its id, role, name and what it can be asked to do."""
-    name = " ".join((element.get("name") or element.get("text") or "").split())
-    if len(name) > 80:
-        name = name[:77] + "..."
-    parts = ["a11y:%s" % element.get("id", "?")]
+    name = _flat(element.get("name") or element.get("text") or "", 80)
+    parts = ["a11y:%s" % _flat(element.get("id", "?"), 16)]
     if element.get("role"):
-        parts.append(element["role"])
+        parts.append(_flat(element["role"], 30))
     if name:
         parts.append(json.dumps(name, ensure_ascii=False))
     if element.get("actions"):
-        parts.append("[%s]" % ", ".join(element["actions"]))
+        parts.append("[%s]" % ", ".join(_flat(a, 30) for a in element["actions"]))
     return " ".join(parts)
 
 
@@ -2555,29 +2562,30 @@ class Accessibility:
             return
         self.windows = [w for w in listing.get("windows") or [] if isinstance(w, dict)]
 
-    def window_for(self, title):
-        for w in self.windows:
-            if w.get("title") == title:
-                return w
-        return None
+    def windows_titled(self, title):
+        return [w for w in self.windows if w.get("title") == title]
 
     def read(self, title, indent="    "):
         """The elements of the foreign window called `title`, or why they cannot be had."""
         if self.blind:
             return ["%snot readable: %s" % (indent, self.blind)]
-        window = self.window_for(title)
-        if window is None:
+        titled = self.windows_titled(title)
+        if not titled:
             return ["%sno accessibility tree: the app publishes none (a terminal, a game, a canvas "
                     "or an X11 app without a bridge). Nothing in this reading can see inside it."
                     % indent]
-        described, why = _quietly(request, "a11y", "a11y.describe", {"window": window["id"]},
-                                  timeout=20)
+        # The compositor names a window by its title and nothing else, so two windows with the
+        # same title cannot be told apart from here. Said, rather than read as if they were one.
+        note = ([] if len(titled) == 1 else
+                ["%s(%d windows share this title; this is the first of them)" % (indent, len(titled))])
+        described, why = _quietly(request, "a11y", "a11y.describe", {"window": titled[0]["id"]},
+                                  timeout=10)
         if described is None:
-            return ["%snot readable: %s" % (indent, why)]
+            return note + ["%snot readable: %s" % (indent, why)]
         elements = described.get("elements") or []
         if not elements:
-            return ["%sits accessibility tree names nothing a person would mention" % indent]
-        return scene_elements(elements, indent=indent)
+            return note + ["%sits accessibility tree names nothing a person would mention" % indent]
+        return note + scene_elements(elements, indent=indent)
 
 
 def scene_web(indent="    "):
@@ -2592,14 +2600,19 @@ def scene_web(indent="    "):
     pages = [t for t in tabs if t.get("type") == "page"]
     if not pages:
         return ["%sno page open" % indent]
-    lines = ["%s%s — %s" % (indent, pages[0].get("title", "")[:80], pages[0].get("url", "")[:90])]
+    # The tab the scan below reads, which is `_page()`'s: YOS_WEB_TAB when a caller named one.
+    page, why = _quietly(_page)
+    if page is None:
+        return ["%snot readable: %s" % (indent, why)]
+    lines = ["%s%s — %s" % (indent, json.dumps(_flat(page.get("title", ""), 80), ensure_ascii=False),
+                            _flat(page.get("url", ""), 90))]
     if len(pages) > 1:
         lines.append("%s(%d tabs; `yos web tabs` lists them)" % (indent, len(pages)))
     scan, why = _quietly(_eval, _scan_js())
     if scan is None:
         return lines + ["%sthe page did not answer: %s" % (indent, why)]
     rows = [r for r in str(scan).splitlines() if r.strip()]
-    lines.extend(indent + r for r in rows[:SCENE_WEB_LINES])
+    lines.extend(indent + _flat(r, 200) for r in rows[:SCENE_WEB_LINES])
     if len(rows) > SCENE_WEB_LINES:
         lines.append("%s(+%d more lines; `yos web` for all of them, `yos web click <n>` to act)"
                      % (indent, len(rows) - SCENE_WEB_LINES))
@@ -2626,12 +2639,13 @@ def scene(desktop, accessibility=None):
         return ["The screen is locked. Nothing on it can be read until the person unlocks it."]
     windows = [w for w in state.get("windows") or [] if isinstance(w, dict)]
     in_front = state.get("in_front")
+    desktop_in_front = state.get("desktop_in_front")
     clock = state.get("clock") if isinstance(state.get("clock"), dict) else {}
     head = ("Screen at %s %s. " % (clock.get("weekday", ""), clock["time"])).replace("  ", " ")         if clock.get("time") else "Screen. "
-    if in_front == "shell":
-        head += "In front: the desktop itself (its %s screen)." % (state.get("screen") or "desktop")
+    if desktop_in_front is True:
+        head += "In front: the desktop itself (its %s screen)." % _flat(state.get("screen") or "desktop", 30)
     elif in_front:
-        head += "In front: %s." % in_front
+        head += "In front: %s." % json.dumps(_flat(in_front, 100), ensure_ascii=False)
     else:
         head += "Which window is in front is not knowable right now."
     lines = [head]
@@ -2655,18 +2669,19 @@ def scene(desktop, accessibility=None):
         lines.append("  (none — the desktop itself is all there is)")
     for w in windows:
         app, title = w.get("app") or "?", w.get("title") or "?"
-        mark = "  (in front)" if in_front and in_front == title else ""
+        mark = "  (in front)" if in_front and in_front == title and desktop_in_front is not True else ""
         if app == "mind-view":
-            inside = ", ".join(view.get("apps") or []) or "nothing yet"
+            inside = _flat(", ".join(a for a in view.get("apps") or [] if isinstance(a, str))) or "nothing yet"
             lines.append("- Mind View%s — the minds' own display, holding: %s" % (mark, inside))
         elif app == "browser":
-            lines.append("- [browser] %s%s" % (title, mark))
+            lines.append("- [browser] %s%s" % (json.dumps(_flat(title, 100), ensure_ascii=False), mark))
             lines.extend(scene_web())
         elif surfaces.get(app):
-            lines.append("- [%s] %s%s" % (app, title, mark))
+            lines.append("- [%s] %s%s" % (_flat(app, 40), _flat(title, 100), mark))
             lines.extend(scene_app(surfaces[app]))
         else:
-            lines.append("- %s — %s, not one of ours%s" % (title, app, mark))
+            lines.append("- %s — %s, not one of ours%s" % (
+                json.dumps(_flat(title, 100), ensure_ascii=False), _flat(app, 40), mark))
             lines.extend(accessibility.read(title))
 
     apps = [a for a in view.get("apps") or [] if isinstance(a, str)]
@@ -2674,11 +2689,11 @@ def scene(desktop, accessibility=None):
         lines += ["", "In Mind View, %s:" % _plural(len(apps), "app")]
         for app in apps:
             surface = scene_surface(app)
-            lines.append("- [%s]" % app)
+            lines.append("- [%s]" % _flat(app, 40))
             lines.extend(scene_app(surface) if surface
                          else ["    not readable: it has no surface this caller can reach"])
     elif view.get("unavailable"):
-        lines += ["", "Mind View is not available: %s" % view["unavailable"]]
+        lines += ["", "Mind View is not available: %s" % _flat(view["unavailable"], 200)]
 
     lines += ["", "To act: yos act <app> <action> on an [app]; yos web click <n> on a page's "
                   "numbers; a11y.act on the a11y service with an a11y: id."]

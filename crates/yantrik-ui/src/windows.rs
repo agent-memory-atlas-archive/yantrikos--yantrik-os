@@ -768,13 +768,15 @@ pub fn shell_in_front() -> Option<bool> {
     }
 }
 
-/// What the person is looking at, as of the last reading: `Some("shell")` for the desktop or one
-/// of its screens, `Some(title)` for an app window (the title exactly as `windows` lists it), and
-/// `None` when the compositor could not say. For `describe shell`, so a reader of the screen can
-/// tell which of the open windows is the one in front instead of guessing from the list's order.
+/// The app window the person is looking at, as of the last reading: its title exactly as
+/// `windows` lists it, or `None` when the desktop itself is in front or the compositor could not
+/// say ([`shell_in_front`] tells those two apart). For `describe shell`, so a reader of the screen
+/// can tell which open window is the one in front instead of guessing from the list's order.
+///
+/// A title and never a keyword: a window can be titled anything, "shell" included.
 pub fn in_front() -> Option<String> {
     match shell_in_front()? {
-        true => Some("shell".to_string()),
+        true => None,
         false => compositor_snapshot().1,
     }
 }

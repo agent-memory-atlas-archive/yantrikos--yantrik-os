@@ -485,7 +485,8 @@ TOOLS = [
     },
     {
         "name": "os_screen",
-        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        # Open-world: it carries the browser's page, which is the web's.
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
         # One reading of everything on screen, as text (#257). A mind asked "what's on my screen"
         # otherwise described each app in turn, or asked for a screenshot: thousands of vision
         # tokens to learn that a window says "Ready". On VM 520 this is about 1 KB for three
@@ -499,7 +500,10 @@ TOOLS = [
                        "before a screenshot. Act on what it lists with os_act.",
         "inputSchema": {"type": "object", "properties": {}},
         "argv": lambda a: ["screen"],
-        "timeout": 40,
+        # Its readers run one after another, each bounded: 10 s per foreign window, the page scan's
+        # own socket timeout, 5 s per app. A whole reading lost to the bridge's clock is worse
+        # than a slow one.
+        "timeout": 90,
     },
     {
         "name": "os_perception",
