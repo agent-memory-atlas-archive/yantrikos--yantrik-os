@@ -39,12 +39,13 @@ Environment=YM_WEB=off
 Environment=YM_WEBUI=off
 Environment=YANTRIK_MIND_RUN=/run/yantrik-minds
 # No EnvironmentFile: systemd would read it as root, before dropping to the account, and follow a
-# link the mind put in its own home to any root-readable file. The mind reads its settings itself
-# (YM_ENV_PATH), as itself.
+# link the mind put in its own home to any root-readable file. yantrik-mind-launch reads the
+# settings at YM_ENV_PATH as the mind itself, and starts the Mind with them.
 # Never on an empty memory while the old one is still in a person's home: that would be a mind
 # that silently forgot everything. Run as root (+), the only one that can look there.
 ExecStartPre=+/bin/sh -c 'for d in /home/*/.local/share/yantrik-mind/mind.db; do if [ -e "$$d" ] && [ ! -e /var/lib/yantrik-mind/mind.db ]; then echo "Yantrik Mind: its memory is still at $$d. Run: sudo yantrik-update migrate-minds" >&2; exit 1; fi; done; exit 0'
-ExecStart=/opt/yantrik-mind/bin/yantrik-mind
+# The Mind's settings are read by the mind itself, not by systemd as root (see the launcher).
+ExecStart=/opt/yantrik/bin/yantrik-mind-launch
 # stdin is not a terminal, which is how the mind knows to run headless.
 StandardInput=null
 Restart=always

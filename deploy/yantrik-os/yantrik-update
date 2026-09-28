@@ -615,6 +615,16 @@ install_sudo_rule() {
   info "sudo rule in place: $SUDO_RULE"
 }
 
+# The narrow rule, rewritten when this build's text differs from what is installed: it was only
+# ever written by migrate-ownership, once, so a line added later (the Mind's restart, #411) never
+# reached a machine already migrated.
+reconcile_sudo_rule() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || return 0
+  [ "$(sudo_rule_text)" = "$(cat "$SUDO_RULE" 2>/dev/null)" ] && return 0
+  install_sudo_rule
+}
+
 # The blanket rule the OS itself wrote — `<user> ALL=(ALL) NOPASSWD: ALL`, by the image
 # (/etc/sudoers.d/yantrik) and the installer (/etc/sudoers.d/<user>) — taken away once the
 # narrow rule is in place (#397). With it, anything running as the desktop's account was root
@@ -732,6 +742,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     reconcile_sysctl || true
     reconcile_registries || true
     reconcile_podman_socket || true
+    reconcile_sudo_rule || true
     reconcile_minds || true
     reconcile_mind_units || true
     return 0
@@ -1929,6 +1940,22 @@ for _, rel in pairs:
     if os.path.lexists(target):
         continue
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    if rel == ".config/yantrik-mind.env":
+        # Written when the Mind lived in the person home: paths into that home, and a debug dump
+        # into the shared /tmp, are dropped; the unit names where things are now.
+        kept, dropped = [], []
+        for line in open(staged, "r", encoding="utf-8", errors="replace").read().splitlines():
+            key = line.strip().removeprefix("export ").split("=", 1)[0].strip()
+            if key in ("YM_MCP_CONFIG", "YM_DUMP_TOOLS") or "/home/" in line:
+                dropped.append(key)
+            else:
+                kept.append(line)
+        os.write(fd, ("\n".join(kept) + "\n").encode())
+        os.close(fd)
+        if dropped:
+            sys.stderr.write("from the mind settings, dropped as they pointed at the person home or /tmp: %s\n" % ", ".join(dropped))
+        placed.append(rel)
+        continue
     with open(staged, "rb") as src:
         while True:
             chunk = src.read(1 << 20)
@@ -2050,6 +2077,7 @@ cmd_reconcile() {
   reconcile_polkit
   reconcile_helpers
   reconcile_sysctl
+  reconcile_sudo_rule
   reconcile_minds
   reconcile_mind_units
   reconcile_registries
