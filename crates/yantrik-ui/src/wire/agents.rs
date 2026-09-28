@@ -1722,7 +1722,11 @@ impl Watch {
                         out.push(Notice::Finished {
                             agent: id.clone(),
                             mind: a.meta.mind.clone(),
-                            title: a.meta.title.clone(),
+                            // The turn that ended, not the agent's title. A mind that holds one
+                            // conversation across every chat keeps the title of its first prompt
+                            // for good, and "Yantrik Mind finished: “Release check: reply with
+                            // exactly one word…”" was the toast for a Blender scene (VM 520).
+                            title: turn.prompt.clone(),
                             ok: turn.ok != Some(false),
                         });
                     }
@@ -2131,6 +2135,15 @@ mod tests {
         s.close_turn(&pi, true);
         let told = watch.changes(&s, &waiting, 0);
         assert_eq!(told, vec![Notice::Finished { agent: pi.clone(), mind: "pi".into(), title: "tidy the photos folder".into(), ok: true }]);
+
+        // A later turn in the same conversation is told by its own prompt, not the first one's.
+        s.open_turn(&pi, "now rename them by date");
+        s.close_turn(&pi, true);
+        let told = watch.changes(&s, &waiting, 0);
+        assert!(
+            matches!(&told[..], [Notice::Finished { title, .. }] if title == "now rename them by date"),
+            "{told:?}"
+        );
 
         // A turn the person stopped needs no telling.
         s.open_turn(&pi, "and the videos");
