@@ -745,6 +745,7 @@ from it. Change it with: yantrik-update set-channel nightly" ;;
     reconcile_sudo_rule || true
     reconcile_minds || true
     reconcile_mind_units || true
+    reconcile_private_dirs || true
     return 0
   fi
 
@@ -1783,6 +1784,36 @@ d /run/yantrik-minds 2750 $owner yantrik-minds -"
   systemd-tmpfiles --create "$conf" >/dev/null 2>&1 || warn "could not make /run/yantrik-minds now; it is made at the next boot"
 }
 
+# logs/ and data/ are the desktop's alone. The installer made logs/ 0777, so once minds had an
+# account of their own (#411) the mind could plant a name there: the session rotates
+# yantrik-os.log and appends to that name, so a symlink to ~/.bashrc put there first would have
+# the shell's output (which carries text the mind chose) written into the person's startup file.
+# Write for the owner only, then anything in it someone else owns is removed; both as the owner,
+# because root never works inside a directory another account controls.
+reconcile_private_dirs() {
+  [ "$(id -u)" = 0 ] || return 0
+  tree_is_roots || return 0
+  command -v runuser >/dev/null 2>&1 || return 0
+  local owner d left
+  owner="$(desktop_owner)"
+  case "$owner" in
+    ''|root|*[!a-z0-9_-]*) return 0 ;;
+  esac
+  for d in "$LOG_DIR" "$PREFIX/data"; do
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    [ "$(stat -c %U "$d")" = "$owner" ] || continue
+    if [ -n "$(find "$d" -maxdepth 0 -perm /022 2>/dev/null)" ]; then
+      runuser -u "$owner" -- chmod go-w "$d" && info "$d is written by $owner alone now"
+    fi
+    # Files and links only: a directory someone else made here cannot be emptied as the owner,
+    # so it is named for a person to look at rather than removed as root.
+    runuser -u "$owner" -- find "$d" -mindepth 1 -maxdepth 1 ! -user "$owner" ! -type d \
+      -exec rm -f -- {} + 2>/dev/null || true
+    left="$(find "$d" -mindepth 1 -maxdepth 1 ! -user "$owner" 2>/dev/null | head -5)"
+    [ -z "$left" ] || warn "not $owner's, in $d: $(printf '%s ' $left)"
+  done
+}
+
 # The system units the bundle ships for minds (share/systemd), into /etc/systemd/system, by
 # content like every other root file (#419). Installed, not enabled: a mind's unit is enabled by
 # `migrate-minds`, once what it remembers has moved out of the person's home.
@@ -2011,6 +2042,9 @@ cmd_migrate_minds() {
   elevate "$@"
   reconcile_minds
   reconcile_mind_units
+  # Before the mind runs as an account of its own: from then on a directory anyone can write is
+  # one the mind can write.
+  reconcile_private_dirs
   getent passwd yantrik-mind >/dev/null 2>&1 || fail "there is no mind account; nothing was moved"
   local owner home dst stage pairs placed before="" after=""
   owner="$(desktop_owner)"
@@ -2080,6 +2114,7 @@ cmd_reconcile() {
   reconcile_sudo_rule
   reconcile_minds
   reconcile_mind_units
+  reconcile_private_dirs
   reconcile_registries
   reconcile_podman_socket
   audit_unowned /etc/polkit-1/rules.d '*.rules' polkit

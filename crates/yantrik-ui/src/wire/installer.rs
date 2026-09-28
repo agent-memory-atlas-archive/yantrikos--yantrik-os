@@ -561,9 +561,14 @@ fn install_to_target(
     let marker = format!("{mount_dir}/opt/yantrik/.installer-mode");
     let _ = run_cmd("rm", &["-f", &marker]);
 
-    // Ensure log directory exists and is writable
-    let _ = run_cmd("mkdir", &["-p", &format!("{mount_dir}/opt/yantrik/logs")]);
-    let _ = run_cmd("chmod", &["777", &format!("{mount_dir}/opt/yantrik/logs")]);
+    // The session's log directory, the person's and written by them alone. It was 0777, which
+    // since minds have an account of their own (#411) let the mind plant a name the session
+    // appends to — a symlink to ~/.bashrc, say (yantrik-update's reconcile_private_dirs).
+    let logs = format!("{mount_dir}/opt/yantrik/logs");
+    let owner = if state.username.is_empty() { "yantrik" } else { &state.username };
+    let _ = run_cmd("install", &["-d", "-m", "0755", &logs]);
+    let _ = run_cmd("chmod", &["0755", &logs]);
+    let _ = chroot_cmd(mount_dir, &["chown", &format!("{owner}:{owner}"), "/opt/yantrik/logs"]);
 
     // Regenerate initramfs without live-boot hooks
     progress(93, "Rebuilding initramfs...");
